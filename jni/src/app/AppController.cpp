@@ -45,6 +45,40 @@ float Lerp(float start, float end, float amount) {
     return start + (end - start) * std::clamp(amount, 0.0f, 1.0f);
 }
 
+float SmoothStep01(float value) {
+    const float clamped = std::clamp(value, 0.0f, 1.0f);
+    return clamped * clamped * (3.0f - 2.0f * clamped);
+}
+
+float AdvanceSpring(float current,
+                    float& velocity,
+                    float target,
+                    float stiffness,
+                    float damping,
+                    float deltaTime) {
+    float remaining = std::clamp(deltaTime, 0.0f, 0.1f);
+    while (remaining > 0.0f) {
+        const float step = std::min(remaining, 1.0f / 120.0f);
+        const float acceleration =
+            (target - current) * std::max(0.0f, stiffness) -
+            velocity * std::max(0.0f, damping);
+        velocity += acceleration * step;
+        current += velocity * step;
+        remaining -= step;
+    }
+    return current;
+}
+
+bool ContainsPoint(float x,
+                   float y,
+                   float minimumX,
+                   float minimumY,
+                   float maximumX,
+                   float maximumY) {
+    return x >= minimumX && x <= maximumX &&
+        y >= minimumY && y <= maximumY;
+}
+
 ImU32 BlendColor(ImU32 start, ImU32 end, float amount) {
     const float clamped = std::clamp(amount, 0.0f, 1.0f);
     const ImVec4 first = ImGui::ColorConvertU32ToFloat4(start);
@@ -111,12 +145,28 @@ void AppController::RenderFrame(float presentedFramesPerSecond) {
     SyncRuntimeStatus();
     FlushConfig(false);
 
+    populationDrawnThisFrame_ = false;
     menuView_.ClearTopOverlayBounds();
     if (model_.runtime.active) {
         const std::shared_ptr<const game::GameFrame> frame = runtime_.LatestFrame();
         if (frame != nullptr) {
             DrawGameFrame(*frame, ImGui::GetBackgroundDrawList());
         }
+    }
+    if (!populationDrawnThisFrame_) {
+        populationBoundsValid_ = false;
+        populationPressActive_ = false;
+        populationPressCanceled_ = false;
+        populationAlpha_ = 0.0f;
+        populationWidth_ = -1.0f;
+        populationTop_ = -1.0f;
+        populationTopVelocity_ = 0.0f;
+        populationMenuProgress_ = -1.0f;
+        populationHover_ = 0.0f;
+        populationPress_ = 0.0f;
+        populationPulse_ = 0.0f;
+        lastPlayerCount_ = -1;
+        lastBotCount_ = -1;
     }
 
     menuView_.Render(model_, *this);
@@ -159,6 +209,12 @@ void AppController::SetDisplayGeometry(
         ((orientation % 4) + 4) % 4;
     if (normalizedOrientation != displayOrientation_) {
         menuView_.RequestRecenter();
+        populationBoundsValid_ = false;
+        populationPressActive_ = false;
+        populationPressCanceled_ = false;
+        populationWidth_ = -1.0f;
+        populationTop_ = -1.0f;
+        populationTopVelocity_ = 0.0f;
     }
     model_.runtime.screenWidth = width;
     model_.runtime.screenHeight = height;
@@ -551,54 +607,109 @@ void AppController::DrawPopulation(const game::GameFrame& frame,
 
     ImGuiIO& io = ImGui::GetIO();
     const RenderStyle& style = renderer_.Style();
+    ImFont* font = ImGui::GetFont();
+    if (font == nullptr) {
+        return;
+    }
+    populationDrawnThisFrame_ = true;
+
     const float screenWidth = static_cast<float>(model_.runtime.screenWidth);
     const float screenHeight = static_cast<float>(model_.runtime.screenHeight);
     const float scale = std::clamp(
         std::min(screenWidth, screenHeight) / 1080.0f, 0.78f, 1.35f);
     const float centerX = screenWidth * 0.5f;
-    const float targetTop = model_.visible
-        ? std::max(6.0f, 8.0f * scale)
-        : std::max(18.0f, 22.0f * scale);
-    const float layoutTop = std::max(6.0f, 8.0f * scale);
-    if (populationTop_ < 0.0f) {
-        populationTop_ = targetTop;
-    }
-    populationTop_ = Approach(
-        populationTop_, targetTop, 12.0f, io.DeltaTime);
-    const float top = populationTop_;
-    const float maximumWidth = std::max(1.0f, screenWidth - 32.0f * scale);
-    const float compactWidth = std::min(maximumWidth, 420.0f * scale);
-    const float compactHeight = 72.0f * scale;
-    const ImVec2 panelMinimum{
-        centerX - compactWidth * 0.5f, top};
-    const ImVec2 panelMaximum{
-        centerX + compactWidth * 0.5f, top + compactHeight};
-    menuView_.SetTopOverlayBounds(
-        panelMinimum.x,
-        panelMinimum.y,
-        panelMaximum.x,
-        panelMaximum.y,
-        layoutTop + compactHeight);
+    const ImVec2 safePadding = ImGui::GetStyle().DisplaySafeAreaPadding;
+    const float safeMarginX = std::max(
+        safePadding.x,
+        std::clamp(screenWidth * 0.012f, 12.0f * scale, 28.0f * scale));
+    const float safeMarginY = std::max(
+        safePadding.y,
+        std::clamp(screenHeight * 0.014f, 10.0f * scale, 26.0f * scale));
 
-    const bool hovered =
-        io.MousePos.x >= panelMinimum.x && io.MousePos.x <= panelMaximum.x &&
-        io.MousePos.y >= panelMinimum.y && io.MousePos.y <= panelMaximum.y;
-    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    char statusText[64]{};
+    std::snprintf(
+        statusText, sizeof(statusText),
+        "玩家 %d  ·  人机 %d", frame.playerCount, frame.botCount);
+    const float fontSize = std::clamp(20.0f * scale, 16.0f, 27.0f);
+    const ImVec2 textSize = font->CalcTextSizeA(
+        fontSize,
+        std::numeric_limits<float>::max(),
+        0.0f,
+        statusText);
+    const float paddingX = 18.0f * scale;
+    const float paddingY = 8.0f * scale;
+    const float dotRadius = 4.0f * scale;
+    const float contentGap = 11.0f * scale;
+    const float panelHeight = std::ceil(textSize.y + paddingY * 2.0f);
+    const float maximumWidth = std::max(
+        1.0f, screenWidth - safeMarginX * 2.0f);
+    const float minimumWidth = std::min(
+        maximumWidth, panelHeight * 2.4f);
+    const float targetWidth = std::clamp(
+        textSize.x + paddingX * 2.0f + dotRadius * 2.0f + contentGap,
+        minimumWidth,
+        maximumWidth);
+    if (populationWidth_ < 0.0f) {
+        populationWidth_ = targetWidth;
+    }
+    populationWidth_ = std::clamp(
+        Approach(populationWidth_, targetWidth, 10.5f, io.DeltaTime),
+        minimumWidth,
+        maximumWidth);
+
+    const bool hovered = populationBoundsValid_ && ContainsPoint(
+        io.MousePos.x,
+        io.MousePos.y,
+        populationBoundsMinimumX_,
+        populationBoundsMinimumY_,
+        populationBoundsMaximumX_,
+        populationBoundsMaximumY_);
+    const bool pressedNow =
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    const bool releasedNow =
+        ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+    if (pressedNow && hovered) {
         populationPressActive_ = true;
+        populationPressCanceled_ = false;
+        populationPressMinimumX_ = populationBoundsMinimumX_;
+        populationPressMinimumY_ = populationBoundsMinimumY_;
+        populationPressMaximumX_ = populationBoundsMaximumX_;
+        populationPressMaximumY_ = populationBoundsMaximumY_;
     }
-    if (populationPressActive_ && !hovered) {
-        populationPressActive_ = false;
-    }
-    if (populationPressActive_ &&
-        !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        if (hovered) {
-            model_.visible = !model_.visible;
+    if (populationPressActive_) {
+        const bool insidePressBounds = ContainsPoint(
+            io.MousePos.x,
+            io.MousePos.y,
+            populationPressMinimumX_,
+            populationPressMinimumY_,
+            populationPressMaximumX_,
+            populationPressMaximumY_);
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+            !insidePressBounds) {
+            populationPressCanceled_ = true;
         }
-        populationPressActive_ = false;
+        if (releasedNow) {
+            if (!populationPressCanceled_ && insidePressBounds) {
+                model_.visible = !model_.visible;
+            }
+            populationPressActive_ = false;
+            populationPressCanceled_ = false;
+        } else if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && !pressedNow) {
+            populationPressActive_ = false;
+            populationPressCanceled_ = false;
+        }
     }
+    if (hovered || populationPressActive_) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+
+    populationAlpha_ = Approach(
+        populationAlpha_, 1.0f, 6.5f, io.DeltaTime);
     populationPress_ = Approach(
-        populationPress_, populationPressActive_ ? 1.0f : 0.0f,
-        populationPressActive_ ? 26.0f : 14.0f, io.DeltaTime);
+        populationPress_,
+        populationPressActive_ && !populationPressCanceled_ ? 1.0f : 0.0f,
+        populationPressActive_ ? 26.0f : 14.0f,
+        io.DeltaTime);
     populationHover_ = Approach(
         populationHover_, hovered ? 1.0f : 0.0f, 14.0f, io.DeltaTime);
 
@@ -611,69 +722,180 @@ void AppController::DrawPopulation(const game::GameFrame& frame,
         lastBotCount_ = frame.botCount;
     }
     populationPulse_ = Approach(
-        populationPulse_, 0.0f, 4.0f, io.DeltaTime);
+        populationPulse_, 0.0f, 5.2f, io.DeltaTime);
 
-    const float rounding = compactHeight * 0.5f;
+    if (populationMenuProgress_ < 0.0f) {
+        populationMenuProgress_ = model_.visible ? 1.0f : 0.0f;
+    }
+    populationMenuProgress_ = Approach(
+        populationMenuProgress_,
+        model_.visible ? 1.0f : 0.0f,
+        model_.visible ? 7.5f : 9.0f,
+        io.DeltaTime);
+
+    const float safeTop = safeMarginY;
+    const float maximumTop = std::max(
+        safeTop, screenHeight - safeMarginY - panelHeight);
+    const float closedCenterY = std::clamp(
+        screenHeight * 0.11f,
+        safeTop + panelHeight * 0.5f,
+        maximumTop + panelHeight * 0.5f);
+    const float closedTop = closedCenterY - panelHeight * 0.5f;
+    float targetTop = closedTop;
+    if (model_.visible) {
+        const float firstStage = SmoothStep01(
+            populationMenuProgress_ / 0.62f);
+        const float secondStage = SmoothStep01(
+            (populationMenuProgress_ - 0.46f) / 0.54f);
+        const float settleTop = std::min(
+            closedTop, safeTop + 10.0f * scale);
+        targetTop = Lerp(closedTop, settleTop, firstStage);
+        targetTop = Lerp(targetTop, safeTop, secondStage);
+    }
+    if (populationTop_ < 0.0f) {
+        populationTop_ = model_.visible ? safeTop : closedTop;
+        populationTopVelocity_ = 0.0f;
+    }
+    populationTop_ = AdvanceSpring(
+        populationTop_,
+        populationTopVelocity_,
+        targetTop,
+        model_.visible ? 235.0f : 185.0f,
+        model_.visible ? 19.0f : 21.0f,
+        io.DeltaTime);
+    if (populationTop_ < safeTop) {
+        populationTop_ = safeTop;
+        populationTopVelocity_ = std::max(0.0f, populationTopVelocity_);
+    } else if (populationTop_ > maximumTop) {
+        populationTop_ = maximumTop;
+        populationTopVelocity_ = std::min(0.0f, populationTopVelocity_);
+    }
+
+    const float panelLeft = std::clamp(
+        centerX - populationWidth_ * 0.5f,
+        safeMarginX,
+        screenWidth - safeMarginX - populationWidth_);
+    const ImVec2 panelMinimum{panelLeft, populationTop_};
+    const ImVec2 panelMaximum{
+        panelLeft + populationWidth_, populationTop_ + panelHeight};
+    menuView_.SetTopOverlayBounds(
+        panelMinimum.x,
+        panelMinimum.y,
+        panelMaximum.x,
+        panelMaximum.y,
+        safeTop + panelHeight);
+
+    populationBoundsMinimumX_ = panelMinimum.x;
+    populationBoundsMinimumY_ = panelMinimum.y;
+    populationBoundsMaximumX_ = panelMaximum.x;
+    populationBoundsMaximumY_ = panelMaximum.y;
+    populationBoundsValid_ = true;
+
+    const float rounding = panelHeight * 0.5f;
+    const float opacity = std::clamp(populationAlpha_, 0.0f, 1.0f);
     const ImU32 panelColor = BlendColor(
-        style.colors.surfaceRaised, style.colors.surfaceSoft,
-        populationHover_ * 0.45f + populationPress_ * 0.15f);
+        style.colors.surfaceRaised,
+        style.colors.surfaceSoft,
+        populationHover_ * 0.34f + populationPress_ * 0.20f);
     const ImU32 borderColor = BlendColor(
-        style.colors.border, style.colors.accent,
-        populationHover_ * 0.75f +
-            populationPulse_ * 0.25f +
-            populationPress_ * 0.18f);
+        style.colors.border,
+        style.colors.accent,
+        std::clamp(
+            populationHover_ * 0.52f +
+                populationPulse_ * 0.78f +
+                populationPress_ * 0.24f,
+            0.0f,
+            1.0f));
 
     drawList->AddRectFilled(
-        ImVec2(panelMinimum.x + 3.0f * scale, panelMinimum.y + 6.0f * scale),
-        ImVec2(panelMaximum.x + 3.0f * scale, panelMaximum.y + 6.0f * scale),
-        WithOpacity(style.colors.shadow, 0.72f), rounding);
-    if (populationHover_ > 0.01f || populationPulse_ > 0.01f) {
+        ImVec2(panelMinimum.x + 2.0f * scale,
+               panelMinimum.y + 4.0f * scale),
+        ImVec2(panelMaximum.x + 2.0f * scale,
+               panelMaximum.y + 4.0f * scale),
+        WithOpacity(style.colors.shadow, opacity * 0.62f),
+        rounding);
+    drawList->AddRectFilled(
+        panelMinimum,
+        panelMaximum,
+        WithOpacity(panelColor, opacity),
+        rounding);
+    if (populationPulse_ > 0.01f) {
         drawList->AddRect(
-            ImVec2(panelMinimum.x - 3.0f * scale, panelMinimum.y - 3.0f * scale),
-            ImVec2(panelMaximum.x + 3.0f * scale, panelMaximum.y + 3.0f * scale),
+            panelMinimum,
+            panelMaximum,
             WithOpacity(
                 style.colors.accent,
-                populationHover_ * 0.22f + populationPulse_ * 0.34f),
-            rounding + 3.0f * scale, 0, 3.0f * scale);
+                opacity * populationPulse_ * 0.68f),
+            rounding,
+            0,
+            std::max(1.0f, (1.0f + populationPulse_ * 1.8f) * scale));
     }
-    drawList->AddRectFilled(
-        panelMinimum, panelMaximum, panelColor, rounding);
     drawList->AddRect(
-        panelMinimum, panelMaximum, borderColor, rounding,
-        0, std::max(1.0f, 1.4f * scale));
+        panelMinimum,
+        panelMaximum,
+        WithOpacity(borderColor, opacity),
+        rounding,
+        0,
+        std::max(1.0f, 1.25f * scale));
 
-    const float dotRadius =
-        (5.0f + populationPulse_ * 2.5f) * scale;
+    const float popFontSize =
+        fontSize * (1.0f + populationPulse_ * 0.065f);
+    const ImVec2 popTextSize = font->CalcTextSizeA(
+        popFontSize,
+        std::numeric_limits<float>::max(),
+        0.0f,
+        statusText);
+    const float groupWidth =
+        dotRadius * 2.0f + contentGap + popTextSize.x;
+    const float contentStart = centerX - groupWidth * 0.5f;
+    const float contentOffsetY =
+        populationPress_ * scale - populationPulse_ * 1.5f * scale;
     const ImVec2 dotCenter{
-        panelMinimum.x + 30.0f * scale,
-        panelMinimum.y + compactHeight * 0.5f,
-    };
+        contentStart + dotRadius,
+        panelMinimum.y + panelHeight * 0.5f + contentOffsetY};
+    drawList->PushClipRect(panelMinimum, panelMaximum, true);
     drawList->AddCircleFilled(
-        dotCenter, dotRadius + 5.0f * scale,
-        WithOpacity(style.colors.accent, 0.11f + populationPulse_ * 0.16f));
-    drawList->AddCircleFilled(dotCenter, dotRadius, style.colors.accent);
-
-    ImFont* font = ImGui::GetFont();
-    char compactText[64]{};
-    std::snprintf(
-        compactText, sizeof(compactText),
-        "玩家 %d  ·  人机 %d", frame.playerCount, frame.botCount);
-    const float fontSize = 20.0f * scale;
-    const ImVec2 textSize = font->CalcTextSizeA(
-        fontSize, maximumWidth, 0.0f, compactText);
+        dotCenter,
+        dotRadius + 3.0f * scale,
+        WithOpacity(
+            style.colors.accent,
+            opacity * (0.08f + populationPulse_ * 0.16f)));
+    drawList->AddCircleFilled(
+        dotCenter,
+        dotRadius,
+        WithOpacity(style.colors.accent, opacity));
+    const ImVec2 textPosition{
+        contentStart + dotRadius * 2.0f + contentGap,
+        panelMinimum.y +
+            (panelHeight - popTextSize.y) * 0.5f +
+            contentOffsetY};
     drawList->AddText(
-        font, fontSize,
-        ImVec2(
-            centerX - textSize.x * 0.5f,
-            panelMinimum.y + (compactHeight - textSize.y) * 0.5f),
-        style.colors.text, compactText);
+        font,
+        popFontSize,
+        ImVec2(textPosition.x + scale, textPosition.y + scale),
+        WithOpacity(style.colors.shadow, opacity * 0.52f),
+        statusText);
+    drawList->AddText(
+        font,
+        popFontSize,
+        textPosition,
+        WithOpacity(style.colors.text, opacity),
+        statusText);
+    drawList->PopClipRect();
 
-    const float indicatorWidth = 52.0f * scale;
+    const float indicatorWidth = std::min(
+        34.0f * scale, populationWidth_ * 0.20f);
     drawList->AddLine(
-        ImVec2(centerX - indicatorWidth * 0.5f, panelMaximum.y - 5.0f * scale),
-        ImVec2(centerX + indicatorWidth * 0.5f, panelMaximum.y - 5.0f * scale),
-        WithOpacity(style.colors.accent, 0.55f + populationHover_ * 0.35f),
-        2.0f * scale);
+        ImVec2(centerX - indicatorWidth * 0.5f,
+               panelMaximum.y - 3.0f * scale),
+        ImVec2(centerX + indicatorWidth * 0.5f,
+               panelMaximum.y - 3.0f * scale),
+        WithOpacity(
+            style.colors.accent,
+            opacity * (0.32f +
+                       populationHover_ * 0.36f +
+                       populationPress_ * 0.16f)),
+        std::max(1.0f, 1.4f * scale));
 }
 
 void AppController::DrawDebugInfo(const game::GameFrame& frame,
