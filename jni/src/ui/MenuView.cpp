@@ -336,8 +336,11 @@ template <std::size_t N>
 bool Combo(const char* label, int& selected, const std::array<const char*, N>& options) {
     const int safeIndex = std::clamp(selected, 0, static_cast<int>(N) - 1);
     bool changed = false;
+    ImGui::TextColored(kMuted, "%s", label);
+    ImGui::PushID(label);
     ImGui::SetNextItemWidth(-1.0f);
-    if (ImGui::BeginCombo(label, options[static_cast<std::size_t>(safeIndex)])) {
+    if (ImGui::BeginCombo(
+            "##value", options[static_cast<std::size_t>(safeIndex)])) {
         for (std::size_t i = 0; i < N; ++i) {
             const bool active = safeIndex == static_cast<int>(i);
             if (ImGui::Selectable(options[i], active)) {
@@ -350,6 +353,7 @@ bool Combo(const char* label, int& selected, const std::array<const char*, N>& o
         }
         ImGui::EndCombo();
     }
+    ImGui::PopID();
     return changed;
 }
 
@@ -360,8 +364,10 @@ bool DriverCombo(RuntimeModel& runtime) {
         ? runtime.driverOptions[static_cast<std::size_t>(runtime.driverIndex)].c_str()
         : "未配置";
     bool changed = false;
+    ImGui::TextColored(kMuted, "驱动");
+    ImGui::PushID("runtime_driver");
     ImGui::SetNextItemWidth(-1.0f);
-    if (ImGui::BeginCombo("驱动", preview)) {
+    if (ImGui::BeginCombo("##value", preview)) {
         for (std::size_t i = 0; i < runtime.driverOptions.size(); ++i) {
             const bool active = runtime.driverIndex == static_cast<int>(i);
             if (ImGui::Selectable(runtime.driverOptions[i].c_str(), active)) {
@@ -374,6 +380,37 @@ bool DriverCombo(RuntimeModel& runtime) {
         }
         ImGui::EndCombo();
     }
+    ImGui::PopID();
+    return changed;
+}
+
+bool SliderIntRow(
+    const char* label,
+    int* value,
+    int minimum,
+    int maximum,
+    const char* format) {
+    ImGui::TextColored(kMuted, "%s", label);
+    ImGui::PushID(label);
+    ImGui::SetNextItemWidth(-1.0f);
+    const bool changed =
+        ImGui::SliderInt("##value", value, minimum, maximum, format);
+    ImGui::PopID();
+    return changed;
+}
+
+bool SliderFloatRow(
+    const char* label,
+    float* value,
+    float minimum,
+    float maximum,
+    const char* format) {
+    ImGui::TextColored(kMuted, "%s", label);
+    ImGui::PushID(label);
+    ImGui::SetNextItemWidth(-1.0f);
+    const bool changed =
+        ImGui::SliderFloat("##value", value, minimum, maximum, format);
+    ImGui::PopID();
     return changed;
 }
 
@@ -445,6 +482,10 @@ bool AnimatedButton(
     }
 
     const ImVec2 textSize = ImGui::CalcTextSize(label);
+    draw->PushClipRect(
+        ImVec2(minimum.x + 4.0f, minimum.y),
+        ImVec2(maximum.x - 4.0f, maximum.y),
+        true);
     draw->AddText(
         ImVec2(
             origin.x + (size.x - textSize.x) * 0.5f,
@@ -454,6 +495,7 @@ bool AnimatedButton(
             kText,
             *hoverMotion)),
         label);
+    draw->PopClipRect();
     ImGui::PopID();
     return clicked;
 }
@@ -467,7 +509,15 @@ bool SegmentedChoice(
     const ImGuiStyle& style = ImGui::GetStyle();
     const float spacing = style.ItemSpacing.x;
     const float width = ImGui::GetContentRegionAvail().x;
-    const float buttonWidth = std::max(60.0f, (width - spacing * (N - 1)) / N);
+    const bool vertical =
+        width < 60.0f * static_cast<float>(N) +
+            spacing * static_cast<float>(N - 1);
+    const float buttonWidth = vertical
+        ? width
+        : std::max(
+              1.0f,
+              (width - spacing * static_cast<float>(N - 1)) /
+                  static_cast<float>(N));
     bool changed = false;
 
     for (std::size_t i = 0; i < N; ++i) {
@@ -488,7 +538,7 @@ bool SegmentedChoice(
             changed = true;
         }
         ImGui::PopID();
-        if (i + 1 < N) {
+        if (!vertical && i + 1 < N) {
             ImGui::SameLine();
         }
     }
@@ -612,8 +662,15 @@ void RenderRuntime(UiModel& model, UiActions& actions) {
     RuntimeModel& runtime = model.runtime;
 
     SectionTitle("运行状态");
+    const float metricsWidth = ImGui::GetContentRegionAvail().x;
+    const int metricColumns =
+        metricsWidth >= 740.0f
+            ? 5
+            : (metricsWidth >= 420.0f
+                ? 3
+                : (metricsWidth >= 280.0f ? 2 : 1));
     if (ImGui::BeginTable(
-            "##runtime_metrics", 5,
+            "##runtime_metrics", metricColumns,
             ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoSavedSettings)) {
         const char* state = runtime.stopping ? "停止中" : (runtime.active ? "运行中" : "未运行");
         const ImVec4 stateColor = runtime.stopping ? kAmber : (runtime.active ? kGreen : kMuted);
@@ -717,31 +774,23 @@ void RenderVisual(UiModel& model, UiActions& actions) {
     }
 
     SectionTitle("显示范围");
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Visual, ImGui::SliderInt(
+    Mark(actions, SettingsDomain::Visual, SliderIntRow(
         "绘制距离", &visual.drawDistanceMeters, 0, 1000, "%d 米"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Visual, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Visual, SliderFloatRow(
         "预警大小", &visual.warningSize, 0.0f, 1000.0f, "%.0f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Visual, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Visual, SliderFloatRow(
         "预警距离", &visual.warningDistanceMeters, 0.0f, 1000.0f, "%.0f 米"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Visual, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Visual, SliderFloatRow(
         "骨骼距离", &visual.skeletonDistanceMeters, 50.0f, 500.0f, "%.0f 米"));
 
     SectionTitle("绘制样式");
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Visual, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Visual, SliderFloatRow(
         "准星大小", &visual.crosshairSize, 5.0f, 500.0f, "%.0f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Visual, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Visual, SliderFloatRow(
         "准星厚度", &visual.crosshairThickness, 1.0f, 10.0f, "%.1f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Visual, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Visual, SliderFloatRow(
         "线条粗细", &visual.lineThickness, 1.0f, 10.0f, "%.1f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Visual, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Visual, SliderFloatRow(
         "字体大小", &visual.fontScale, 0.3f, 3.0f, "%.1f"));
 
     SectionTitle("调试");
@@ -779,32 +828,23 @@ void RenderLoot(UiModel& model, UiActions& actions) {
     }
 
     SectionTitle("筛选设置");
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Loot, ImGui::SliderInt(
+    Mark(actions, SettingsDomain::Loot, SliderIntRow(
         "物资距离", &loot.itemDistanceMeters, 0, 500, "%d 米"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Loot, ImGui::SliderInt(
+    Mark(actions, SettingsDomain::Loot, SliderIntRow(
         "物资价值", &loot.minimumItemValue, 0, 500000, "%d"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Loot, ImGui::SliderInt(
+    Mark(actions, SettingsDomain::Loot, SliderIntRow(
         "物资等级", &loot.minimumItemRarity, 1, 6, "%d 级"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Loot, ImGui::SliderInt(
+    Mark(actions, SettingsDomain::Loot, SliderIntRow(
         "容器距离", &loot.containerDistanceMeters, 0, 500, "%d 米"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Loot, ImGui::SliderInt(
+    Mark(actions, SettingsDomain::Loot, SliderIntRow(
         "容器价值", &loot.minimumContainerValue, 0, 500000, "%d"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Loot, ImGui::SliderInt(
+    Mark(actions, SettingsDomain::Loot, SliderIntRow(
         "容器等级", &loot.minimumContainerRarity, 1, 6, "%d 级"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Loot, ImGui::SliderInt(
+    Mark(actions, SettingsDomain::Loot, SliderIntRow(
         "列表数量", &loot.listLimit, 1, 20, "%d 个"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Loot, ImGui::SliderInt(
+    Mark(actions, SettingsDomain::Loot, SliderIntRow(
         "列表价值", &loot.minimumListValue, 0, 500000, "%d"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Loot, ImGui::SliderInt(
+    Mark(actions, SettingsDomain::Loot, SliderIntRow(
         "列表等级", &loot.minimumListRarity, 1, 6, "%d 级"));
 
     SectionTitle("容器类型");
@@ -848,31 +888,23 @@ void RenderRadar(UiModel& model, UiActions& actions) {
     SectionTitle("独立雷达");
     const float maxX = static_cast<float>(std::max(1, model.runtime.screenWidth));
     const float maxY = static_cast<float>(std::max(1, model.runtime.screenHeight));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Radar, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Radar, SliderFloatRow(
         "水平位置", &radar.overlayX, 0.0f, maxX, "%.0f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Radar, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Radar, SliderFloatRow(
         "垂直位置", &radar.overlayY, 0.0f, maxY, "%.0f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Radar, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Radar, SliderFloatRow(
         "雷达大小", &radar.overlaySize, 50.0f, 600.0f, "%.0f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Radar, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Radar, SliderFloatRow(
         "雷达范围", &radar.overlayRangeMeters, 50.0f, 2000.0f, "%.0f 米"));
 
     SectionTitle("地图雷达");
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Radar, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Radar, SliderFloatRow(
         "水平偏移", &radar.mapOffsetX, -800.0f, 800.0f, "%.0f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Radar, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Radar, SliderFloatRow(
         "垂直偏移", &radar.mapOffsetY, -800.0f, 800.0f, "%.0f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Radar, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Radar, SliderFloatRow(
         "字体大小", &radar.mapFontSize, 0.0f, 40.0f, "%.0f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Radar, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Radar, SliderFloatRow(
         "圆点大小", &radar.mapDotSize, 0.0f, 40.0f, "%.1f"));
 }
 
@@ -923,58 +955,45 @@ void RenderAim(UiModel& model, UiActions& actions) {
         SectionTitle("随机部位");
         for (std::size_t i = 0; i < kRandomBoneNames.size(); ++i) {
             ImGui::PushID(static_cast<int>(i));
-            ImGui::SetNextItemWidth(-1.0f);
-            Mark(actions, SettingsDomain::Aim, ImGui::SliderFloat(
+            Mark(actions, SettingsDomain::Aim, SliderFloatRow(
                 kRandomBoneNames[i], &aim.randomBoneWeights[i], 0.0f, 100.0f, "%.0f"));
             ImGui::PopID();
         }
     }
 
     SectionTitle("距离范围");
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Aim, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Aim, SliderFloatRow(
         "瞄准范围", &tuning.rangePixels, 0.0f, 1314.0f, "%.0f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Aim, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Aim, SliderFloatRow(
         "腰射距离", &tuning.hipDistanceMeters, 5.0f, 300.0f, "%.0f 米"));
 
     SectionTitle("触摸区域");
     Mark(actions, SettingsDomain::Aim, Toggle("显示触摸范围", aim.showTouchArea));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Aim, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Aim, SliderFloatRow(
         "触摸范围", &aim.touchRange, 100.0f, 800.0f, "%.0f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Aim, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Aim, SliderFloatRow(
         "触摸位置 X", &aim.touchX, 0.0f,
         static_cast<float>(std::max(1, model.runtime.screenWidth)), "%.1f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Aim, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Aim, SliderFloatRow(
         "触摸位置 Y", &aim.touchY, 0.0f,
         static_cast<float>(std::max(1, model.runtime.screenHeight)), "%.1f"));
 
     SectionTitle("瞄准速度");
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Aim, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Aim, SliderFloatRow(
         "水平速度", &tuning.horizontalSpeed, 0.0f, 200.0f, "%.0f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Aim, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Aim, SliderFloatRow(
         "垂直速度", &tuning.verticalSpeed, 0.0f, 200.0f, "%.0f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Aim, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Aim, SliderFloatRow(
         "腰射速度", &tuning.hipSpeed, 1.0f, 50.0f, "%.0f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Aim, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Aim, SliderFloatRow(
         "开镜速度", &tuning.adsSpeed, 1.0f, 50.0f, "%.0f"));
 
     SectionTitle("高级调节");
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Aim, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Aim, SliderFloatRow(
         "预判强度", &tuning.prediction, 0.0f, 2.0f, "%.2f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Aim, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Aim, SliderFloatRow(
         "压枪强度", &tuning.recoil, 0.0f, 2.0f, "%.2f"));
-    ImGui::SetNextItemWidth(-1.0f);
-    Mark(actions, SettingsDomain::Aim, ImGui::SliderFloat(
+    Mark(actions, SettingsDomain::Aim, SliderFloatRow(
         "瞄准平滑", &tuning.smoothing, 0.0f, 200.0f, "%.0f"));
 }
 
@@ -1276,6 +1295,34 @@ void MenuView::SetLogoTexture(void* texture) noexcept {
     logoTexture_ = texture;
 }
 
+void MenuView::RequestRecenter() noexcept {
+    positionInitialized_ = false;
+    dragActive_ = false;
+    animationAnchorValid_ = false;
+}
+
+void MenuView::ClearTopOverlayBounds() noexcept {
+    topOverlayValid_ = false;
+}
+
+void MenuView::SetTopOverlayBounds(
+    float minimumX,
+    float minimumY,
+    float maximumX,
+    float maximumY,
+    float layoutMaximumY) noexcept {
+    topOverlayValid_ =
+        maximumX > minimumX && maximumY > minimumY;
+    if (!topOverlayValid_) {
+        return;
+    }
+    topOverlayMinimumX_ = minimumX;
+    topOverlayMinimumY_ = minimumY;
+    topOverlayMaximumX_ = maximumX;
+    topOverlayMaximumY_ = maximumY;
+    topOverlayLayoutMaximumY_ = std::max(maximumY, layoutMaximumY);
+}
+
 void MenuView::Render(UiModel& model, UiActions& actions) {
     if (!model.visible) {
         dragActive_ = false;
@@ -1289,6 +1336,13 @@ void MenuView::Render(UiModel& model, UiActions& actions) {
     if (!wasVisible_) {
         windowAnimation_ = 0.0f;
         pageAnimation_ = 1.0f;
+        animationAnchorValid_ = topOverlayValid_;
+        if (animationAnchorValid_) {
+            animationAnchorMinimumX_ = topOverlayMinimumX_;
+            animationAnchorMinimumY_ = topOverlayMinimumY_;
+            animationAnchorMaximumX_ = topOverlayMaximumX_;
+            animationAnchorMaximumY_ = topOverlayMaximumY_;
+        }
         wasVisible_ = true;
     }
     if (!pageStateInitialized_) {
@@ -1298,34 +1352,46 @@ void MenuView::Render(UiModel& model, UiActions& actions) {
     windowAnimation_ = AnimateToward(windowAnimation_, 1.0f, 9.0f);
     const float windowEase =
         1.0f - (1.0f - windowAnimation_) * (1.0f - windowAnimation_);
-    style.PushVar(
-        ImGuiStyleVar_Alpha,
-        std::max(0.08f, windowEase));
 
     constexpr float viewportMargin = 12.0f;
+    constexpr float topOverlayGap = 12.0f;
     constexpr float dragRegionHeight = 56.0f;
     const float displayWidth = std::max(1.0f, io.DisplaySize.x);
     const float displayHeight = std::max(1.0f, io.DisplaySize.y);
+    const float topInset = topOverlayValid_
+        ? std::max(
+              viewportMargin,
+              topOverlayLayoutMaximumY_ + topOverlayGap)
+        : viewportMargin;
     const float availableWidth = std::max(1.0f, displayWidth - viewportMargin * 2.0f);
-    const float availableHeight = std::max(1.0f, displayHeight - viewportMargin * 2.0f);
+    const float availableHeight =
+        std::max(1.0f, displayHeight - topInset - viewportMargin);
     const float windowWidth = std::min(1120.0f, availableWidth);
     const float windowHeight = std::min(820.0f, availableHeight);
     const float minWidth = std::min(360.0f, availableWidth);
     const float minHeight = std::min(440.0f, availableHeight);
 
-    const float minimumX = std::min(viewportMargin, (displayWidth - windowWidth) * 0.5f);
-    const float minimumY = std::min(viewportMargin, (displayHeight - windowHeight) * 0.5f);
-    const float maximumX = std::max(minimumX, displayWidth - windowWidth - minimumX);
-    const float maximumY = std::max(minimumY, displayHeight - windowHeight - minimumY);
+    const float minimumX = viewportMargin;
+    const float minimumY = topInset;
+    const float maximumX =
+        std::max(minimumX, displayWidth - windowWidth - viewportMargin);
+    const float maximumY =
+        std::max(minimumY, displayHeight - windowHeight - viewportMargin);
     const bool displayChanged =
         displayWidth != lastDisplayWidth_ || displayHeight != lastDisplayHeight_;
     if (!positionInitialized_) {
         windowX_ = (displayWidth - windowWidth) * 0.5f;
-        windowY_ = (displayHeight - windowHeight) * 0.5f;
+        windowY_ = std::clamp(
+            (displayHeight - windowHeight) * 0.5f,
+            minimumY,
+            maximumY);
         positionInitialized_ = true;
     } else if (displayChanged) {
         windowX_ = (displayWidth - windowWidth) * 0.5f;
-        windowY_ = (displayHeight - windowHeight) * 0.5f;
+        windowY_ = std::clamp(
+            (displayHeight - windowHeight) * 0.5f,
+            minimumY,
+            maximumY);
         dragActive_ = false;
     }
     windowX_ = std::clamp(windowX_, minimumX, maximumX);
@@ -1333,11 +1399,71 @@ void MenuView::Render(UiModel& model, UiActions& actions) {
     lastDisplayWidth_ = displayWidth;
     lastDisplayHeight_ = displayHeight;
 
+    if (animationAnchorValid_ && windowEase < 0.999f) {
+        const float anchorWidth =
+            animationAnchorMaximumX_ - animationAnchorMinimumX_;
+        const float anchorHeight =
+            animationAnchorMaximumY_ - animationAnchorMinimumY_;
+        const float anchorCenterX =
+            (animationAnchorMinimumX_ + animationAnchorMaximumX_) * 0.5f;
+        const float anchorCenterY =
+            (animationAnchorMinimumY_ + animationAnchorMaximumY_) * 0.5f;
+        const float targetCenterX = windowX_ + windowWidth * 0.5f;
+        const float targetCenterY = windowY_ + windowHeight * 0.5f;
+        const float drawWidth =
+            anchorWidth + (windowWidth - anchorWidth) * windowEase;
+        const float drawHeight =
+            anchorHeight + (windowHeight - anchorHeight) * windowEase;
+        const float drawCenterX =
+            anchorCenterX + (targetCenterX - anchorCenterX) * windowEase;
+        const float drawCenterY =
+            anchorCenterY + (targetCenterY - anchorCenterY) * windowEase;
+        ImGui::SetNextWindowPos(
+            ImVec2(
+                drawCenterX - drawWidth * 0.5f,
+                drawCenterY - drawHeight * 0.5f),
+            ImGuiCond_Always);
+        ImGui::SetNextWindowSize(
+            ImVec2(
+                std::max(1.0f, drawWidth),
+                std::max(1.0f, drawHeight)),
+            ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(std::max(0.18f, windowEase));
+        ImGui::Begin(
+            "棱镜##menu_transition",
+            nullptr,
+            ImGuiWindowFlags_NoTitleBar |
+                ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoSavedSettings |
+                ImGuiWindowFlags_NoInputs |
+                ImGuiWindowFlags_NoNav |
+                ImGuiWindowFlags_NoFocusOnAppearing);
+        ImGui::End();
+        if (windowEase < 0.48f) {
+            return;
+        }
+    }
+
+    const float contentEase = animationAnchorValid_
+        ? std::clamp(
+              (windowEase - 0.48f) / 0.52f,
+              0.0f,
+              1.0f)
+        : windowEase;
+    style.PushVar(
+        ImGuiStyleVar_Alpha,
+        std::max(0.03f, contentEase));
     ImGui::SetNextWindowSize(ImVec2(windowWidth, windowHeight), ImGuiCond_Always);
     ImGui::SetNextWindowSizeConstraints(
         ImVec2(minWidth, minHeight), ImVec2(availableWidth, availableHeight));
     ImGui::SetNextWindowPos(
-        ImVec2(windowX_, windowY_ + (1.0f - windowEase) * 16.0f),
+        ImVec2(
+            windowX_,
+            windowY_ +
+                (animationAnchorValid_
+                    ? 0.0f
+                    : (1.0f - windowEase) * 16.0f)),
         ImGuiCond_Always);
 
     constexpr ImGuiWindowFlags flags =
@@ -1384,11 +1510,13 @@ void MenuView::Render(UiModel& model, UiActions& actions) {
         1.0f - (1.0f - pageAnimation_) * (1.0f - pageAnimation_);
 
     const float dockHeight = ActionDockHeight(ImGui::GetContentRegionAvail().x);
-    const float contentHeight = std::max(
-        60.0f,
-        ImGui::GetContentRegionAvail().y -
-            dockHeight -
-            ImGui::GetStyle().ItemSpacing.y);
+    const float bodyHeight = std::max(1.0f, ImGui::GetContentRegionAvail().y);
+    const float dockSpacing = ImGui::GetStyle().ItemSpacing.y;
+    const bool dockInsideScroll =
+        bodyHeight < dockHeight + 80.0f + dockSpacing;
+    const float contentHeight = dockInsideScroll
+        ? bodyHeight
+        : std::max(1.0f, bodyHeight - dockHeight - dockSpacing);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.045f, 0.061f, 0.064f, 0.72f));
     if (ImGui::BeginChild(
             "##workspace_content",
@@ -1402,11 +1530,17 @@ void MenuView::Render(UiModel& model, UiActions& actions) {
             ImGui::GetStyle().Alpha * std::max(0.06f, pageEase));
         RenderContent(model, actions);
         ImGui::PopStyleVar();
+        if (dockInsideScroll) {
+            ImGui::Dummy(ImVec2(0.0f, dockSpacing));
+            RenderActionDock(model, actions, dockHeight);
+        }
     }
     ImGui::EndChild();
     ImGui::PopStyleColor();
 
-    RenderActionDock(model, actions, dockHeight);
+    if (!dockInsideScroll) {
+        RenderActionDock(model, actions, dockHeight);
+    }
     ImGui::End();
 }
 

@@ -50,6 +50,7 @@ if not defined BIN (
     echo [ERROR] Product not found. Run 1_build.bat first.
     exit /b 1
 )
+for %%I in ("!BIN!") do set "LOCAL_SIZE=%%~zI"
 
 set "ADB="
 if defined ADB_PATH (
@@ -124,15 +125,17 @@ if errorlevel 1 (
     exit /b 1
 )
 
-"%ADB%" -s "!SERIAL!" shell "su -c 'rm -f %REMOTE_DIR%/!PRODUCT!'" >nul 2>&1
+"%ADB%" -s "!SERIAL!" shell "su -c 'pkill -TERM -x !PRODUCT! 2>/dev/null || true; n=0; while pidof !PRODUCT! >/dev/null 2>&1 && [ $n -lt 20 ]; do sleep 0.1; n=$((n+1)); done; pkill -KILL -x !PRODUCT! 2>/dev/null || true; rm -f %REMOTE_DIR%/!PRODUCT!'" >nul 2>&1
 set "PUSH_TRY=0"
 :push_retry
 set /a PUSH_TRY+=1
 "%ADB%" -s "!SERIAL!" push "!BIN!" "%REMOTE_DIR%/!PRODUCT!"
 set "PUSH_RESULT=!errorlevel!"
-"%ADB%" -s "!SERIAL!" shell "su -c '[ -f %REMOTE_DIR%/!PRODUCT! ] && echo OK || echo MISS'" >"%CHECK_FILE%" 2>nul
-findstr /B /C:"OK" "%CHECK_FILE%" >nul 2>&1
-if not errorlevel 1 goto pushed
+"%ADB%" -s "!SERIAL!" shell "su -c 'if [ -f %REMOTE_DIR%/!PRODUCT! ]; then wc -c < %REMOTE_DIR%/!PRODUCT!; else echo MISS; fi'" >"%CHECK_FILE%" 2>nul
+if "!PUSH_RESULT!"=="0" (
+    findstr /R /X /C:" *!LOCAL_SIZE! *" "%CHECK_FILE%" >nul 2>&1
+    if not errorlevel 1 goto pushed
+)
 if !PUSH_TRY! lss 3 (
     echo [WARN] Push failed with exit code !PUSH_RESULT!, retry !PUSH_TRY!/3.
     timeout /t 1 /nobreak >nul
@@ -153,15 +156,7 @@ if errorlevel 1 (
 set "RUN_SERIAL=!SERIAL!"
 set "RUN_PRODUCT=!PRODUCT!"
 setlocal DisableDelayedExpansion
-if defined LENGJING_CARD_KEY goto card_ready
-set /p "LENGJING_CARD_KEY=Card key: "
-:card_ready
-if not defined LENGJING_CARD_KEY (
-    echo [ERROR] Card key is required.
-    exit /b 1
-)
-
 echo [RUN] %RUN_PRODUCT% on %RUN_SERIAL%
-powershell.exe -NoProfile -NonInteractive -Command "[Console]::Out.WriteLine([Environment]::GetEnvironmentVariable('LENGJING_CARD_KEY'))" | "%ADB%" -s "%RUN_SERIAL%" shell -T "su -c 'cd %REMOTE_DIR% && exec ./%RUN_PRODUCT%'"
+"%ADB%" -s "%RUN_SERIAL%" shell -T "su -c 'cd %REMOTE_DIR% && exec ./%RUN_PRODUCT%'"
 set "RUN_RESULT=%errorlevel%"
 endlocal & exit /b %RUN_RESULT%

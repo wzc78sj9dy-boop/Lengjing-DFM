@@ -62,47 +62,56 @@ if not defined UPX_EXE (
     exit /b 1
 )
 
-for %%I in ("!BIN!") do echo [UPX] before: %%~zI bytes
-"!UPX_EXE!" -t "!BIN!" >nul 2>&1
-if not errorlevel 1 (
-    echo [UPX] already packed and verified.
-) else (
-    "!UPX_EXE!" --best --lzma --no-progress "!BIN!"
-    if errorlevel 1 (
-        echo [ERROR] UPX packing failed.
-        exit /b 1
-    )
-)
-"!UPX_EXE!" -t "!BIN!" >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] Packed product verification failed.
-    exit /b 1
-)
-for %%I in ("!BIN!") do echo [UPX] after: %%~zI bytes
-
-copy /y "!BIN!" "!ROOT_BIN!" >nul
-if errorlevel 1 (
-    echo [ERROR] Unable to synchronize the packed product.
-    exit /b 1
-)
-
-set "BUILD_SHA="
+set "BUILD_SHA_BEFORE="
+set "BUILD_SHA_AFTER="
 set "ROOT_SHA="
-for /f "usebackq delims=" %%H in (`powershell.exe -NoProfile -NonInteractive -Command "(Get-FileHash -LiteralPath $env:BIN -Algorithm SHA256).Hash.ToLowerInvariant()"`) do set "BUILD_SHA=%%H"
-for /f "usebackq delims=" %%H in (`powershell.exe -NoProfile -NonInteractive -Command "(Get-FileHash -LiteralPath $env:ROOT_BIN -Algorithm SHA256).Hash.ToLowerInvariant()"`) do set "ROOT_SHA=%%H"
-if not defined BUILD_SHA (
+for /f "usebackq delims=" %%H in (`powershell.exe -NoProfile -NonInteractive -Command "(Get-FileHash -LiteralPath $env:BIN -Algorithm SHA256).Hash.ToLowerInvariant()"`) do set "BUILD_SHA_BEFORE=%%H"
+if not defined BUILD_SHA_BEFORE (
     echo [ERROR] Unable to hash the build product.
     exit /b 1
 )
-if not defined ROOT_SHA (
-    echo [ERROR] Unable to hash the synchronized product.
+
+copy /y "!BIN!" "!ROOT_BIN!" >nul
+if errorlevel 1 (
+    echo [ERROR] Unable to create the release product.
     exit /b 1
 )
-if /i not "!BUILD_SHA!"=="!ROOT_SHA!" (
-    echo [ERROR] Build and synchronized product hashes differ.
+
+for %%I in ("!ROOT_BIN!") do echo [UPX] before: %%~zI bytes
+"!UPX_EXE!" -t "!ROOT_BIN!" >nul 2>&1
+if not errorlevel 1 (
+    echo [UPX] already packed and verified.
+) else (
+    "!UPX_EXE!" --best --lzma --no-progress "!ROOT_BIN!"
+    if errorlevel 1 (
+        echo [ERROR] UPX packing failed.
+        del /q "!ROOT_BIN!" >nul 2>&1
+        exit /b 1
+    )
+)
+"!UPX_EXE!" -t "!ROOT_BIN!" >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Packed product verification failed.
+    del /q "!ROOT_BIN!" >nul 2>&1
+    exit /b 1
+)
+for %%I in ("!ROOT_BIN!") do echo [UPX] after: %%~zI bytes
+
+for /f "usebackq delims=" %%H in (`powershell.exe -NoProfile -NonInteractive -Command "(Get-FileHash -LiteralPath $env:BIN -Algorithm SHA256).Hash.ToLowerInvariant()"`) do set "BUILD_SHA_AFTER=%%H"
+for /f "usebackq delims=" %%H in (`powershell.exe -NoProfile -NonInteractive -Command "(Get-FileHash -LiteralPath $env:ROOT_BIN -Algorithm SHA256).Hash.ToLowerInvariant()"`) do set "ROOT_SHA=%%H"
+if not defined BUILD_SHA_AFTER (
+    echo [ERROR] Unable to verify the build product.
+    exit /b 1
+)
+if not defined ROOT_SHA (
+    echo [ERROR] Unable to hash the release product.
+    exit /b 1
+)
+if /i not "!BUILD_SHA_BEFORE!"=="!BUILD_SHA_AFTER!" (
+    echo [ERROR] The build product changed during packing.
     exit /b 1
 )
 
 echo [DONE] !ROOT_BIN!
-echo [SHA256] !BUILD_SHA!
+echo [SHA256] !ROOT_SHA!
 exit /b 0

@@ -37,6 +37,7 @@ constexpr float kPi = 3.14159265358979323846f;
 constexpr std::uintptr_t kMinimumRemoteAddress = 0x10000000ULL;
 constexpr std::uintptr_t kMaximumRemoteAddress = 0x10000000000ULL;
 constexpr std::int32_t kMaximumActorCount = 10000;
+constexpr std::int32_t kMaximumWorldObjectCount = 65536;
 constexpr std::size_t kMaximumNameLength = 249;
 
 struct Vec2 {
@@ -466,7 +467,9 @@ bool IsCharacterClass(std::string_view name) {
 }
 
 bool IsBotClass(std::string_view name) {
-    return name.find("AI") != std::string_view::npos ||
+    return name == "NC_BP_DFMCharacter_TutorialPlayerAi_C" ||
+           name.rfind("NC_BP_DFMCharacter_AI", 0) == 0 ||
+           name.rfind("NC_BP_DFMAICharacter", 0) == 0 ||
            name.find("RangeTargetCharacter") != std::string_view::npos;
 }
 
@@ -855,6 +858,7 @@ public:
         const bool scanWorldObjects = settings.loot.enabled ||
             settings.loot.playerBox || settings.loot.botBox ||
             settings.loot.password || settings.loot.containers ||
+            (settings.visual.enabled && settings.visual.classNameDebug) ||
             (settings.visual.enabled &&
              (settings.visual.throwableWarning ||
               settings.visual.throwableTrajectory));
@@ -873,12 +877,18 @@ public:
         }
 
         frame.players.reserve(std::min<std::size_t>(actorAddresses.size(), 256));
+        std::size_t validActorCount = 0;
+        std::size_t decodedNameCount = 0;
         for (const std::uintptr_t actor : actorAddresses) {
             if (!IsValidPointer(actor) || actor == context.localPawn) continue;
+            ++validActorCount;
 
             std::int32_t nameIndex = -1;
             if (!ReadValue(actor + 0x1C, nameIndex) || nameIndex < 0) continue;
             const std::string className = DecodeName(nameIndex, context.namePool);
+            if (!className.empty()) {
+                ++decodedNameCount;
+            }
             bool character = IsCharacterClass(className);
             if (!character) {
                 float compatibilityMarker = 0.0f;
@@ -907,15 +917,18 @@ public:
                 primaryTeamRead, primaryTeam, botClass);
             secondaryTeam = native::ResolvePlayerTeam(
                 secondaryTeamRead, secondaryTeam, botClass);
-            const bool bot = botClass || primaryTeam == 0;
             const bool useSecondaryTeam = context.warfare || settings.visual.battlefieldMode;
             const std::int32_t targetTeam = useSecondaryTeam ? secondaryTeam : primaryTeam;
+            const bool bot = botClass || targetTeam == 0;
             const bool threatTeamsValid =
-                context.localTeam >= 0 && targetTeam >= 0;
-            if (context.localTeam >= 0 && targetTeam >= 0 &&
-                targetTeam == context.localTeam) {
+                native::HasComparablePlayerTeams(
+                    context.localTeam, targetTeam);
+            if (native::IsSamePlayerTeam(
+                    context.localTeam, targetTeam)) {
                 continue;
             }
+            const bool enemyEligible = native::IsEnemyEligible(
+                context.localTeam, targetTeam, bot);
 
             Vec3 position{};
             const bool coordinateAvailable = ReadCharacterPosition(
@@ -948,7 +961,7 @@ public:
 
             const bool combatModeActive = settings.visual.combatMode &&
                 (context.firing || context.zooming);
-            const bool aimEligible = aimActive && threatTeamsValid &&
+            const bool aimEligible = aimActive && enemyEligible &&
                 !(bot && settings.aim.ignoreBots) &&
                 !(health.downed && settings.aim.ignoreDowned);
             const bool visualEligible = !health.downed || settings.visual.downedPlayer;
@@ -974,9 +987,9 @@ public:
             const SemanticTone actorTone = ToneForVisibility(
                 bot, settings.visual.visibilityColor, actorVisibility);
 
-            const bool radarInRange = threatTeamsValid && frame.radar.has_value() &&
+            const bool radarInRange = enemyEligible && frame.radar.has_value() &&
                 distanceMeters <= frame.radar->maxDistanceMeters;
-            const bool hudMapEligible = threatTeamsValid && frame.hudMap.has_value();
+            const bool hudMapEligible = enemyEligible && frame.hudMap.has_value();
             const bool facingNeeded = radarInRange || hudMapEligible ||
                 (settings.visual.enabled && !bot &&
                  threatTeamsValid &&
@@ -1361,6 +1374,14 @@ public:
             frame.players.push_back(std::move(visual));
         }
 
+        if (validActorCount > 0 && decodedNameCount == 0) {
+            error = "数据链等待：名称池暂不可读";
+            aimController_.ClearTarget();
+            lockedAimIdentity_ = 0;
+            lockedAimBone_ = -1;
+            return true;
+        }
+
         FinalizeThreatSignals(settings, frame);
         PublishAimFrame(settings.aim, aimTuning, context, aimCandidates, frame);
 
@@ -1380,6 +1401,7 @@ public:
                 entries.resize(static_cast<std::size_t>(frame.highValueList->maxRows));
             }
         }
+        frame.ready = true;
         return true;
     }
 
@@ -1555,10 +1577,17 @@ private:
 
     template <typename T>
     bool ReadValue(std::uintptr_t address, T& output) {
-        output = T{};
-        return IsValidReadAddress(address) &&
-               sizeof(T) <= kMaximumRemoteAddress - address && memory_ != nullptr &&
-               memory_->Read(address, &output, sizeof(T));
+        if (!IsValidReadAddress(address) ||
+            sizeof(T) > kMaximumRemoteAddress - address ||
+            memory_ == nullptr) {
+            return false;
+        }
+        T value{};
+        if (!memory_->Read(address, &value, sizeof(T))) {
+            return false;
+        }
+        output = value;
+        return true;
     }
 
     std::uintptr_t ReadPointer(std::uintptr_t address) {
@@ -1569,15 +1598,16 @@ private:
     std::vector<std::uintptr_t> CollectActorAddresses(
         const FrameContext& context,
         bool includeStreamingLevels) {
-        constexpr std::size_t kMaximumCollectedActors = 50000;
+        constexpr std::size_t kMaximumCollectedActors = 100000;
         std::vector<std::uintptr_t> result;
         std::unordered_set<std::uintptr_t> seen;
         result.reserve(static_cast<std::size_t>(context.actorCount));
         seen.reserve(static_cast<std::size_t>(context.actorCount));
 
-        const auto appendArray = [&](const ActorArrayHeader& header) {
+        const auto appendArray = [&](const ActorArrayHeader& header,
+                                     std::int32_t maximumCount) {
             if (!IsValidPointer(header.data) || header.count <= 0 ||
-                header.count > kMaximumActorCount || header.capacity < header.count ||
+                header.count > maximumCount || header.capacity < header.count ||
                 result.size() >= kMaximumCollectedActors) {
                 return;
             }
@@ -1604,24 +1634,26 @@ private:
             }
         };
 
-        appendArray(ActorArrayHeader{
-            context.actorArray,
-            context.actorCount,
-            context.actorCount,
-        });
+        appendArray(
+            ActorArrayHeader{
+                context.actorArray,
+                context.actorCount,
+                context.actorCount,
+            },
+            kMaximumActorCount);
         if (!includeStreamingLevels || result.size() >= kMaximumCollectedActors) {
             return result;
         }
 
         ActorArrayHeader persistentObjects{};
         if (ReadValue(context.level + 0x98, persistentObjects)) {
-            appendArray(persistentObjects);
+            appendArray(persistentObjects, kMaximumWorldObjectCount);
         }
 
         const std::uintptr_t levels = ReadPointer(context.world + 0x158);
         std::int32_t levelCount = 0;
         if (!IsValidPointer(levels) || !ReadValue(context.world + 0x160, levelCount) ||
-            levelCount <= 0 || levelCount > 512) {
+            levelCount <= 0 || levelCount > 1024) {
             return result;
         }
         std::vector<std::uintptr_t> levelAddresses(static_cast<std::size_t>(levelCount));
@@ -1629,16 +1661,27 @@ private:
                 levels,
                 levelAddresses.data(),
                 levelAddresses.size() * sizeof(std::uintptr_t))) {
-            return result;
+            for (std::size_t index = 0; index < levelAddresses.size(); ++index) {
+                const std::uintptr_t offset =
+                    index * sizeof(std::uintptr_t);
+                if (offset > kMaximumRemoteAddress - levels) {
+                    break;
+                }
+                ReadValue(levels + offset, levelAddresses[index]);
+            }
         }
         for (const std::uintptr_t level : levelAddresses) {
             if (!IsValidPointer(level)) continue;
             if (level != context.level) {
                 ActorArrayHeader actors{};
-                if (ReadValue(level + 0x1F0, actors)) appendArray(actors);
+                if (ReadValue(level + 0x1F0, actors)) {
+                    appendArray(actors, kMaximumWorldObjectCount);
+                }
             }
             ActorArrayHeader objects{};
-            if (ReadValue(level + 0x98, objects)) appendArray(objects);
+            if (ReadValue(level + 0x98, objects)) {
+                appendArray(objects, kMaximumWorldObjectCount);
+            }
             if (result.size() >= kMaximumCollectedActors) break;
         }
         return result;
@@ -2163,6 +2206,9 @@ private:
         }
         context.localTeam =
             (context.warfare || battlefieldMode) ? secondaryTeam : primaryTeam;
+        if (context.localTeam <= 0) {
+            context.localTeam = native::kUnknownPlayerTeam;
+        }
 
         const std::uintptr_t blackboard = ReadPointer(context.localPawn + 0x2430);
         std::uint8_t zooming = 0;
@@ -2407,9 +2453,14 @@ private:
         float maximumDownedHealth = 0.0f;
         ReadValue(healthSet + 0x110, downedHealth);
         ReadValue(healthSet + 0x120, maximumDownedHealth);
-        state.downed = downed != 0 ||
-            (std::isfinite(downedHealth) && std::isfinite(maximumDownedHealth) &&
-             maximumDownedHealth > 0.0f && downedHealth > 0.0f);
+        const bool downedPoolValid =
+            std::isfinite(downedHealth) &&
+            std::isfinite(maximumDownedHealth);
+        state.downed = native::ResolveDownedState(
+            downed != 0,
+            state.health,
+            downedPoolValid ? downedHealth : 0.0f,
+            downedPoolValid ? maximumDownedHealth : 0.0f);
 
         const std::uintptr_t equipmentComponent = ReadPointer(actor + 0x2420);
         const std::uintptr_t equipment = ReadPointer(equipmentComponent + 0x1D8);

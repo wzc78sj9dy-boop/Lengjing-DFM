@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.18)
 project(lengjing VERSION 1.0.0 LANGUAGES C CXX)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -8,12 +8,15 @@ endif()
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-add_compile_options("SHELL:-mllvm -irobf")
+add_compile_options(
+    "SHELL:-mllvm -irobf"
+    "SHELL:-mllvm -irobf-strenc"
+)
 
 file(GLOB_RECURSE LENGJING_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c"
@@ -21,8 +24,12 @@ file(GLOB_RECURSE LENGJING_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
 list(FILTER LENGJING_SOURCES EXCLUDE REGEX "/imgui_demo\\.cpp$")
-list(APPEND LENGJING_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/lib/t3/t3sdk.cpp"
+
+set_source_files_properties(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Android_Graphics/CPUGraphics.cpp"
+    PROPERTIES
+        COMPILE_OPTIONS
+            "-O3;-ffast-math;-ftree-vectorize;-fno-stack-protector"
 )
 
 add_executable(lengjing ${LENGJING_SOURCES})

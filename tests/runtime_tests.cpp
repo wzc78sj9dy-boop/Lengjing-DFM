@@ -1,5 +1,6 @@
 #include "test_support.h"
 
+#include "game/FrameRetentionPolicy.h"
 #include "game/GameRuntime.h"
 
 #include <atomic>
@@ -21,6 +22,7 @@ struct BackendState {
     std::atomic_int screenHeight{0};
     std::atomic_int orientation{0};
     std::atomic_bool aimEnabled{false};
+    std::atomic_bool frameReady{true};
 };
 
 class FakeBackend final : public lengjing::game::GameBackend {
@@ -44,8 +46,11 @@ public:
     bool ReadFrame(const lengjing::game::FeatureSettings& settings,
                    lengjing::game::GameFrame& frame,
                    lengjing::game::RuntimeProbe&,
-                   std::string&) override {
-        frame.playerCount = settings.visual.enabled ? 3 : 0;
+                   std::string& error) override {
+        frame.ready = state_->frameReady.load();
+        frame.playerCount =
+            frame.ready && settings.visual.enabled ? 3 : 0;
+        error = frame.ready ? std::string{} : "数据链等待：测试帧未就绪";
         ++state_->reads;
         return true;
     }
@@ -82,6 +87,10 @@ bool WaitFor(Predicate predicate, std::chrono::milliseconds timeout = 1000ms) {
 }  // namespace
 
 void RunRuntimeTests() {
+    REQUIRE(lengjing::game::ShouldPublishWaitingFrame(false, 0ms));
+    REQUIRE(!lengjing::game::ShouldPublishWaitingFrame(true, 249ms));
+    REQUIRE(lengjing::game::ShouldPublishWaitingFrame(true, 250ms));
+
     auto state = std::make_shared<BackendState>();
     lengjing::game::GameRuntime runtime(std::make_unique<FakeBackend>(state));
 
@@ -96,11 +105,24 @@ void RunRuntimeTests() {
         return runtime.Status().phase == lengjing::game::RuntimePhase::Running;
     }));
     REQUIRE(WaitFor([&] {
-        return runtime.LatestFrame()->sequence >= 2;
+        const auto frame = runtime.LatestFrame();
+        return frame->sequence >= 2 && frame->playerCount == 3;
     }));
     REQUIRE(runtime.Status().processId == 42);
     REQUIRE(runtime.Status().baseReady);
-    REQUIRE(runtime.LatestFrame()->playerCount == 3);
+
+    state->frameReady.store(false);
+    REQUIRE(WaitFor([&] {
+        return runtime.Status().message ==
+            "数据链等待：测试帧未就绪";
+    }));
+    const auto retainedFrame = runtime.LatestFrame();
+    const std::uint64_t retainedSequence = retainedFrame->sequence;
+    state->frameReady.store(true);
+    REQUIRE(WaitFor([&] {
+        const auto frame = runtime.LatestFrame();
+        return frame->sequence > retainedSequence && frame->playerCount == 3;
+    }));
 
     runtime.SetAimEnabled(true);
     runtime.UpdateDisplayGeometry(1080, 2376, 0);

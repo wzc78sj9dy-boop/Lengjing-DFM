@@ -5,6 +5,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 set "SOURCE_DIR=%~dp0tests"
 set "BUILD_DIR=E:\demo\fenxi\lengjing\host_tests"
 set "TARGET="
+set "NINJA="
 
 if not exist "%SOURCE_DIR%\CMakeLists.txt" (
     echo [ERROR] Host test project not found: %SOURCE_DIR%
@@ -16,8 +17,15 @@ if errorlevel 1 (
     echo [ERROR] cmake.exe not found in PATH.
     exit /b 1
 )
-where ninja.exe >nul 2>&1
-if errorlevel 1 (
+if defined NINJA_PATH (
+    if exist "%NINJA_PATH%\ninja.exe" set "NINJA=%NINJA_PATH%\ninja.exe"
+    if not defined NINJA if exist "%NINJA_PATH%" set "NINJA=%NINJA_PATH%"
+)
+if not defined NINJA for %%I in (ninja.exe) do set "NINJA=%%~$PATH:I"
+if not defined NINJA if exist "E:\demo\fenxi\lengjing\tools\python\bin\ninja.exe" (
+    set "NINJA=E:\demo\fenxi\lengjing\tools\python\bin\ninja.exe"
+)
+if not defined NINJA (
     echo [ERROR] ninja.exe not found in PATH.
     exit /b 1
 )
@@ -48,6 +56,7 @@ if errorlevel 1 (
 )
 
 cmake -Wno-deprecated --no-warn-unused-cli -S "%SOURCE_DIR%" -B "%BUILD_DIR%" -G Ninja ^
+    -DCMAKE_MAKE_PROGRAM="%NINJA%" ^
     -DCMAKE_BUILD_TYPE=Release
 if errorlevel 1 (
     echo [ERROR] Host test configuration failed.

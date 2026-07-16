@@ -368,13 +368,42 @@ bool IsWriteSlotAvailableLocked(int slot) {
     return g_fingers[static_cast<std::size_t>(slot)].tracking_id < 0;
 }
 
+bool HasUnmanagedActiveTouchLocked() {
+    std::array<int, kFingerCount + 1> trackingIds{};
+    trackingIds.fill(-1);
+    trackingIds[0] = ABS_MT_TRACKING_ID;
+    if (ioctl(
+            g_writeTouchFile,
+            EVIOCGMTSLOTS(sizeof(trackingIds)),
+            trackingIds.data()) >= 0) {
+        for (int slot = 0; slot < kFingerCount; ++slot) {
+            const std::size_t index = static_cast<std::size_t>(slot);
+            if (trackingIds[index + 1] >= 0 &&
+                !g_writtenActive[index]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(g_fingerMutex);
+    for (int slot = 0; slot < kFingerCount; ++slot) {
+        const std::size_t index = static_cast<std::size_t>(slot);
+        if (g_fingers[index].tracking_id >= 0 &&
+            !g_writtenActive[index]) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void ReleaseWrittenTouchesLocked() {
     if (g_writeTouchFile < 0) {
         g_writtenActive.fill(false);
         return;
     }
 
-    EventBatch<kFingerCount * 2 + 2> batch;
+    EventBatch<kFingerCount * 2 + 4> batch;
     bool hadActiveTouch = false;
     for (int slot = 0; slot < kFingerCount; ++slot) {
         if (!g_writtenActive[static_cast<std::size_t>(slot)]) {
@@ -385,6 +414,15 @@ void ReleaseWrittenTouchesLocked() {
         batch.Add(EV_ABS, ABS_MT_TRACKING_ID, -1);
     }
     if (hadActiveTouch) {
+        const DeviceRange outputRange = LoadOutputRange();
+        const bool releaseGlobalButtons =
+            !HasUnmanagedActiveTouchLocked();
+        if (releaseGlobalButtons && outputRange.hasButtonTouch) {
+            batch.Add(EV_KEY, BTN_TOUCH, 0);
+        }
+        if (releaseGlobalButtons && outputRange.hasButtonToolFinger) {
+            batch.Add(EV_KEY, BTN_TOOL_FINGER, 0);
+        }
         batch.Add(EV_SYN, SYN_REPORT, 0);
         batch.Add(EV_ABS, ABS_MT_SLOT, 0);
         batch.Send(g_writeTouchFile);
@@ -598,6 +636,17 @@ void ResetFingers() {
     g_fingers.fill(TouchFinger{});
 }
 
+void StopTouchScreenLocked() {
+    g_running.store(false, std::memory_order_release);
+    g_mode.store(0, std::memory_order_release);
+    if (g_worker.joinable()) {
+        g_worker.join();
+    }
+    CloseWriteTouch();
+    ResetFingers();
+    QueueUiRelease();
+}
+
 struct TouchCleanup {
     ~TouchCleanup() {
         StopTouchScreen();
@@ -761,9 +810,20 @@ bool Touch_Up(int slot) {
             return false;
         }
 
-        EventBatch<4> batch;
+        const bool lastWrittenTouch =
+            std::count(g_writtenActive.begin(), g_writtenActive.end(), true) == 1;
+        const bool releaseGlobalButtons =
+            lastWrittenTouch && !HasUnmanagedActiveTouchLocked();
+        const DeviceRange outputRange = LoadOutputRange();
+        EventBatch<6> batch;
         batch.Add(EV_ABS, ABS_MT_SLOT, slot);
         batch.Add(EV_ABS, ABS_MT_TRACKING_ID, -1);
+        if (releaseGlobalButtons && outputRange.hasButtonTouch) {
+            batch.Add(EV_KEY, BTN_TOUCH, 0);
+        }
+        if (releaseGlobalButtons && outputRange.hasButtonToolFinger) {
+            batch.Add(EV_KEY, BTN_TOOL_FINGER, 0);
+        }
         batch.Add(EV_SYN, SYN_REPORT, 0);
         batch.Add(EV_ABS, ABS_MT_SLOT, 0);
         notify = batch.Send(g_writeTouchFile);
@@ -808,7 +868,8 @@ bool TouchScreenHandle(int mode) {
         g_running.store(false, std::memory_order_release);
         return false;
     }
-    StopTouchScreen();
+    std::lock_guard<std::mutex> lifecycleLock(g_lifecycleMutex);
+    StopTouchScreenLocked();
 
     int selectedMode = mode == 1 ? 1 : 0;
 
@@ -828,7 +889,6 @@ bool TouchScreenHandle(int mode) {
     g_mode.store(selectedMode, std::memory_order_release);
     g_running.store(true, std::memory_order_release);
 
-    std::lock_guard<std::mutex> lock(g_lifecycleMutex);
     try {
         g_worker = std::thread(InputWorker, inputFile);
     } catch (...) {
@@ -844,20 +904,14 @@ bool TouchScreenHandle(int mode) {
 }
 
 void StopTouchScreen() {
-    g_running.store(false, std::memory_order_release);
-    g_mode.store(0, std::memory_order_release);
     if (g_insideInputWorker) {
+        g_running.store(false, std::memory_order_release);
+        g_mode.store(0, std::memory_order_release);
         return;
     }
 
-    std::lock_guard<std::mutex> lock(g_lifecycleMutex);
-    if (g_worker.joinable()) {
-        g_worker.join();
-    }
-
-    CloseWriteTouch();
-    ResetFingers();
-    QueueUiRelease();
+    std::lock_guard<std::mutex> lifecycleLock(g_lifecycleMutex);
+    StopTouchScreenLocked();
 }
 
 void PumpTouchInput() {

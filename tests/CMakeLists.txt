@@ -6,8 +6,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_executable(lengjing_tests
-    auth_config_tests.cpp
-    card_input_policy_tests.cpp
     config_tests.cpp
     coordinate_reader_tests.cpp
     hud_map_tests.cpp

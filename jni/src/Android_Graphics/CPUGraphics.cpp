@@ -21,6 +21,8 @@ constexpr int kWindowWatchdogMs = 500;
 constexpr int kRasterWaitMs = 250;
 constexpr int kRasterAbortWaitMs = 500;
 constexpr int kSubmitStopWaitMs = 100;
+constexpr int kMaximumConsecutiveWindowFailures = 8;
+constexpr std::size_t kMaximumPendingDamage = 32;
 
 std::int64_t NowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -569,8 +571,42 @@ std::shared_ptr<CpuSubmitState> MakeSubmitState() {
         });
 }
 
+void ClearNativeBuffer(ANativeWindow_Buffer& buffer) {
+    if (buffer.bits == nullptr ||
+        buffer.format != WINDOW_FORMAT_RGBA_8888 ||
+        buffer.width <= 0 ||
+        buffer.height <= 0 ||
+        buffer.stride < buffer.width) {
+        return;
+    }
+    auto* pixels = static_cast<std::uint32_t*>(buffer.bits);
+    const std::size_t rowBytes =
+        static_cast<std::size_t>(buffer.width) *
+        sizeof(std::uint32_t);
+    for (int y = 0; y < buffer.height; ++y) {
+        std::memset(
+            pixels + static_cast<std::size_t>(y) * buffer.stride,
+            0,
+            rowBytes);
+    }
+}
+
 void RunSubmitLoop(const std::shared_ptr<CpuSubmitState>& state) {
     std::vector<std::uint32_t> localBuffer;
+    std::uint64_t localBufferGeneration = 0;
+    int consecutiveWindowFailures = 0;
+    const auto recordWindowFailure = [&] {
+        ++consecutiveWindowFailures;
+        if (consecutiveWindowFailures <
+            kMaximumConsecutiveWindowFailures) {
+            return false;
+        }
+        state->surfaceRecoveryRequired.store(
+            true, std::memory_order_release);
+        state->running.store(false, std::memory_order_release);
+        state->condition.notify_all();
+        return true;
+    };
 
     while (state->running.load(std::memory_order_acquire)) {
         int width = 0;
@@ -579,6 +615,7 @@ void RunSubmitLoop(const std::shared_ptr<CpuSubmitState>& state) {
         int minY = 0;
         int maxX = 0;
         int maxY = 0;
+        std::uint64_t generation = 0;
         {
             std::unique_lock<std::mutex> lock(state->mutex);
             state->condition.wait(lock, [&] {
@@ -589,14 +626,19 @@ void RunSubmitLoop(const std::shared_ptr<CpuSubmitState>& state) {
                 break;
             }
             localBuffer.swap(state->buffer);
+            std::swap(
+                localBufferGeneration,
+                state->bufferGeneration);
             width = state->bufferWidth;
             height = state->bufferHeight;
             minX = state->dirtyMinX;
             minY = state->dirtyMinY;
             maxX = state->dirtyMaxX;
             maxY = state->dirtyMaxY;
+            generation = localBufferGeneration;
             state->hasWork = false;
         }
+        state->condition.notify_all();
 
         const std::size_t expectedPixels =
             width > 0 && height > 0
@@ -610,7 +652,6 @@ void RunSubmitLoop(const std::shared_ptr<CpuSubmitState>& state) {
             continue;
         }
 
-        state->lastProgressMs.store(NowMs(), std::memory_order_release);
         ANativeWindow* window = state->window;
         ANativeWindow_acquire(window);
 
@@ -620,6 +661,9 @@ void RunSubmitLoop(const std::shared_ptr<CpuSubmitState>& state) {
             ANativeWindow_setBuffersGeometry(
                 window, width, height, WINDOW_FORMAT_RGBA_8888);
             ANativeWindow_release(window);
+            if (recordWindowFailure()) {
+                break;
+            }
             continue;
         }
 
@@ -630,23 +674,47 @@ void RunSubmitLoop(const std::shared_ptr<CpuSubmitState>& state) {
             std::clamp(maxY, 0, height),
         };
         ANativeWindow_Buffer nativeBuffer{};
+        state->windowCallStartedMs.store(
+            NowMs(), std::memory_order_release);
         state->insideWindowLock.store(true, std::memory_order_release);
         const int lockResult =
             ANativeWindow_lock(window, &nativeBuffer, &dirty);
         state->insideWindowLock.store(false, std::memory_order_release);
+        state->windowCallStartedMs.store(0, std::memory_order_release);
         if (lockResult != 0) {
             ANativeWindow_release(window);
+            if (recordWindowFailure()) {
+                break;
+            }
             continue;
+        }
+
+        if (!state->running.load(std::memory_order_acquire)) {
+            ClearNativeBuffer(nativeBuffer);
+            state->windowCallStartedMs.store(
+                NowMs(), std::memory_order_release);
+            state->insideWindowPost.store(true, std::memory_order_release);
+            ANativeWindow_unlockAndPost(window);
+            state->insideWindowPost.store(false, std::memory_order_release);
+            state->windowCallStartedMs.store(0, std::memory_order_release);
+            ANativeWindow_release(window);
+            break;
         }
 
         if (nativeBuffer.width != width ||
             nativeBuffer.height != height) {
+            state->windowCallStartedMs.store(
+                NowMs(), std::memory_order_release);
             state->insideWindowPost.store(true, std::memory_order_release);
             ANativeWindow_unlockAndPost(window);
             state->insideWindowPost.store(false, std::memory_order_release);
+            state->windowCallStartedMs.store(0, std::memory_order_release);
             ANativeWindow_setBuffersGeometry(
                 window, width, height, WINDOW_FORMAT_RGBA_8888);
             ANativeWindow_release(window);
+            if (recordWindowFailure()) {
+                break;
+            }
             continue;
         }
 
@@ -694,19 +762,35 @@ void RunSubmitLoop(const std::shared_ptr<CpuSubmitState>& state) {
             copiedFrame = true;
         }
 
+        const bool stillRunning =
+            state->running.load(std::memory_order_acquire);
+        if (!stillRunning) {
+            ClearNativeBuffer(nativeBuffer);
+            copiedFrame = false;
+        }
+        state->windowCallStartedMs.store(
+            NowMs(), std::memory_order_release);
         state->insideWindowPost.store(true, std::memory_order_release);
         const int postResult = ANativeWindow_unlockAndPost(window);
         state->insideWindowPost.store(false, std::memory_order_release);
-        if (postResult == 0) {
-            state->lastProgressMs.store(
-                NowMs(), std::memory_order_release);
-            if (copiedFrame &&
-                state->running.load(std::memory_order_acquire) &&
-                state->presentationRate != nullptr) {
-                state->presentationRate->Record();
+        state->windowCallStartedMs.store(0, std::memory_order_release);
+        if (postResult == 0 && copiedFrame) {
+            consecutiveWindowFailures = 0;
+            if (state->running.load(std::memory_order_acquire)) {
+                state->presentedGeneration.store(
+                    generation, std::memory_order_release);
+                if (state->presentationRate != nullptr) {
+                    state->presentationRate->Record();
+                }
             }
+        } else if (stillRunning && recordWindowFailure()) {
+            ANativeWindow_release(window);
+            break;
         }
         ANativeWindow_release(window);
+        if (!stillRunning) {
+            break;
+        }
     }
 
     state->running.store(false, std::memory_order_release);
@@ -799,7 +883,7 @@ CPUGraphics::CPUGraphics() {
 }
 
 CPUGraphics::~CPUGraphics() {
-    StopSubmitThread();
+    StopSubmitThread(true);
     abortRaster_.store(true, std::memory_order_release);
     rasterPool_.reset();
 }
@@ -830,6 +914,9 @@ bool CPUGraphics::Create() {
     previousMinY_ = height;
     previousMaxX_ = 0;
     previousMaxY_ = 0;
+    nextGeneration_ = 0;
+    pendingDamage_.clear();
+    surfaceRecoveryRequested_.store(false, std::memory_order_release);
     frontBuffer_.assign(
         static_cast<std::size_t>(width) * height, 0u);
     {
@@ -893,7 +980,9 @@ void CPUGraphics::PrepareFrame(bool resize) {
     const bool changed =
         resize || width != bufferWidth_ || height != bufferHeight_;
     if (changed) {
-        StopSubmitThread();
+        if (!StopSubmitThread(false)) {
+            return;
+        }
         {
             std::lock_guard<std::mutex> lock(renderMutex_);
             bufferWidth_ = width;
@@ -902,6 +991,8 @@ void CPUGraphics::PrepareFrame(bool resize) {
             previousMinY_ = height;
             previousMaxX_ = 0;
             previousMaxY_ = 0;
+            nextGeneration_ = 0;
+            pendingDamage_.clear();
             frontBuffer_.assign(
                 static_cast<std::size_t>(width) * height, 0u);
         }
@@ -924,6 +1015,7 @@ void CPUGraphics::PrepareFrame(bool resize) {
     io.DisplaySize = ImVec2(m_Width, m_Height);
     io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
     RefreshFontTexture();
+    WaitForSubmitSlot();
 }
 
 void CPUGraphics::StartSubmitThread() {
@@ -931,33 +1023,41 @@ void CPUGraphics::StartSubmitThread() {
     const std::int64_t now = NowMs();
 
     if (submitState_ != nullptr &&
+        submitState_->surfaceRecoveryRequired.load(
+            std::memory_order_acquire)) {
+        surfaceRecoveryRequested_.store(
+            true, std::memory_order_release);
+        submitState_->running.store(false, std::memory_order_release);
+        submitState_->condition.notify_all();
+        return;
+    }
+
+    if (submitState_ != nullptr &&
         submitState_->running.load(std::memory_order_acquire)) {
-        const std::int64_t lastProgress =
-            submitState_->lastProgressMs.load(std::memory_order_acquire);
         const bool blocked =
             submitState_->insideWindowLock.load(std::memory_order_acquire) ||
             submitState_->insideWindowPost.load(std::memory_order_acquire);
+        const std::int64_t callStarted =
+            submitState_->windowCallStartedMs.load(
+                std::memory_order_acquire);
         const bool stuck =
             blocked &&
-            lastProgress > 0 &&
-            now - lastProgress > kWindowWatchdogMs;
+            callStarted > 0 &&
+            now - callStarted > kWindowWatchdogMs;
         if (!stuck) {
             return;
         }
 
+        surfaceRecoveryRequested_.store(true, std::memory_order_release);
         submitState_->running.store(false, std::memory_order_release);
         submitState_->condition.notify_all();
-        if (submitThread_.joinable()) {
-            submitThread_.detach();
-        }
-        submitState_.reset();
+        return;
     } else if (submitThread_.joinable()) {
         if (submitState_ != nullptr &&
             !submitState_->exited.load(std::memory_order_acquire)) {
-            submitThread_.detach();
-        } else {
-            submitThread_.join();
+            return;
         }
+        submitThread_.join();
         submitState_.reset();
     }
 
@@ -976,14 +1076,13 @@ void CPUGraphics::StartSubmitThread() {
 
     state->exited.store(false, std::memory_order_release);
     state->running.store(true, std::memory_order_release);
-    state->lastProgressMs.store(now, std::memory_order_release);
     submitState_ = state;
     submitThread_ = std::thread([state] {
         RunSubmitLoop(state);
     });
 }
 
-void CPUGraphics::StopSubmitThread() {
+bool CPUGraphics::StopSubmitThread(bool detachIfBlocked) {
     std::lock_guard<std::mutex> lock(threadMutex_);
     std::shared_ptr<CpuSubmitState> state = submitState_;
     if (state != nullptr) {
@@ -1006,11 +1105,48 @@ void CPUGraphics::StopSubmitThread() {
         if (state == nullptr ||
             state->exited.load(std::memory_order_acquire)) {
             submitThread_.join();
-        } else {
+        } else if (detachIfBlocked) {
             submitThread_.detach();
+        } else {
+            return false;
         }
     }
     submitState_.reset();
+    return true;
+}
+
+bool CPUGraphics::ConsumeSurfaceRecoveryRequest() {
+    bool requested = surfaceRecoveryRequested_.exchange(
+        false, std::memory_order_acq_rel);
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (submitState_ != nullptr &&
+        submitState_->surfaceRecoveryRequired.exchange(
+            false, std::memory_order_acq_rel)) {
+        requested = true;
+        submitState_->running.store(false, std::memory_order_release);
+        submitState_->condition.notify_all();
+    }
+    return requested;
+}
+
+void CPUGraphics::WaitForSubmitSlot() {
+    std::shared_ptr<CpuSubmitState> state;
+    {
+        std::lock_guard<std::mutex> lock(threadMutex_);
+        state = submitState_;
+    }
+    if (state == nullptr) {
+        return;
+    }
+
+    std::unique_lock<std::mutex> lock(state->mutex);
+    state->condition.wait_for(
+        lock,
+        std::chrono::milliseconds(20),
+        [&] {
+            return !state->running.load(std::memory_order_acquire) ||
+                !state->hasWork;
+        });
 }
 
 void CPUGraphics::RenderBand(ImDrawData* drawData,
@@ -1236,11 +1372,13 @@ void CPUGraphics::Render(ImDrawData* drawData) {
         !state->running.load(std::memory_order_acquire)) {
         return;
     }
+    std::uint64_t availableBufferGeneration = 0;
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         if (state->hasWork) {
             return;
         }
+        availableBufferGeneration = state->bufferGeneration;
     }
 
     std::lock_guard<std::mutex> renderLock(renderMutex_);
@@ -1275,17 +1413,78 @@ void CPUGraphics::Render(ImDrawData* drawData) {
              ++commandIndex) {
             const ImDrawCmd& command =
                 drawList->CmdBuffer[commandIndex];
-            if (command.UserCallback != nullptr) {
+            if (command.UserCallback != nullptr ||
+                command.ElemCount == 0) {
                 continue;
             }
-            const int commandMinX = static_cast<int>(
-                (command.ClipRect.x - displayPosition.x) * scale.x);
-            const int commandMinY = static_cast<int>(
-                (command.ClipRect.y - displayPosition.y) * scale.y);
-            const int commandMaxX = static_cast<int>(
-                (command.ClipRect.z - displayPosition.x) * scale.x);
-            const int commandMaxY = static_cast<int>(
-                (command.ClipRect.w - displayPosition.y) * scale.y);
+
+            const std::size_t indexBegin =
+                static_cast<std::size_t>(command.IdxOffset);
+            if (indexBegin >=
+                static_cast<std::size_t>(drawList->IdxBuffer.Size)) {
+                continue;
+            }
+            const std::size_t indexEnd = std::min(
+                static_cast<std::size_t>(drawList->IdxBuffer.Size),
+                indexBegin + static_cast<std::size_t>(command.ElemCount));
+            float vertexMinX = std::numeric_limits<float>::max();
+            float vertexMinY = std::numeric_limits<float>::max();
+            float vertexMaxX = std::numeric_limits<float>::lowest();
+            float vertexMaxY = std::numeric_limits<float>::lowest();
+            for (std::size_t indexPosition = indexBegin;
+                 indexPosition < indexEnd;
+                 ++indexPosition) {
+                const std::size_t vertexIndex =
+                    static_cast<std::size_t>(command.VtxOffset) +
+                    static_cast<std::size_t>(
+                        drawList->IdxBuffer[
+                            static_cast<int>(indexPosition)]);
+                if (vertexIndex >=
+                    static_cast<std::size_t>(drawList->VtxBuffer.Size)) {
+                    continue;
+                }
+                const ImVec2& position =
+                    drawList->VtxBuffer[
+                        static_cast<int>(vertexIndex)].pos;
+                const float framebufferX =
+                    (position.x - displayPosition.x) * scale.x;
+                const float framebufferY =
+                    (position.y - displayPosition.y) * scale.y;
+                vertexMinX = std::min(vertexMinX, framebufferX);
+                vertexMinY = std::min(vertexMinY, framebufferY);
+                vertexMaxX = std::max(vertexMaxX, framebufferX);
+                vertexMaxY = std::max(vertexMaxY, framebufferY);
+            }
+            if (vertexMaxX < vertexMinX ||
+                vertexMaxY < vertexMinY) {
+                continue;
+            }
+
+            constexpr float dirtyPadding = 2.0f;
+            const int clipMinX = static_cast<int>(std::floor(
+                (command.ClipRect.x - displayPosition.x) * scale.x));
+            const int clipMinY = static_cast<int>(std::floor(
+                (command.ClipRect.y - displayPosition.y) * scale.y));
+            const int clipMaxX = static_cast<int>(std::ceil(
+                (command.ClipRect.z - displayPosition.x) * scale.x));
+            const int clipMaxY = static_cast<int>(std::ceil(
+                (command.ClipRect.w - displayPosition.y) * scale.y));
+            const int commandMinX = std::max(
+                clipMinX,
+                static_cast<int>(
+                    std::floor(vertexMinX - dirtyPadding)));
+            const int commandMinY = std::max(
+                clipMinY,
+                static_cast<int>(
+                    std::floor(vertexMinY - dirtyPadding)));
+            const int commandMaxX = std::min(
+                clipMaxX,
+                static_cast<int>(
+                    std::ceil(vertexMaxX + dirtyPadding)));
+            const int commandMaxY = std::min(
+                clipMaxY,
+                static_cast<int>(
+                    std::ceil(vertexMaxY + dirtyPadding)));
             if (commandMaxX <= commandMinX ||
                 commandMaxY <= commandMinY) {
                 continue;
@@ -1297,59 +1496,66 @@ void CPUGraphics::Render(ImDrawData* drawData) {
         }
     }
 
-    const bool hasCurrentDirty = maxX > minX && maxY > minY;
-    if (!hasCurrentDirty) {
-        minX = previousMinX_;
-        minY = previousMinY_;
-        maxX = previousMaxX_;
-        maxY = previousMaxY_;
-        previousMinX_ = bufferWidth_;
-        previousMinY_ = bufferHeight_;
-        previousMaxX_ = 0;
-        previousMaxY_ = 0;
-    } else {
-        if (previousMaxX_ > previousMinX_ &&
-            previousMaxY_ > previousMinY_) {
-            minX = std::min(minX, previousMinX_);
-            minY = std::min(minY, previousMinY_);
-            maxX = std::max(maxX, previousMaxX_);
-            maxY = std::max(maxY, previousMaxY_);
-        }
-        previousMinX_ = minX;
-        previousMinY_ = minY;
-        previousMaxX_ = maxX;
-        previousMaxY_ = maxY;
-    }
+    const int currentMinX = std::clamp(minX, 0, bufferWidth_);
+    const int currentMinY = std::clamp(minY, 0, bufferHeight_);
+    const int currentMaxX = std::clamp(maxX, 0, bufferWidth_);
+    const int currentMaxY = std::clamp(maxY, 0, bufferHeight_);
+    const bool hasCurrentDirty =
+        currentMaxX > currentMinX && currentMaxY > currentMinY;
+    const bool hasPreviousDirty =
+        previousMaxX_ > previousMinX_ &&
+        previousMaxY_ > previousMinY_;
 
-    minX = std::clamp(minX, 0, bufferWidth_);
-    minY = std::clamp(minY, 0, bufferHeight_);
-    maxX = std::clamp(maxX, 0, bufferWidth_);
-    maxY = std::clamp(maxY, 0, bufferHeight_);
-    if (maxX <= minX || maxY <= minY) {
+    int damageMinX = hasCurrentDirty ? currentMinX : previousMinX_;
+    int damageMinY = hasCurrentDirty ? currentMinY : previousMinY_;
+    int damageMaxX = hasCurrentDirty ? currentMaxX : previousMaxX_;
+    int damageMaxY = hasCurrentDirty ? currentMaxY : previousMaxY_;
+    if (hasCurrentDirty && hasPreviousDirty) {
+        damageMinX = std::min(damageMinX, previousMinX_);
+        damageMinY = std::min(damageMinY, previousMinY_);
+        damageMaxX = std::max(damageMaxX, previousMaxX_);
+        damageMaxY = std::max(damageMaxY, previousMaxY_);
+    }
+    damageMinX = std::clamp(damageMinX, 0, bufferWidth_);
+    damageMinY = std::clamp(damageMinY, 0, bufferHeight_);
+    damageMaxX = std::clamp(damageMaxX, 0, bufferWidth_);
+    damageMaxY = std::clamp(damageMaxY, 0, bufferHeight_);
+    const bool hasFrameDamage =
+        damageMaxX > damageMinX && damageMaxY > damageMinY;
+
+    const std::uint64_t presentedGeneration =
+        state->presentedGeneration.load(std::memory_order_acquire);
+    const std::uint64_t reusableGeneration =
+        std::min(presentedGeneration, availableBufferGeneration);
+    while (!pendingDamage_.empty() &&
+           pendingDamage_.front().generation <= reusableGeneration) {
+        pendingDamage_.pop_front();
+    }
+    if (!hasFrameDamage && pendingDamage_.empty()) {
         return;
     }
 
-    if (!hasCurrentDirty) {
-        for (int y = minY; y < maxY; ++y) {
+    if (hasFrameDamage && !hasCurrentDirty) {
+        for (int y = damageMinY; y < damageMaxY; ++y) {
             std::memset(
                 frontBuffer_.data() +
                     static_cast<std::size_t>(y) * bufferWidth_ +
-                    minX,
+                    damageMinX,
                 0,
-                static_cast<std::size_t>(maxX - minX) *
+                static_cast<std::size_t>(damageMaxX - damageMinX) *
                     sizeof(std::uint32_t));
         }
-    } else {
+    } else if (hasFrameDamage) {
         abortRaster_.store(false, std::memory_order_release);
         const int bandHeight =
             bufferHeight_ / CpuRasterPool::kWorkerCount;
         auto makeTask =
-            [=](int bandMinY, int bandMaxY) {
-                return [=] {
+            [=, this](int bandMinY, int bandMaxY) {
+                return [=, this] {
                     const int clearMinY =
-                        std::max(bandMinY, minY);
+                        std::max(bandMinY, damageMinY);
                     const int clearMaxY =
-                        std::min(bandMaxY, maxY);
+                        std::min(bandMaxY, damageMaxY);
                     for (int y = clearMinY; y < clearMaxY; ++y) {
                         if ((y & 15) == 0 &&
                             abortRaster_.load(std::memory_order_relaxed)) {
@@ -1359,9 +1565,10 @@ void CPUGraphics::Render(ImDrawData* drawData) {
                             frontBuffer_.data() +
                                 static_cast<std::size_t>(y) *
                                     bufferWidth_ +
-                                minX,
+                                damageMinX,
                             0,
-                            static_cast<std::size_t>(maxX - minX) *
+                            static_cast<std::size_t>(
+                                damageMaxX - damageMinX) *
                                 sizeof(std::uint32_t));
                     }
                     RenderBand(
@@ -1369,11 +1576,11 @@ void CPUGraphics::Render(ImDrawData* drawData) {
                         frontBuffer_.data(),
                         bufferWidth_,
                         bandMinY,
-                        minX,
-                        minY,
+                        damageMinX,
+                        damageMinY,
                         bandMaxY,
-                        maxX,
-                        maxY);
+                        damageMaxX,
+                        damageMaxY);
                 };
             };
         rasterPool_->Run(
@@ -1391,8 +1598,65 @@ void CPUGraphics::Render(ImDrawData* drawData) {
                 }
             }
             std::fill(frontBuffer_.begin(), frontBuffer_.end(), 0u);
+            previousMinX_ = 0;
+            previousMinY_ = 0;
+            previousMaxX_ = bufferWidth_;
+            previousMaxY_ = bufferHeight_;
             return;
         }
+    }
+
+    if (hasFrameDamage) {
+        if (hasCurrentDirty) {
+            previousMinX_ = currentMinX;
+            previousMinY_ = currentMinY;
+            previousMaxX_ = currentMaxX;
+            previousMaxY_ = currentMaxY;
+        } else {
+            previousMinX_ = bufferWidth_;
+            previousMinY_ = bufferHeight_;
+            previousMaxX_ = 0;
+            previousMaxY_ = 0;
+        }
+    }
+
+    const std::uint64_t generation = ++nextGeneration_;
+    if (hasFrameDamage) {
+        pendingDamage_.push_back(PendingDamage{
+            generation,
+            damageMinX,
+            damageMinY,
+            damageMaxX,
+            damageMaxY,
+        });
+        if (pendingDamage_.size() > kMaximumPendingDamage) {
+            PendingDamage collapsed = pendingDamage_.front();
+            for (const PendingDamage& pending : pendingDamage_) {
+                collapsed.generation = std::max(
+                    collapsed.generation, pending.generation);
+                collapsed.minimumX = std::min(
+                    collapsed.minimumX, pending.minimumX);
+                collapsed.minimumY = std::min(
+                    collapsed.minimumY, pending.minimumY);
+                collapsed.maximumX = std::max(
+                    collapsed.maximumX, pending.maximumX);
+                collapsed.maximumY = std::max(
+                    collapsed.maximumY, pending.maximumY);
+            }
+            pendingDamage_.clear();
+            pendingDamage_.push_back(collapsed);
+        }
+    }
+
+    int submitMinX = bufferWidth_;
+    int submitMinY = bufferHeight_;
+    int submitMaxX = 0;
+    int submitMaxY = 0;
+    for (const PendingDamage& pending : pendingDamage_) {
+        submitMinX = std::min(submitMinX, pending.minimumX);
+        submitMinY = std::min(submitMinY, pending.minimumY);
+        submitMaxX = std::max(submitMaxX, pending.maximumX);
+        submitMaxY = std::max(submitMaxY, pending.maximumY);
     }
 
     {
@@ -1400,17 +1664,39 @@ void CPUGraphics::Render(ImDrawData* drawData) {
         if (!state->running.load(std::memory_order_acquire)) {
             return;
         }
-        state->buffer.swap(frontBuffer_);
+        const bool needsCompleteBuffer =
+            state->buffer.size() != pixelCount ||
+            state->bufferWidth != bufferWidth_ ||
+            state->bufferHeight != bufferHeight_;
+        if (needsCompleteBuffer) {
+            state->buffer = frontBuffer_;
+            submitMinX = 0;
+            submitMinY = 0;
+            submitMaxX = bufferWidth_;
+            submitMaxY = bufferHeight_;
+        } else {
+            const std::size_t rowBytes =
+                static_cast<std::size_t>(submitMaxX - submitMinX) *
+                sizeof(std::uint32_t);
+            for (int y = submitMinY; y < submitMaxY; ++y) {
+                std::memcpy(
+                    state->buffer.data() +
+                        static_cast<std::size_t>(y) * bufferWidth_ +
+                        submitMinX,
+                    frontBuffer_.data() +
+                        static_cast<std::size_t>(y) * bufferWidth_ +
+                        submitMinX,
+                    rowBytes);
+            }
+        }
         state->bufferWidth = bufferWidth_;
         state->bufferHeight = bufferHeight_;
-        state->dirtyMinX = minX;
-        state->dirtyMinY = minY;
-        state->dirtyMaxX = maxX;
-        state->dirtyMaxY = maxY;
+        state->dirtyMinX = submitMinX;
+        state->dirtyMinY = submitMinY;
+        state->dirtyMaxX = submitMaxX;
+        state->dirtyMaxY = submitMaxY;
+        state->bufferGeneration = generation;
         state->hasWork = true;
-    }
-    if (frontBuffer_.size() != pixelCount) {
-        frontBuffer_.assign(pixelCount, 0u);
     }
     state->condition.notify_one();
 }
@@ -1433,9 +1719,12 @@ void CPUGraphics::PrepareShutdown() {
 }
 
 void CPUGraphics::Cleanup() {
-    StopSubmitThread();
+    StopSubmitThread(true);
     abortRaster_.store(true, std::memory_order_release);
     rasterPool_.reset();
+    pendingDamage_.clear();
+    nextGeneration_ = 0;
+    surfaceRecoveryRequested_.store(false, std::memory_order_release);
     frontBuffer_.clear();
     frontBuffer_.shrink_to_fit();
 }

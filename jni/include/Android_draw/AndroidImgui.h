@@ -53,6 +53,10 @@ public:
 
     float PresentedFrameRate() const;
 
+    virtual bool ConsumeSurfaceRecoveryRequest() {
+        return false;
+    }
+
     BaseTexData *LoadTextureFromFile(const char *filepath);
 
     BaseTexData *LoadTextureFromMemory(void *data, int len);

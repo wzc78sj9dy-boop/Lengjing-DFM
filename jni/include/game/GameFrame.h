@@ -12,6 +12,7 @@ namespace lengjing::game {
 
 struct GameFrame {
     std::uint64_t sequence = 0;
+    bool ready = false;
     int playerCount = 0;
     int botCount = 0;
     int nearbyEnemyCount = 0;

@@ -5,12 +5,21 @@ setlocal EnableExtensions EnableDelayedExpansion
 set "ROOT=%~dp0"
 set "SOURCE_DIR=%ROOT%jni"
 set "BUILD_DIR=%SOURCE_DIR%\build"
-set "NDK=D:\AAA\android-ndk-r27d"
+set "NDK="
+set "NINJA="
 set "TARGET="
 set "PRODUCT="
 
+if exist "D:\AAA\android-ndk-r27d\build\cmake\android.toolchain.cmake" set "NDK=D:\AAA\android-ndk-r27d"
+if not defined NDK if defined ANDROID_NDK_HOME if exist "%ANDROID_NDK_HOME%\build\cmake\android.toolchain.cmake" set "NDK=%ANDROID_NDK_HOME%"
+if not defined NDK if defined ANDROID_NDK_ROOT if exist "%ANDROID_NDK_ROOT%\build\cmake\android.toolchain.cmake" set "NDK=%ANDROID_NDK_ROOT%"
+if not defined NDK if defined NDK_HOME if exist "%NDK_HOME%\build\cmake\android.toolchain.cmake" set "NDK=%NDK_HOME%"
+if not defined NDK if exist "D:\AAA\android-ndk-r28\build\cmake\android.toolchain.cmake" set "NDK=D:\AAA\android-ndk-r28"
+if not defined NDK if exist "D:\AAA\android-ndk-r29\build\cmake\android.toolchain.cmake" set "NDK=D:\AAA\android-ndk-r29"
+if not defined NDK call :probe_sdk_ndk
+
 if not exist "%NDK%\build\cmake\android.toolchain.cmake" (
-    echo [ERROR] Required customized NDK not found: %NDK%
+    echo [ERROR] Required Android NDK not found.
     exit /b 1
 )
 where cmake.exe >nul 2>&1
@@ -18,8 +27,15 @@ if errorlevel 1 (
     echo [ERROR] cmake.exe not found in PATH.
     exit /b 1
 )
-where ninja.exe >nul 2>&1
-if errorlevel 1 (
+if defined NINJA_PATH (
+    if exist "%NINJA_PATH%\ninja.exe" set "NINJA=%NINJA_PATH%\ninja.exe"
+    if not defined NINJA if exist "%NINJA_PATH%" set "NINJA=%NINJA_PATH%"
+)
+if not defined NINJA for %%I in (ninja.exe) do set "NINJA=%%~$PATH:I"
+if not defined NINJA if exist "E:\demo\fenxi\lengjing\tools\python\bin\ninja.exe" (
+    set "NINJA=E:\demo\fenxi\lengjing\tools\python\bin\ninja.exe"
+)
+if not defined NINJA (
     echo [ERROR] ninja.exe not found in PATH.
     exit /b 1
 )
@@ -49,10 +65,12 @@ if /i "%~1"=="clean" (
 )
 
 set "NDK_CMAKE=%NDK:\=/%"
+set "NINJA_CMAKE=%NINJA:\=/%"
 echo [NDK] %NDK%
 echo [TARGET] !TARGET!
 
 cmake -Wno-deprecated --no-warn-unused-cli -S "%SOURCE_DIR%" -B "%BUILD_DIR%" -G Ninja ^
+    -DCMAKE_MAKE_PROGRAM="%NINJA_CMAKE%" ^
     -DCMAKE_TOOLCHAIN_FILE="%NDK_CMAKE%/build/cmake/android.toolchain.cmake" ^
     -DANDROID_ABI=arm64-v8a ^
     -DANDROID_PLATFORM=android-21 ^
@@ -86,4 +104,16 @@ if not exist "!BIN!" (
 )
 
 for %%I in ("!BIN!") do echo [DONE] %%~fI ^(%%~zI bytes^)
+exit /b 0
+
+:probe_sdk_ndk
+set "_NDK_BASE=%LOCALAPPDATA%\Android\Sdk\ndk"
+if not exist "%_NDK_BASE%" exit /b 0
+for /f "delims=" %%D in ('dir /B /AD /O-N "%_NDK_BASE%" 2^>nul') do (
+    if not defined NDK (
+        if exist "%_NDK_BASE%\%%D\build\cmake\android.toolchain.cmake" (
+            set "NDK=%_NDK_BASE%\%%D"
+        )
+    )
+)
 exit /b 0

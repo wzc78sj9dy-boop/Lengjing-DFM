@@ -5,8 +5,6 @@
 
 int main() {
     try {
-        RunAuthConfigTests();
-        RunCardInputPolicyTests();
         RunConfigTests();
         RunCoordinateReaderTests();
         RunHudMapTests();

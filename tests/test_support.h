@@ -12,8 +12,6 @@
         }                                                                         \
     } while (false)
 
-void RunAuthConfigTests();
-void RunCardInputPolicyTests();
 void RunConfigTests();
 void RunCoordinateReaderTests();
 void RunHudMapTests();

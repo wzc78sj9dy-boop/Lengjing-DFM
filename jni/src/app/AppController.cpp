@@ -111,6 +111,7 @@ void AppController::RenderFrame(float presentedFramesPerSecond) {
     SyncRuntimeStatus();
     FlushConfig(false);
 
+    menuView_.ClearTopOverlayBounds();
     if (model_.runtime.active) {
         const std::shared_ptr<const game::GameFrame> frame = runtime_.LatestFrame();
         if (frame != nullptr) {
@@ -154,9 +155,14 @@ void AppController::SetDisplayGeometry(
     if (width <= 1 || height <= 1) {
         return;
     }
+    const int normalizedOrientation =
+        ((orientation % 4) + 4) % 4;
+    if (normalizedOrientation != displayOrientation_) {
+        menuView_.RequestRecenter();
+    }
     model_.runtime.screenWidth = width;
     model_.runtime.screenHeight = height;
-    displayOrientation_ = ((orientation % 4) + 4) % 4;
+    displayOrientation_ = normalizedOrientation;
     runtime_.UpdateDisplayGeometry(width, height, displayOrientation_);
 }
 
@@ -529,7 +535,7 @@ void AppController::DrawGameFrame(const game::GameFrame& frame,
         }
     }
     if (model_.visual.enabled && model_.visual.playerCount) {
-        DrawPopulation(frame, drawList);
+        DrawPopulation(frame, ImGui::GetForegroundDrawList());
     }
     if (model_.visual.enabled && model_.visual.debugInfo) {
         DrawDebugInfo(frame, drawList);
@@ -550,35 +556,49 @@ void AppController::DrawPopulation(const game::GameFrame& frame,
     const float scale = std::clamp(
         std::min(screenWidth, screenHeight) / 1080.0f, 0.78f, 1.35f);
     const float centerX = screenWidth * 0.5f;
-    const float top = std::max(18.0f, 22.0f * scale);
+    const float targetTop = model_.visible
+        ? std::max(6.0f, 8.0f * scale)
+        : std::max(18.0f, 22.0f * scale);
+    const float layoutTop = std::max(6.0f, 8.0f * scale);
+    if (populationTop_ < 0.0f) {
+        populationTop_ = targetTop;
+    }
+    populationTop_ = Approach(
+        populationTop_, targetTop, 12.0f, io.DeltaTime);
+    const float top = populationTop_;
     const float maximumWidth = std::max(1.0f, screenWidth - 32.0f * scale);
-    const float compactWidth = std::min(maximumWidth, 340.0f * scale);
-    const float expandedWidth = std::min(maximumWidth, 500.0f * scale);
-    const float compactHeight = 58.0f * scale;
-    const float expandedHeight = 116.0f * scale;
-
-    const float previousWidth =
-        Lerp(compactWidth, expandedWidth, populationExpansion_);
-    const float previousHeight =
-        Lerp(compactHeight, expandedHeight, populationExpansion_);
-    const ImVec2 minimum{
-        centerX - previousWidth * 0.5f,
-        top,
-    };
-    const ImVec2 maximum{
-        centerX + previousWidth * 0.5f,
-        top + previousHeight,
-    };
+    const float compactWidth = std::min(maximumWidth, 420.0f * scale);
+    const float compactHeight = 72.0f * scale;
+    const ImVec2 panelMinimum{
+        centerX - compactWidth * 0.5f, top};
+    const ImVec2 panelMaximum{
+        centerX + compactWidth * 0.5f, top + compactHeight};
+    menuView_.SetTopOverlayBounds(
+        panelMinimum.x,
+        panelMinimum.y,
+        panelMaximum.x,
+        panelMaximum.y,
+        layoutTop + compactHeight);
 
     const bool hovered =
-        io.MousePos.x >= minimum.x && io.MousePos.x <= maximum.x &&
-        io.MousePos.y >= minimum.y && io.MousePos.y <= maximum.y;
+        io.MousePos.x >= panelMinimum.x && io.MousePos.x <= panelMaximum.x &&
+        io.MousePos.y >= panelMinimum.y && io.MousePos.y <= panelMaximum.y;
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        populationExpanded_ = !populationExpanded_;
+        populationPressActive_ = true;
     }
-    populationExpansion_ = Approach(
-        populationExpansion_, populationExpanded_ ? 1.0f : 0.0f,
-        11.0f, io.DeltaTime);
+    if (populationPressActive_ && !hovered) {
+        populationPressActive_ = false;
+    }
+    if (populationPressActive_ &&
+        !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        if (hovered) {
+            model_.visible = !model_.visible;
+        }
+        populationPressActive_ = false;
+    }
+    populationPress_ = Approach(
+        populationPress_, populationPressActive_ ? 1.0f : 0.0f,
+        populationPressActive_ ? 26.0f : 14.0f, io.DeltaTime);
     populationHover_ = Approach(
         populationHover_, hovered ? 1.0f : 0.0f, 14.0f, io.DeltaTime);
 
@@ -593,17 +613,15 @@ void AppController::DrawPopulation(const game::GameFrame& frame,
     populationPulse_ = Approach(
         populationPulse_, 0.0f, 4.0f, io.DeltaTime);
 
-    const float width = Lerp(compactWidth, expandedWidth, populationExpansion_);
-    const float height = Lerp(compactHeight, expandedHeight, populationExpansion_);
-    const ImVec2 panelMinimum{centerX - width * 0.5f, top};
-    const ImVec2 panelMaximum{centerX + width * 0.5f, top + height};
-    const float rounding = height * 0.5f;
+    const float rounding = compactHeight * 0.5f;
     const ImU32 panelColor = BlendColor(
         style.colors.surfaceRaised, style.colors.surfaceSoft,
-        populationHover_ * 0.45f);
+        populationHover_ * 0.45f + populationPress_ * 0.15f);
     const ImU32 borderColor = BlendColor(
         style.colors.border, style.colors.accent,
-        populationHover_ * 0.75f + populationPulse_ * 0.25f);
+        populationHover_ * 0.75f +
+            populationPulse_ * 0.25f +
+            populationPress_ * 0.18f);
 
     drawList->AddRectFilled(
         ImVec2(panelMinimum.x + 3.0f * scale, panelMinimum.y + 6.0f * scale),
@@ -627,7 +645,7 @@ void AppController::DrawPopulation(const game::GameFrame& frame,
     const float dotRadius =
         (5.0f + populationPulse_ * 2.5f) * scale;
     const ImVec2 dotCenter{
-        panelMinimum.x + 25.0f * scale,
+        panelMinimum.x + 30.0f * scale,
         panelMinimum.y + compactHeight * 0.5f,
     };
     drawList->AddCircleFilled(
@@ -636,67 +654,21 @@ void AppController::DrawPopulation(const game::GameFrame& frame,
     drawList->AddCircleFilled(dotCenter, dotRadius, style.colors.accent);
 
     ImFont* font = ImGui::GetFont();
-    const float compactAlpha = 1.0f - populationExpansion_;
-    if (compactAlpha > 0.01f) {
-        char compactText[64]{};
-        std::snprintf(
-            compactText, sizeof(compactText),
-            "玩家 %d  ·  人机 %d", frame.playerCount, frame.botCount);
-        const float fontSize = std::max(
-            18.0f * scale, style.metrics.fontSize * 1.18f);
-        const ImVec2 textSize = font->CalcTextSizeA(
-            fontSize, maximumWidth, 0.0f, compactText);
-        drawList->AddText(
-            font, fontSize,
-            ImVec2(
-                centerX - textSize.x * 0.5f,
-                panelMinimum.y + (compactHeight - textSize.y) * 0.5f),
-            WithOpacity(style.colors.text, compactAlpha), compactText);
-    }
+    char compactText[64]{};
+    std::snprintf(
+        compactText, sizeof(compactText),
+        "玩家 %d  ·  人机 %d", frame.playerCount, frame.botCount);
+    const float fontSize = 20.0f * scale;
+    const ImVec2 textSize = font->CalcTextSizeA(
+        fontSize, maximumWidth, 0.0f, compactText);
+    drawList->AddText(
+        font, fontSize,
+        ImVec2(
+            centerX - textSize.x * 0.5f,
+            panelMinimum.y + (compactHeight - textSize.y) * 0.5f),
+        style.colors.text, compactText);
 
-    const float expandedAlpha = populationExpansion_;
-    if (expandedAlpha > 0.01f) {
-        const float contentTop = panelMinimum.y + 20.0f * scale;
-        const float columnHalf = width * 0.25f;
-        const float dividerTop = panelMinimum.y + 17.0f * scale;
-        const float dividerBottom = panelMaximum.y - 17.0f * scale;
-        drawList->AddLine(
-            ImVec2(centerX, dividerTop), ImVec2(centerX, dividerBottom),
-            WithOpacity(style.colors.border, expandedAlpha),
-            std::max(1.0f, scale));
-
-        const auto drawMetric = [&](float columnCenter,
-                                    const char* label,
-                                    int value,
-                                    ImU32 valueColor) {
-            char number[24]{};
-            std::snprintf(number, sizeof(number), "%d", value);
-            const float labelSize = 16.0f * scale;
-            const float numberSize = 34.0f * scale;
-            const ImVec2 labelExtent = font->CalcTextSizeA(
-                labelSize, columnHalf * 2.0f, 0.0f, label);
-            const ImVec2 numberExtent = font->CalcTextSizeA(
-                numberSize, columnHalf * 2.0f, 0.0f, number);
-            drawList->AddText(
-                font, labelSize,
-                ImVec2(columnCenter - labelExtent.x * 0.5f, contentTop),
-                WithOpacity(style.colors.textMuted, expandedAlpha), label);
-            drawList->AddText(
-                font, numberSize,
-                ImVec2(
-                    columnCenter - numberExtent.x * 0.5f,
-                    contentTop + 30.0f * scale),
-                WithOpacity(valueColor, expandedAlpha), number);
-        };
-        drawMetric(
-            centerX - columnHalf, "玩家", frame.playerCount,
-            style.colors.text);
-        drawMetric(
-            centerX + columnHalf, "人机", frame.botCount,
-            style.colors.caution);
-    }
-
-    const float indicatorWidth = Lerp(52.0f, 88.0f, populationExpansion_) * scale;
+    const float indicatorWidth = 52.0f * scale;
     drawList->AddLine(
         ImVec2(centerX - indicatorWidth * 0.5f, panelMaximum.y - 5.0f * scale),
         ImVec2(centerX + indicatorWidth * 0.5f, panelMaximum.y - 5.0f * scale),

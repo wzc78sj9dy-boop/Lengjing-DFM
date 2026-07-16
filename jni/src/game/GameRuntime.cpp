@@ -1,4 +1,5 @@
 #include "game/GameRuntime.h"
+#include "game/FrameRetentionPolicy.h"
 
 #include <chrono>
 #include <exception>
@@ -107,6 +108,8 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
 
         SetStatus(RuntimePhase::Running, probe);
         std::uint64_t sequence = 0;
+        bool hasReadyFrame = false;
+        FrameClock::time_point lastReadyFrameAt{};
         while (!stopRequested_.load(std::memory_order_acquire)) {
             if (displayGeometryDirty_.exchange(false, std::memory_order_acq_rel)) {
                 backend_->UpdateDisplayGeometry(
@@ -143,7 +146,17 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                latestFrame_ = std::move(frame);
+                const auto frameTime = FrameClock::now();
+                if (frame->ready) {
+                    latestFrame_ = std::move(frame);
+                    lastReadyFrameAt = frameTime;
+                    hasReadyFrame = true;
+                } else if (ShouldPublishWaitingFrame(
+                               hasReadyFrame,
+                               frameTime - lastReadyFrameAt)) {
+                    frame->ready = true;
+                    latestFrame_ = std::move(frame);
+                }
                 status_.processId = probe.processId;
                 status_.baseReady = probe.baseReady;
                 status_.customItemCount = probe.customItemCount;

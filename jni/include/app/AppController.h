@@ -91,8 +91,9 @@ private:
     bool terminalWorkerJoined_ = true;
     bool exitRequested_ = false;
     int displayOrientation_ = 0;
-    bool populationExpanded_ = false;
-    float populationExpansion_ = 0.0f;
+    bool populationPressActive_ = false;
+    float populationPress_ = 0.0f;
+    float populationTop_ = -1.0f;
     float populationHover_ = 0.0f;
     float populationPulse_ = 0.0f;
     int lastPlayerCount_ = -1;

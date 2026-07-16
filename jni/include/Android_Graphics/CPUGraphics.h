@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -52,12 +53,15 @@ struct CpuSubmitState {
     int dirtyMinY = 0;
     int dirtyMaxX = 0;
     int dirtyMaxY = 0;
+    std::uint64_t bufferGeneration = 0;
     bool hasWork = false;
     std::atomic<bool> running{false};
     std::atomic<bool> exited{true};
     std::atomic<bool> insideWindowLock{false};
     std::atomic<bool> insideWindowPost{false};
-    std::atomic<std::int64_t> lastProgressMs{0};
+    std::atomic<bool> surfaceRecoveryRequired{false};
+    std::atomic<std::int64_t> windowCallStartedMs{0};
+    std::atomic<std::uint64_t> presentedGeneration{0};
     std::shared_ptr<lengjing::render::PresentationRateTracker>
         presentationRate;
     ANativeWindow* window = nullptr;
@@ -67,8 +71,17 @@ class CPUGraphics final : public AndroidImgui {
 public:
     CPUGraphics();
     ~CPUGraphics() override;
+    bool ConsumeSurfaceRecoveryRequest() override;
 
 private:
+    struct PendingDamage {
+        std::uint64_t generation = 0;
+        int minimumX = 0;
+        int minimumY = 0;
+        int maximumX = 0;
+        int maximumY = 0;
+    };
+
     struct CpuTextureData : BaseTexData {
         std::vector<std::uint32_t> pixels;
     };
@@ -84,7 +97,8 @@ private:
 
     void RefreshFontTexture();
     void StartSubmitThread();
-    void StopSubmitThread();
+    bool StopSubmitThread(bool detachIfBlocked);
+    void WaitForSubmitSlot();
     void RenderBand(ImDrawData* drawData,
                     std::uint32_t* buffer,
                     int stride,
@@ -101,6 +115,8 @@ private:
     int previousMinY_ = 0;
     int previousMaxX_ = 0;
     int previousMaxY_ = 0;
+    std::uint64_t nextGeneration_ = 0;
+    std::deque<PendingDamage> pendingDamage_;
     std::vector<std::uint32_t> frontBuffer_;
 
     std::shared_ptr<CpuSubmitState> submitState_;
@@ -109,6 +125,7 @@ private:
     std::mutex windowMutex_;
     std::mutex renderMutex_;
     std::atomic<bool> abortRaster_{false};
+    std::atomic<bool> surfaceRecoveryRequested_{false};
     std::unique_ptr<CpuRasterPool> rasterPool_;
 
     const std::uint8_t* fontPixels_ = nullptr;

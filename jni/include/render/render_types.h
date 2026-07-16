@@ -48,12 +48,12 @@ struct RenderPalette {
 
 struct RenderMetrics {
     float scale = 1.0f;
-    float lineWidth = 1.45f;
-    float outlineWidth = 3.3f;
+    float lineWidth = 2.0f;
+    float outlineWidth = 4.0f;
     float cornerLength = 14.0f;
     float panelRounding = 4.0f;
-    float fontSize = 14.0f;
-    float smallFontSize = 12.0f;
+    float fontSize = 22.0f;
+    float smallFontSize = 19.0f;
     float radarRadius = 110.0f;
 };
 

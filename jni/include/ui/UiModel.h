@@ -226,7 +226,7 @@ struct AimSettings {
 };
 
 struct SystemSettings {
-    int frameLimitIndex = 6;
+    int frameLimitIndex = 3;
     bool autoScrollLogs = true;
     bool toastNotifications = true;
 };
