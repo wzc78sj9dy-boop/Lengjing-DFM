@@ -1,0 +1,24 @@
+# Build output
+/jni/build/
+/jni/obj/
+/build/
+/obj/
+/lengjing
+*.o
+*.so
+*.lo
+*.log
+*.tmp
+
+# Machine-local state
+.adb_wifi
+*.fp
+
+# Editors and operating systems
+/.idea/
+/.vscode/
+*.swp
+*~
+Thumbs.db
+.DS_Store
+desktop.ini

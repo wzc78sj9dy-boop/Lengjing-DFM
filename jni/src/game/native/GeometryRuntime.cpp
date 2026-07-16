@@ -1,0 +1,2323 @@
+#include "game/native/GeometryRuntime.h"
+
+#include "embree4/rtcore.h"
+#include "embree4/rtcore_ray.h"
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <cmath>
+#include <condition_variable>
+#include <cstring>
+#include <limits>
+#include <mutex>
+#include <new>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+
+namespace lengjing::game::native {
+namespace {
+
+constexpr std::uintptr_t kMinimumRemoteAddress = 0x10000ULL;
+constexpr std::uintptr_t kMaximumRemoteAddress = 0x0000FFFFFFFFFFFFULL;
+constexpr std::uintptr_t kSceneArrayOffset = 8ULL;
+constexpr std::uintptr_t kActorArrayOffset = 9704ULL;
+constexpr std::size_t kMaximumScenes = 64;
+constexpr std::size_t kMaximumActorsPerScene = 65536;
+constexpr std::size_t kMaximumShapesPerActor = 4096;
+constexpr std::size_t kMaximumReadChunk = 1024 * 1024;
+constexpr std::uint16_t kDynamicActorType = 6;
+constexpr std::uint16_t kStaticActorType = 7;
+constexpr std::uint16_t kTriangleMeshBvh33Type = 3;
+constexpr std::uint16_t kTriangleMeshBvh34Type = 4;
+constexpr std::uint16_t kHeightFieldType = 1;
+constexpr std::uint16_t kConvexMeshType = 2;
+constexpr std::int32_t kSphereGeometryType = 0;
+constexpr std::int32_t kPlaneGeometryType = 1;
+constexpr std::int32_t kCapsuleGeometryType = 2;
+constexpr std::int32_t kBoxGeometryType = 3;
+constexpr std::int32_t kConvexMeshGeometryType = 4;
+constexpr std::int32_t kTriangleMeshGeometryType = 5;
+constexpr std::int32_t kHeightFieldGeometryType = 6;
+constexpr std::int32_t kGeometryTypeCount = 7;
+constexpr std::uint8_t kTriggerShapeFlag = 0x04U;
+constexpr std::uint8_t kCollisionShapeFlags = 0x03U;
+constexpr std::uint8_t kMeshHas16BitIndices = 0x02U;
+constexpr std::uint8_t kHeightFieldTessellationFlag = 0x80U;
+constexpr std::uint8_t kHeightFieldMaterialMask = 0x7FU;
+constexpr std::uint8_t kHeightFieldHoleMaterial = 0x7FU;
+constexpr float kMaximumGeometryExtent = 1.0e7f;
+constexpr float kPi = 3.14159265358979323846f;
+constexpr int kRoundSegments = 12;
+constexpr int kSphereRings = 8;
+constexpr int kCapsuleHemisphereRings = 6;
+
+struct RemoteArray {
+    std::uintptr_t data = 0;
+    std::int32_t count = 0;
+    std::int32_t capacity = 0;
+};
+static_assert(sizeof(RemoteArray) == 16, "Remote array layout mismatch");
+
+struct RemoteVec3 {
+    float x;
+    float y;
+    float z;
+};
+static_assert(sizeof(RemoteVec3) == 12, "Remote vector layout mismatch");
+
+struct RemoteQuat {
+    float x;
+    float y;
+    float z;
+    float w;
+};
+static_assert(sizeof(RemoteQuat) == 16, "Remote quaternion layout mismatch");
+
+struct RemoteTransform {
+    RemoteQuat q;
+    RemoteVec3 p;
+};
+static_assert(sizeof(RemoteTransform) == 28, "Remote transform layout mismatch");
+
+struct RemoteMeshScale {
+    RemoteVec3 scale;
+    RemoteQuat rotation;
+};
+static_assert(sizeof(RemoteMeshScale) == 28, "Remote mesh scale layout mismatch");
+
+struct RemoteRigidCore {
+    alignas(16) RemoteTransform bodyToWorld;
+    std::uint8_t flags;
+    std::uint8_t bodyToActorIdentity;
+    std::uint16_t solverIterations;
+};
+static_assert(sizeof(RemoteRigidCore) == 32, "Remote rigid core layout mismatch");
+
+struct RemoteBodyCore {
+    std::array<std::uint8_t, 0x10> padding;
+    alignas(16) RemoteRigidCore core;
+    alignas(16) RemoteTransform bodyToActor;
+};
+static_assert(sizeof(RemoteBodyCore) == 80, "Remote body core layout mismatch");
+static_assert(offsetof(RemoteBodyCore, core) == 16,
+              "Remote rigid core offset mismatch");
+static_assert(offsetof(RemoteBodyCore, bodyToActor) == 48,
+              "Remote body-to-actor offset mismatch");
+
+struct RemoteBody {
+    std::array<std::uint8_t, 0x60> padding;
+    std::uint64_t scene;
+    std::uint64_t controlState;
+    std::uint64_t stream;
+    alignas(16) RemoteBodyCore rigid;
+};
+static_assert(sizeof(RemoteBody) == 208, "Remote body layout mismatch");
+static_assert(offsetof(RemoteBody, rigid) == 128,
+              "Remote body core offset mismatch");
+
+struct RemoteFilterData {
+    std::uint32_t word0;
+    std::uint32_t word1;
+    std::uint32_t word2;
+    std::uint32_t word3;
+};
+static_assert(sizeof(RemoteFilterData) == 16, "Remote filter layout mismatch");
+
+struct alignas(8) RemoteGeometryUnion {
+    std::array<std::uint8_t, 80> data;
+};
+static_assert(sizeof(RemoteGeometryUnion) == 80,
+              "Remote geometry union layout mismatch");
+
+struct RemoteShapeCoreData {
+    alignas(16) RemoteTransform transform;
+    float contactOffset;
+    std::uint8_t shapeFlags;
+    std::uint8_t ownsMaterialIndexMemory;
+    std::uint16_t materialIndex;
+    RemoteGeometryUnion geometry;
+};
+static_assert(sizeof(RemoteShapeCoreData) == 128,
+              "Remote shape core data layout mismatch");
+static_assert(offsetof(RemoteShapeCoreData, geometry) == 40,
+              "Remote geometry offset mismatch");
+
+struct RemoteShapeCore {
+    RemoteFilterData queryFilter;
+    RemoteFilterData simulationFilter;
+    alignas(16) RemoteShapeCoreData core;
+    float restOffset;
+};
+static_assert(sizeof(RemoteShapeCore) == 176,
+              "Remote shape core layout mismatch");
+static_assert(offsetof(RemoteShapeCore, core) == 32,
+              "Remote shape core data offset mismatch");
+
+struct RemoteShape {
+    std::array<std::uint8_t, 0x30> padding;
+    std::uint64_t scene;
+    std::uint32_t controlState;
+    std::uint64_t stream;
+    alignas(16) RemoteShapeCore shapeCore;
+};
+static_assert(sizeof(RemoteShape) == 256, "Remote shape layout mismatch");
+static_assert(offsetof(RemoteShape, shapeCore) == 80,
+              "Remote shape core offset mismatch");
+
+struct RemoteCenterExtents {
+    RemoteVec3 center;
+    RemoteVec3 extents;
+};
+static_assert(sizeof(RemoteCenterExtents) == 24,
+              "Remote bounds layout mismatch");
+
+struct RemoteTriangleMesh {
+    std::array<std::uint8_t, 0x8> padding;
+    std::uint16_t concreteType;
+    std::uint16_t baseFlags;
+    std::uint64_t refCountVtable;
+    std::int32_t refCount;
+    std::uint32_t vertexCount;
+    std::uint32_t triangleCount;
+    RemoteVec3* vertices;
+    void* triangles;
+    RemoteCenterExtents bounds;
+    std::uint8_t* extraTriangleData;
+    float geometryEpsilon;
+    std::uint8_t flags;
+};
+static_assert(sizeof(RemoteTriangleMesh) == 96,
+              "Remote triangle mesh layout mismatch");
+static_assert(offsetof(RemoteTriangleMesh, vertices) == 40,
+              "Remote vertex pointer offset mismatch");
+static_assert(offsetof(RemoteTriangleMesh, triangles) == 48,
+              "Remote index pointer offset mismatch");
+static_assert(offsetof(RemoteTriangleMesh, flags) == 92,
+              "Remote mesh flags offset mismatch");
+
+struct RemoteTriangleMeshGeometry {
+    std::int32_t type;
+    RemoteMeshScale scale;
+    std::uint8_t meshFlags;
+    std::array<std::uint8_t, 3> padding;
+    RemoteTriangleMesh* triangleMesh;
+};
+static_assert(sizeof(RemoteTriangleMeshGeometry) == 48,
+              "Remote triangle geometry layout mismatch");
+static_assert(offsetof(RemoteTriangleMeshGeometry, triangleMesh) == 40,
+              "Remote triangle mesh pointer offset mismatch");
+
+struct RemoteSphereGeometry {
+    std::int32_t type;
+    float radius;
+};
+static_assert(sizeof(RemoteSphereGeometry) == 8,
+              "Remote sphere geometry layout mismatch");
+
+struct RemoteCapsuleGeometry {
+    std::int32_t type;
+    float radius;
+    float halfHeight;
+};
+static_assert(sizeof(RemoteCapsuleGeometry) == 12,
+              "Remote capsule geometry layout mismatch");
+
+struct RemoteBoxGeometry {
+    std::int32_t type;
+    RemoteVec3 halfExtents;
+};
+static_assert(sizeof(RemoteBoxGeometry) == 16,
+              "Remote box geometry layout mismatch");
+
+struct RemotePlane {
+    RemoteVec3 normal;
+    float distance;
+};
+static_assert(sizeof(RemotePlane) == 16,
+              "Remote plane layout mismatch");
+
+struct RemoteHullPolygon {
+    RemotePlane plane;
+    std::uint16_t vertexReference;
+    std::uint8_t vertexCount;
+    std::uint8_t minimumIndex;
+};
+static_assert(sizeof(RemoteHullPolygon) == 20,
+              "Remote hull polygon layout mismatch");
+
+struct RemoteConvexHullData {
+    RemoteCenterExtents bounds;
+    RemoteVec3 centerOfMass;
+    std::uint16_t edgeCountAndFlags;
+    std::uint8_t vertexCount;
+    std::uint8_t polygonCount;
+    RemoteHullPolygon* polygons;
+};
+static_assert(sizeof(RemoteConvexHullData) == 48,
+              "Remote convex hull layout mismatch");
+static_assert(offsetof(RemoteConvexHullData, polygons) == 40,
+              "Remote convex polygon pointer offset mismatch");
+
+struct RemoteConvexMesh {
+    std::array<std::uint8_t, 0x8> padding;
+    std::uint16_t concreteType;
+    std::uint16_t baseFlags;
+    std::uint64_t refCountVtable;
+    std::int32_t refCount;
+    RemoteConvexHullData hull;
+    std::uint32_t auxiliaryCount;
+};
+static_assert(sizeof(RemoteConvexMesh) == 88,
+              "Remote convex mesh layout mismatch");
+static_assert(offsetof(RemoteConvexMesh, hull) == 32,
+              "Remote convex hull offset mismatch");
+
+struct RemoteConvexMeshGeometry {
+    std::int32_t type;
+    RemoteMeshScale scale;
+    RemoteConvexMesh* convexMesh;
+    float maximumMargin;
+    std::uint8_t meshFlags;
+    std::array<std::uint8_t, 3> padding;
+};
+static_assert(sizeof(RemoteConvexMeshGeometry) == 48,
+              "Remote convex geometry layout mismatch");
+static_assert(offsetof(RemoteConvexMeshGeometry, convexMesh) == 32,
+              "Remote convex mesh pointer offset mismatch");
+
+struct RemoteHeightFieldSample {
+    std::int16_t height;
+    std::uint8_t material0;
+    std::uint8_t material1;
+};
+static_assert(sizeof(RemoteHeightFieldSample) == 4,
+              "Remote height sample layout mismatch");
+
+struct RemoteHeightFieldData {
+    RemoteCenterExtents bounds;
+    std::uint32_t rows;
+    std::uint32_t columns;
+    float rowLimit;
+    float columnLimit;
+    float columnCount;
+    RemoteHeightFieldSample* samples;
+    float thickness;
+    float convexEdgeThreshold;
+    std::uint16_t flags;
+    std::uint8_t format;
+};
+static_assert(sizeof(RemoteHeightFieldData) == 72,
+              "Remote height data layout mismatch");
+static_assert(offsetof(RemoteHeightFieldData, samples) == 48,
+              "Remote height sample pointer offset mismatch");
+
+struct RemoteHeightField {
+    std::array<std::uint8_t, 0x8> padding;
+    std::uint16_t concreteType;
+    std::uint16_t baseFlags;
+    std::uint64_t refCountVtable;
+    std::int32_t refCount;
+    RemoteHeightFieldData data;
+    std::uint32_t sampleStride;
+    std::uint32_t sampleCount;
+    float minimumHeight;
+    float maximumHeight;
+    std::int32_t modifyCount;
+    void* meshFactory;
+};
+static_assert(sizeof(RemoteHeightField) == 136,
+              "Remote height field layout mismatch");
+static_assert(offsetof(RemoteHeightField, data) == 32,
+              "Remote height data offset mismatch");
+
+struct RemoteHeightFieldGeometry {
+    std::int32_t type;
+    RemoteHeightField* heightField;
+    float heightScale;
+    float rowScale;
+    float columnScale;
+    std::int8_t flags;
+    std::array<std::uint8_t, 3> padding;
+};
+static_assert(sizeof(RemoteHeightFieldGeometry) == 32,
+              "Remote height geometry layout mismatch");
+static_assert(offsetof(RemoteHeightFieldGeometry, heightField) == 8,
+              "Remote height field pointer offset mismatch");
+static_assert(sizeof(GeometryPoint) == sizeof(float) * 3,
+              "Published vertex layout mismatch");
+
+struct ActorShape {
+    std::uintptr_t actor = 0;
+    std::uintptr_t shape = 0;
+
+    bool operator==(const ActorShape& other) const noexcept {
+        return actor == other.actor && shape == other.shape;
+    }
+};
+
+struct ActorShapeHash {
+    std::size_t operator()(const ActorShape& value) const noexcept {
+        const auto first = static_cast<std::size_t>(value.actor);
+        const auto second = static_cast<std::size_t>(value.shape);
+        return first ^ (second + 0x9e3779b9U + (first << 6U) + (first >> 2U));
+    }
+};
+
+struct Vec3 {
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+};
+
+struct Quat {
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    float w = 1.0f;
+};
+
+struct Transform {
+    Quat q{};
+    Vec3 p{};
+};
+
+bool IsFinite(float value) noexcept {
+    return std::isfinite(value);
+}
+
+bool IsFinite(const Vec3& value) noexcept {
+    return IsFinite(value.x) && IsFinite(value.y) && IsFinite(value.z);
+}
+
+bool IsFinite(const GeometryPoint& value) noexcept {
+    return IsFinite(value.x) && IsFinite(value.y) && IsFinite(value.z);
+}
+
+bool IsReasonable(const Vec3& value) noexcept {
+    constexpr float kMaximumCoordinate = 1.0e9f;
+    return IsFinite(value) && std::abs(value.x) <= kMaximumCoordinate &&
+           std::abs(value.y) <= kMaximumCoordinate &&
+           std::abs(value.z) <= kMaximumCoordinate;
+}
+
+Vec3 Add(const Vec3& left, const Vec3& right) noexcept {
+    return Vec3{left.x + right.x, left.y + right.y, left.z + right.z};
+}
+
+Vec3 Subtract(const Vec3& left, const Vec3& right) noexcept {
+    return Vec3{left.x - right.x, left.y - right.y, left.z - right.z};
+}
+
+Vec3 Multiply(const Vec3& value, float scalar) noexcept {
+    return Vec3{value.x * scalar, value.y * scalar, value.z * scalar};
+}
+
+Vec3 Multiply(const Vec3& left, const Vec3& right) noexcept {
+    return Vec3{left.x * right.x, left.y * right.y, left.z * right.z};
+}
+
+float Dot(const Vec3& left, const Vec3& right) noexcept {
+    return left.x * right.x + left.y * right.y + left.z * right.z;
+}
+
+Vec3 Cross(const Vec3& left, const Vec3& right) noexcept {
+    return Vec3{left.y * right.z - left.z * right.y,
+                left.z * right.x - left.x * right.z,
+                left.x * right.y - left.y * right.x};
+}
+
+float LengthSquared(const Vec3& value) noexcept {
+    return Dot(value, value);
+}
+
+bool Normalize(Quat& value) noexcept {
+    const float lengthSquared =
+        value.x * value.x + value.y * value.y + value.z * value.z +
+        value.w * value.w;
+    if (!IsFinite(lengthSquared) || lengthSquared < 0.25f ||
+        lengthSquared > 4.0f) {
+        return false;
+    }
+    const float inverseLength = 1.0f / std::sqrt(lengthSquared);
+    value.x *= inverseLength;
+    value.y *= inverseLength;
+    value.z *= inverseLength;
+    value.w *= inverseLength;
+    return IsFinite(value.x) && IsFinite(value.y) && IsFinite(value.z) &&
+           IsFinite(value.w);
+}
+
+Quat Conjugate(const Quat& value) noexcept {
+    return Quat{-value.x, -value.y, -value.z, value.w};
+}
+
+Quat Multiply(const Quat& left, const Quat& right) noexcept {
+    return Quat{
+        left.w * right.x + left.x * right.w + left.y * right.z -
+            left.z * right.y,
+        left.w * right.y - left.x * right.z + left.y * right.w +
+            left.z * right.x,
+        left.w * right.z + left.x * right.y - left.y * right.x +
+            left.z * right.w,
+        left.w * right.w - left.x * right.x - left.y * right.y -
+            left.z * right.z};
+}
+
+Vec3 Rotate(const Quat& rotation, const Vec3& value) noexcept {
+    const Vec3 vectorPart{rotation.x, rotation.y, rotation.z};
+    const Vec3 twiceCross = Multiply(Cross(vectorPart, value), 2.0f);
+    return Add(value,
+               Add(Multiply(twiceCross, rotation.w),
+                   Cross(vectorPart, twiceCross)));
+}
+
+Transform Compose(const Transform& parent, const Transform& child) noexcept {
+    Transform result;
+    result.q = Multiply(parent.q, child.q);
+    Normalize(result.q);
+    result.p = Add(Rotate(parent.q, child.p), parent.p);
+    return result;
+}
+
+Transform Inverse(const Transform& value) noexcept {
+    Transform result;
+    result.q = Conjugate(value.q);
+    result.p = Rotate(result.q, Multiply(value.p, -1.0f));
+    return result;
+}
+
+Vec3 Apply(const Transform& transform, const Vec3& value) noexcept {
+    return Add(Rotate(transform.q, value), transform.p);
+}
+
+bool Convert(const RemoteTransform& source, Transform& destination) noexcept {
+    destination.q =
+        Quat{source.q.x, source.q.y, source.q.z, source.q.w};
+    destination.p = Vec3{source.p.x, source.p.y, source.p.z};
+    return Normalize(destination.q) && IsReasonable(destination.p);
+}
+
+bool Convert(const RemoteMeshScale& source, Vec3& scale,
+             Quat& rotation) noexcept {
+    scale = Vec3{source.scale.x, source.scale.y, source.scale.z};
+    rotation =
+        Quat{source.rotation.x, source.rotation.y, source.rotation.z,
+             source.rotation.w};
+    constexpr float kMaximumScale = 10000.0f;
+    if (!IsFinite(scale) || std::abs(scale.x) > kMaximumScale ||
+        std::abs(scale.y) > kMaximumScale ||
+        std::abs(scale.z) > kMaximumScale ||
+        std::abs(scale.x) <= 1.0e-4f ||
+        std::abs(scale.y) <= 1.0e-4f ||
+        std::abs(scale.z) <= 1.0e-4f) {
+        return false;
+    }
+    return Normalize(rotation);
+}
+
+Vec3 ApplyMeshScale(const Vec3& value, const Vec3& scale,
+                    const Quat& rotation) noexcept {
+    return Rotate(Conjugate(rotation),
+                  Multiply(Rotate(rotation, value), scale));
+}
+
+bool IsRemoteRange(std::uintptr_t address, std::size_t size,
+                   std::size_t alignment = 1) noexcept {
+    if (size == 0 || address < kMinimumRemoteAddress ||
+        address > kMaximumRemoteAddress || alignment == 0 ||
+        (address % alignment) != 0) {
+        return false;
+    }
+    return size - 1 <= kMaximumRemoteAddress - address;
+}
+
+bool CheckedMultiply(std::size_t left, std::size_t right,
+                     std::size_t& result) noexcept {
+    if (left != 0 && right > std::numeric_limits<std::size_t>::max() / left) {
+        return false;
+    }
+    result = left * right;
+    return true;
+}
+
+bool CheckedAdd(std::size_t left, std::size_t right,
+                std::size_t& result) noexcept {
+    if (right > std::numeric_limits<std::size_t>::max() - left) {
+        return false;
+    }
+    result = left + right;
+    return true;
+}
+
+bool IsValidExtent(float value) noexcept {
+    return IsFinite(value) && value > 1.0e-4f &&
+           value <= kMaximumGeometryExtent;
+}
+
+bool BuildWorldTransform(const RemoteBody& body, GeometryBodyType bodyType,
+                         const RemoteShape& shape,
+                         Transform& worldTransform) noexcept {
+    Transform bodyWorld{};
+    Transform shapeLocal{};
+    if (!Convert(body.rigid.core.bodyToWorld, bodyWorld) ||
+        !Convert(shape.shapeCore.core.transform, shapeLocal)) {
+        return false;
+    }
+
+    Transform actorWorld = bodyWorld;
+    if (bodyType == GeometryBodyType::Dynamic) {
+        Transform bodyToActor{};
+        if (!Convert(body.rigid.bodyToActor, bodyToActor)) {
+            return false;
+        }
+        actorWorld = Compose(bodyWorld, Inverse(bodyToActor));
+    }
+    worldTransform = Compose(actorWorld, shapeLocal);
+    return IsReasonable(worldTransform.p);
+}
+
+bool FinalizeMesh(const ActorShape& reference, GeometryBodyType bodyType,
+                  const Transform& worldTransform,
+                  const std::vector<Vec3>& localVertices,
+                  const std::vector<std::uint32_t>& sourceIndices,
+                  std::shared_ptr<const GeometryMesh>& output) {
+    output.reset();
+    if (localVertices.size() < 3 || sourceIndices.size() < 3 ||
+        (sourceIndices.size() % 3) != 0) {
+        return false;
+    }
+
+    auto mesh = std::make_shared<GeometryMesh>();
+    mesh->bodyType = bodyType;
+    mesh->actorAddress = reference.actor;
+    mesh->shapeAddress = reference.shape;
+    mesh->vertices.resize(localVertices.size());
+
+    double centerX = 0.0;
+    double centerY = 0.0;
+    double centerZ = 0.0;
+    for (std::size_t index = 0; index < localVertices.size(); ++index) {
+        if (!IsReasonable(localVertices[index])) {
+            return false;
+        }
+        const Vec3 world = Apply(worldTransform, localVertices[index]);
+        if (!IsReasonable(world)) {
+            return false;
+        }
+        mesh->vertices[index] = GeometryPoint{world.x, world.y, world.z};
+        centerX += static_cast<double>(world.x);
+        centerY += static_cast<double>(world.y);
+        centerZ += static_cast<double>(world.z);
+    }
+
+    mesh->indices.reserve(sourceIndices.size());
+    for (std::size_t index = 0; index < sourceIndices.size(); index += 3) {
+        const std::uint32_t first = sourceIndices[index];
+        const std::uint32_t second = sourceIndices[index + 1];
+        const std::uint32_t third = sourceIndices[index + 2];
+        if (first >= mesh->vertices.size() ||
+            second >= mesh->vertices.size() ||
+            third >= mesh->vertices.size()) {
+            return false;
+        }
+        if (first == second || second == third || first == third) {
+            continue;
+        }
+
+        const auto& a = mesh->vertices[first];
+        const auto& b = mesh->vertices[second];
+        const auto& c = mesh->vertices[third];
+        const Vec3 edgeA{b.x - a.x, b.y - a.y, b.z - a.z};
+        const Vec3 edgeB{c.x - a.x, c.y - a.y, c.z - a.z};
+        const float areaSquared = LengthSquared(Cross(edgeA, edgeB));
+        if (!IsFinite(areaSquared) || areaSquared <= 1.0e-10f) {
+            continue;
+        }
+        mesh->indices.push_back(first);
+        mesh->indices.push_back(second);
+        mesh->indices.push_back(third);
+    }
+    if (mesh->indices.empty()) {
+        return false;
+    }
+
+    const double inverseCount =
+        1.0 / static_cast<double>(mesh->vertices.size());
+    mesh->center = GeometryPoint{
+        static_cast<float>(centerX * inverseCount),
+        static_cast<float>(centerY * inverseCount),
+        static_cast<float>(centerZ * inverseCount)};
+    if (!IsFinite(mesh->center)) {
+        return false;
+    }
+
+    float maximumDistanceSquared = 0.0f;
+    for (const auto& vertex : mesh->vertices) {
+        const Vec3 delta{vertex.x - mesh->center.x,
+                         vertex.y - mesh->center.y,
+                         vertex.z - mesh->center.z};
+        maximumDistanceSquared =
+            std::max(maximumDistanceSquared, LengthSquared(delta));
+    }
+    if (!IsFinite(maximumDistanceSquared)) {
+        return false;
+    }
+    mesh->boundsRadius = std::sqrt(maximumDistanceSquared);
+    output = std::move(mesh);
+    return true;
+}
+
+GeometryRuntimeConfig Sanitize(GeometryRuntimeConfig config) {
+    config.dynamicRefresh =
+        std::clamp(config.dynamicRefresh, std::chrono::milliseconds(100),
+                   std::chrono::milliseconds(5000));
+    config.staticRefresh =
+        std::clamp(config.staticRefresh, config.dynamicRefresh,
+                   std::chrono::milliseconds(60000));
+    config.lastGoodTtl =
+        std::clamp(config.lastGoodTtl, config.dynamicRefresh,
+                   std::chrono::milliseconds(60000));
+    config.maxConsecutiveFailures =
+        std::clamp<std::size_t>(config.maxConsecutiveFailures, 1, 1000);
+    config.maxActors =
+        std::clamp<std::size_t>(config.maxActors, 1, 262144);
+    config.maxShapes =
+        std::clamp<std::size_t>(config.maxShapes, 1, 262144);
+    config.maxMeshes =
+        std::clamp<std::size_t>(config.maxMeshes, 1, 24000);
+    config.maxVerticesPerMesh =
+        std::clamp<std::size_t>(config.maxVerticesPerMesh, 3, 2000000);
+    config.maxTrianglesPerMesh =
+        std::clamp<std::size_t>(config.maxTrianglesPerMesh, 1, 2000000);
+    config.maxTotalVertices =
+        std::clamp<std::size_t>(config.maxTotalVertices, 3, 8000000);
+    config.maxTotalTriangles =
+        std::clamp<std::size_t>(config.maxTotalTriangles, 1, 8000000);
+    return config;
+}
+
+class DeviceOwner final {
+public:
+    DeviceOwner() : device_(rtcNewDevice("threads=1")) {}
+
+    ~DeviceOwner() {
+        if (device_ != nullptr) {
+            rtcReleaseDevice(device_);
+        }
+    }
+
+    DeviceOwner(const DeviceOwner&) = delete;
+    DeviceOwner& operator=(const DeviceOwner&) = delete;
+
+    RTCDevice Get() const noexcept {
+        return device_;
+    }
+
+private:
+    RTCDevice device_ = nullptr;
+};
+
+class SceneOwner final {
+public:
+    SceneOwner(std::shared_ptr<DeviceOwner> device,
+               std::vector<std::shared_ptr<const GeometryMesh>> meshes)
+        : device_(std::move(device)), meshes_(std::move(meshes)) {}
+
+    ~SceneOwner() {
+        if (scene_ != nullptr) {
+            rtcReleaseScene(scene_);
+        }
+    }
+
+    SceneOwner(const SceneOwner&) = delete;
+    SceneOwner& operator=(const SceneOwner&) = delete;
+
+    bool Build() {
+        if (!device_ || device_->Get() == nullptr) {
+            return false;
+        }
+
+        rtcGetDeviceError(device_->Get());
+        scene_ = rtcNewScene(device_->Get());
+        if (scene_ == nullptr) {
+            return false;
+        }
+
+        rtcSetSceneBuildQuality(scene_, RTC_BUILD_QUALITY_MEDIUM);
+        rtcSetSceneFlags(
+            scene_,
+            static_cast<RTCSceneFlags>(RTC_SCENE_FLAG_ROBUST |
+                                       RTC_SCENE_FLAG_COMPACT));
+
+        for (const auto& mesh : meshes_) {
+            if (!mesh || mesh->vertices.size() < 3 ||
+                mesh->indices.size() < 3 ||
+                (mesh->indices.size() % 3) != 0) {
+                return false;
+            }
+
+            RTCGeometry geometry =
+                rtcNewGeometry(device_->Get(), RTC_GEOMETRY_TYPE_TRIANGLE);
+            if (geometry == nullptr) {
+                return false;
+            }
+
+            rtcSetSharedGeometryBuffer(
+                geometry, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3,
+                mesh->vertices.data(), 0, sizeof(GeometryPoint),
+                mesh->vertices.size());
+            rtcSetSharedGeometryBuffer(
+                geometry, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3,
+                mesh->indices.data(), 0, sizeof(std::uint32_t) * 3,
+                mesh->indices.size() / 3);
+            rtcCommitGeometry(geometry);
+            const unsigned int geometryId = rtcAttachGeometry(scene_, geometry);
+            rtcReleaseGeometry(geometry);
+            if (geometryId == RTC_INVALID_GEOMETRY_ID) {
+                return false;
+            }
+            geometryById_.emplace(geometryId, mesh);
+        }
+
+        rtcCommitScene(scene_);
+        if (rtcGetDeviceError(device_->Get()) != RTC_ERROR_NONE) {
+            rtcReleaseScene(scene_);
+            scene_ = nullptr;
+            return false;
+        }
+        return true;
+    }
+
+    RTCScene Get() const noexcept {
+        return scene_;
+    }
+
+    std::shared_ptr<const GeometryMesh> FindMesh(
+        unsigned int geometryId) const noexcept {
+        const auto iterator = geometryById_.find(geometryId);
+        return iterator == geometryById_.end() ? nullptr : iterator->second;
+    }
+
+private:
+    std::shared_ptr<DeviceOwner> device_;
+    std::vector<std::shared_ptr<const GeometryMesh>> meshes_;
+    std::unordered_map<unsigned int, std::shared_ptr<const GeometryMesh>>
+        geometryById_;
+    RTCScene scene_ = nullptr;
+};
+
+struct PublishedState {
+    std::shared_ptr<const GeometrySnapshot> snapshot;
+    std::shared_ptr<const SceneOwner> staticScene;
+    std::shared_ptr<const SceneOwner> dynamicScene;
+};
+
+enum class PublishResult : std::uint8_t {
+    Published,
+    Stale,
+    Failed,
+};
+
+}  // namespace
+
+struct GeometryRuntime::Impl final {
+    explicit Impl() {
+        auto initialSnapshot = std::make_shared<GeometrySnapshot>();
+        auto initialState = std::make_shared<PublishedState>();
+        initialState->snapshot = std::move(initialSnapshot);
+        std::atomic_store_explicit(
+            &published, std::shared_ptr<const PublishedState>(initialState),
+            std::memory_order_release);
+    }
+
+    ~Impl() {
+        Stop();
+    }
+
+    bool Start(ReadCallback callback, GeometryRuntimeConfig requestedConfig) {
+        std::lock_guard<std::mutex> lock(lifecycleMutex);
+        StopLocked();
+
+        requestedConfig = Sanitize(std::move(requestedConfig));
+        if (!callback ||
+            (requestedConfig.instanceAddress == 0 &&
+             requestedConfig.instancePointerSlots.empty())) {
+            return false;
+        }
+
+        auto newDevice = std::make_shared<DeviceOwner>();
+        if (newDevice->Get() == nullptr) {
+            return false;
+        }
+
+        read = std::move(callback);
+        config = std::move(requestedConfig);
+        device = std::move(newDevice);
+        generation = 0;
+        {
+            std::lock_guard<std::mutex> waitLock(waitMutex);
+            requestEpoch.fetch_add(1, std::memory_order_acq_rel);
+            refreshRequested = true;
+        }
+        running.store(true, std::memory_order_release);
+        try {
+            worker = std::thread(&Impl::WorkerMain, this);
+        } catch (...) {
+            running.store(false, std::memory_order_release);
+            {
+                std::lock_guard<std::mutex> waitLock(waitMutex);
+                refreshRequested = false;
+            }
+            read = {};
+            config = {};
+            device.reset();
+            return false;
+        }
+        return true;
+    }
+
+    void Stop() noexcept {
+        std::lock_guard<std::mutex> lock(lifecycleMutex);
+        StopLocked();
+    }
+
+    void StopLocked() noexcept {
+        running.store(false, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> waitLock(waitMutex);
+            refreshRequested = false;
+        }
+        waitCondition.notify_all();
+        if (worker.joinable()) {
+            worker.join();
+        }
+        read = {};
+        config = {};
+        device.reset();
+        PublishUnavailable(
+            0, requestEpoch.load(std::memory_order_acquire));
+    }
+
+    bool IsRunning() const noexcept {
+        return running.load(std::memory_order_acquire);
+    }
+
+    std::uint64_t RequestRefresh() noexcept {
+        {
+            std::lock_guard<std::mutex> lock(waitMutex);
+            const std::uint64_t epoch =
+                requestEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+            if (!running.load(std::memory_order_acquire)) {
+                return epoch;
+            }
+            refreshRequested = true;
+            waitCondition.notify_all();
+            return epoch;
+        }
+    }
+
+    std::shared_ptr<const GeometrySnapshot> GetSnapshot() const noexcept {
+        const auto state =
+            std::atomic_load_explicit(&published, std::memory_order_acquire);
+        return state ? state->snapshot : nullptr;
+    }
+
+    GeometryVisibility Trace(const GeometryPoint& origin,
+                             const GeometryPoint& target) const noexcept {
+        if (!IsFinite(origin) || !IsFinite(target)) {
+            return GeometryVisibility::Unavailable;
+        }
+
+        const auto state =
+            std::atomic_load_explicit(&published, std::memory_order_acquire);
+        if (!state || !state->snapshot || !state->snapshot->available) {
+            return GeometryVisibility::Unavailable;
+        }
+        const bool hasStaticScene =
+            state->staticScene && state->staticScene->Get() != nullptr;
+        const bool hasDynamicScene =
+            state->dynamicScene && state->dynamicScene->Get() != nullptr;
+        if (!hasStaticScene && !hasDynamicScene) {
+            return GeometryVisibility::Unavailable;
+        }
+
+        const Vec3 start{origin.x, origin.y, origin.z};
+        const Vec3 end{target.x, target.y, target.z};
+        const Vec3 delta = Subtract(end, start);
+        const float distanceSquared = LengthSquared(delta);
+        if (!IsFinite(distanceSquared) || distanceSquared <= 1.0e-6f) {
+            return GeometryVisibility::Unavailable;
+        }
+
+        const float distance = std::sqrt(distanceSquared);
+        const float endPadding = std::min(1.0f, distance * 0.01f);
+        if (distance <= endPadding + 0.01f) {
+            return GeometryVisibility::Visible;
+        }
+
+        const Vec3 direction = Multiply(delta, 1.0f / distance);
+        if (!IsFinite(direction)) {
+            return GeometryVisibility::Unavailable;
+        }
+
+        const auto occludedBy =
+            [&](const std::shared_ptr<const SceneOwner>& scene) {
+                if (!scene || scene->Get() == nullptr) {
+                    return false;
+                }
+                RTCRay ray{};
+                ray.org_x = start.x;
+                ray.org_y = start.y;
+                ray.org_z = start.z;
+                ray.dir_x = direction.x;
+                ray.dir_y = direction.y;
+                ray.dir_z = direction.z;
+                ray.tnear = std::min(0.05f, distance * 0.001f);
+                ray.tfar = distance - endPadding;
+                ray.mask = 0xFFFFFFFFU;
+                ray.flags = 0;
+
+                RTCOccludedArguments arguments;
+                rtcInitOccludedArguments(&arguments);
+                rtcOccluded1(scene->Get(), &ray, &arguments);
+                return ray.tfar < 0.0f;
+            };
+        return occludedBy(state->staticScene) ||
+                occludedBy(state->dynamicScene)
+            ? GeometryVisibility::Occluded
+            : GeometryVisibility::Visible;
+    }
+
+    GeometryRaycastHit Raycast(const GeometryPoint& origin,
+                               const GeometryPoint& target) const noexcept {
+        GeometryRaycastHit result;
+        if (!IsFinite(origin) || !IsFinite(target)) {
+            return result;
+        }
+
+        const auto state =
+            std::atomic_load_explicit(&published, std::memory_order_acquire);
+        if (!state || !state->snapshot || !state->snapshot->available) {
+            return result;
+        }
+        const bool hasStaticScene =
+            state->staticScene && state->staticScene->Get() != nullptr;
+        const bool hasDynamicScene =
+            state->dynamicScene && state->dynamicScene->Get() != nullptr;
+        if (!hasStaticScene && !hasDynamicScene) {
+            return result;
+        }
+
+        const Vec3 start{origin.x, origin.y, origin.z};
+        const Vec3 end{target.x, target.y, target.z};
+        const Vec3 delta = Subtract(end, start);
+        const float distanceSquared = LengthSquared(delta);
+        if (!IsFinite(distanceSquared) || distanceSquared <= 1.0e-6f) {
+            return result;
+        }
+
+        const float maximumDistance = std::sqrt(distanceSquared);
+        const Vec3 direction = Multiply(delta, 1.0f / maximumDistance);
+        if (!IsFinite(direction)) {
+            return result;
+        }
+
+        const auto intersectScene =
+            [&](const std::shared_ptr<const SceneOwner>& scene) {
+                if (!scene || scene->Get() == nullptr) {
+                    return;
+                }
+                RTCRayHit rayHit{};
+                rayHit.ray.org_x = start.x;
+                rayHit.ray.org_y = start.y;
+                rayHit.ray.org_z = start.z;
+                rayHit.ray.dir_x = direction.x;
+                rayHit.ray.dir_y = direction.y;
+                rayHit.ray.dir_z = direction.z;
+                rayHit.ray.tnear =
+                    std::min(0.05f, maximumDistance * 0.001f);
+                rayHit.ray.tfar =
+                    result.mesh ? result.distance : maximumDistance;
+                rayHit.ray.mask = 0xFFFFFFFFU;
+                rayHit.ray.flags = 0;
+                rayHit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
+                rayHit.hit.primID = RTC_INVALID_GEOMETRY_ID;
+                for (unsigned int& instanceId : rayHit.hit.instID) {
+                    instanceId = RTC_INVALID_GEOMETRY_ID;
+                }
+
+                RTCIntersectArguments arguments;
+                rtcInitIntersectArguments(&arguments);
+                rtcIntersect1(scene->Get(), &rayHit, &arguments);
+                if (rayHit.hit.geomID == RTC_INVALID_GEOMETRY_ID ||
+                    !IsFinite(rayHit.ray.tfar) || rayHit.ray.tfar < 0.0f ||
+                    rayHit.ray.tfar > maximumDistance) {
+                    return;
+                }
+                std::shared_ptr<const GeometryMesh> mesh =
+                    scene->FindMesh(rayHit.hit.geomID);
+                if (!mesh) {
+                    return;
+                }
+                result.mesh = std::move(mesh);
+                result.distance = rayHit.ray.tfar;
+                result.position = GeometryPoint{
+                    start.x + direction.x * result.distance,
+                    start.y + direction.y * result.distance,
+                    start.z + direction.z * result.distance};
+                result.triangleIndex = rayHit.hit.primID;
+            };
+        intersectScene(state->staticScene);
+        intersectScene(state->dynamicScene);
+        return result;
+    }
+
+private:
+    bool SafeRead(std::uintptr_t address, void* destination,
+                  std::size_t size) const noexcept {
+        if (destination == nullptr || !IsRemoteRange(address, size)) {
+            return false;
+        }
+        try {
+            return read && read(address, destination, size);
+        } catch (...) {
+            return false;
+        }
+    }
+
+    template <typename T>
+    bool ReadObject(std::uintptr_t address, T& destination) const noexcept {
+        destination = {};
+        return IsRemoteRange(address, sizeof(T), alignof(T) > 8 ? 8 : alignof(T)) &&
+               SafeRead(address, &destination, sizeof(T));
+    }
+
+    template <typename T>
+    bool ReadVector(std::uintptr_t address, std::size_t count,
+                    std::vector<T>& destination) const {
+        destination.clear();
+        if (count == 0) {
+            return true;
+        }
+
+        std::size_t byteCount = 0;
+        if (!CheckedMultiply(count, sizeof(T), byteCount) ||
+            !IsRemoteRange(address, byteCount,
+                           alignof(T) > 8 ? 8 : alignof(T))) {
+            return false;
+        }
+
+        destination.resize(count);
+        std::size_t byteOffset = 0;
+        while (byteOffset < byteCount) {
+            const std::size_t chunk =
+                std::min(kMaximumReadChunk, byteCount - byteOffset);
+            if (!SafeRead(address + byteOffset,
+                          reinterpret_cast<std::uint8_t*>(destination.data()) +
+                              byteOffset,
+                          chunk)) {
+                destination.clear();
+                return false;
+            }
+            byteOffset += chunk;
+        }
+        return true;
+    }
+
+    bool ValidateArray(const RemoteArray& array,
+                       std::size_t maximumCount) const noexcept {
+        if (array.count < 0 || array.capacity < 0 ||
+            array.count > array.capacity ||
+            static_cast<std::size_t>(array.count) > maximumCount ||
+            static_cast<std::size_t>(array.capacity) > maximumCount) {
+            return false;
+        }
+        if (array.count == 0) {
+            return true;
+        }
+        std::size_t byteCount = 0;
+        return CheckedMultiply(static_cast<std::size_t>(array.count),
+                               sizeof(std::uintptr_t), byteCount) &&
+               IsRemoteRange(array.data, byteCount, alignof(std::uintptr_t));
+    }
+
+    bool ReadPointerArray(const RemoteArray& array,
+                          std::size_t maximumCount,
+                          std::vector<std::uintptr_t>& output) const {
+        if (!ValidateArray(array, maximumCount)) {
+            output.clear();
+            return false;
+        }
+        return ReadVector(array.data, static_cast<std::size_t>(array.count),
+                          output);
+    }
+
+    bool ValidateInstance(std::uintptr_t instance,
+                          RemoteArray* sceneArray = nullptr) const noexcept {
+        if (!IsRemoteRange(instance, kSceneArrayOffset + sizeof(RemoteArray), 8)) {
+            return false;
+        }
+        RemoteArray scenes{};
+        if (!ReadObject(instance + kSceneArrayOffset, scenes) ||
+            !ValidateArray(scenes, kMaximumScenes)) {
+            return false;
+        }
+        if (sceneArray != nullptr) {
+            *sceneArray = scenes;
+        }
+        return true;
+    }
+
+    bool ResolveInstance(std::uintptr_t& output) const noexcept {
+        output = 0;
+        if (config.instanceAddress != 0) {
+            if (!ValidateInstance(config.instanceAddress)) {
+                return false;
+            }
+            output = config.instanceAddress;
+            return true;
+        }
+
+        bool sawCandidate = false;
+        for (const std::uintptr_t slot : config.instancePointerSlots) {
+            std::uintptr_t candidate = 0;
+            if (!ReadObject(slot, candidate)) {
+                return false;
+            }
+            if (candidate == 0) {
+                continue;
+            }
+            sawCandidate = true;
+            if (ValidateInstance(candidate)) {
+                output = candidate;
+                return true;
+            }
+        }
+        return !sawCandidate;
+    }
+
+    bool CollectActorShapes(std::uintptr_t instance, std::uint16_t actorType,
+                            std::vector<ActorShape>& output,
+                            std::size_t initialShapeCount) const {
+        output.clear();
+        if (initialShapeCount > config.maxShapes) {
+            return false;
+        }
+        RemoteArray sceneArray{};
+        if (!ValidateInstance(instance, &sceneArray)) {
+            return false;
+        }
+
+        std::vector<std::uintptr_t> scenes;
+        if (!ReadPointerArray(sceneArray, kMaximumScenes, scenes)) {
+            return false;
+        }
+
+        std::unordered_set<ActorShape, ActorShapeHash> uniqueShapes;
+        std::vector<std::uintptr_t> actors;
+        std::vector<std::uintptr_t> shapes;
+        std::size_t totalActors = 0;
+
+        for (const std::uintptr_t scene : scenes) {
+            if (!IsRemoteRange(scene, kActorArrayOffset + sizeof(RemoteArray), 8)) {
+                return false;
+            }
+
+            RemoteArray actorArray{};
+            if (!ReadObject(scene + kActorArrayOffset, actorArray) ||
+                !ReadPointerArray(actorArray, kMaximumActorsPerScene, actors)) {
+                return false;
+            }
+
+            if (actors.size() > config.maxActors - totalActors) {
+                return false;
+            }
+            totalActors += actors.size();
+
+            for (const std::uintptr_t actor : actors) {
+                if (!IsRemoteRange(actor, 8 + 42, 8)) {
+                    return false;
+                }
+
+                std::array<std::uint8_t, 42> actorHeader{};
+                if (!SafeRead(actor + 8, actorHeader.data(),
+                              actorHeader.size())) {
+                    return false;
+                }
+
+                std::uint16_t concreteType = 0;
+                std::uintptr_t shapeStorage = 0;
+                std::uint16_t shapeCount = 0;
+                std::memcpy(&concreteType, actorHeader.data(),
+                            sizeof(concreteType));
+                std::memcpy(&shapeStorage, actorHeader.data() + 32,
+                            sizeof(shapeStorage));
+                std::memcpy(&shapeCount, actorHeader.data() + 40,
+                            sizeof(shapeCount));
+
+                if (concreteType != actorType) {
+                    continue;
+                }
+                if (shapeCount == 0) {
+                    continue;
+                }
+                if (shapeCount > kMaximumShapesPerActor) {
+                    return false;
+                }
+                if (uniqueShapes.size() >
+                        config.maxShapes - initialShapeCount ||
+                    shapeCount >
+                        config.maxShapes - initialShapeCount -
+                            uniqueShapes.size()) {
+                    return false;
+                }
+
+                if (shapeCount == 1) {
+                    if (!IsRemoteRange(shapeStorage, sizeof(RemoteShape), 8)) {
+                        return false;
+                    }
+                    uniqueShapes.insert(ActorShape{actor, shapeStorage});
+                    continue;
+                }
+
+                RemoteArray shapeArray{shapeStorage,
+                                       static_cast<std::int32_t>(shapeCount),
+                                       static_cast<std::int32_t>(shapeCount)};
+                if (!ReadPointerArray(shapeArray, kMaximumShapesPerActor,
+                                      shapes)) {
+                    return false;
+                }
+                for (const std::uintptr_t shape : shapes) {
+                    if (!IsRemoteRange(shape, sizeof(RemoteShape), 8)) {
+                        return false;
+                    }
+                    uniqueShapes.insert(ActorShape{actor, shape});
+                }
+            }
+        }
+
+        output.assign(uniqueShapes.begin(), uniqueShapes.end());
+        return true;
+    }
+
+    bool LoadTriangleMesh(const ActorShape& reference,
+                          GeometryBodyType bodyType,
+                          const RemoteBody& body,
+                          const RemoteShape& shape,
+                          std::shared_ptr<const GeometryMesh>& output) const {
+        output.reset();
+
+        std::int32_t geometryType = -1;
+        std::memcpy(&geometryType, shape.shapeCore.core.geometry.data.data(),
+                    sizeof(geometryType));
+        if (geometryType != kTriangleMeshGeometryType) {
+            return false;
+        }
+
+        RemoteTriangleMeshGeometry geometry{};
+        std::memcpy(&geometry, shape.shapeCore.core.geometry.data.data(),
+                    sizeof(geometry));
+        const std::uintptr_t meshAddress =
+            reinterpret_cast<std::uintptr_t>(geometry.triangleMesh);
+        if (geometry.type != kTriangleMeshGeometryType ||
+            !IsRemoteRange(meshAddress, sizeof(RemoteTriangleMesh), 8)) {
+            return false;
+        }
+
+        RemoteTriangleMesh sourceMesh{};
+        if (!ReadObject(meshAddress, sourceMesh) ||
+            (sourceMesh.concreteType != kTriangleMeshBvh33Type &&
+             sourceMesh.concreteType != kTriangleMeshBvh34Type) ||
+            sourceMesh.vertexCount < 3 || sourceMesh.triangleCount == 0 ||
+            sourceMesh.vertexCount > config.maxVerticesPerMesh ||
+            sourceMesh.triangleCount > config.maxTrianglesPerMesh) {
+            return false;
+        }
+
+        std::size_t indexCount = 0;
+        if (!CheckedMultiply(
+                static_cast<std::size_t>(sourceMesh.triangleCount), 3,
+                indexCount)) {
+            return false;
+        }
+
+        const std::uintptr_t vertexAddress =
+            reinterpret_cast<std::uintptr_t>(sourceMesh.vertices);
+        const std::uintptr_t indexAddress =
+            reinterpret_cast<std::uintptr_t>(sourceMesh.triangles);
+        if (vertexAddress == 0 || indexAddress == 0) {
+            return false;
+        }
+
+        Transform worldTransform{};
+        if (!BuildWorldTransform(body, bodyType, shape, worldTransform)) {
+            return false;
+        }
+
+        Vec3 meshScale{};
+        Quat meshScaleRotation{};
+        if (!Convert(geometry.scale, meshScale, meshScaleRotation)) {
+            return false;
+        }
+
+        std::vector<RemoteVec3> remoteVertices;
+        if (!ReadVector(vertexAddress, sourceMesh.vertexCount,
+                        remoteVertices)) {
+            return false;
+        }
+
+        auto mesh = std::make_shared<GeometryMesh>();
+        mesh->bodyType = bodyType;
+        mesh->actorAddress = reference.actor;
+        mesh->shapeAddress = reference.shape;
+        mesh->vertices.resize(remoteVertices.size());
+
+        double centerX = 0.0;
+        double centerY = 0.0;
+        double centerZ = 0.0;
+        for (std::size_t index = 0; index < remoteVertices.size(); ++index) {
+            const auto& source = remoteVertices[index];
+            const Vec3 local{source.x, source.y, source.z};
+            if (!IsReasonable(local)) {
+                return false;
+            }
+            const Vec3 scaled =
+                ApplyMeshScale(local, meshScale, meshScaleRotation);
+            const Vec3 world = Apply(worldTransform, scaled);
+            if (!IsReasonable(world)) {
+                return false;
+            }
+            mesh->vertices[index] = GeometryPoint{world.x, world.y, world.z};
+            centerX += static_cast<double>(world.x);
+            centerY += static_cast<double>(world.y);
+            centerZ += static_cast<double>(world.z);
+        }
+
+        if ((sourceMesh.flags & kMeshHas16BitIndices) != 0) {
+            std::vector<std::uint16_t> smallIndices;
+            if (!ReadVector(indexAddress, indexCount, smallIndices)) {
+                return false;
+            }
+            mesh->indices.assign(smallIndices.begin(), smallIndices.end());
+        } else if (!ReadVector(indexAddress, indexCount, mesh->indices)) {
+            return false;
+        }
+
+        for (const std::uint32_t index : mesh->indices) {
+            if (index >= mesh->vertices.size()) {
+                return false;
+            }
+        }
+
+        std::vector<std::uint32_t> validIndices;
+        validIndices.reserve(mesh->indices.size());
+        for (std::size_t index = 0; index + 2 < mesh->indices.size();
+             index += 3) {
+            const std::uint32_t first = mesh->indices[index];
+            const std::uint32_t second = mesh->indices[index + 1];
+            const std::uint32_t third = mesh->indices[index + 2];
+            if (first == second || second == third || first == third) {
+                continue;
+            }
+
+            const auto& a = mesh->vertices[first];
+            const auto& b = mesh->vertices[second];
+            const auto& c = mesh->vertices[third];
+            const Vec3 edgeA{b.x - a.x, b.y - a.y, b.z - a.z};
+            const Vec3 edgeB{c.x - a.x, c.y - a.y, c.z - a.z};
+            const float areaSquared = LengthSquared(Cross(edgeA, edgeB));
+            if (!IsFinite(areaSquared) || areaSquared <= 1.0e-10f) {
+                continue;
+            }
+            validIndices.push_back(first);
+            validIndices.push_back(second);
+            validIndices.push_back(third);
+        }
+        if (validIndices.empty()) {
+            return false;
+        }
+        mesh->indices = std::move(validIndices);
+
+        const double inverseCount =
+            1.0 / static_cast<double>(mesh->vertices.size());
+        mesh->center = GeometryPoint{
+            static_cast<float>(centerX * inverseCount),
+            static_cast<float>(centerY * inverseCount),
+            static_cast<float>(centerZ * inverseCount)};
+        if (!IsFinite(mesh->center)) {
+            return false;
+        }
+
+        float maximumDistanceSquared = 0.0f;
+        for (const auto& vertex : mesh->vertices) {
+            const Vec3 delta{vertex.x - mesh->center.x,
+                             vertex.y - mesh->center.y,
+                             vertex.z - mesh->center.z};
+            maximumDistanceSquared =
+                std::max(maximumDistanceSquared, LengthSquared(delta));
+        }
+        if (!IsFinite(maximumDistanceSquared)) {
+            return false;
+        }
+        mesh->boundsRadius = std::sqrt(maximumDistanceSquared);
+        output = std::move(mesh);
+        return true;
+    }
+
+    bool LoadPrimitiveMesh(const ActorShape& reference,
+                           GeometryBodyType bodyType,
+                           const RemoteBody& body,
+                           const RemoteShape& shape,
+                           std::int32_t geometryType,
+                           std::shared_ptr<const GeometryMesh>& output) const {
+        Transform worldTransform{};
+        if (!BuildWorldTransform(body, bodyType, shape, worldTransform)) {
+            return false;
+        }
+
+        std::vector<Vec3> vertices;
+        std::vector<std::uint32_t> indices;
+        const auto& geometry = shape.shapeCore.core.geometry.data;
+
+        if (geometryType == kBoxGeometryType) {
+            RemoteBoxGeometry box{};
+            std::memcpy(&box, geometry.data(), sizeof(box));
+            const Vec3 extents{box.halfExtents.x, box.halfExtents.y,
+                               box.halfExtents.z};
+            if (box.type != kBoxGeometryType ||
+                !IsValidExtent(extents.x) || !IsValidExtent(extents.y) ||
+                !IsValidExtent(extents.z)) {
+                return false;
+            }
+            vertices = {
+                {-extents.x, -extents.y, -extents.z},
+                {extents.x, -extents.y, -extents.z},
+                {extents.x, extents.y, -extents.z},
+                {-extents.x, extents.y, -extents.z},
+                {-extents.x, -extents.y, extents.z},
+                {extents.x, -extents.y, extents.z},
+                {extents.x, extents.y, extents.z},
+                {-extents.x, extents.y, extents.z},
+            };
+            indices = {
+                0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6,
+                0, 4, 5, 0, 5, 1, 2, 6, 7, 2, 7, 3,
+                0, 3, 7, 0, 7, 4, 1, 5, 6, 1, 6, 2,
+            };
+        } else if (geometryType == kSphereGeometryType) {
+            RemoteSphereGeometry sphere{};
+            std::memcpy(&sphere, geometry.data(), sizeof(sphere));
+            if (sphere.type != kSphereGeometryType ||
+                !IsValidExtent(sphere.radius)) {
+                return false;
+            }
+
+            constexpr std::size_t ringWidth =
+                static_cast<std::size_t>(kRoundSegments + 1);
+            vertices.reserve(
+                static_cast<std::size_t>(kSphereRings + 1) * ringWidth);
+            for (int ring = 0; ring <= kSphereRings; ++ring) {
+                const float phi =
+                    kPi * static_cast<float>(ring) /
+                    static_cast<float>(kSphereRings);
+                const float axial = sphere.radius * std::cos(phi);
+                const float ringRadius = sphere.radius * std::sin(phi);
+                for (int segment = 0; segment <= kRoundSegments; ++segment) {
+                    const float theta =
+                        2.0f * kPi * static_cast<float>(segment) /
+                        static_cast<float>(kRoundSegments);
+                    vertices.push_back(
+                        Vec3{axial, ringRadius * std::cos(theta),
+                             ringRadius * std::sin(theta)});
+                }
+            }
+            indices.reserve(
+                static_cast<std::size_t>(kSphereRings) *
+                static_cast<std::size_t>(kRoundSegments) * 6);
+            for (int ring = 0; ring < kSphereRings; ++ring) {
+                for (int segment = 0; segment < kRoundSegments; ++segment) {
+                    const auto first = static_cast<std::uint32_t>(
+                        static_cast<std::size_t>(ring) * ringWidth +
+                        static_cast<std::size_t>(segment));
+                    const auto second =
+                        static_cast<std::uint32_t>(first + ringWidth);
+                    indices.insert(indices.end(),
+                                   {first, second, first + 1,
+                                    first + 1, second, second + 1});
+                }
+            }
+        } else if (geometryType == kCapsuleGeometryType) {
+            RemoteCapsuleGeometry capsule{};
+            std::memcpy(&capsule, geometry.data(), sizeof(capsule));
+            if (capsule.type != kCapsuleGeometryType ||
+                !IsValidExtent(capsule.radius) ||
+                !IsValidExtent(capsule.halfHeight)) {
+                return false;
+            }
+
+            std::vector<std::pair<float, float>> profile;
+            profile.reserve(
+                static_cast<std::size_t>(kCapsuleHemisphereRings * 2 + 2));
+            for (int ring = 0; ring <= kCapsuleHemisphereRings; ++ring) {
+                const float angle =
+                    -0.5f * kPi +
+                    0.5f * kPi * static_cast<float>(ring) /
+                        static_cast<float>(kCapsuleHemisphereRings);
+                profile.emplace_back(
+                    -capsule.halfHeight + capsule.radius * std::sin(angle),
+                    capsule.radius * std::cos(angle));
+            }
+            profile.emplace_back(capsule.halfHeight, capsule.radius);
+            for (int ring = 1; ring <= kCapsuleHemisphereRings; ++ring) {
+                const float angle =
+                    0.5f * kPi * static_cast<float>(ring) /
+                    static_cast<float>(kCapsuleHemisphereRings);
+                profile.emplace_back(
+                    capsule.halfHeight + capsule.radius * std::sin(angle),
+                    capsule.radius * std::cos(angle));
+            }
+
+            const std::size_t ringWidth =
+                static_cast<std::size_t>(kRoundSegments + 1);
+            vertices.reserve(profile.size() * ringWidth);
+            for (const auto& [axial, ringRadius] : profile) {
+                for (int segment = 0; segment <= kRoundSegments; ++segment) {
+                    const float theta =
+                        2.0f * kPi * static_cast<float>(segment) /
+                        static_cast<float>(kRoundSegments);
+                    vertices.push_back(
+                        Vec3{axial, ringRadius * std::cos(theta),
+                             ringRadius * std::sin(theta)});
+                }
+            }
+            indices.reserve((profile.size() - 1) *
+                            static_cast<std::size_t>(kRoundSegments) * 6);
+            for (std::size_t ring = 0; ring + 1 < profile.size(); ++ring) {
+                for (int segment = 0; segment < kRoundSegments; ++segment) {
+                    const auto first = static_cast<std::uint32_t>(
+                        ring * ringWidth +
+                        static_cast<std::size_t>(segment));
+                    const auto second =
+                        static_cast<std::uint32_t>(first + ringWidth);
+                    indices.insert(indices.end(),
+                                   {first, second, first + 1,
+                                    first + 1, second, second + 1});
+                }
+            }
+        } else {
+            return false;
+        }
+
+        if (vertices.size() > config.maxVerticesPerMesh ||
+            indices.size() / 3 > config.maxTrianglesPerMesh) {
+            return false;
+        }
+        return FinalizeMesh(reference, bodyType, worldTransform, vertices,
+                            indices, output);
+    }
+
+    bool LoadConvexMesh(const ActorShape& reference,
+                        GeometryBodyType bodyType,
+                        const RemoteBody& body,
+                        const RemoteShape& shape,
+                        std::shared_ptr<const GeometryMesh>& output) const {
+        RemoteConvexMeshGeometry geometry{};
+        std::memcpy(&geometry,
+                    shape.shapeCore.core.geometry.data.data(),
+                    sizeof(geometry));
+        const std::uintptr_t meshAddress =
+            reinterpret_cast<std::uintptr_t>(geometry.convexMesh);
+        if (geometry.type != kConvexMeshGeometryType ||
+            !IsRemoteRange(meshAddress, sizeof(RemoteConvexMesh), 8)) {
+            return false;
+        }
+
+        RemoteConvexMesh sourceMesh{};
+        if (!ReadObject(meshAddress, sourceMesh) ||
+            sourceMesh.concreteType != kConvexMeshType ||
+            sourceMesh.hull.vertexCount < 3 ||
+            sourceMesh.hull.polygonCount == 0 ||
+            sourceMesh.hull.vertexCount > config.maxVerticesPerMesh) {
+            return false;
+        }
+
+        const std::uintptr_t polygonAddress =
+            reinterpret_cast<std::uintptr_t>(sourceMesh.hull.polygons);
+        const std::size_t polygonCount = sourceMesh.hull.polygonCount;
+        const std::size_t vertexCount = sourceMesh.hull.vertexCount;
+        std::vector<RemoteHullPolygon> polygons;
+        if (!ReadVector(polygonAddress, polygonCount, polygons)) {
+            return false;
+        }
+
+        std::size_t polygonBytes = 0;
+        std::size_t vertexBytes = 0;
+        std::size_t edgeBytes = 0;
+        std::size_t vertexAdjacencyBytes = 0;
+        const std::size_t edgeCount =
+            sourceMesh.hull.edgeCountAndFlags & 0x7FFFU;
+        if (!CheckedMultiply(polygonCount, sizeof(RemoteHullPolygon),
+                             polygonBytes) ||
+            !CheckedMultiply(vertexCount, sizeof(RemoteVec3), vertexBytes) ||
+            !CheckedMultiply(edgeCount, 2, edgeBytes) ||
+            !CheckedMultiply(vertexCount, 3, vertexAdjacencyBytes)) {
+            return false;
+        }
+
+        std::size_t vertexOffset = polygonBytes;
+        std::size_t indexOffset = 0;
+        if (!CheckedAdd(vertexOffset, vertexBytes, indexOffset) ||
+            !CheckedAdd(indexOffset, edgeBytes, indexOffset) ||
+            !CheckedAdd(indexOffset, vertexAdjacencyBytes, indexOffset)) {
+            return false;
+        }
+        if ((sourceMesh.hull.edgeCountAndFlags & 0x8000U) != 0) {
+            std::size_t wideEdgeBytes = 0;
+            if (!CheckedMultiply(edgeCount, sizeof(std::uint16_t) * 2,
+                                 wideEdgeBytes) ||
+                !CheckedAdd(indexOffset, wideEdgeBytes, indexOffset)) {
+                return false;
+            }
+        }
+        if (polygonBytes > kMaximumRemoteAddress - polygonAddress ||
+            indexOffset > kMaximumRemoteAddress - polygonAddress) {
+            return false;
+        }
+        const std::uintptr_t vertexAddress = polygonAddress + vertexOffset;
+        const std::uintptr_t indexAddress = polygonAddress + indexOffset;
+
+        std::size_t convexIndexCount = 0;
+        for (const auto& polygon : polygons) {
+            if (polygon.vertexCount < 3 ||
+                !CheckedAdd(convexIndexCount, polygon.vertexCount,
+                            convexIndexCount)) {
+                return false;
+            }
+        }
+        if (convexIndexCount < 3) {
+            return false;
+        }
+
+        std::vector<RemoteVec3> remoteVertices;
+        std::vector<std::uint8_t> convexIndices;
+        if (!ReadVector(vertexAddress, vertexCount, remoteVertices) ||
+            !ReadVector(indexAddress, convexIndexCount, convexIndices)) {
+            return false;
+        }
+
+        Vec3 meshScale{};
+        Quat meshScaleRotation{};
+        if (!Convert(geometry.scale, meshScale, meshScaleRotation)) {
+            return false;
+        }
+        std::vector<Vec3> vertices;
+        vertices.reserve(remoteVertices.size());
+        for (const auto& vertex : remoteVertices) {
+            const Vec3 local{vertex.x, vertex.y, vertex.z};
+            if (!IsReasonable(local)) {
+                return false;
+            }
+            const Vec3 scaled =
+                ApplyMeshScale(local, meshScale, meshScaleRotation);
+            if (!IsReasonable(scaled)) {
+                return false;
+            }
+            vertices.push_back(scaled);
+        }
+
+        std::vector<std::uint32_t> indices;
+        for (const auto& polygon : polygons) {
+            const std::size_t start = polygon.vertexReference;
+            const std::size_t count = polygon.vertexCount;
+            if (start > convexIndices.size() ||
+                count > convexIndices.size() - start) {
+                return false;
+            }
+            if (count - 2 >
+                config.maxTrianglesPerMesh - indices.size() / 3) {
+                return false;
+            }
+            for (std::size_t offset = 1; offset + 1 < count; ++offset) {
+                indices.push_back(convexIndices[start]);
+                indices.push_back(convexIndices[start + offset]);
+                indices.push_back(convexIndices[start + offset + 1]);
+            }
+        }
+
+        Transform worldTransform{};
+        if (!BuildWorldTransform(body, bodyType, shape, worldTransform)) {
+            return false;
+        }
+        return FinalizeMesh(reference, bodyType, worldTransform, vertices,
+                            indices, output);
+    }
+
+    bool LoadHeightField(const ActorShape& reference,
+                         GeometryBodyType bodyType,
+                         const RemoteBody& body,
+                         const RemoteShape& shape,
+                         std::shared_ptr<const GeometryMesh>& output) const {
+        RemoteHeightFieldGeometry geometry{};
+        std::memcpy(&geometry,
+                    shape.shapeCore.core.geometry.data.data(),
+                    sizeof(geometry));
+        const std::uintptr_t fieldAddress =
+            reinterpret_cast<std::uintptr_t>(geometry.heightField);
+        if (geometry.type != kHeightFieldGeometryType ||
+            !IsRemoteRange(fieldAddress, sizeof(RemoteHeightField), 8) ||
+            !IsValidExtent(geometry.heightScale) ||
+            !IsValidExtent(geometry.rowScale) ||
+            !IsValidExtent(geometry.columnScale)) {
+            return false;
+        }
+
+        RemoteHeightField sourceField{};
+        if (!ReadObject(fieldAddress, sourceField) ||
+            sourceField.concreteType != kHeightFieldType ||
+            sourceField.sampleStride != sizeof(RemoteHeightFieldSample) ||
+            sourceField.data.format != 0 ||
+            sourceField.data.rows < 2 || sourceField.data.columns < 2) {
+            return false;
+        }
+
+        const std::size_t rows = sourceField.data.rows;
+        const std::size_t columns = sourceField.data.columns;
+        std::size_t sampleCount = 0;
+        std::size_t cellCount = 0;
+        std::size_t maximumTriangleCount = 0;
+        if (!CheckedMultiply(rows, columns, sampleCount) ||
+            sampleCount != sourceField.sampleCount ||
+            sampleCount > config.maxVerticesPerMesh ||
+            !CheckedMultiply(rows - 1, columns - 1, cellCount) ||
+            !CheckedMultiply(cellCount, 2, maximumTriangleCount) ||
+            maximumTriangleCount > config.maxTrianglesPerMesh) {
+            return false;
+        }
+
+        const std::uintptr_t sampleAddress =
+            reinterpret_cast<std::uintptr_t>(sourceField.data.samples);
+        std::vector<RemoteHeightFieldSample> samples;
+        if (!ReadVector(sampleAddress, sampleCount, samples)) {
+            return false;
+        }
+
+        std::vector<Vec3> vertices;
+        vertices.reserve(sampleCount);
+        for (std::size_t row = 0; row < rows; ++row) {
+            for (std::size_t column = 0; column < columns; ++column) {
+                const auto& sample = samples[row * columns + column];
+                const Vec3 vertex{
+                    static_cast<float>(row) * geometry.rowScale,
+                    static_cast<float>(sample.height) * geometry.heightScale,
+                    static_cast<float>(column) * geometry.columnScale};
+                if (!IsReasonable(vertex)) {
+                    return false;
+                }
+                vertices.push_back(vertex);
+            }
+        }
+
+        std::vector<std::uint32_t> indices;
+        indices.reserve(maximumTriangleCount * 3);
+        for (std::size_t row = 0; row + 1 < rows; ++row) {
+            for (std::size_t column = 0; column + 1 < columns; ++column) {
+                const std::size_t first = row * columns + column;
+                const std::size_t nextRow = first + columns;
+                const auto& sample = samples[first];
+                const bool tessellated =
+                    (sample.material0 & kHeightFieldTessellationFlag) != 0;
+                const bool firstHole =
+                    (sample.material0 & kHeightFieldMaterialMask) ==
+                    kHeightFieldHoleMaterial;
+                const bool secondHole =
+                    (sample.material1 & kHeightFieldMaterialMask) ==
+                    kHeightFieldHoleMaterial;
+
+                const auto a = static_cast<std::uint32_t>(first);
+                const auto b = static_cast<std::uint32_t>(nextRow);
+                const auto c = static_cast<std::uint32_t>(first + 1);
+                const auto d = static_cast<std::uint32_t>(nextRow + 1);
+                if (tessellated) {
+                    if (!firstHole) {
+                        indices.insert(indices.end(), {a, b, d});
+                    }
+                    if (!secondHole) {
+                        indices.insert(indices.end(), {a, d, c});
+                    }
+                } else {
+                    if (!firstHole) {
+                        indices.insert(indices.end(), {a, b, c});
+                    }
+                    if (!secondHole) {
+                        indices.insert(indices.end(), {c, b, d});
+                    }
+                }
+            }
+        }
+        if (indices.empty()) {
+            output.reset();
+            return true;
+        }
+
+        Transform worldTransform{};
+        if (!BuildWorldTransform(body, bodyType, shape, worldTransform)) {
+            return false;
+        }
+        return FinalizeMesh(reference, bodyType, worldTransform, vertices,
+                            indices, output);
+    }
+
+    bool CollectMeshes(
+        std::uintptr_t instance, GeometryBodyType bodyType,
+        std::vector<std::shared_ptr<const GeometryMesh>>& output,
+        std::size_t initialMeshCount = 0,
+        std::size_t initialVertexCount = 0,
+        std::size_t initialTriangleCount = 0,
+        std::size_t initialShapeCount = 0,
+        std::size_t* collectedShapeCount = nullptr) const {
+        output.clear();
+        if (initialMeshCount > config.maxMeshes ||
+            initialVertexCount > config.maxTotalVertices ||
+            initialTriangleCount > config.maxTotalTriangles ||
+            initialShapeCount > config.maxShapes) {
+            return false;
+        }
+        std::vector<ActorShape> references;
+        const std::uint16_t concreteType =
+            bodyType == GeometryBodyType::Static ? kStaticActorType
+                                                 : kDynamicActorType;
+        if (!CollectActorShapes(instance, concreteType, references,
+                                initialShapeCount)) {
+            return false;
+        }
+        if (collectedShapeCount != nullptr) {
+            *collectedShapeCount = references.size();
+        }
+
+        std::unordered_map<std::uintptr_t, RemoteBody> bodyCache;
+        std::size_t totalVertices = initialVertexCount;
+        std::size_t totalTriangles = initialTriangleCount;
+        output.reserve(std::min(references.size(),
+                                config.maxMeshes - initialMeshCount));
+
+        for (const auto& reference : references) {
+            RemoteShape shape{};
+            if (!ReadObject(reference.shape, shape)) {
+                return false;
+            }
+            const std::uint8_t shapeFlags =
+                shape.shapeCore.core.shapeFlags;
+            if ((shapeFlags & kTriggerShapeFlag) != 0 ||
+                (shapeFlags & kCollisionShapeFlags) == 0) {
+                continue;
+            }
+
+            std::int32_t geometryType = -1;
+            std::memcpy(&geometryType,
+                        shape.shapeCore.core.geometry.data.data(),
+                        sizeof(geometryType));
+            if (geometryType == kPlaneGeometryType) {
+                continue;
+            }
+            if (geometryType < kSphereGeometryType ||
+                geometryType >= kGeometryTypeCount) {
+                return false;
+            }
+
+            auto bodyIterator = bodyCache.find(reference.actor);
+            if (bodyIterator == bodyCache.end()) {
+                RemoteBody body{};
+                if (!ReadObject(reference.actor, body)) {
+                    return false;
+                }
+                bodyIterator =
+                    bodyCache.emplace(reference.actor, std::move(body)).first;
+            }
+
+            std::shared_ptr<const GeometryMesh> mesh;
+            bool loaded = false;
+            if (geometryType == kTriangleMeshGeometryType) {
+                loaded =
+                    LoadTriangleMesh(reference, bodyType, bodyIterator->second,
+                                     shape, mesh);
+            } else if (geometryType == kConvexMeshGeometryType) {
+                loaded =
+                    LoadConvexMesh(reference, bodyType, bodyIterator->second,
+                                   shape, mesh);
+            } else if (geometryType == kHeightFieldGeometryType) {
+                loaded =
+                    LoadHeightField(reference, bodyType, bodyIterator->second,
+                                    shape, mesh);
+            } else {
+                loaded =
+                    LoadPrimitiveMesh(reference, bodyType, bodyIterator->second,
+                                      shape, geometryType, mesh);
+            }
+            if (!loaded) {
+                return false;
+            }
+            if (!mesh) {
+                continue;
+            }
+            if (output.size() >= config.maxMeshes - initialMeshCount) {
+                return false;
+            }
+
+            const std::size_t triangleCount = mesh->indices.size() / 3;
+            if (mesh->vertices.size() >
+                    config.maxTotalVertices - totalVertices ||
+                triangleCount >
+                    config.maxTotalTriangles - totalTriangles) {
+                return false;
+            }
+            totalVertices += mesh->vertices.size();
+            totalTriangles += triangleCount;
+            output.push_back(std::move(mesh));
+        }
+        return true;
+    }
+
+    void PublishUnavailable(std::uintptr_t instance,
+                            std::uint64_t epoch) noexcept {
+        try {
+            auto snapshot = std::make_shared<GeometrySnapshot>();
+            snapshot->instanceAddress = instance;
+            snapshot->refreshEpoch = epoch;
+            auto state = std::make_shared<PublishedState>();
+            {
+                std::lock_guard<std::mutex> lock(waitMutex);
+                if (requestEpoch.load(std::memory_order_acquire) != epoch) {
+                    return;
+                }
+                snapshot->generation = ++generation;
+                state->snapshot = std::move(snapshot);
+                std::atomic_store_explicit(
+                    &published, std::shared_ptr<const PublishedState>(state),
+                    std::memory_order_release);
+            }
+        } catch (...) {
+        }
+    }
+
+    PublishResult Publish(
+        std::uintptr_t instance,
+        const std::vector<std::shared_ptr<const GeometryMesh>>& staticMeshes,
+        const std::vector<std::shared_ptr<const GeometryMesh>>& dynamicMeshes,
+        bool rebuildStaticScene,
+        std::uint64_t epoch) {
+        if (staticMeshes.size() > config.maxMeshes ||
+            dynamicMeshes.size() > config.maxMeshes - staticMeshes.size()) {
+            return PublishResult::Failed;
+        }
+
+        auto snapshot = std::make_shared<GeometrySnapshot>();
+        snapshot->available = true;
+        snapshot->instanceAddress = instance;
+        snapshot->refreshEpoch = epoch;
+        snapshot->staticMeshes = staticMeshes;
+        snapshot->dynamicMeshes = dynamicMeshes;
+
+        std::size_t totalVertices = 0;
+        const auto countMeshes =
+            [&](const std::vector<std::shared_ptr<const GeometryMesh>>& meshes) {
+                for (const auto& mesh : meshes) {
+                    if (!mesh) {
+                        return false;
+                    }
+                    const std::size_t triangles = mesh->indices.size() / 3;
+                    if (mesh->vertices.size() >
+                            config.maxTotalVertices - totalVertices ||
+                        triangles >
+                            config.maxTotalTriangles -
+                                snapshot->triangleCount) {
+                        return false;
+                    }
+                    totalVertices += mesh->vertices.size();
+                    snapshot->triangleCount += triangles;
+                }
+                return true;
+            };
+        if (!countMeshes(staticMeshes) || !countMeshes(dynamicMeshes) ||
+            requestEpoch.load(std::memory_order_acquire) != epoch) {
+            return requestEpoch.load(std::memory_order_acquire) != epoch
+                ? PublishResult::Stale
+                : PublishResult::Failed;
+        }
+
+        std::shared_ptr<const SceneOwner> staticScene;
+        if (!rebuildStaticScene) {
+            const auto current =
+                std::atomic_load_explicit(
+                    &published, std::memory_order_acquire);
+            if (current && current->snapshot &&
+                current->snapshot->available &&
+                current->snapshot->instanceAddress == instance) {
+                staticScene = current->staticScene;
+            }
+        }
+        if (!staticScene) {
+            auto candidate = std::make_shared<SceneOwner>(
+                device, staticMeshes);
+            if (!candidate->Build()) {
+                return PublishResult::Failed;
+            }
+            staticScene = std::move(candidate);
+        }
+
+        auto dynamicScene = std::make_shared<SceneOwner>(
+            device, dynamicMeshes);
+        if (!dynamicScene->Build()) {
+            return PublishResult::Failed;
+        }
+
+        auto state = std::make_shared<PublishedState>();
+        state->staticScene = std::move(staticScene);
+        state->dynamicScene = std::move(dynamicScene);
+        {
+            std::lock_guard<std::mutex> lock(waitMutex);
+            if (requestEpoch.load(std::memory_order_acquire) != epoch) {
+                return PublishResult::Stale;
+            }
+            snapshot->generation = ++generation;
+            state->snapshot = std::move(snapshot);
+            std::atomic_store_explicit(
+                &published, std::shared_ptr<const PublishedState>(state),
+                std::memory_order_release);
+        }
+        return PublishResult::Published;
+    }
+
+    void EnsureUnavailable(std::uintptr_t instance,
+                           std::uint64_t epoch) noexcept {
+        const auto state =
+            std::atomic_load_explicit(&published, std::memory_order_acquire);
+        if (state && state->snapshot && !state->snapshot->available &&
+            state->snapshot->instanceAddress == instance &&
+            state->snapshot->refreshEpoch >= epoch) {
+            return;
+        }
+        PublishUnavailable(instance, epoch);
+    }
+
+    void WorkerMain() noexcept {
+        std::vector<std::shared_ptr<const GeometryMesh>> staticMeshes;
+        std::size_t staticShapeCount = 0;
+        std::uintptr_t activeInstance = 0;
+        auto nextStaticRefresh = std::chrono::steady_clock::time_point::min();
+        auto lastGoodAt = std::chrono::steady_clock::time_point::min();
+        bool staticReady = false;
+        bool hasLastGood = false;
+        std::size_t consecutiveFailures = 0;
+
+        while (running.load(std::memory_order_acquire)) {
+            bool forceRefresh = false;
+            std::uint64_t roundEpoch = 0;
+            {
+                std::lock_guard<std::mutex> lock(waitMutex);
+                forceRefresh = refreshRequested;
+                refreshRequested = false;
+                roundEpoch =
+                    requestEpoch.load(std::memory_order_acquire);
+            }
+
+            const auto recordFailure =
+                [&](std::chrono::steady_clock::time_point now,
+                    std::uintptr_t instance) {
+                    if (requestEpoch.load(std::memory_order_acquire) !=
+                        roundEpoch) {
+                        return;
+                    }
+                    if (consecutiveFailures <
+                        std::numeric_limits<std::size_t>::max()) {
+                        ++consecutiveFailures;
+                    }
+                    const bool expired =
+                        hasLastGood &&
+                        now - lastGoodAt >= config.lastGoodTtl;
+                    if (!hasLastGood || expired ||
+                        consecutiveFailures >=
+                            config.maxConsecutiveFailures) {
+                        EnsureUnavailable(instance, roundEpoch);
+                        hasLastGood = false;
+                    }
+                    nextStaticRefresh = now + config.dynamicRefresh;
+                };
+
+            try {
+                std::uintptr_t instance = 0;
+                const bool instanceResolved = ResolveInstance(instance);
+                const auto now = std::chrono::steady_clock::now();
+                if (!instanceResolved) {
+                    recordFailure(now, activeInstance);
+                } else if (instance == 0) {
+                    activeInstance = 0;
+                    staticMeshes.clear();
+                    staticShapeCount = 0;
+                    staticReady = false;
+                    hasLastGood = false;
+                    consecutiveFailures = 0;
+                    nextStaticRefresh =
+                        std::chrono::steady_clock::time_point::min();
+                    EnsureUnavailable(0, roundEpoch);
+                } else {
+                    const bool instanceChanged = instance != activeInstance;
+                    if (instanceChanged) {
+                        activeInstance = instance;
+                        staticMeshes.clear();
+                        staticShapeCount = 0;
+                        staticReady = false;
+                        hasLastGood = false;
+                        consecutiveFailures = 0;
+                        nextStaticRefresh =
+                            std::chrono::steady_clock::time_point::min();
+                        EnsureUnavailable(instance, roundEpoch);
+                    }
+
+                    const bool refreshStatic =
+                        forceRefresh || instanceChanged ||
+                        now >= nextStaticRefresh;
+                    bool collectionFailed = false;
+                    std::vector<std::shared_ptr<const GeometryMesh>>
+                        candidateStatic = staticMeshes;
+                    std::size_t candidateStaticShapeCount =
+                        staticShapeCount;
+                    std::vector<std::shared_ptr<const GeometryMesh>>
+                        candidateDynamic;
+                    if (refreshStatic) {
+                        if (!CollectMeshes(instance, GeometryBodyType::Static,
+                                           candidateStatic, 0, 0, 0, 0,
+                                           &candidateStaticShapeCount)) {
+                            collectionFailed = true;
+                            nextStaticRefresh = now + config.dynamicRefresh;
+                        }
+                    }
+
+                    if (!collectionFailed) {
+                        std::size_t staticVertexCount = 0;
+                        std::size_t staticTriangleCount = 0;
+                        for (const auto& mesh : candidateStatic) {
+                            if (!mesh ||
+                                mesh->vertices.size() >
+                                    config.maxTotalVertices -
+                                        staticVertexCount ||
+                                mesh->indices.size() / 3 >
+                                    config.maxTotalTriangles -
+                                        staticTriangleCount) {
+                                collectionFailed = true;
+                                break;
+                            }
+                            staticVertexCount += mesh->vertices.size();
+                            staticTriangleCount += mesh->indices.size() / 3;
+                        }
+                        if (!collectionFailed &&
+                            !CollectMeshes(
+                                instance, GeometryBodyType::Dynamic,
+                                candidateDynamic, candidateStatic.size(),
+                                staticVertexCount, staticTriangleCount,
+                                candidateStaticShapeCount)) {
+                            collectionFailed = true;
+                        }
+                    }
+
+                    PublishResult publishResult = PublishResult::Failed;
+                    const bool candidateStaticReady =
+                        staticReady || refreshStatic;
+                    if (requestEpoch.load(std::memory_order_acquire) !=
+                        roundEpoch) {
+                        publishResult = PublishResult::Stale;
+                    } else if (!collectionFailed && candidateStaticReady) {
+                        publishResult =
+                            Publish(instance, candidateStatic,
+                                    candidateDynamic, refreshStatic,
+                                    roundEpoch);
+                    }
+
+                    if (publishResult == PublishResult::Published) {
+                        staticMeshes = std::move(candidateStatic);
+                        staticShapeCount = candidateStaticShapeCount;
+                        staticReady = true;
+                        if (refreshStatic) {
+                            nextStaticRefresh = now + config.staticRefresh;
+                        }
+                        hasLastGood = true;
+                        lastGoodAt = now;
+                        consecutiveFailures = 0;
+                    } else if (publishResult == PublishResult::Failed) {
+                        if (refreshStatic) {
+                            nextStaticRefresh =
+                                std::min(nextStaticRefresh,
+                                         now + config.dynamicRefresh);
+                        }
+                        recordFailure(now, instance);
+                    }
+                }
+            } catch (...) {
+                const auto now = std::chrono::steady_clock::now();
+                recordFailure(now, activeInstance);
+            }
+
+            std::unique_lock<std::mutex> lock(waitMutex);
+            waitCondition.wait_for(
+                lock, config.dynamicRefresh, [this] {
+                    return !running.load(std::memory_order_acquire) ||
+                           refreshRequested;
+                });
+        }
+    }
+
+    mutable std::mutex lifecycleMutex;
+    mutable std::mutex waitMutex;
+    std::condition_variable waitCondition;
+    std::thread worker;
+    std::atomic<bool> running{false};
+    std::atomic<std::uint64_t> requestEpoch{0};
+    bool refreshRequested = false;
+
+    ReadCallback read;
+    GeometryRuntimeConfig config{};
+    std::shared_ptr<DeviceOwner> device;
+    std::uint64_t generation = 0;
+    std::shared_ptr<const PublishedState> published;
+};
+
+GeometryRuntime::GeometryRuntime() : impl_(std::make_unique<Impl>()) {}
+
+GeometryRuntime::~GeometryRuntime() = default;
+
+bool GeometryRuntime::Start(ReadCallback read, GeometryRuntimeConfig config) {
+    return impl_->Start(std::move(read), std::move(config));
+}
+
+void GeometryRuntime::Stop() noexcept {
+    impl_->Stop();
+}
+
+bool GeometryRuntime::IsRunning() const noexcept {
+    return impl_->IsRunning();
+}
+
+std::uint64_t GeometryRuntime::RequestRefresh() noexcept {
+    return impl_->RequestRefresh();
+}
+
+std::shared_ptr<const GeometrySnapshot> GeometryRuntime::GetSnapshot() const
+    noexcept {
+    return impl_->GetSnapshot();
+}
+
+GeometryVisibility GeometryRuntime::Trace(const GeometryPoint& origin,
+                                          const GeometryPoint& target) const
+    noexcept {
+    return impl_->Trace(origin, target);
+}
+
+GeometryRaycastHit GeometryRuntime::Raycast(const GeometryPoint& origin,
+                                            const GeometryPoint& target) const
+    noexcept {
+    return impl_->Raycast(origin, target);
+}
+
+}  // namespace lengjing::game::native
