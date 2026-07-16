@@ -2,9 +2,11 @@
 
 #include "game/native/CharacterPositionResolver.h"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -61,9 +63,19 @@ void RunPositionResolverTests() {
         true, coordinate, read));
     REQUIRE(coordinate == Coordinate({10.0f, 20.0f, 30.0f}));
 
-    REQUIRE(resolver.Read(
+    REQUIRE(!resolver.Read(
         actor, "NC_BP_DFMCharacter_C", PositionReadMode::Direct,
         false, coordinate, read));
+    REQUIRE(coordinate == Coordinate{});
+
+    REQUIRE(resolver.ReadWithRoot(
+        actor,
+        component,
+        "NC_BP_DFMCharacter_C",
+        PositionReadMode::Direct,
+        false,
+        coordinate,
+        read));
     REQUIRE(coordinate == Coordinate({10.0f, 20.0f, 30.0f}));
 
     constexpr std::uintptr_t decodedRoot = 0x300000;
@@ -112,6 +124,36 @@ void RunPositionResolverTests() {
         false,
         coordinate,
         read));
+    REQUIRE(coordinate == Coordinate{});
+
+    memory.Put(decodedRoot + 0x168, Coordinate{
+        std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f});
+    REQUIRE(resolver.ReadWithRoot(
+        actor,
+        decodedRoot,
+        "NC_BP_DFMCharacter_C",
+        PositionReadMode::Direct,
+        false,
+        coordinate,
+        read));
+    REQUIRE(std::isnan(coordinate[0]));
+
+    memory.Put(decodedRoot + 0x168, Coordinate{});
+    memory.Put(decodedRoot + 0x240, Coordinate{
+        std::numeric_limits<float>::infinity(), 0.0f, 0.0f});
+    REQUIRE(resolver.ReadWithRoot(
+        actor,
+        decodedRoot,
+        "NC_BP_DFMCharacter_C",
+        PositionReadMode::Direct,
+        false,
+        coordinate,
+        read));
+    REQUIRE(std::isinf(coordinate[0]));
+
+    REQUIRE(!resolver.Read(
+        actor, "Pickup_C", PositionReadMode::Direct,
+        true, coordinate, read));
     REQUIRE(coordinate == Coordinate{});
 
     memory.Erase(component + 0x168);

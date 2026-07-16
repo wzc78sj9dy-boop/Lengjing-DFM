@@ -54,26 +54,23 @@ public:
         const bool primary = IsPrimaryCharacter(className);
         const bool directAi = IsDirectAiCharacter(className);
 
+        if (mode == PositionReadMode::Direct) {
+            return decodedRoot != 0 &&
+                ReadDecodedRoot(decodedRoot, coordinate, readBytes);
+        }
+
         bool resolved = false;
         if (mode == PositionReadMode::Indexed && primary) {
             resolved = IndexedCoordinateReader::Read(actor, coordinate, readBytes) &&
                 IsValid(coordinate);
             if (resolved) indexedHistory_[actor] = HistoryEntry{coordinate, now};
             else resolved = Restore(indexedHistory_, actor, now, coordinate);
-        } else if (mode == PositionReadMode::Direct &&
-                   (primary || directAi || decodedRoot != 0)) {
-            std::uintptr_t root = decodedRoot;
-            if (root == 0) ReadComponent(actor, root, readBytes);
-            resolved = ReadDecodedRoot(root, coordinate, readBytes);
         } else if (mode != PositionReadMode::Standard && directAi) {
             resolved = ReadDirect(actor, coordinate, readBytes);
         } else {
             resolved = ReadStandard(actor, coordinate, readBytes);
         }
 
-        if (mode == PositionReadMode::Direct) {
-            return resolved;
-        }
         if (resolved) {
             if (antiFlicker) {
                 positionHistory_[actor] = HistoryEntry{coordinate, now};
@@ -113,12 +110,6 @@ private:
     static bool IsZero(const Coordinate& coordinate) noexcept {
         return coordinate[0] == 0.0f && coordinate[1] == 0.0f &&
             coordinate[2] == 0.0f;
-    }
-
-    static bool IsFinite(const Coordinate& coordinate) noexcept {
-        return std::isfinite(coordinate[0]) &&
-            std::isfinite(coordinate[1]) &&
-            std::isfinite(coordinate[2]);
     }
 
     template <typename ReadBytes, typename T>
@@ -169,8 +160,8 @@ private:
             } else {
                 ReadValue(readBytes, root + offsets[index], coordinate);
             }
-            if (index + 1 == offsets.size()) return IsFinite(coordinate);
-            if (!IsZero(coordinate)) return IsValid(coordinate);
+            if (index + 1 == offsets.size()) return true;
+            if (!IsZero(coordinate)) return true;
         }
         return false;
     }
