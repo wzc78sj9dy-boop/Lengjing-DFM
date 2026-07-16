@@ -1,6 +1,7 @@
 #include "game/aim/AimController.h"
 
 #include "game/aim/AimInputAdapter.h"
+#include "game/aim/TrackingCalculator.h"
 
 #include <algorithm>
 #include <chrono>
@@ -45,11 +46,16 @@ bool TargetAllowed(const TargetSnapshot& target) {
         !std::isfinite(target.worldDistanceMeters)) {
         return false;
     }
-    if (target.screenDistancePixels > std::max(0.0f, target.tuning.rangePixels)) {
+    if (target.enforceFov &&
+        target.screenDistancePixels >
+            std::max(0.0f, target.tuning.rangePixels)) {
         return false;
     }
-    return target.zooming ||
-        target.worldDistanceMeters <= std::max(0.0f, target.tuning.hipDistanceMeters);
+    const float distanceLimit = target.zooming
+        ? target.tuning.adsDistanceMeters
+        : target.tuning.hipDistanceMeters;
+    return !target.enforceDistance ||
+        target.worldDistanceMeters <= std::max(0.0f, distanceLimit);
 }
 
 Vec3 PredictedTarget(const TargetSnapshot& target) {
@@ -81,19 +87,50 @@ struct AimError {
 };
 
 bool CalculateAimError(const TargetSnapshot& target, AimError& output) {
-    const Vec3 predicted = PredictedTarget(target);
-    const float dx = predicted.x - target.view.location.x;
-    const float dy = predicted.y - target.view.location.y;
-    const float dz = predicted.z - target.view.location.z;
-    const float horizontal = std::hypot(dx, dy);
-    if (!std::isfinite(horizontal) || horizontal <= 0.01f ||
-        target.view.halfWidth <= 0.5f ||
+    float targetPitch = 0.0f;
+    float targetYaw = 0.0f;
+    if (target.trajectoryTracking) {
+        const TrackingCommand command = TrackingCalculator::Calculate(
+            true,
+            TrackingPoint{
+                target.view.location.x,
+                target.view.location.y,
+                target.view.location.z,
+            },
+            TrackingPoint{
+                target.world.x,
+                target.world.y,
+                target.world.z,
+            },
+            TrackingPoint{
+                target.velocity.x,
+                target.velocity.y,
+                target.velocity.z,
+            },
+            target.tuning.trackingProjectileSpeed,
+            target.tuning.trackingGravity);
+        if (command.flag == 0) return false;
+        targetPitch = command.pitch;
+        targetYaw = command.yaw;
+    } else {
+        const Vec3 predicted = PredictedTarget(target);
+        const float dx = predicted.x - target.view.location.x;
+        const float dy = predicted.y - target.view.location.y;
+        const float dz = predicted.z - target.view.location.z;
+        const float horizontal = std::hypot(dx, dy);
+        if (!std::isfinite(horizontal) || horizontal <= 0.01f) {
+            return false;
+        }
+        targetPitch = std::atan2(dz, horizontal) * 180.0f / kPi;
+        targetYaw = std::atan2(dy, dx) * 180.0f / kPi;
+    }
+    if (target.view.halfWidth <= 0.5f ||
         !std::isfinite(target.view.fieldOfView)) {
         return false;
     }
-    const float targetPitch = std::atan2(dz, horizontal) * 180.0f / kPi;
-    const float targetYaw = std::atan2(dy, dx) * 180.0f / kPi;
-    const float smoothing = std::max(0.01f, target.tuning.smoothing);
+    const float smoothing = target.trajectoryTracking
+        ? 1.0f
+        : std::max(0.01f, target.tuning.smoothing);
     const float divisor = smoothing * 100.0f;
     const float scale = (target.view.halfWidth * 2.0f /
         std::clamp(target.view.fieldOfView, 5.0f, 170.0f)) / divisor;
@@ -276,7 +313,7 @@ void AimController::WorkerMain() {
             }
         }
 
-        if (target.curvedMotion) {
+        if (target.curvedMotion && !target.trajectoryTracking) {
             const float length = std::hypot(error.pitch, error.yaw);
             if (length > 0.001f) {
                 const float progress = std::clamp(

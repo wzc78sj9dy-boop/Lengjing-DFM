@@ -185,6 +185,9 @@ struct RadarSettings {
 struct AimTuning {
     float rangePixels = 200.0f;
     float hipDistanceMeters = 50.0f;
+    float adsDistanceMeters = 100.0f;
+    float trackingProjectileSpeed = 500.0f;
+    float trackingGravity = 5.24f;
     float hipSpeed = 30.0f;
     float adsSpeed = 30.0f;
     float horizontalSpeed = 70.0f;
@@ -211,6 +214,12 @@ struct AimSettings {
     bool ignoreDowned = false;
     bool persistentLock = false;
     bool curvedMotion = false;
+    bool trajectoryTracking = false;
+    bool requireVisibility = false;
+    bool rejectTargetState = false;
+    bool enforceFov = true;
+    bool enforceDistance = true;
+    int hitPercentage = 100;
     bool drawRange = false;
     bool drawTargetRay = false;
     int triggerMode = 0;

@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_executable(lengjing_tests
+    actor_record_resolver_tests.cpp
     config_tests.cpp
     coordinate_reader_tests.cpp
     hud_map_tests.cpp
@@ -16,6 +17,8 @@ add_executable(lengjing_tests
     projectile_speed_tests.cpp
     runtime_tests.cpp
     threat_catalog_tests.cpp
+    tracking_bone_selector_tests.cpp
+    tracking_calculator_tests.cpp
     touch_transform_tests.cpp
     test_main.cpp
     ../jni/src/config/LocalConfig.cpp

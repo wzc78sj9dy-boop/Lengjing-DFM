@@ -929,6 +929,11 @@ void RenderAim(UiModel& model, UiActions& actions) {
         Mark(actions, SettingsDomain::Aim, GridToggle("倒地不瞄", aim.ignoreDowned));
         Mark(actions, SettingsDomain::Aim, GridToggle("持续锁定", aim.persistentLock));
         Mark(actions, SettingsDomain::Aim, GridToggle("曲线瞄准", aim.curvedMotion));
+        Mark(actions, SettingsDomain::Aim, GridToggle("子弹追踪", aim.trajectoryTracking));
+        Mark(actions, SettingsDomain::Aim, GridToggle("可见检测", aim.requireVisibility));
+        Mark(actions, SettingsDomain::Aim, GridToggle("目标状态过滤", aim.rejectTargetState));
+        Mark(actions, SettingsDomain::Aim, GridToggle("范围限制", aim.enforceFov));
+        Mark(actions, SettingsDomain::Aim, GridToggle("距离限制", aim.enforceDistance));
         Mark(actions, SettingsDomain::Aim, GridToggle("范围圆圈", aim.drawRange));
         Mark(actions, SettingsDomain::Aim, GridToggle("目标射线", aim.drawTargetRay));
         ImGui::EndTable();
@@ -950,6 +955,8 @@ void RenderAim(UiModel& model, UiActions& actions) {
     Mark(actions, SettingsDomain::Aim, Combo("目标算法", aim.targetAlgorithm, kTargetAlgorithms));
     Mark(actions, SettingsDomain::Aim, Combo("腰射部位", tuning.hipBone, kAimBones));
     Mark(actions, SettingsDomain::Aim, Combo("开镜部位", tuning.adsBone, kAimBones));
+    Mark(actions, SettingsDomain::Aim, SliderIntRow(
+        "命中率", &aim.hitPercentage, 0, 100, "%d%%"));
 
     if (tuning.hipBone == 6 || tuning.adsBone == 6) {
         SectionTitle("随机部位");
@@ -966,6 +973,12 @@ void RenderAim(UiModel& model, UiActions& actions) {
         "瞄准范围", &tuning.rangePixels, 0.0f, 1314.0f, "%.0f"));
     Mark(actions, SettingsDomain::Aim, SliderFloatRow(
         "腰射距离", &tuning.hipDistanceMeters, 5.0f, 300.0f, "%.0f 米"));
+    Mark(actions, SettingsDomain::Aim, SliderFloatRow(
+        "开镜距离", &tuning.adsDistanceMeters, 5.0f, 300.0f, "%.0f 米"));
+    Mark(actions, SettingsDomain::Aim, SliderFloatRow(
+        "追踪弹速", &tuning.trackingProjectileSpeed, 1.0f, 5000.0f, "%.0f"));
+    Mark(actions, SettingsDomain::Aim, SliderFloatRow(
+        "重力参数", &tuning.trackingGravity, 0.0f, 100.0f, "%.2f"));
 
     SectionTitle("触摸区域");
     Mark(actions, SettingsDomain::Aim, Toggle("显示触摸范围", aim.showTouchArea));

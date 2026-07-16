@@ -39,6 +39,9 @@ struct TargetSnapshot {
     bool firing = false;
     bool zooming = false;
     bool curvedMotion = false;
+    bool trajectoryTracking = false;
+    bool enforceFov = true;
+    bool enforceDistance = true;
     int triggerMode = 0;
     int orientation = 0;
     float touchRange = 300.0f;

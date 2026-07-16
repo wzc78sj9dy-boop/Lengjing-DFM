@@ -5,6 +5,7 @@
 
 int main() {
     try {
+        RunActorRecordResolverTests();
         RunConfigTests();
         RunCoordinateReaderTests();
         RunHudMapTests();
@@ -15,6 +16,8 @@ int main() {
         RunProjectileSpeedTests();
         RunRuntimeTests();
         RunThreatCatalogTests();
+        RunTrackingBoneSelectorTests();
+        RunTrackingCalculatorTests();
         RunTouchTransformTests();
         std::cout << "all tests passed\n";
         return 0;

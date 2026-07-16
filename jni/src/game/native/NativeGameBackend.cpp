@@ -1,8 +1,10 @@
 #include "game/GameBackend.h"
 #include "game/aim/AimController.h"
+#include "game/aim/TrackingCalculator.h"
 #include "game/data/CustomItemCatalog.h"
 #include "game/data/ItemCatalog.h"
 #include "game/data/ThreatCatalog.h"
+#include "game/native/ActorRecordResolver.h"
 #include "game/native/CharacterPositionResolver.h"
 #include "game/native/GeometryRuntime.h"
 #include "game/native/HudMapProjection.h"
@@ -18,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -81,6 +84,14 @@ struct Transform {
 };
 static_assert(sizeof(Transform) == 48, "Transform layout mismatch");
 
+struct PackedTransform {
+    Quaternion rotation{};
+    Vec3 translation{};
+    Vec3 scale{1.0f, 1.0f, 1.0f};
+    std::array<std::uint8_t, 8> trailing{};
+};
+static_assert(sizeof(PackedTransform) == 48, "Packed transform layout mismatch");
+
 struct Matrix4 {
     float value[4][4]{};
 };
@@ -97,21 +108,32 @@ struct VersionLayout {
     std::uintptr_t namePoolOffset = 0;
     std::uintptr_t worldOffset = 0;
     std::array<std::uintptr_t, 2> geometryInstancePointerOffsets{};
+    native::ActorRecordLayout actorRecordLayout{};
 };
 
 constexpr std::array<VersionLayout, 3> kVersionLayouts{{
     {"com.tencent.tmgp.dfm",
      0x1CDCB8C0ULL,
      0x1D0E8668ULL,
-     {0x1C3C5368ULL, 0x1AF01C68ULL}},
+     {0x1C3C5368ULL, 0x1AF01C68ULL},
+     {0x0EEBDB14ULL,
+      0x1D0A6908ULL,
+      0x180,
+      0x3D0,
+      1000,
+      24,
+      10000,
+      3000}},
     {"com.proxima.dfm",
      0x1D0F4800ULL,
      0x1D4115A8ULL,
-     {0x1B1C0D68ULL, 0}},
+     {0x1B1C0D68ULL, 0},
+     {0, 0, 0, 0, 0, 0, 0, 0}},
     {"com.garena.game.df",
      0x1CF7A440ULL,
      0x1D2971F8ULL,
-     {0x1B0669A8ULL, 0}},
+     {0x1B0669A8ULL, 0},
+     {0, 0, 0, 0, 0, 0, 0, 0}},
 }};
 
 constexpr std::array<int, 15> kBoneIndices{
@@ -209,6 +231,26 @@ float Length(const Vec3& value) {
 
 float HorizontalLength(const Vec3& value) {
     return std::hypot(value.x, value.y);
+}
+
+std::int32_t TrackingAcquisitionDistanceMeters(const Vec3& value) {
+    const double x = static_cast<double>(value.x);
+    const double y = static_cast<double>(value.y);
+    const double z = static_cast<double>(value.z);
+    double squared = x * x;
+    squared = std::fma(y, y, squared);
+    squared = std::fma(z, z, squared);
+    const double length = std::sqrt(squared);
+    constexpr std::uint64_t scaleBits = 0x3F847AE147AE147BULL;
+    double scale = 0.0;
+    std::memcpy(&scale, &scaleBits, sizeof(scale));
+    const double meters = length * scale;
+    if (!std::isfinite(meters) ||
+        meters < static_cast<double>(std::numeric_limits<std::int32_t>::min()) ||
+        meters > static_cast<double>(std::numeric_limits<std::int32_t>::max())) {
+        return std::numeric_limits<std::int32_t>::max();
+    }
+    return static_cast<std::int32_t>(meters);
 }
 
 bool IsAimingAtPosition(const Vec3& actorPosition,
@@ -357,14 +399,26 @@ Matrix4 TransformToMatrix(const Transform& transform) {
     return matrix;
 }
 
+Matrix4 TransformToMatrix(const PackedTransform& transform) {
+    Transform value{};
+    value.rotation = transform.rotation;
+    value.translation = transform.translation;
+    value.scale = transform.scale;
+    return TransformToMatrix(value);
+}
+
 Matrix4 Multiply(const Matrix4& left, const Matrix4& right) {
     Matrix4 result{};
     for (int row = 0; row < 4; ++row) {
         for (int column = 0; column < 4; ++column) {
-            for (int index = 0; index < 4; ++index) {
-                result.value[row][column] +=
-                    left.value[row][index] * right.value[index][column];
+            float value = left.value[row][0] * right.value[0][column];
+            for (int index = 1; index < 4; ++index) {
+                value = std::fma(
+                    left.value[row][index],
+                    right.value[index][column],
+                    value);
             }
+            result.value[row][column] = value;
         }
     }
     return result;
@@ -862,10 +916,10 @@ public:
             (settings.visual.enabled &&
              (settings.visual.throwableWarning ||
               settings.visual.throwableTrajectory));
-        std::vector<std::uintptr_t> actorAddresses =
-            CollectActorAddresses(context, scanWorldObjects);
+        std::vector<RuntimeActorRecord> actorRecords =
+            CollectActorRecords(context, scanWorldObjects);
         std::unordered_set<std::uintptr_t> seenThreats;
-        if (actorAddresses.empty()) {
+        if (actorRecords.empty()) {
             error = "数据链等待：人物列表暂不可读";
             FinalizeThreatSignals(settings, frame);
             PublishAimFrame(settings.aim, aimTuning, context, aimCandidates, frame);
@@ -876,10 +930,11 @@ public:
             return true;
         }
 
-        frame.players.reserve(std::min<std::size_t>(actorAddresses.size(), 256));
+        frame.players.reserve(std::min<std::size_t>(actorRecords.size(), 256));
         std::size_t validActorCount = 0;
         std::size_t decodedNameCount = 0;
-        for (const std::uintptr_t actor : actorAddresses) {
+        for (const RuntimeActorRecord& actorRecord : actorRecords) {
+            const std::uintptr_t actor = actorRecord.actor;
             if (!IsValidPointer(actor) || actor == context.localPawn) continue;
             ++validActorCount;
 
@@ -933,6 +988,7 @@ public:
             Vec3 position{};
             const bool coordinateAvailable = ReadCharacterPosition(
                 actor,
+                actorRecord.root,
                 className,
                 positionMode,
                 settings.visual.antiFlicker,
@@ -953,6 +1009,8 @@ public:
             const Vec3 delta = Subtract(position, context.localPosition);
             const float distanceMeters = Length(delta) * 0.01f;
             const float horizontalDistanceMeters = HorizontalLength(delta) * 0.01f;
+            const std::int32_t trackingAcquisitionDistance =
+                TrackingAcquisitionDistanceMeters(delta);
             if (!std::isfinite(distanceMeters) || distanceMeters < 0.0f) continue;
             if (!std::isfinite(horizontalDistanceMeters) ||
                 horizontalDistanceMeters < 0.0f) {
@@ -961,9 +1019,20 @@ public:
 
             const bool combatModeActive = settings.visual.combatMode &&
                 (context.firing || context.zooming);
+            std::uint8_t targetState = 0;
+            if (settings.aim.rejectTargetState) {
+                const std::uintptr_t targetStateRoot =
+                    ReadPointer(actor + 0x1030);
+                if (IsValidPointer(targetStateRoot)) {
+                    ReadValue(targetStateRoot + 0x2A1, targetState);
+                }
+            }
             const bool aimEligible = aimActive && enemyEligible &&
                 !(bot && settings.aim.ignoreBots) &&
-                !(health.downed && settings.aim.ignoreDowned);
+                !(health.downed && settings.aim.ignoreDowned) &&
+                (!settings.aim.rejectTargetState || targetState == 0) &&
+                (!settings.aim.trajectoryTracking ||
+                 trackingAcquisitionDistance <= 100);
             const bool visualEligible = !health.downed || settings.visual.downedPlayer;
             if (!visualEligible && !aimEligible) continue;
             if (bot) ++frame.botCount;
@@ -997,7 +1066,11 @@ public:
             Vec3 actorForward{};
             float actorHeadingRadians = 0.0f;
             const bool actorFacingValid = facingNeeded &&
-                ReadActorFacing(actor, actorForward, actorHeadingRadians);
+                ReadActorFacing(
+                    actor,
+                    actorRecord.mesh,
+                    actorForward,
+                    actorHeadingRadians);
             if (radarInRange && !(bot && settings.visual.filterBots)) {
                 AddRadarBlip(
                     context,
@@ -1145,12 +1218,20 @@ public:
                    settings.visual.playerViewRay) &&
                   visualEligible && drawingInRange && onScreen)) {
                 boneFrameReady = ReadBoneFrame(
-                    actor, context.view, settings.visual.antiFlicker, boneFrame);
+                    actor,
+                    actorRecord.root,
+                    actorRecord.mesh,
+                    actorRecord.decoded,
+                    context.view,
+                    settings.visual.antiFlicker,
+                    boneFrame);
             }
             native::GeometryVisibility playerVisibility = actorVisibility;
             if (boneFrameReady &&
                 (settings.visual.visibilityColor ||
-                 (aimEligible && settings.aim.missMode))) {
+                 (aimEligible &&
+                  (settings.aim.missMode ||
+                   settings.aim.requireVisibility)))) {
                 playerVisibility = EvaluateBoneVisibility(
                     context.view.location, boneFrame);
             }
@@ -1241,27 +1322,114 @@ public:
                         aimWorld,
                         aimScreen,
                         aimBone)) {
+                    if (settings.aim.trajectoryTracking) {
+                        std::int32_t meshType = 0;
+                        if (!IsValidPointer(actorRecord.mesh) ||
+                            !ReadValue(actorRecord.mesh + 0x738, meshType) ||
+                            meshType < 1 || meshType > 100) {
+                            meshType = 0;
+                            if (IsValidPointer(actorRecord.mesh)) {
+                                ReadValue(actorRecord.mesh + 0x748, meshType);
+                            }
+                        }
+                        const int selectedBone =
+                            aimBone >= 0 &&
+                                aimBone < static_cast<int>(kBoneIndices.size())
+                            ? kBoneIndices[static_cast<std::size_t>(aimBone)]
+                            : -1;
+                        const int endpointBone = meshType == 66 ? 11 : 32;
+                        aimWorld.z -= selectedBone == endpointBone
+                            ? 15.0f
+                            : 10.0f;
+                    }
+                    Vec3 velocity{};
+                    if (settings.aim.trajectoryTracking) {
+                        ReadValue(actor + 0x1CB4, velocity);
+                        if (!IsFinite(velocity)) velocity = Vec3{};
+                    } else {
+                        const std::uintptr_t movement =
+                            ReadPointer(actor + 0x3D8);
+                        if (IsValidPointer(movement)) {
+                            ReadValue(movement + 0x2B0, velocity);
+                        }
+                        if (!IsFinite(velocity)) velocity = Vec3{};
+                    }
+                    float candidateDistanceMeters = distanceMeters;
+                    bool trackingProjectionReady = true;
+                    if (settings.aim.trajectoryTracking) {
+                        const aim::TrackingPrediction prediction =
+                            aim::TrackingCalculator::Predict(
+                                aim::TrackingPoint{
+                                    context.firingOrigin.x,
+                                    context.firingOrigin.y,
+                                    context.firingOrigin.z,
+                                },
+                                aim::TrackingPoint{
+                                    aimWorld.x,
+                                    aimWorld.y,
+                                    aimWorld.z,
+                                },
+                                aim::TrackingPoint{
+                                    velocity.x,
+                                    velocity.y,
+                                    velocity.z,
+                                },
+                                aimTuning.trackingProjectileSpeed,
+                                aimTuning.trackingGravity);
+                        candidateDistanceMeters = static_cast<float>(
+                            prediction.distanceMeters);
+                        trackingProjectionReady = prediction.valid &&
+                            ProjectToScreen(
+                                Vec3{
+                                    prediction.point.x,
+                                    prediction.point.y,
+                                    prediction.point.z,
+                                },
+                                context.view,
+                                options_.screenWidth,
+                                options_.screenHeight,
+                                aimScreen);
+                    }
                     const float centerX = static_cast<float>(options_.screenWidth) * 0.5f;
                     const float centerY = static_cast<float>(options_.screenHeight) * 0.5f;
                     const float screenDistance = std::hypot(
                         aimScreen.x - centerX, aimScreen.y - centerY);
-                    const bool distanceAllowed = context.zooming ||
-                        distanceMeters <= aimTuning.hipDistanceMeters;
-                    if (std::isfinite(screenDistance) &&
-                        screenDistance <= aimTuning.rangePixels && distanceAllowed) {
-                        Vec3 velocity{};
-                        const std::uintptr_t movement = ReadPointer(actor + 0x3D8);
-                        if (IsValidPointer(movement)) {
-                            ReadValue(movement + 0x2B0, velocity);
-                            if (!IsFinite(velocity)) velocity = Vec3{};
+                    float selectionDistance = screenDistance;
+                    if (settings.aim.trajectoryTracking) {
+                        Vec2 rootScreen{};
+                        trackingProjectionReady = trackingProjectionReady &&
+                            ProjectToScreen(
+                                position,
+                                context.view,
+                                options_.screenWidth,
+                                options_.screenHeight,
+                                rootScreen);
+                        if (trackingProjectionReady) {
+                            selectionDistance = std::hypot(
+                                rootScreen.x - centerX,
+                                rootScreen.y - centerY);
                         }
+                    }
+                    const float distanceLimit = context.zooming
+                        ? aimTuning.adsDistanceMeters
+                        : aimTuning.hipDistanceMeters;
+                    const bool distanceAllowed =
+                        !settings.aim.enforceDistance ||
+                        candidateDistanceMeters <= distanceLimit;
+                    const bool rangeAllowed =
+                        !settings.aim.enforceFov ||
+                        screenDistance <= aimTuning.rangePixels;
+                    if (trackingProjectionReady &&
+                        std::isfinite(screenDistance) &&
+                        rangeAllowed && distanceAllowed) {
                         aimCandidates.push_back(AimCandidate{
                             identity,
                             aimWorld,
                             velocity,
                             aimScreen,
                             screenDistance,
-                            distanceMeters,
+                            candidateDistanceMeters,
+                            selectionDistance,
                             aimBone,
                         });
                     }
@@ -1295,7 +1463,8 @@ public:
             visual.drawVitals = settings.visual.health;
             visual.drawPlate = settings.visual.playerName || settings.visual.distance ||
                 settings.visual.operatorName || settings.visual.heldWeapon ||
-                settings.visual.armorLevel || settings.visual.armorDurability;
+                settings.visual.armorLevel || settings.visual.armorDurability ||
+                settings.visual.health;
             visual.drawSkeleton = settings.visual.skeleton &&
                 distanceMeters <= settings.visual.skeletonDistanceMeters;
             visual.tracerOrigin = ImVec2(
@@ -1366,7 +1535,13 @@ public:
             if (visual.drawSkeleton) {
                 if (!boneFrameReady) {
                     boneFrameReady = ReadBoneFrame(
-                        actor, context.view, settings.visual.antiFlicker, boneFrame);
+                        actor,
+                        actorRecord.root,
+                        actorRecord.mesh,
+                        actorRecord.decoded,
+                        context.view,
+                        settings.visual.antiFlicker,
+                        boneFrame);
                 }
                 if (boneFrameReady) BuildSkeletonVisual(boneFrame, visual.skeleton);
                 if (visual.skeleton.joints.empty()) visual.drawSkeleton = false;
@@ -1427,6 +1602,13 @@ public:
     }
 
 private:
+    struct RuntimeActorRecord {
+        std::uintptr_t actor = 0;
+        std::uintptr_t root = 0;
+        std::uintptr_t mesh = 0;
+        bool decoded = false;
+    };
+
     struct FrameContext {
         std::uintptr_t world = 0;
         std::uintptr_t level = 0;
@@ -1437,6 +1619,7 @@ private:
         std::uintptr_t cameraManager = 0;
         std::uintptr_t namePool = 0;
         Vec3 localPosition{};
+        Vec3 firingOrigin{};
         CameraView view{};
         std::int32_t localTeam = -1;
         std::int32_t mapBuildId = 0;
@@ -1445,6 +1628,7 @@ private:
         bool zooming = false;
         std::uint64_t weaponId = 0;
         std::uintptr_t weaponRoot = 0;
+        std::vector<RuntimeActorRecord> decodedActors;
     };
 
     struct HealthState {
@@ -1489,6 +1673,7 @@ private:
         Vec2 screen{};
         float screenDistancePixels = 0.0f;
         float worldDistanceMeters = 0.0f;
+        float selectionDistancePixels = 0.0f;
         int boneIndex = -1;
     };
 
@@ -1506,7 +1691,8 @@ private:
               settings.visual.visibilityColor)) ||
             (settings.aim.enabled &&
              aimEnabled_.load(std::memory_order_acquire) &&
-             settings.aim.missMode);
+             (settings.aim.missMode ||
+              settings.aim.requireVisibility));
         if (!needed) {
             if (geometryRuntime_.IsRunning()) geometryRuntime_.Stop();
             geometrySnapshotReady_ = false;
@@ -1595,14 +1781,83 @@ private:
         return ReadValue(address, value) && IsValidPointer(value) ? value : 0;
     }
 
+    std::vector<RuntimeActorRecord> CollectDecodedActorRecords() {
+        std::vector<RuntimeActorRecord> result;
+        if (layout_.actorRecordLayout.taggedContainerOffset == 0 ||
+            layout_.actorRecordLayout.plainArrayOffset == 0 ||
+            memory_ == nullptr) {
+            return result;
+        }
+
+        auto readBytes = [this](std::uintptr_t address,
+                                void* destination,
+                                std::size_t size) {
+            return memory_ != nullptr && IsValidReadAddress(address) &&
+                size != 0 && size <= kMaximumRemoteAddress - address &&
+                memory_->Read(address, destination, size);
+        };
+        const auto validatePointer = [](std::uintptr_t address) {
+            return IsValidPointer(address);
+        };
+        const native::ActorRecordResolver resolver(
+            layout_.actorRecordLayout);
+        const std::optional<native::ActorArrayDescriptor> array =
+            resolver.Locate(moduleBase_, readBytes, validatePointer);
+        if (!array.has_value()) return result;
+
+        result.reserve(std::min<std::uint32_t>(array->count, 10000));
+        std::unordered_set<std::uintptr_t> seen;
+        seen.reserve(result.capacity());
+        for (std::uint32_t index = 0;
+             index < array->count && result.size() < 10000;
+             ++index) {
+            const std::optional<native::ActorAddressRecord> record =
+                resolver.ReadRecord(*array, index, readBytes);
+            if (!record.has_value() ||
+                !IsValidPointer(record->actor) ||
+                !IsValidPointer(record->root) ||
+                !IsValidPointer(record->mesh) ||
+                !seen.insert(record->actor).second) {
+                continue;
+            }
+            result.push_back(RuntimeActorRecord{
+                record->actor,
+                record->root,
+                record->mesh,
+                true,
+            });
+        }
+        return result;
+    }
+
+    std::vector<RuntimeActorRecord> CollectActorRecords(
+        const FrameContext& context,
+        bool includeStreamingLevels) {
+        std::vector<RuntimeActorRecord> result = context.decodedActors;
+        std::unordered_set<std::uintptr_t> seen;
+        seen.reserve(result.size() +
+            static_cast<std::size_t>(std::max(context.actorCount, 0)));
+        for (const RuntimeActorRecord& record : result) {
+            seen.insert(record.actor);
+        }
+        const std::vector<std::uintptr_t> ordinary =
+            CollectActorAddresses(context, includeStreamingLevels);
+        result.reserve(result.size() + ordinary.size());
+        for (const std::uintptr_t actor : ordinary) {
+            if (!seen.insert(actor).second) continue;
+            result.push_back(RuntimeActorRecord{actor, 0, 0, false});
+        }
+        return result;
+    }
+
     std::vector<std::uintptr_t> CollectActorAddresses(
         const FrameContext& context,
         bool includeStreamingLevels) {
         constexpr std::size_t kMaximumCollectedActors = 100000;
         std::vector<std::uintptr_t> result;
         std::unordered_set<std::uintptr_t> seen;
-        result.reserve(static_cast<std::size_t>(context.actorCount));
-        seen.reserve(static_cast<std::size_t>(context.actorCount));
+        result.reserve(static_cast<std::size_t>(std::max(context.actorCount, 0)));
+        seen.reserve(static_cast<std::size_t>(std::max(context.actorCount, 0)));
 
         const auto appendArray = [&](const ActorArrayHeader& header,
                                      std::int32_t maximumCount) {
@@ -2166,15 +2421,22 @@ private:
         }
 
         ActorArrayHeader actors{};
-        if (!ReadValue(context.level + 0x1F0, actors) ||
-            !IsValidPointer(actors.data) || actors.count <= 0 ||
-            actors.count > kMaximumActorCount || actors.capacity < actors.count) {
+        const bool ordinaryActorsAvailable =
+            ReadValue(context.level + 0x1F0, actors) &&
+            IsValidPointer(actors.data) && actors.count > 0 &&
+            actors.count <= kMaximumActorCount &&
+            actors.capacity >= actors.count;
+        if (ordinaryActorsAvailable) {
+            context.actorArray = actors.data;
+            context.actorCount = actors.count;
+        }
+        if (positionMode == native::PositionReadMode::Direct) {
+            context.decodedActors = CollectDecodedActorRecords();
+        }
+        if (!ordinaryActorsAvailable && context.decodedActors.empty()) {
             diagnostic = "数据链等待：人物数组暂不可读";
             return false;
         }
-        context.actorArray = actors.data;
-        context.actorCount = actors.count;
-
         const std::uintptr_t gameInstance = ReadPointer(context.world + 0x190);
         const std::uintptr_t localPlayers = ReadPointer(gameInstance + 0x38);
         const std::uintptr_t localPlayer = ReadPointer(localPlayers);
@@ -2237,13 +2499,27 @@ private:
         }
         lastView_ = context.view;
         lastViewValid_ = true;
+        context.firingOrigin = ResolveTrackingOrigin(context);
 
         std::int32_t localNameIndex = -1;
         ReadValue(context.localPawn + 0x1C, localNameIndex);
         const std::string localClassName =
             DecodeName(localNameIndex, context.namePool);
+        std::uintptr_t localRoot = 0;
+        if (positionMode == native::PositionReadMode::Direct) {
+            const auto localRecord = std::find_if(
+                context.decodedActors.begin(),
+                context.decodedActors.end(),
+                [&context](const RuntimeActorRecord& record) {
+                    return record.actor == context.localPawn;
+                });
+            if (localRecord != context.decodedActors.end()) {
+                localRoot = localRecord->root;
+            }
+        }
         if (!ReadCharacterPosition(
                 context.localPawn,
+                localRoot,
                 localClassName,
                 positionMode,
                 antiFlicker,
@@ -2288,6 +2564,7 @@ private:
 
     bool ReadCharacterPosition(
         std::uintptr_t actor,
+        std::uintptr_t decodedRoot,
         std::string_view className,
         native::PositionReadMode mode,
         bool antiFlicker,
@@ -2300,8 +2577,9 @@ private:
                 memory_->Read(address, destination, size);
         };
         native::CharacterPositionResolver::Coordinate coordinate{};
-        if (!characterPositions_.Read(
+        if (!characterPositions_.ReadWithRoot(
                 actor,
+                decodedRoot,
                 className,
                 mode,
                 antiFlicker,
@@ -2314,11 +2592,14 @@ private:
     }
 
     bool ReadActorFacing(std::uintptr_t actor,
+                         std::uintptr_t decodedMesh,
                          Vec3& forward,
                          float& headingRadians) {
         forward = Vec3{};
         headingRadians = 0.0f;
-        const std::uintptr_t mesh = ReadPointer(actor + 0x3D0);
+        const std::uintptr_t mesh = IsValidPointer(decodedMesh)
+            ? decodedMesh
+            : ReadPointer(actor + 0x3D0);
         if (!IsValidPointer(mesh)) return false;
 
         Transform transform{};
@@ -2605,7 +2886,56 @@ private:
         return native::GeometryVisibility::Unavailable;
     }
 
+    static bool IsZeroOrMinusNinety(const Vec3& value) {
+        return value.x == 0.0f && value.y == 0.0f &&
+            (value.z == 0.0f || value.z == -90.0f);
+    }
+
+    bool RebuildDecodedComponentTransform(
+        std::uintptr_t root,
+        std::uintptr_t mesh,
+        PackedTransform& transform) {
+        transform = PackedTransform{};
+        if (!IsValidPointer(root) || !IsValidPointer(mesh) ||
+            !ReadValue(mesh + 0x210, transform)) {
+            return false;
+        }
+
+        Vec3 position{};
+        ReadValue(root + 0x168, position);
+        bool finalFallback = false;
+        if (IsZeroOrMinusNinety(position)) {
+            ReadValue(root + 0x220, position);
+            finalFallback = true;
+        }
+        float verticalAdjustment = 0.0f;
+        float yaw = 0.0f;
+        ReadValue(root + 0x5A0, verticalAdjustment);
+        ReadValue(root + 0x17C, yaw);
+        position.z -= verticalAdjustment;
+
+        constexpr float kHalfDegreesToRadians =
+            0.008726646259971648f;
+        constexpr float kQuarterTurn = 0.7853981633974483f;
+        const float angle = yaw * kHalfDegreesToRadians -
+            (finalFallback ? 0.0f : kQuarterTurn);
+        transform.translation = position;
+        transform.rotation = Quaternion{
+            0.0f,
+            0.0f,
+            std::sin(angle),
+            std::cos(angle),
+        };
+        transform.scale = Vec3{1.0f, 1.0f, 1.0f};
+        return IsFinite(transform.translation) &&
+            std::isfinite(transform.rotation.z) &&
+            std::isfinite(transform.rotation.w);
+    }
+
     bool ReadBoneFrame(std::uintptr_t actor,
+                       std::uintptr_t decodedRoot,
+                       std::uintptr_t decodedMesh,
+                       bool decoded,
                        const CameraView& view,
                        bool antiFlicker,
                        BoneFrame& frame) {
@@ -2616,11 +2946,16 @@ private:
         bool cacheFresh = antiFlicker && cached != boneCache_.end() &&
             now - cached->second.lastUpdatedAt <= kCacheLifetime;
 
-        std::uintptr_t mesh = ReadPointer(actor + 0x3D0);
+        std::uintptr_t mesh = IsValidPointer(decodedMesh)
+            ? decodedMesh
+            : ReadPointer(actor + 0x3D0);
         if (!IsValidPointer(mesh) && cacheFresh) mesh = cached->second.mesh;
         std::uintptr_t boneArray = IsValidPointer(mesh)
             ? ReadPointer(mesh + 0x730)
             : 0;
+        if (!IsValidPointer(boneArray) && IsValidPointer(mesh)) {
+            boneArray = ReadPointer(mesh + 0x740);
+        }
         if (!IsValidPointer(boneArray) && cacheFresh) {
             boneArray = cached->second.boneArray;
         }
@@ -2628,17 +2963,39 @@ private:
         std::array<Vec3, kBoneIndices.size()> currentWorld{};
         std::array<bool, kBoneIndices.size()> currentValid{};
         bool anyCurrent = false;
-        Transform componentTransform{};
+        Matrix4 componentMatrix{};
+        bool componentReady = false;
+        if (decoded && IsValidPointer(decodedRoot) && IsValidPointer(mesh)) {
+            PackedTransform componentTransform{};
+            componentReady = RebuildDecodedComponentTransform(
+                decodedRoot, mesh, componentTransform);
+            if (componentReady) {
+                componentMatrix = TransformToMatrix(componentTransform);
+            }
+        } else if (IsValidPointer(mesh)) {
+            Transform componentTransform{};
+            componentReady = ReadValue(mesh + 0x210, componentTransform);
+            if (componentReady) {
+                componentMatrix = TransformToMatrix(componentTransform);
+            }
+        }
         if (IsValidPointer(mesh) && IsValidPointer(boneArray) &&
-            ReadValue(mesh + 0x210, componentTransform)) {
-            const Matrix4 componentMatrix = TransformToMatrix(componentTransform);
+            componentReady) {
             for (std::size_t index = 0; index < kBoneIndices.size(); ++index) {
-                Transform boneTransform{};
                 const std::uintptr_t address = boneArray +
                     static_cast<std::uintptr_t>(kBoneIndices[index]) * sizeof(Transform);
-                if (!ReadValue(address, boneTransform)) continue;
-                Vec3 world = MatrixTranslation(
-                    Multiply(TransformToMatrix(boneTransform), componentMatrix));
+                Matrix4 boneMatrix{};
+                if (decoded) {
+                    PackedTransform boneTransform{};
+                    if (!ReadValue(address, boneTransform)) continue;
+                    boneMatrix = TransformToMatrix(boneTransform);
+                } else {
+                    Transform boneTransform{};
+                    if (!ReadValue(address, boneTransform)) continue;
+                    boneMatrix = TransformToMatrix(boneTransform);
+                }
+                Vec3 world = MatrixTranslation(Multiply(
+                    boneMatrix, componentMatrix));
                 if (index == 0) world.z += 7.0f;
                 if (!IsFinite(world)) continue;
                 currentWorld[index] = world;
@@ -2834,6 +3191,12 @@ private:
         tuning.rangePixels = std::clamp(finiteOr(tuning.rangePixels, 200.0f), 0.0f, 4000.0f);
         tuning.hipDistanceMeters = std::clamp(
             finiteOr(tuning.hipDistanceMeters, 50.0f), 0.0f, 1000.0f);
+        tuning.adsDistanceMeters = std::clamp(
+            finiteOr(tuning.adsDistanceMeters, 100.0f), 0.0f, 1000.0f);
+        tuning.trackingProjectileSpeed = std::clamp(
+            finiteOr(tuning.trackingProjectileSpeed, 500.0f), 1.0f, 5000.0f);
+        tuning.trackingGravity = std::clamp(
+            finiteOr(tuning.trackingGravity, 5.24f), 0.0f, 100.0f);
         tuning.hipSpeed = std::clamp(finiteOr(tuning.hipSpeed, 30.0f), 1.0f, 100.0f);
         tuning.adsSpeed = std::clamp(finiteOr(tuning.adsSpeed, 30.0f), 1.0f, 100.0f);
         tuning.horizontalSpeed = std::clamp(
@@ -2867,12 +3230,19 @@ private:
                         int preferredBone,
                         Vec3& world,
                         Vec2& screen,
-                        int& boneIndex) const {
+        int& boneIndex) const {
         const auto selectable = [&](std::size_t index) {
-            return index < frame.valid.size() && frame.valid[index] &&
-                (!settings.missMode ||
-                 frame.visibility[index] ==
-                     native::GeometryVisibility::Visible);
+            if (index >= frame.valid.size() || !frame.valid[index]) {
+                return false;
+            }
+            if (settings.missMode &&
+                frame.visibility[index] !=
+                    native::GeometryVisibility::Visible) {
+                return false;
+            }
+            return !settings.requireVisibility ||
+                frame.visibility[index] !=
+                    native::GeometryVisibility::Occluded;
         };
         const auto select = [&](int index) {
             if (index < 0 || index >= static_cast<int>(frame.valid.size()) ||
@@ -2974,6 +3344,62 @@ private:
         return false;
     }
 
+    static std::optional<std::int32_t> TruncateTrackingCounter(float value) {
+        if (!std::isfinite(value) ||
+            value < static_cast<float>(std::numeric_limits<std::int32_t>::min()) ||
+            value > static_cast<float>(std::numeric_limits<std::int32_t>::max())) {
+            return std::nullopt;
+        }
+        return static_cast<std::int32_t>(value);
+    }
+
+    bool PassTrackingHitPercentage(const ui::AimSettings& settings,
+                                   const FrameContext& context) {
+        std::uintptr_t state = ReadPointer(context.localPawn + 0x1030);
+        if (!IsValidPointer(state)) return false;
+        state = ReadPointer(state + 0x4D8);
+        if (!IsValidPointer(state)) return false;
+        state = ReadPointer(state + 0x1220);
+        if (!IsValidPointer(state)) return false;
+        float totalValue = 0.0f;
+        float currentValue = 0.0f;
+        if (!ReadValue(state + 0x58, totalValue) ||
+            !ReadValue(state + 0x48, currentValue)) {
+            return false;
+        }
+        const std::optional<std::int32_t> total =
+            TruncateTrackingCounter(totalValue);
+        const std::optional<std::int32_t> current =
+            TruncateTrackingCounter(currentValue);
+        if (!total.has_value() || !current.has_value()) return false;
+        const std::int32_t selected =
+            aim::HitSelectionCache::SelectedCountForPercentage(
+                std::clamp(settings.hitPercentage, 0, 100), *total);
+        const aim::HitSelectionDecision decision =
+            trackingHitSelection_.Evaluate(
+                selected,
+                *current,
+                *total,
+                [](std::uint32_t seed) {
+                    std::srand(seed);
+                    return static_cast<std::uint32_t>(std::rand());
+                });
+        return decision.accepted;
+    }
+
+    Vec3 ResolveTrackingOrigin(const FrameContext& context) {
+        std::uintptr_t state = ReadPointer(context.localPawn + 0x1030);
+        state = ReadPointer(state + 0x4D8);
+        state = ReadPointer(state + 0x180);
+        Vec3 origin{};
+        if (IsValidPointer(state) &&
+            ReadValue(state + 0x220, origin) &&
+            IsFinite(origin)) {
+            return origin;
+        }
+        return context.view.location;
+    }
+
     void PublishAimFrame(const ui::AimSettings& settings,
                          const ui::AimTuning& tuning,
                          const FrameContext& context,
@@ -3013,6 +3439,10 @@ private:
             selected = &*std::min_element(
                 candidates.begin(), candidates.end(), [&settings](
                     const AimCandidate& left, const AimCandidate& right) {
+                    if (settings.trajectoryTracking) {
+                        return left.selectionDistancePixels <
+                            right.selectionDistancePixels;
+                    }
                     return settings.targetAlgorithm == 0
                         ? left.screenDistancePixels < right.screenDistancePixels
                         : left.worldDistanceMeters < right.worldDistanceMeters;
@@ -3050,6 +3480,13 @@ private:
             lockedAimBone_ = -1;
         }
 
+        if (settings.trajectoryTracking &&
+            !PassTrackingHitPercentage(settings, context)) {
+            aimController_.ClearTarget();
+            if (guide.drawCircle || guide.drawTargetRay) frame.aimGuide = guide;
+            return;
+        }
+
         aim::TargetSnapshot snapshot{};
         snapshot.valid = true;
         snapshot.identity = selected->identity;
@@ -3062,14 +3499,20 @@ private:
         snapshot.firing = context.firing;
         snapshot.zooming = context.zooming;
         snapshot.curvedMotion = settings.curvedMotion;
+        snapshot.trajectoryTracking = settings.trajectoryTracking;
+        snapshot.enforceFov = settings.enforceFov;
+        snapshot.enforceDistance = settings.enforceDistance;
         snapshot.triggerMode = settings.triggerMode;
         snapshot.orientation = options_.orientation;
         snapshot.touchRange = settings.touchRange;
         snapshot.touchCenterX = settings.touchX;
         snapshot.touchCenterY = settings.touchY;
         snapshot.tuning = tuning;
+        const Vec3 aimOrigin = settings.trajectoryTracking
+            ? context.firingOrigin
+            : context.view.location;
         snapshot.view.location = aim::Vec3{
-            context.view.location.x, context.view.location.y, context.view.location.z};
+            aimOrigin.x, aimOrigin.y, aimOrigin.z};
         snapshot.view.pitch = context.view.rotation.pitch;
         snapshot.view.yaw = context.view.rotation.yaw;
         snapshot.view.roll = context.view.rotation.roll;
@@ -3183,6 +3626,7 @@ private:
         characterPositions_.Clear();
         positionReadMode_ = native::PositionReadMode::Standard;
         projectileSpeedReader_.Invalidate();
+        trackingHitSelection_.Reset();
         lockedAimIdentity_ = 0;
         lockedAimBone_ = -1;
         aimController_.ClearTarget();
@@ -3233,6 +3677,7 @@ private:
     native::CharacterPositionResolver characterPositions_{};
     native::PositionReadMode positionReadMode_ = native::PositionReadMode::Standard;
     native::ProjectileSpeedReader projectileSpeedReader_{};
+    aim::HitSelectionCache trackingHitSelection_{};
     native::GeometryRuntime geometryRuntime_{};
     bool geometrySnapshotReady_ = false;
     std::uint64_t geometryRefreshEpoch_ = 0;

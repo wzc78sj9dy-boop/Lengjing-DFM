@@ -39,6 +39,9 @@ Json SaveAimTuning(const ui::AimTuning& tuning) {
     return Json{
         {"range_pixels", tuning.rangePixels},
         {"hip_distance_meters", tuning.hipDistanceMeters},
+        {"ads_distance_meters", tuning.adsDistanceMeters},
+        {"tracking_projectile_speed", tuning.trackingProjectileSpeed},
+        {"tracking_gravity", tuning.trackingGravity},
         {"hip_speed", tuning.hipSpeed},
         {"ads_speed", tuning.adsSpeed},
         {"horizontal_speed", tuning.horizontalSpeed},
@@ -54,6 +57,9 @@ Json SaveAimTuning(const ui::AimTuning& tuning) {
 void LoadAimTuning(const Json& object, ui::AimTuning& tuning) {
     tuning.rangePixels = ReadNumber(object, "range_pixels", tuning.rangePixels, 0.0f, 2000.0f);
     tuning.hipDistanceMeters = ReadNumber(object, "hip_distance_meters", tuning.hipDistanceMeters, 1.0f, 1000.0f);
+    tuning.adsDistanceMeters = ReadNumber(object, "ads_distance_meters", tuning.adsDistanceMeters, 1.0f, 1000.0f);
+    tuning.trackingProjectileSpeed = ReadNumber(object, "tracking_projectile_speed", tuning.trackingProjectileSpeed, 1.0f, 5000.0f);
+    tuning.trackingGravity = ReadNumber(object, "tracking_gravity", tuning.trackingGravity, 0.0f, 100.0f);
     tuning.hipSpeed = ReadNumber(object, "hip_speed", tuning.hipSpeed, 0.0f, 300.0f);
     tuning.adsSpeed = ReadNumber(object, "ads_speed", tuning.adsSpeed, 0.0f, 300.0f);
     tuning.horizontalSpeed = ReadNumber(object, "horizontal_speed", tuning.horizontalSpeed, 0.0f, 300.0f);
@@ -175,6 +181,12 @@ Json Serialize(const ui::UiModel& model) {
             {"ignore_downed", model.aim.ignoreDowned},
             {"persistent_lock", model.aim.persistentLock},
             {"curved_motion", model.aim.curvedMotion},
+            {"trajectory_tracking", model.aim.trajectoryTracking},
+            {"require_visibility", model.aim.requireVisibility},
+            {"reject_target_state", model.aim.rejectTargetState},
+            {"enforce_fov", model.aim.enforceFov},
+            {"enforce_distance", model.aim.enforceDistance},
+            {"hit_percentage", model.aim.hitPercentage},
             {"draw_range", model.aim.drawRange},
             {"draw_target_ray", model.aim.drawTargetRay},
             {"trigger_mode", model.aim.triggerMode},
@@ -319,6 +331,12 @@ void Apply(const Json& root, ui::UiModel& model) {
     model.aim.ignoreDowned = ReadBool(aim, "ignore_downed", model.aim.ignoreDowned);
     model.aim.persistentLock = ReadBool(aim, "persistent_lock", model.aim.persistentLock);
     model.aim.curvedMotion = ReadBool(aim, "curved_motion", model.aim.curvedMotion);
+    model.aim.trajectoryTracking = ReadBool(aim, "trajectory_tracking", model.aim.trajectoryTracking);
+    model.aim.requireVisibility = ReadBool(aim, "require_visibility", model.aim.requireVisibility);
+    model.aim.rejectTargetState = ReadBool(aim, "reject_target_state", model.aim.rejectTargetState);
+    model.aim.enforceFov = ReadBool(aim, "enforce_fov", model.aim.enforceFov);
+    model.aim.enforceDistance = ReadBool(aim, "enforce_distance", model.aim.enforceDistance);
+    model.aim.hitPercentage = ReadNumber(aim, "hit_percentage", model.aim.hitPercentage, 0, 100);
     model.aim.drawRange = ReadBool(aim, "draw_range", model.aim.drawRange);
     model.aim.drawTargetRay = ReadBool(aim, "draw_target_ray", model.aim.drawTargetRay);
     model.aim.triggerMode = ReadNumber(aim, "trigger_mode", model.aim.triggerMode, 0, 2);

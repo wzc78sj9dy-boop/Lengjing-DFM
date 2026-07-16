@@ -13,6 +13,7 @@
     } while (false)
 
 void RunConfigTests();
+void RunActorRecordResolverTests();
 void RunCoordinateReaderTests();
 void RunHudMapTests();
 void RunKernelModuleCatalogTests();
@@ -22,4 +23,6 @@ void RunPresentationRateTests();
 void RunProjectileSpeedTests();
 void RunRuntimeTests();
 void RunThreatCatalogTests();
+void RunTrackingBoneSelectorTests();
+void RunTrackingCalculatorTests();
 void RunTouchTransformTests();

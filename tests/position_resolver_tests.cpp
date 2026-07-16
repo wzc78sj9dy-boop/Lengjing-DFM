@@ -64,7 +64,55 @@ void RunPositionResolverTests() {
     REQUIRE(resolver.Read(
         actor, "NC_BP_DFMCharacter_C", PositionReadMode::Direct,
         false, coordinate, read));
-    REQUIRE(coordinate == Coordinate({40.0f, 50.0f, 60.0f}));
+    REQUIRE(coordinate == Coordinate({10.0f, 20.0f, 30.0f}));
+
+    constexpr std::uintptr_t decodedRoot = 0x300000;
+    memory.Put(decodedRoot + 0x168, Coordinate{});
+    memory.Put(decodedRoot + 0x148, Coordinate{});
+    memory.Put(decodedRoot + 0x220, Coordinate{0.0f, 0.0f, -90.0f});
+    memory.Put(decodedRoot + 0x240, Coordinate{70.0f, 80.0f, 90.0f});
+    REQUIRE(resolver.ReadWithRoot(
+        actor,
+        decodedRoot,
+        "NC_BP_DFMCharacter_C",
+        PositionReadMode::Direct,
+        false,
+        coordinate,
+        read));
+    REQUIRE(coordinate == Coordinate({0.0f, 0.0f, -90.0f}));
+
+    memory.Put(decodedRoot + 0x220, Coordinate{});
+    REQUIRE(resolver.ReadWithRoot(
+        actor,
+        decodedRoot,
+        "NC_BP_DFMCharacter_C",
+        PositionReadMode::Direct,
+        false,
+        coordinate,
+        read));
+    REQUIRE(coordinate == Coordinate({70.0f, 80.0f, 90.0f}));
+
+    memory.Put(decodedRoot + 0x240, Coordinate{});
+    REQUIRE(resolver.ReadWithRoot(
+        actor,
+        decodedRoot,
+        "NC_BP_DFMCharacter_C",
+        PositionReadMode::Direct,
+        false,
+        coordinate,
+        read));
+    REQUIRE(coordinate == Coordinate{});
+
+    memory.Erase(decodedRoot + 0x240);
+    REQUIRE(resolver.ReadWithRoot(
+        actor,
+        decodedRoot,
+        "NC_BP_DFMCharacter_C",
+        PositionReadMode::Direct,
+        false,
+        coordinate,
+        read));
+    REQUIRE(coordinate == Coordinate{});
 
     memory.Erase(component + 0x168);
     memory.Erase(component + 0x220);

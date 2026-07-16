@@ -30,6 +30,24 @@ public:
               bool antiFlicker,
               Coordinate& coordinate,
               ReadBytes&& readBytes) {
+        return ReadWithRoot(
+            actor,
+            0,
+            className,
+            mode,
+            antiFlicker,
+            coordinate,
+            readBytes);
+    }
+
+    template <typename ReadBytes>
+    bool ReadWithRoot(std::uintptr_t actor,
+                      std::uintptr_t decodedRoot,
+                      std::string_view className,
+                      PositionReadMode mode,
+                      bool antiFlicker,
+                      Coordinate& coordinate,
+                      ReadBytes&& readBytes) {
         coordinate = Coordinate{};
         const auto now = std::chrono::steady_clock::now();
         PruneIfDue(now);
@@ -42,13 +60,20 @@ public:
                 IsValid(coordinate);
             if (resolved) indexedHistory_[actor] = HistoryEntry{coordinate, now};
             else resolved = Restore(indexedHistory_, actor, now, coordinate);
-        } else if ((mode == PositionReadMode::Direct && primary) ||
-                   (mode != PositionReadMode::Standard && directAi)) {
+        } else if (mode == PositionReadMode::Direct &&
+                   (primary || directAi || decodedRoot != 0)) {
+            std::uintptr_t root = decodedRoot;
+            if (root == 0) ReadComponent(actor, root, readBytes);
+            resolved = ReadDecodedRoot(root, coordinate, readBytes);
+        } else if (mode != PositionReadMode::Standard && directAi) {
             resolved = ReadDirect(actor, coordinate, readBytes);
         } else {
             resolved = ReadStandard(actor, coordinate, readBytes);
         }
 
+        if (mode == PositionReadMode::Direct) {
+            return resolved;
+        }
         if (resolved) {
             if (antiFlicker) {
                 positionHistory_[actor] = HistoryEntry{coordinate, now};
@@ -85,6 +110,17 @@ private:
              coordinate[2] != 0.0f);
     }
 
+    static bool IsZero(const Coordinate& coordinate) noexcept {
+        return coordinate[0] == 0.0f && coordinate[1] == 0.0f &&
+            coordinate[2] == 0.0f;
+    }
+
+    static bool IsFinite(const Coordinate& coordinate) noexcept {
+        return std::isfinite(coordinate[0]) &&
+            std::isfinite(coordinate[1]) &&
+            std::isfinite(coordinate[2]);
+    }
+
     template <typename ReadBytes, typename T>
     static bool ReadValue(ReadBytes& readBytes,
                           std::uintptr_t address,
@@ -113,6 +149,30 @@ private:
                 std::numeric_limits<std::uintptr_t>::max() - 0x220 &&
             ReadValue(readBytes, component + 0x220, coordinate) &&
             IsValid(coordinate);
+    }
+
+    template <typename ReadBytes>
+    static bool ReadDecodedRoot(std::uintptr_t root,
+                                Coordinate& coordinate,
+                                ReadBytes& readBytes) {
+        if (root == 0) return false;
+        constexpr std::array<std::uintptr_t, 4> offsets{
+            0x168,
+            0x148,
+            0x220,
+            0x240,
+        };
+        for (std::size_t index = 0; index < offsets.size(); ++index) {
+            if (root > std::numeric_limits<std::uintptr_t>::max() -
+                    offsets[index]) {
+                coordinate = Coordinate{};
+            } else {
+                ReadValue(readBytes, root + offsets[index], coordinate);
+            }
+            if (index + 1 == offsets.size()) return IsFinite(coordinate);
+            if (!IsZero(coordinate)) return IsValid(coordinate);
+        }
+        return false;
     }
 
     template <typename ReadBytes>

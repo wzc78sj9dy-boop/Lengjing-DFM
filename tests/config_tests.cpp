@@ -57,6 +57,15 @@ void RunConfigTests() {
     expected.aim.inputMode = lengjing::ui::AimInputMode::WriteTouch;
     expected.aim.weaponProfilesEnabled = true;
     expected.aim.weaponProfiles[4].prediction = 1.75f;
+    expected.aim.weaponProfiles[4].adsDistanceMeters = 225.0f;
+    expected.aim.weaponProfiles[4].trackingProjectileSpeed = 825.0f;
+    expected.aim.weaponProfiles[4].trackingGravity = 6.5f;
+    expected.aim.trajectoryTracking = true;
+    expected.aim.requireVisibility = true;
+    expected.aim.rejectTargetState = true;
+    expected.aim.enforceFov = false;
+    expected.aim.enforceDistance = false;
+    expected.aim.hitPercentage = 73;
     expected.aim.randomBoneWeights[8] = 17.0f;
     expected.system.frameLimitIndex = 4;
     expected.system.toastNotifications = false;
@@ -95,6 +104,15 @@ void RunConfigTests() {
     REQUIRE(actual.aim.inputMode == lengjing::ui::AimInputMode::WriteTouch);
     REQUIRE(actual.aim.weaponProfilesEnabled);
     REQUIRE(actual.aim.weaponProfiles[4].prediction == 1.75f);
+    REQUIRE(actual.aim.weaponProfiles[4].adsDistanceMeters == 225.0f);
+    REQUIRE(actual.aim.weaponProfiles[4].trackingProjectileSpeed == 825.0f);
+    REQUIRE(actual.aim.weaponProfiles[4].trackingGravity == 6.5f);
+    REQUIRE(actual.aim.trajectoryTracking);
+    REQUIRE(actual.aim.requireVisibility);
+    REQUIRE(actual.aim.rejectTargetState);
+    REQUIRE(!actual.aim.enforceFov);
+    REQUIRE(!actual.aim.enforceDistance);
+    REQUIRE(actual.aim.hitPercentage == 73);
     REQUIRE(actual.aim.randomBoneWeights[8] == 17.0f);
     REQUIRE(actual.system.frameLimitIndex == 4);
     REQUIRE(!actual.system.toastNotifications);
@@ -111,7 +129,9 @@ void RunConfigTests() {
             R"({"schema_version":1,"runtime":{"driver":9},)"
             R"("visual":{"coordinate_decrypt":true,)"
             R"("algorithm_decrypt":true,"warning_size":1200},)"
-            R"("aim":{"input_mode":9}})";
+            R"("aim":{"input_mode":9,"hit_percentage":1000,)"
+            R"("defaults":{"ads_distance_meters":0,)"
+            R"("tracking_projectile_speed":9000,"tracking_gravity":1000}}})";
     }
     actual = {};
     error.clear();
@@ -122,6 +142,15 @@ void RunConfigTests() {
     REQUIRE(actual.visual.warningSize == 1000.0f);
     REQUIRE(actual.runtime.driverIndex == 1);
     REQUIRE(actual.aim.inputMode == lengjing::ui::AimInputMode::WriteTouch);
+    REQUIRE(!actual.aim.trajectoryTracking);
+    REQUIRE(!actual.aim.requireVisibility);
+    REQUIRE(!actual.aim.rejectTargetState);
+    REQUIRE(actual.aim.enforceFov);
+    REQUIRE(actual.aim.enforceDistance);
+    REQUIRE(actual.aim.hitPercentage == 100);
+    REQUIRE(actual.aim.defaults.adsDistanceMeters == 1.0f);
+    REQUIRE(actual.aim.defaults.trackingProjectileSpeed == 5000.0f);
+    REQUIRE(actual.aim.defaults.trackingGravity == 100.0f);
 
     const std::filesystem::path menuSource =
         std::filesystem::path(__FILE__).parent_path().parent_path() /
