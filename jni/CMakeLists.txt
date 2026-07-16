@@ -76,7 +76,6 @@ target_link_options(lengjing PRIVATE
     -Wl,--icf=safe
     -Wl,-O2
     $<$<CONFIG:Release>:-flto=thin>
-    $<$<CONFIG:Release>:-Wl,--strip-all>
 )
 
 set(LENGJING_STATIC_LIBRARIES
