@@ -87,7 +87,7 @@ private:
     };
 
     bool Create() override;
-    void Setup() override;
+    bool Setup() override;
     void PrepareFrame(bool resize) override;
     void Render(ImDrawData* drawData) override;
     void PrepareShutdown() override;
@@ -95,7 +95,6 @@ private:
     BaseTexData* LoadTexture(BaseTexData* texture, void* pixelData) override;
     void RemoveTexture(BaseTexData* texture) override;
 
-    void RefreshFontTexture();
     void StartSubmitThread();
     bool StopSubmitThread(bool detachIfBlocked);
     void WaitForSubmitSlot();
@@ -128,9 +127,6 @@ private:
     std::atomic<bool> surfaceRecoveryRequested_{false};
     std::unique_ptr<CpuRasterPool> rasterPool_;
 
-    const std::uint8_t* fontPixels_ = nullptr;
-    int fontWidth_ = 0;
-    int fontHeight_ = 0;
 };
 
 #endif

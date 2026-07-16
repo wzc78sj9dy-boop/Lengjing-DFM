@@ -8,35 +8,86 @@ bool AndroidImgui::Init_Render(ANativeWindow *window, float width, float height)
     if (m_Initialized || window == nullptr || width <= 0.0f || height <= 0.0f) {
         return false;
     }
+
+    bool rendererCreated = false;
+    bool contextCreated = false;
+    bool platformInitialized = false;
+    bool rendererSetupStarted = false;
+    auto rollback = [&] {
+        if (rendererSetupStarted &&
+            ImGui::GetCurrentContext() != nullptr) {
+            try {
+                PrepareShutdown();
+            } catch (...) {
+            }
+            rendererSetupStarted = false;
+        }
+        if (platformInitialized) {
+            My_ImGui_ImplAndroid_Shutdown();
+            platformInitialized = false;
+        }
+        if (contextCreated && ImGui::GetCurrentContext() != nullptr) {
+            ImGui::DestroyContext();
+            contextCreated = false;
+        }
+        if (rendererCreated) {
+            Cleanup();
+            rendererCreated = false;
+        }
+        if (m_Window != nullptr) {
+            ANativeWindow_release(m_Window);
+            m_Window = nullptr;
+        }
+        m_Width = 0.0f;
+        m_Height = 0.0f;
+        m_Initialized = false;
+        m_PresentationRate->Reset();
+    };
+
     m_Window = window;
     m_Width = width;
     m_Height = height;
     m_PresentationRate->Reset();
     ANativeWindow_acquire(window);
-    if (!Create()) {
-        ANativeWindow_release(window);
-        m_Window = nullptr;
+
+    try {
+        rendererCreated = true;
+        if (!Create()) {
+            rollback();
+            return false;
+        }
+
+        IMGUI_CHECKVERSION();
+        if (ImGui::CreateContext() == nullptr) {
+            rollback();
+            return false;
+        }
+        contextCreated = true;
+        ImGuiIO &io = ImGui::GetIO();
+        io.LogFilename = nullptr;
+        io.IniFilename = nullptr;
+        io.DisplaySize = {width, height};
+        io.FontGlobalScale = 1.0f;
+        ImGui::StyleColorsDark();
+        ImGuiStyle *style = &ImGui::GetStyle();
+        style->Alpha = 1.0f;
+        style->WindowTitleAlign = ImVec2(0.5f, 0.5f);
+        if (!My_ImGui_ImplAndroid_Init(window)) {
+            rollback();
+            return false;
+        }
+        platformInitialized = true;
+        rendererSetupStarted = true;
+        if (!Setup()) {
+            rollback();
+            return false;
+        }
+        rendererSetupStarted = false;
+    } catch (...) {
+        rollback();
         return false;
     }
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGuiIO &io = ImGui::GetIO();
-    io.LogFilename = nullptr;
-    io.IniFilename = nullptr;
-    io.DisplaySize = {width, height};
-    io.FontGlobalScale = 1.0f;
-    ImGui::StyleColorsDark();
-    ImGuiStyle *style = &ImGui::GetStyle();
-    style->Alpha = 1.0f;
-    style->WindowTitleAlign = ImVec2(0.5f, 0.5f);
-    if (!My_ImGui_ImplAndroid_Init(window)) {
-        ImGui::DestroyContext();
-        Cleanup();
-        ANativeWindow_release(window);
-        m_Window = nullptr;
-        return false;
-    }
-    Setup();
+
     m_Initialized = true;
     return true;
 }
@@ -79,8 +130,12 @@ void AndroidImgui::Shutdown() {
     My_ImGui_ImplAndroid_Shutdown();
     ImGui::DestroyContext();
     Cleanup();
-    ANativeWindow_release(m_Window);
-    m_Window = nullptr;
+    if (m_Window != nullptr) {
+        ANativeWindow_release(m_Window);
+        m_Window = nullptr;
+    }
+    m_Width = 0.0f;
+    m_Height = 0.0f;
     m_Initialized = false;
     m_PresentationRate->Reset();
 }

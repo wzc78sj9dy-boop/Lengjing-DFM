@@ -70,7 +70,7 @@ private:
 
     virtual bool Create() = 0;
 
-    virtual void Setup() = 0;
+    virtual bool Setup() = 0;
 
     virtual void PrepareFrame(bool resize) = 0;
 

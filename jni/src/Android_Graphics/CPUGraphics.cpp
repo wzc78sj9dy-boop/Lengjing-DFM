@@ -9,6 +9,7 @@
 #include <cstring>
 #include <limits>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 #include "imgui.h"
@@ -174,6 +175,253 @@ struct TextureView {
     int width = 0;
     int height = 0;
 };
+
+constexpr std::uintptr_t kDynamicTextureTag = 1u;
+
+struct DynamicTexture {
+    ImTextureFormat format = ImTextureFormat_Alpha8;
+    int width = 0;
+    int height = 0;
+    std::vector<std::uint8_t> alpha;
+    std::vector<std::uint32_t> rgba;
+};
+
+static_assert(alignof(DynamicTexture) > kDynamicTextureTag);
+
+template <typename Id>
+std::uintptr_t TextureIdBits(Id id) {
+    if constexpr (std::is_pointer_v<Id>) {
+        return reinterpret_cast<std::uintptr_t>(id);
+    } else {
+        return static_cast<std::uintptr_t>(id);
+    }
+}
+
+template <typename Id>
+Id TextureIdFromBits(std::uintptr_t bits) {
+    if constexpr (std::is_pointer_v<Id>) {
+        return reinterpret_cast<Id>(bits);
+    } else {
+        return static_cast<Id>(bits);
+    }
+}
+
+bool TryPixelCount(int width, int height, std::size_t* pixelCount) {
+    if (pixelCount == nullptr || width <= 0 || height <= 0) {
+        return false;
+    }
+    const std::size_t unsignedWidth = static_cast<std::size_t>(width);
+    const std::size_t unsignedHeight = static_cast<std::size_t>(height);
+    if (unsignedWidth >
+        std::numeric_limits<std::size_t>::max() / unsignedHeight) {
+        return false;
+    }
+    const std::size_t count = unsignedWidth * unsignedHeight;
+    if (count >
+            std::numeric_limits<std::size_t>::max() /
+                sizeof(std::uint32_t) ||
+        count > static_cast<std::size_t>(
+                    std::numeric_limits<int>::max())) {
+        return false;
+    }
+    *pixelCount = count;
+    return true;
+}
+
+bool IsDynamicTextureId(ImTextureID id) {
+    return (TextureIdBits(id) & kDynamicTextureTag) != 0;
+}
+
+ImTextureID MakeDynamicTextureId(DynamicTexture* texture) {
+    return TextureIdFromBits<ImTextureID>(
+        reinterpret_cast<std::uintptr_t>(texture) | kDynamicTextureTag);
+}
+
+DynamicTexture* DynamicTextureFromId(ImTextureID id) {
+    return reinterpret_cast<DynamicTexture*>(
+        TextureIdBits(id) & ~kDynamicTextureTag);
+}
+
+bool ResizeDynamicTexture(DynamicTexture* output,
+                          const ImTextureData* input) {
+    if (output == nullptr || input == nullptr || input->Pixels == nullptr ||
+        input->Width <= 0 || input->Height <= 0 ||
+        (input->Format != ImTextureFormat_Alpha8 &&
+         input->Format != ImTextureFormat_RGBA32)) {
+        return false;
+    }
+
+    std::size_t pixelCount = 0;
+    if (!TryPixelCount(input->Width, input->Height, &pixelCount)) {
+        return false;
+    }
+
+    std::vector<std::uint8_t> alpha;
+    std::vector<std::uint32_t> rgba;
+    if (input->Format == ImTextureFormat_Alpha8) {
+        alpha.resize(pixelCount);
+    } else {
+        rgba.resize(pixelCount);
+    }
+
+    output->format = input->Format;
+    output->width = input->Width;
+    output->height = input->Height;
+    output->alpha = std::move(alpha);
+    output->rgba = std::move(rgba);
+    return true;
+}
+
+void CopyDynamicTextureRect(DynamicTexture* output,
+                            const ImTextureData* input,
+                            int x,
+                            int y,
+                            int width,
+                            int height) {
+    if (output == nullptr || input == nullptr || input->Pixels == nullptr ||
+        output->width != input->Width ||
+        output->height != input->Height ||
+        output->format != input->Format) {
+        return;
+    }
+
+    const int minimumX = std::clamp(x, 0, input->Width);
+    const int minimumY = std::clamp(y, 0, input->Height);
+    const int maximumX = std::clamp(x + width, 0, input->Width);
+    const int maximumY = std::clamp(y + height, 0, input->Height);
+    if (maximumX <= minimumX || maximumY <= minimumY) {
+        return;
+    }
+
+    const std::size_t rowPixels =
+        static_cast<std::size_t>(maximumX - minimumX);
+    if (input->Format == ImTextureFormat_Alpha8) {
+        for (int row = minimumY; row < maximumY; ++row) {
+            const std::size_t offset =
+                static_cast<std::size_t>(row) * input->Width + minimumX;
+            std::memcpy(
+                output->alpha.data() + offset,
+                input->Pixels + offset,
+                rowPixels);
+        }
+        return;
+    }
+
+    for (int row = minimumY; row < maximumY; ++row) {
+        const std::size_t offset =
+            static_cast<std::size_t>(row) * input->Width + minimumX;
+        std::memcpy(
+            output->rgba.data() + offset,
+            input->Pixels + offset * sizeof(std::uint32_t),
+            rowPixels * sizeof(std::uint32_t));
+    }
+}
+
+bool UpdateDynamicTexture(ImTextureData* texture) {
+    if (texture == nullptr) {
+        return false;
+    }
+
+    if (texture->Status == ImTextureStatus_WantCreate) {
+        auto dynamic = std::make_unique<DynamicTexture>();
+        if (!ResizeDynamicTexture(dynamic.get(), texture)) {
+            return false;
+        }
+        CopyDynamicTextureRect(
+            dynamic.get(), texture, 0, 0, texture->Width, texture->Height);
+        texture->BackendUserData = dynamic.get();
+        texture->SetTexID(MakeDynamicTextureId(dynamic.get()));
+        texture->SetStatus(ImTextureStatus_OK);
+        dynamic.release();
+        return true;
+    }
+
+    if (texture->Status == ImTextureStatus_WantUpdates) {
+        auto* dynamic =
+            static_cast<DynamicTexture*>(texture->BackendUserData);
+        if (dynamic == nullptr || !IsDynamicTextureId(texture->TexID) ||
+            DynamicTextureFromId(texture->TexID) != dynamic) {
+            return false;
+        }
+        if (dynamic->width != texture->Width ||
+            dynamic->height != texture->Height ||
+            dynamic->format != texture->Format) {
+            if (!ResizeDynamicTexture(dynamic, texture)) {
+                return false;
+            }
+            CopyDynamicTextureRect(
+                dynamic, texture, 0, 0, texture->Width, texture->Height);
+        } else if (!texture->Updates.empty()) {
+            for (const ImTextureRect& rectangle : texture->Updates) {
+                CopyDynamicTextureRect(
+                    dynamic,
+                    texture,
+                    rectangle.x,
+                    rectangle.y,
+                    rectangle.w,
+                    rectangle.h);
+            }
+        } else {
+            const ImTextureRect& rectangle = texture->UpdateRect;
+            CopyDynamicTextureRect(
+                dynamic,
+                texture,
+                rectangle.x,
+                rectangle.y,
+                rectangle.w,
+                rectangle.h);
+        }
+        texture->SetStatus(ImTextureStatus_OK);
+        return true;
+    }
+
+    if (texture->Status == ImTextureStatus_WantDestroy &&
+        texture->UnusedFrames > 0) {
+        auto* dynamic =
+            static_cast<DynamicTexture*>(texture->BackendUserData);
+        if (dynamic != nullptr && IsDynamicTextureId(texture->TexID) &&
+            DynamicTextureFromId(texture->TexID) == dynamic) {
+            delete dynamic;
+        }
+        texture->BackendUserData = nullptr;
+        texture->SetTexID(ImTextureID_Invalid);
+        texture->SetStatus(ImTextureStatus_Destroyed);
+    }
+    return true;
+}
+
+bool UpdateDynamicTextures(ImDrawData* drawData) {
+    if (drawData == nullptr || drawData->Textures == nullptr) {
+        return true;
+    }
+    for (ImTextureData* texture : *drawData->Textures) {
+        if (texture != nullptr && texture->Status != ImTextureStatus_OK &&
+            !UpdateDynamicTexture(texture)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void DestroyDynamicTextures() {
+    if (ImGui::GetCurrentContext() == nullptr) {
+        return;
+    }
+    for (ImTextureData* texture : ImGui::GetPlatformIO().Textures) {
+        if (texture == nullptr || texture->BackendUserData == nullptr ||
+            !IsDynamicTextureId(texture->TexID)) {
+            continue;
+        }
+        auto* dynamic =
+            static_cast<DynamicTexture*>(texture->BackendUserData);
+        if (DynamicTextureFromId(texture->TexID) == dynamic) {
+            delete dynamic;
+        }
+        texture->BackendUserData = nullptr;
+        texture->SetTexID(ImTextureID_Invalid);
+        texture->SetStatus(ImTextureStatus_Destroyed);
+    }
+}
 
 int ClampTextureCoordinate(int value, int size) {
     if (value < 0) {
@@ -933,33 +1181,13 @@ bool CPUGraphics::Create() {
     return true;
 }
 
-void CPUGraphics::Setup() {
+bool CPUGraphics::Setup() {
     ImGuiIO& io = ImGui::GetIO();
-    io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
+    io.Fonts->TexDesiredFormat = ImTextureFormat_Alpha8;
+    io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset |
+                       ImGuiBackendFlags_RendererHasTextures;
     io.BackendRendererName = "CPU";
-    RefreshFontTexture();
-}
-
-void CPUGraphics::RefreshFontTexture() {
-    if (ImGui::GetCurrentContext() == nullptr) {
-        return;
-    }
-    ImGuiIO& io = ImGui::GetIO();
-    if (io.Fonts == nullptr) {
-        fontPixels_ = nullptr;
-        fontWidth_ = 0;
-        fontHeight_ = 0;
-        return;
-    }
-
-    unsigned char* pixels = nullptr;
-    int width = 0;
-    int height = 0;
-    io.Fonts->GetTexDataAsAlpha8(&pixels, &width, &height);
-    fontPixels_ = pixels;
-    fontWidth_ = width;
-    fontHeight_ = height;
-    io.Fonts->SetTexID(reinterpret_cast<ImTextureID>(pixels));
+    return true;
 }
 
 void CPUGraphics::PrepareFrame(bool resize) {
@@ -1014,7 +1242,6 @@ void CPUGraphics::PrepareFrame(bool resize) {
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(m_Width, m_Height);
     io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
-    RefreshFontTexture();
     WaitForSubmitSlot();
 }
 
@@ -1228,25 +1455,35 @@ void CPUGraphics::RenderBand(ImDrawData* drawData,
             }
 
             TextureView texture;
-            const ImTextureID textureId = command.GetTexID();
-            if (textureId == nullptr ||
-                textureId ==
-                    reinterpret_cast<ImTextureID>(
-                        const_cast<std::uint8_t*>(fontPixels_))) {
-                if (fontPixels_ == nullptr ||
-                    fontWidth_ <= 0 ||
-                    fontHeight_ <= 0) {
+            ImTextureID textureId = command.GetTexID();
+            if (IsDynamicTextureId(textureId)) {
+                const DynamicTexture* dynamic =
+                    DynamicTextureFromId(textureId);
+                if (dynamic == nullptr || dynamic->width <= 0 ||
+                    dynamic->height <= 0) {
                     continue;
                 }
-                texture.kind = TextureKind::FontAlpha;
-                texture.alpha = fontPixels_;
-                texture.width = fontWidth_;
-                texture.height = fontHeight_;
+                if (dynamic->format == ImTextureFormat_Alpha8) {
+                    if (dynamic->alpha.empty()) {
+                        continue;
+                    }
+                    texture.kind = TextureKind::FontAlpha;
+                    texture.alpha = dynamic->alpha.data();
+                } else {
+                    if (dynamic->rgba.empty()) {
+                        continue;
+                    }
+                    texture.kind = TextureKind::Rgba;
+                    texture.rgba = dynamic->rgba.data();
+                }
+                texture.width = dynamic->width;
+                texture.height = dynamic->height;
             } else {
                 const CpuTextureData* textureData = nullptr;
                 for (const BaseTexData* candidate : m_Textures) {
                     if (candidate != nullptr &&
-                        candidate->DS == textureId) {
+                        TextureIdBits(candidate->DS) ==
+                            TextureIdBits(textureId)) {
                         textureData =
                             static_cast<const CpuTextureData*>(candidate);
                         break;
@@ -1359,6 +1596,13 @@ void CPUGraphics::RenderBand(ImDrawData* drawData,
 
 void CPUGraphics::Render(ImDrawData* drawData) {
     if (drawData == nullptr || !drawData->Valid) {
+        return;
+    }
+    try {
+        if (!UpdateDynamicTextures(drawData)) {
+            return;
+        }
+    } catch (...) {
         return;
     }
     StartSubmitThread();
@@ -1702,20 +1946,14 @@ void CPUGraphics::Render(ImDrawData* drawData) {
 }
 
 void CPUGraphics::PrepareShutdown() {
+    DestroyDynamicTextures();
     if (ImGui::GetCurrentContext() != nullptr) {
         ImGuiIO& io = ImGui::GetIO();
-        if (io.Fonts != nullptr &&
-            io.Fonts->TexID ==
-                reinterpret_cast<ImTextureID>(
-                    const_cast<std::uint8_t*>(fontPixels_))) {
-            io.Fonts->SetTexID(nullptr);
-        }
-        io.BackendFlags &= ~ImGuiBackendFlags_RendererHasVtxOffset;
+        io.BackendFlags &= ~(
+            ImGuiBackendFlags_RendererHasVtxOffset |
+            ImGuiBackendFlags_RendererHasTextures);
         io.BackendRendererName = nullptr;
     }
-    fontPixels_ = nullptr;
-    fontWidth_ = 0;
-    fontHeight_ = 0;
 }
 
 void CPUGraphics::Cleanup() {
