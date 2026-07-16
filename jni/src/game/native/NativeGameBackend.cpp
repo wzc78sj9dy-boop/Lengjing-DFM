@@ -2588,6 +2588,7 @@ private:
             return false;
         }
         position = Vec3{coordinate[0], coordinate[1], coordinate[2]};
+        if (mode == native::PositionReadMode::Direct) return true;
         return IsFinite(position) && IsNonzero(position);
     }
 
