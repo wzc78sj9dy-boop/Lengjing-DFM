@@ -80,7 +80,7 @@ target_link_options(lengjing PRIVATE
 
 set(LENGJING_STATIC_LIBRARIES
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/paradise/libparadise_api.a
-    ${CMAKE_CURRENT_SOURCE_DIR}/lib/kernel/libkernel_modules.a
+    ${CMAKE_CURRENT_SOURCE_DIR}/lib/kernel/libkernel_scripts.a
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/libembree4.a
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/liblexers.a
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/libmath.a

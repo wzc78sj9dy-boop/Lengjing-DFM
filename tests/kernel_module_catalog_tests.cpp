@@ -5,24 +5,41 @@
 #include <string_view>
 
 void RunKernelModuleCatalogTests() {
-    using lengjing::game::native::FindKernelModuleRelease;
+    using lengjing::game::native::FindKernelModuleVariant;
     using lengjing::game::native::KernelModuleId;
-    using lengjing::game::native::kKernelModuleReleases;
+    using lengjing::game::native::kKernelModuleVariants;
 
-    REQUIRE(kKernelModuleReleases.size() == 7);
+    REQUIRE(kKernelModuleVariants.size() == 7);
     REQUIRE(
-        FindKernelModuleRelease("5.10.245-dirty")->module ==
-        KernelModuleId::Kernel510245);
+        FindKernelModuleVariant("5.10.157+")->module ==
+        KernelModuleId::Kernel510252);
     REQUIRE(
-        FindKernelModuleRelease(
-            "5.15.202-android13-5.15.202_r00-dirty")->module ==
+        FindKernelModuleVariant("5.15.202-android13-vendor")->module ==
         KernelModuleId::Kernel515202Android13);
     REQUIRE(
-        FindKernelModuleRelease("6.12.76-4k-gae4e2f4f997e-dirty")->module ==
+        FindKernelModuleVariant(
+            "6.1.118-android14-11-o-gdc1f87dd9a69")->module ==
+        KernelModuleId::Kernel61166);
+    REQUIRE(
+        FindKernelModuleVariant("6.6.127-custom")->module ==
+        KernelModuleId::Kernel66127);
+    REQUIRE(
+        FindKernelModuleVariant("6.12.76-custom")->module ==
         KernelModuleId::Kernel61276);
 
-    REQUIRE(FindKernelModuleRelease("5.10.245") == nullptr);
-    REQUIRE(FindKernelModuleRelease("5.10.245-dirty-extra") == nullptr);
-    REQUIRE(FindKernelModuleRelease("6.6.127-4k") == nullptr);
-    REQUIRE(FindKernelModuleRelease(std::string_view{}) == nullptr);
+    REQUIRE(
+        FindKernelModuleVariant("5.10.245-dirty")->module ==
+        KernelModuleId::Kernel510252);
+    REQUIRE(
+        FindKernelModuleVariant("6.2.0")->module ==
+        KernelModuleId::Kernel61166);
+    REQUIRE(
+        FindKernelModuleVariant("6.10.0")->module ==
+        KernelModuleId::Kernel66127);
+    REQUIRE(
+        FindKernelModuleVariant("4.19.157")->module ==
+        KernelModuleId::Kernel510252);
+    REQUIRE(
+        FindKernelModuleVariant(std::string_view{})->module ==
+        KernelModuleId::Kernel61276);
 }
