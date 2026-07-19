@@ -8,6 +8,16 @@ set "TARGET="
 set "PRODUCT="
 set "BIN="
 set "ROOT_BIN="
+set "USE_UPX=0"
+set "READELF="
+set "SYMBOL_REPORT=%BUILD_DIR%\lengjing_symbol_check_%RANDOM%_%RANDOM%.txt"
+
+if /i "%~1"=="upx" set "USE_UPX=1"
+if not "%~1"=="" if /i not "%~1"=="upx" (
+    echo [ERROR] Unsupported mode: %~1
+    echo [USAGE] 2_pack.bat [upx]
+    exit /b 1
+)
 
 for /f "tokens=2 delims=( " %%T in ('findstr /R /I /C:"^[ ]*add_executable(" "%SOURCE_DIR%\CMakeLists.txt"') do (
     if not defined TARGET set "TARGET=%%T"
@@ -40,26 +50,59 @@ if not defined BIN (
 )
 set "ROOT_BIN=%~dp0!PRODUCT!"
 
-set "UPX_EXE="
-if defined UPX_PATH (
-    if exist "%UPX_PATH%\upx.exe" set "UPX_EXE=%UPX_PATH%\upx.exe"
-    if not defined UPX_EXE if exist "%UPX_PATH%" set "UPX_EXE=%UPX_PATH%"
+if "!USE_UPX!"=="0" (
+    for %%I in (llvm-readelf.exe) do set "READELF=%%~$PATH:I"
+    if not defined READELF if exist "%BUILD_DIR%\CMakeCache.txt" (
+        for /f "tokens=2 delims==" %%R in ('findstr /B /C:"CMAKE_READELF:FILEPATH=" "%BUILD_DIR%\CMakeCache.txt"') do (
+            if exist "%%R" set "READELF=%%R"
+        )
+    )
+    if not defined READELF if exist "%BUILD_DIR%\CMakeCache.txt" (
+        for /f "tokens=2 delims==" %%C in ('findstr /B /C:"CMAKE_CXX_COMPILER:FILEPATH=" "%BUILD_DIR%\CMakeCache.txt"') do (
+            for %%D in ("%%C") do if exist "%%~dpDllvm-readelf.exe" set "READELF=%%~dpDllvm-readelf.exe"
+        )
+    )
+    if not defined READELF (
+        echo [ERROR] llvm-readelf.exe not found. Cannot verify the symbol table.
+        exit /b 1
+    )
+    "!READELF!" --sections --wide "!BIN!" >"!SYMBOL_REPORT!" 2>nul
+    if errorlevel 1 (
+        del /q "!SYMBOL_REPORT!" >nul 2>&1
+        echo [ERROR] Unable to inspect the build product symbol table.
+        exit /b 1
+    )
+    findstr /C:".symtab" "!SYMBOL_REPORT!" >nul 2>&1
+    if errorlevel 1 (
+        del /q "!SYMBOL_REPORT!" >nul 2>&1
+        echo [ERROR] The build product is stripped: .symtab is missing.
+        exit /b 1
+    )
+    del /q "!SYMBOL_REPORT!" >nul 2>&1
+    echo [SYMBOLS] ELF symbol table verified.
 )
-if not defined UPX_EXE for %%P in (
-    "D:\tools\upx\upx.exe"
-    "C:\upx-5.0.2-win64\upx.exe"
-    "C:\upx\upx.exe"
-    "D:\upx\upx.exe"
-    "D:\AAA\upx\upx.exe"
-    "%USERPROFILE%\tools\upx\upx.exe"
-) do (
-    if not defined UPX_EXE if exist "%%~P" set "UPX_EXE=%%~P"
-)
-if not defined UPX_EXE for %%I in (upx.exe) do set "UPX_EXE=%%~$PATH:I"
 
-if not defined UPX_EXE (
-    echo [ERROR] upx.exe not found. Set UPX_PATH or add it to PATH.
-    exit /b 1
+set "UPX_EXE="
+if "!USE_UPX!"=="1" (
+    if defined UPX_PATH (
+        if exist "%UPX_PATH%\upx.exe" set "UPX_EXE=%UPX_PATH%\upx.exe"
+        if not defined UPX_EXE if exist "%UPX_PATH%" set "UPX_EXE=%UPX_PATH%"
+    )
+    if not defined UPX_EXE for %%P in (
+        "D:\tools\upx\upx.exe"
+        "C:\upx-5.0.2-win64\upx.exe"
+        "C:\upx\upx.exe"
+        "D:\upx\upx.exe"
+        "D:\AAA\upx\upx.exe"
+        "%USERPROFILE%\tools\upx\upx.exe"
+    ) do (
+        if not defined UPX_EXE if exist "%%~P" set "UPX_EXE=%%~P"
+    )
+    if not defined UPX_EXE for %%I in (upx.exe) do set "UPX_EXE=%%~$PATH:I"
+    if not defined UPX_EXE (
+        echo [ERROR] upx.exe not found. Set UPX_PATH or add it to PATH.
+        exit /b 1
+    )
 )
 
 set "BUILD_SHA_BEFORE="
@@ -77,25 +120,29 @@ if errorlevel 1 (
     exit /b 1
 )
 
-for %%I in ("!ROOT_BIN!") do echo [UPX] before: %%~zI bytes
-"!UPX_EXE!" -t "!ROOT_BIN!" >nul 2>&1
-if not errorlevel 1 (
-    echo [UPX] already packed and verified.
-) else (
-    "!UPX_EXE!" --best --lzma --no-progress "!ROOT_BIN!"
+if "!USE_UPX!"=="1" (
+    for %%I in ("!ROOT_BIN!") do echo [UPX] before: %%~zI bytes
+    "!UPX_EXE!" -t "!ROOT_BIN!" >nul 2>&1
+    if not errorlevel 1 (
+        echo [UPX] already packed and verified.
+    ) else (
+        "!UPX_EXE!" --best --lzma --no-progress "!ROOT_BIN!"
+        if errorlevel 1 (
+            echo [ERROR] UPX packing failed.
+            del /q "!ROOT_BIN!" >nul 2>&1
+            exit /b 1
+        )
+    )
+    "!UPX_EXE!" -t "!ROOT_BIN!" >nul 2>&1
     if errorlevel 1 (
-        echo [ERROR] UPX packing failed.
+        echo [ERROR] Packed product verification failed.
         del /q "!ROOT_BIN!" >nul 2>&1
         exit /b 1
     )
+    for %%I in ("!ROOT_BIN!") do echo [UPX] after: %%~zI bytes
+) else (
+    echo [SYMBOLS] Unstripped build copied without compression.
 )
-"!UPX_EXE!" -t "!ROOT_BIN!" >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] Packed product verification failed.
-    del /q "!ROOT_BIN!" >nul 2>&1
-    exit /b 1
-)
-for %%I in ("!ROOT_BIN!") do echo [UPX] after: %%~zI bytes
 
 for /f "usebackq delims=" %%H in (`powershell.exe -NoProfile -NonInteractive -Command "(Get-FileHash -LiteralPath $env:BIN -Algorithm SHA256).Hash.ToLowerInvariant()"`) do set "BUILD_SHA_AFTER=%%H"
 for /f "usebackq delims=" %%H in (`powershell.exe -NoProfile -NonInteractive -Command "(Get-FileHash -LiteralPath $env:ROOT_BIN -Algorithm SHA256).Hash.ToLowerInvariant()"`) do set "ROOT_SHA=%%H"
@@ -109,6 +156,10 @@ if not defined ROOT_SHA (
 )
 if /i not "!BUILD_SHA_BEFORE!"=="!BUILD_SHA_AFTER!" (
     echo [ERROR] The build product changed during packing.
+    exit /b 1
+)
+if "!USE_UPX!"=="0" if /i not "!BUILD_SHA_AFTER!"=="!ROOT_SHA!" (
+    echo [ERROR] The unstripped release copy does not match the build product.
     exit /b 1
 )
 

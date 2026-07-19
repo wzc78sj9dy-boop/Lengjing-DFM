@@ -5,20 +5,33 @@
 
 int main() {
     try {
+        RunActorFrameVisitSetTests();
         RunActorRecordResolverTests();
+        RunAlgorithmPositionPolicyTests();
+        RunAimModePolicyTests();
+        RunAimPredictionTests();
+        RunAuthConfigTests();
+        RunAuthSessionTests();
+        RunAuthTransportTests();
+        RunCardInputPolicyTests();
+        RunCloudLayoutTests();
         RunConfigTests();
-        RunCoordinateReaderTests();
+        RunCpuMailboxPolicyTests();
+        RunFrameProjectionTests();
         RunHudMapTests();
         RunKernelModuleCatalogTests();
+        RunPlayerBoundsTests();
         RunPlayerTrackingTests();
         RunPositionResolverTests();
         RunPresentationRateTests();
         RunProjectileSpeedTests();
+        RunRenderBackendSelectionTests();
+        RunRuntimeLayoutOverrideTests();
         RunRuntimeTests();
         RunThreatCatalogTests();
-        RunTrackingBoneSelectorTests();
         RunTrackingCalculatorTests();
         RunTouchTransformTests();
+        RunWorldObjectRefreshPolicyTests();
         std::cout << "all tests passed\n";
         return 0;
     } catch (const std::exception& exception) {

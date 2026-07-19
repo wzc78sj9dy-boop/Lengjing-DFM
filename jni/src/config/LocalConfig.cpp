@@ -35,13 +35,34 @@ bool ReadBool(const Json& object, const char* key, bool fallback) {
         : fallback;
 }
 
+ui::RenderBackend ReadRenderBackend(
+    const Json& object,
+    const char* key,
+    ui::RenderBackend fallback) {
+    const auto iterator = object.find(key);
+    if (iterator == object.end()) {
+        return fallback;
+    }
+    if (!iterator->is_number_integer()) {
+        return ui::RenderBackend::Cpu;
+    }
+    switch (iterator->get<int>()) {
+        case static_cast<int>(ui::RenderBackend::Cpu):
+            return ui::RenderBackend::Cpu;
+        case static_cast<int>(ui::RenderBackend::Vulkan):
+            return ui::RenderBackend::Vulkan;
+        case static_cast<int>(ui::RenderBackend::OpenGl):
+            return ui::RenderBackend::OpenGl;
+        default:
+            return ui::RenderBackend::Cpu;
+    }
+}
+
 Json SaveAimTuning(const ui::AimTuning& tuning) {
     return Json{
         {"range_pixels", tuning.rangePixels},
         {"hip_distance_meters", tuning.hipDistanceMeters},
         {"ads_distance_meters", tuning.adsDistanceMeters},
-        {"tracking_projectile_speed", tuning.trackingProjectileSpeed},
-        {"tracking_gravity", tuning.trackingGravity},
         {"hip_speed", tuning.hipSpeed},
         {"ads_speed", tuning.adsSpeed},
         {"horizontal_speed", tuning.horizontalSpeed},
@@ -58,8 +79,6 @@ void LoadAimTuning(const Json& object, ui::AimTuning& tuning) {
     tuning.rangePixels = ReadNumber(object, "range_pixels", tuning.rangePixels, 0.0f, 2000.0f);
     tuning.hipDistanceMeters = ReadNumber(object, "hip_distance_meters", tuning.hipDistanceMeters, 1.0f, 1000.0f);
     tuning.adsDistanceMeters = ReadNumber(object, "ads_distance_meters", tuning.adsDistanceMeters, 1.0f, 1000.0f);
-    tuning.trackingProjectileSpeed = ReadNumber(object, "tracking_projectile_speed", tuning.trackingProjectileSpeed, 1.0f, 5000.0f);
-    tuning.trackingGravity = ReadNumber(object, "tracking_gravity", tuning.trackingGravity, 0.0f, 100.0f);
     tuning.hipSpeed = ReadNumber(object, "hip_speed", tuning.hipSpeed, 0.0f, 300.0f);
     tuning.adsSpeed = ReadNumber(object, "ads_speed", tuning.adsSpeed, 0.0f, 300.0f);
     tuning.horizontalSpeed = ReadNumber(object, "horizontal_speed", tuning.horizontalSpeed, 0.0f, 300.0f);
@@ -100,7 +119,6 @@ Json Serialize(const ui::UiModel& model) {
             {"model_geometry", model.visual.modelGeometry},
             {"visibility_color", model.visual.visibilityColor},
             {"coordinate_decrypt", model.visual.coordinateDecrypt},
-            {"algorithm_decrypt", model.visual.algorithmDecrypt},
             {"box", model.visual.box},
             {"snapline", model.visual.snapline},
             {"skeleton", model.visual.skeleton},
@@ -172,7 +190,8 @@ Json Serialize(const ui::UiModel& model) {
         }},
         {"aim", {
             {"enabled", model.aim.enabled},
-            {"miss_mode", model.aim.missMode},
+            {"cover", model.aim.missMode},
+            {"cover_mode", model.aim.coverMode},
             {"weapon_profiles_enabled", model.aim.weaponProfilesEnabled},
             {"weapon_profile", model.aim.weaponProfileIndex},
             {"weapon_profiles", std::move(profiles)},
@@ -184,6 +203,9 @@ Json Serialize(const ui::UiModel& model) {
             {"trajectory_tracking", model.aim.trajectoryTracking},
             {"require_visibility", model.aim.requireVisibility},
             {"reject_target_state", model.aim.rejectTargetState},
+            {"reject_dead_target", model.aim.rejectDeadTarget},
+            {"player_dead_box", model.aim.playerDeadBox},
+            {"robot_dead_box", model.aim.robotDeadBox},
             {"enforce_fov", model.aim.enforceFov},
             {"enforce_distance", model.aim.enforceDistance},
             {"hit_percentage", model.aim.hitPercentage},
@@ -200,6 +222,7 @@ Json Serialize(const ui::UiModel& model) {
         }},
         {"system", {
             {"frame_limit", model.system.frameLimitIndex},
+            {"render_backend", static_cast<int>(model.system.renderBackend)},
             {"auto_scroll_logs", model.system.autoScrollLogs},
             {"toast_notifications", model.system.toastNotifications},
         }},
@@ -213,7 +236,8 @@ void Apply(const Json& root, ui::UiModel& model) {
 
     const Json& runtime = root.value("runtime", Json::object());
     model.runtime.gameVersionIndex = ReadNumber(runtime, "game_version", model.runtime.gameVersionIndex, 0, 2);
-    model.runtime.driverIndex = ReadNumber(runtime, "driver", model.runtime.driverIndex, 0, 1);
+    model.runtime.driverIndex = ReadNumber(
+        runtime, "driver", model.runtime.driverIndex, 0, 2);
 
     const Json& visual = root.value("visual", Json::object());
 #define LOAD_VISUAL_BOOL(field, key) model.visual.field = ReadBool(visual, key, model.visual.field)
@@ -223,7 +247,6 @@ void Apply(const Json& root, ui::UiModel& model) {
     LOAD_VISUAL_BOOL(modelGeometry, "model_geometry");
     LOAD_VISUAL_BOOL(visibilityColor, "visibility_color");
     LOAD_VISUAL_BOOL(coordinateDecrypt, "coordinate_decrypt");
-    LOAD_VISUAL_BOOL(algorithmDecrypt, "algorithm_decrypt");
     LOAD_VISUAL_BOOL(box, "box");
     LOAD_VISUAL_BOOL(snapline, "snapline");
     LOAD_VISUAL_BOOL(skeleton, "skeleton");
@@ -249,9 +272,6 @@ void Apply(const Json& root, ui::UiModel& model) {
     LOAD_VISUAL_BOOL(debugInfo, "debug_info");
     LOAD_VISUAL_BOOL(classNameDebug, "class_name_debug");
 #undef LOAD_VISUAL_BOOL
-    if (model.visual.algorithmDecrypt) {
-        model.visual.coordinateDecrypt = false;
-    }
     model.visual.drawDistanceMeters = ReadNumber(visual, "draw_distance_meters", model.visual.drawDistanceMeters, 0, 2000);
     model.visual.warningSize = ReadNumber(visual, "warning_size", model.visual.warningSize, 0.0f, 1000.0f);
     model.visual.warningDistanceMeters = ReadNumber(visual, "warning_distance_meters", model.visual.warningDistanceMeters, 0.0f, 2000.0f);
@@ -311,7 +331,11 @@ void Apply(const Json& root, ui::UiModel& model) {
 
     const Json& aim = root.value("aim", Json::object());
     model.aim.enabled = ReadBool(aim, "enabled", model.aim.enabled);
-    model.aim.missMode = ReadBool(aim, "miss_mode", model.aim.missMode);
+    const bool legacyCover =
+        ReadBool(aim, "miss_mode", model.aim.missMode);
+    model.aim.missMode = ReadBool(aim, "cover", legacyCover);
+    model.aim.coverMode = ReadNumber(
+        aim, "cover_mode", model.aim.coverMode, 0, 1);
     model.aim.weaponProfilesEnabled = ReadBool(aim, "weapon_profiles_enabled", model.aim.weaponProfilesEnabled);
     model.aim.weaponProfileIndex = ReadNumber(aim, "weapon_profile", model.aim.weaponProfileIndex, 0, static_cast<int>(ui::kWeaponProfileCount - 1));
     const auto profilesIterator = aim.find("weapon_profiles");
@@ -334,6 +358,11 @@ void Apply(const Json& root, ui::UiModel& model) {
     model.aim.trajectoryTracking = ReadBool(aim, "trajectory_tracking", model.aim.trajectoryTracking);
     model.aim.requireVisibility = ReadBool(aim, "require_visibility", model.aim.requireVisibility);
     model.aim.rejectTargetState = ReadBool(aim, "reject_target_state", model.aim.rejectTargetState);
+    model.aim.rejectDeadTarget = ReadBool(aim, "reject_dead_target", model.aim.rejectDeadTarget);
+    model.aim.playerDeadBox = ReadBool(
+        aim, "player_dead_box", model.aim.playerDeadBox);
+    model.aim.robotDeadBox = ReadBool(
+        aim, "robot_dead_box", model.aim.robotDeadBox);
     model.aim.enforceFov = ReadBool(aim, "enforce_fov", model.aim.enforceFov);
     model.aim.enforceDistance = ReadBool(aim, "enforce_distance", model.aim.enforceDistance);
     model.aim.hitPercentage = ReadNumber(aim, "hit_percentage", model.aim.hitPercentage, 0, 100);
@@ -351,13 +380,14 @@ void Apply(const Json& root, ui::UiModel& model) {
         }
     }
     const auto inputModeIterator = aim.find("input_mode");
+    model.aim.inputMode = ui::AimInputMode::ReadOnly;
     if (inputModeIterator != aim.end() && inputModeIterator->is_number_integer()) {
         const int inputMode = inputModeIterator->get<int>();
-        if (inputMode >= static_cast<int>(ui::AimInputMode::WriteTouch) &&
+        if (inputMode >= static_cast<int>(ui::AimInputMode::ReadOnly) &&
             inputMode <= static_cast<int>(ui::AimInputMode::KernelGyroscope)) {
             model.aim.inputMode = static_cast<ui::AimInputMode>(inputMode);
         } else {
-            model.aim.inputMode = ui::AimInputMode::WriteTouch;
+            model.aim.inputMode = ui::AimInputMode::ReadOnly;
         }
     }
     model.aim.showTouchArea = ReadBool(aim, "show_touch_area", model.aim.showTouchArea);
@@ -367,6 +397,8 @@ void Apply(const Json& root, ui::UiModel& model) {
 
     const Json& system = root.value("system", Json::object());
     model.system.frameLimitIndex = ReadNumber(system, "frame_limit", model.system.frameLimitIndex, 0, 6);
+    model.system.renderBackend = ReadRenderBackend(
+        system, "render_backend", model.system.renderBackend);
     model.system.autoScrollLogs = ReadBool(system, "auto_scroll_logs", model.system.autoScrollLogs);
     model.system.toastNotifications = ReadBool(system, "toast_notifications", model.system.toastNotifications);
 }

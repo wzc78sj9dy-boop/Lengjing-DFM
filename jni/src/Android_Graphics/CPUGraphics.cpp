@@ -3,6 +3,7 @@
 #include <arm_neon.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -17,150 +18,194 @@
 namespace {
 
 using Clock = std::chrono::steady_clock;
+using lengjing::render::cpu::ClampRect;
+using lengjing::render::cpu::EdgeCovers;
+using lengjing::render::cpu::EdgeValue;
+using lengjing::render::cpu::EndPixelAtOrBefore;
+using lengjing::render::cpu::EndPixelBefore;
+using lengjing::render::cpu::FirstPixelAtOrAfter;
+using lengjing::render::cpu::IntersectRect;
+using lengjing::render::cpu::IsTopLeftEdge;
+using lengjing::render::cpu::PixelCenter;
+using lengjing::render::cpu::PixelRect;
+using lengjing::render::cpu::SaturatingInt;
+using lengjing::render::cpu::SubpixelPoint;
+using lengjing::render::cpu::ToSubpixel;
+using lengjing::render::cpu::UnionRect;
 
-constexpr int kWindowWatchdogMs = 500;
-constexpr int kRasterWaitMs = 250;
-constexpr int kRasterAbortWaitMs = 500;
+constexpr int kWindowLockWatchdogMs = 500;
 constexpr int kSubmitStopWaitMs = 100;
-constexpr int kMaximumConsecutiveWindowFailures = 8;
-constexpr std::size_t kMaximumPendingDamage = 32;
+constexpr int kSubmitFailureLimit = 8;
+constexpr int kSubmitRetryBaseMs = 4;
+constexpr int kSubmitRetryMaxMs = 100;
+constexpr int kSubmitRestartDelayMs = 500;
+constexpr int kGeometryRetryBaseMs = 16;
+constexpr int kGeometryRetryMaxMs = 500;
 
-std::int64_t NowMs() {
+int64_t NowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                Clock::now().time_since_epoch())
         .count();
 }
 
-std::uint8_t Scale255Exact(std::uint16_t value) {
-    const std::uint16_t adjusted =
-        static_cast<std::uint16_t>(value + (value >> 8));
-    return static_cast<std::uint8_t>((adjusted + 0x80u) >> 8);
+bool TryPixelCount(int width, int height, size_t* pixel_count) {
+    if (pixel_count == nullptr || width <= 0 || height <= 0)
+        return false;
+
+    const size_t w = static_cast<size_t>(width);
+    const size_t h = static_cast<size_t>(height);
+    if (w > std::numeric_limits<size_t>::max() / h)
+        return false;
+    const size_t count = w * h;
+    if (count > std::numeric_limits<size_t>::max() / sizeof(uint32_t))
+        return false;
+    if (count > static_cast<size_t>(std::numeric_limits<int>::max()))
+        return false;
+    *pixel_count = count;
+    return true;
 }
 
-std::uint8_t Div255Floor(std::uint32_t value) {
-    return static_cast<std::uint8_t>((value * 32897u) >> 23);
+int FailureBackoffMs(int failures, int base_ms, int max_ms) {
+    const int shift = std::clamp(failures - 1, 0, 6);
+    const int64_t delay = static_cast<int64_t>(base_ms) << shift;
+    return static_cast<int>(std::min<int64_t>(delay, max_ms));
 }
 
-std::uint32_t BlendPixel(std::uint32_t destination, std::uint32_t source) {
-    const std::uint32_t sourceAlpha = source >> 24;
-    if (sourceAlpha == 0) {
-        return destination;
-    }
-    if (sourceAlpha == 255) {
-        return source;
+void ScheduleGeometryRetry(int* failures, int64_t* retry_after_ms) {
+    if (failures == nullptr || retry_after_ms == nullptr)
+        return;
+    *failures = std::min(*failures + 1, 32);
+    *retry_after_ms = NowMs() + FailureBackoffMs(
+        *failures, kGeometryRetryBaseMs, kGeometryRetryMaxMs);
+}
+
+bool BackOffSubmitFailure(const std::shared_ptr<SubmitState>& state,
+                          int* consecutive_failures) {
+    if (state == nullptr || consecutive_failures == nullptr)
+        return false;
+
+    *consecutive_failures = std::min(
+        *consecutive_failures + 1, kSubmitFailureLimit);
+    if (*consecutive_failures >= kSubmitFailureLimit) {
+        if (state->m_SurfaceRecoveryRequested != nullptr) {
+            state->m_SurfaceRecoveryRequested->store(
+                true, std::memory_order_release);
+        }
+        state->m_RetryAfterMs.store(
+            NowMs() + kSubmitRestartDelayMs, std::memory_order_release);
+        state->m_Running.store(false, std::memory_order_release);
+        state->m_Cond.notify_all();
+        return false;
     }
 
-    const std::uint32_t inverseAlpha = sourceAlpha ^ 255u;
-    std::uint32_t result = 0;
+    const int delay_ms = FailureBackoffMs(
+        *consecutive_failures, kSubmitRetryBaseMs, kSubmitRetryMaxMs);
+    std::unique_lock<std::mutex> lock(state->m_Mutex);
+    state->m_Cond.wait_for(lock, std::chrono::milliseconds(delay_ms), [&] {
+        return !state->m_Running.load(std::memory_order_acquire);
+    });
+    return state->m_Running.load(std::memory_order_acquire);
+}
+
+inline uint8_t Scale255Exact(uint16_t value) {
+    const uint16_t adjusted = static_cast<uint16_t>(value + (value >> 8));
+    return static_cast<uint8_t>((adjusted + 0x80u) >> 8);
+}
+
+inline uint8_t Div255Floor(uint32_t value) {
+    return static_cast<uint8_t>((value * 32897u) >> 23);
+}
+
+inline uint32_t BlendPixel(uint32_t dst, uint32_t src) {
+    const uint32_t src_alpha = src >> 24;
+    if (src_alpha == 0)
+        return dst;
+    if (src_alpha == 255)
+        return src;
+
+    const uint32_t inv_alpha = src_alpha ^ 255u;
+    uint32_t result = 0;
     for (unsigned shift = 0; shift < 24; shift += 8) {
-        const std::uint32_t destinationChannel =
-            (destination >> shift) & 255u;
-        const std::uint32_t sourceChannel = (source >> shift) & 255u;
-        result |= static_cast<std::uint32_t>(Scale255Exact(
-                      static_cast<std::uint16_t>(
-                          destinationChannel * inverseAlpha +
-                          sourceChannel * sourceAlpha)))
+        const uint32_t d = (dst >> shift) & 255u;
+        const uint32_t s = (src >> shift) & 255u;
+        result |= static_cast<uint32_t>(Scale255Exact(
+                      static_cast<uint16_t>(d * inv_alpha + s * src_alpha)))
                << shift;
     }
-
-    const std::uint32_t destinationAlpha = destination >> 24;
-    const std::uint32_t outputAlpha =
-        sourceAlpha + Div255Floor(destinationAlpha * inverseAlpha);
-    return result | (outputAlpha << 24);
+    const uint32_t dst_alpha = dst >> 24;
+    const uint32_t out_alpha = src_alpha + Div255Floor(dst_alpha * inv_alpha);
+    return result | (out_alpha << 24);
 }
 
-void BlendSpan(std::uint32_t* destination,
-               int count,
-               std::uint32_t source) {
-    if (destination == nullptr || count <= 0 || (source >> 24) == 0) {
+void BlendSpan(uint32_t* dst, int count, uint32_t src) {
+    if (count <= 0 || (src >> 24) == 0)
+        return;
+
+    const uint32_t src_alpha = src >> 24;
+    int x = 0;
+    if (src_alpha == 255) {
+        const uint32x4_t fill = vdupq_n_u32(src);
+        for (; x + 4 <= count; x += 4)
+            vst1q_u32(dst + x, fill);
+        for (; x < count; ++x)
+            dst[x] = src;
         return;
     }
 
-    const std::uint32_t sourceAlpha = source >> 24;
-    int offset = 0;
-    if (sourceAlpha == 255) {
-        const uint32x4_t fill = vdupq_n_u32(source);
-        for (; offset + 4 <= count; offset += 4) {
-            vst1q_u32(destination + offset, fill);
-        }
-        for (; offset < count; ++offset) {
-            destination[offset] = source;
-        }
-        return;
+    const uint8x8_t inv8 = vdup_n_u8(static_cast<uint8_t>(src_alpha ^ 255u));
+    const uint8x8_t alpha8 = vdup_n_u8(static_cast<uint8_t>(src_alpha));
+    const uint8x16_t src_bytes = vreinterpretq_u8_u32(vdupq_n_u32(src));
+    const uint8x8_t src_lo = vget_low_u8(src_bytes);
+    const uint8x8_t src_hi = vget_high_u8(src_bytes);
+    const uint32x4_t rgb_mask = vdupq_n_u32(0x00FFFFFFu);
+    const uint32x4_t src_alpha4 = vdupq_n_u32(src_alpha);
+    const uint32_t alpha_coeff = (src_alpha ^ 255u) * 32897u;
+
+    for (; x + 4 <= count; x += 4) {
+        const uint32x4_t dst_words = vld1q_u32(dst + x);
+        const uint8x16_t dst_bytes = vreinterpretq_u8_u32(dst_words);
+
+        uint16x8_t lo = vmull_u8(vget_low_u8(dst_bytes), inv8);
+        uint16x8_t hi = vmull_u8(vget_high_u8(dst_bytes), inv8);
+        lo = vmlal_u8(lo, src_lo, alpha8);
+        hi = vmlal_u8(hi, src_hi, alpha8);
+        lo = vsraq_n_u16(lo, lo, 8);
+        hi = vsraq_n_u16(hi, hi, 8);
+        const uint8x16_t blended_bytes = vcombine_u8(
+            vrshrn_n_u16(lo, 8), vrshrn_n_u16(hi, 8));
+
+        const uint32x4_t dst_alpha4 = vshrq_n_u32(dst_words, 24);
+        const uint32x4_t out_alpha4 = vaddq_u32(
+            src_alpha4,
+            vshrq_n_u32(vmulq_n_u32(dst_alpha4, alpha_coeff), 23));
+        const uint32x4_t out = vorrq_u32(
+            vandq_u32(vreinterpretq_u32_u8(blended_bytes), rgb_mask),
+            vshlq_n_u32(out_alpha4, 24));
+        vst1q_u32(dst + x, out);
     }
-
-    const uint8x8_t inverse8 =
-        vdup_n_u8(static_cast<std::uint8_t>(sourceAlpha ^ 255u));
-    const uint8x8_t alpha8 =
-        vdup_n_u8(static_cast<std::uint8_t>(sourceAlpha));
-    const uint8x16_t sourceBytes =
-        vreinterpretq_u8_u32(vdupq_n_u32(source));
-    const uint8x8_t sourceLow = vget_low_u8(sourceBytes);
-    const uint8x8_t sourceHigh = vget_high_u8(sourceBytes);
-    const uint32x4_t rgbMask = vdupq_n_u32(0x00FFFFFFu);
-    const uint32x4_t sourceAlpha4 = vdupq_n_u32(sourceAlpha);
-    const std::uint32_t alphaCoefficient =
-        (sourceAlpha ^ 255u) * 32897u;
-
-    for (; offset + 4 <= count; offset += 4) {
-        const uint32x4_t destinationWords =
-            vld1q_u32(destination + offset);
-        const uint8x16_t destinationBytes =
-            vreinterpretq_u8_u32(destinationWords);
-
-        uint16x8_t low =
-            vmull_u8(vget_low_u8(destinationBytes), inverse8);
-        uint16x8_t high =
-            vmull_u8(vget_high_u8(destinationBytes), inverse8);
-        low = vmlal_u8(low, sourceLow, alpha8);
-        high = vmlal_u8(high, sourceHigh, alpha8);
-        low = vsraq_n_u16(low, low, 8);
-        high = vsraq_n_u16(high, high, 8);
-        const uint8x16_t blendedBytes = vcombine_u8(
-            vrshrn_n_u16(low, 8), vrshrn_n_u16(high, 8));
-
-        const uint32x4_t destinationAlpha4 =
-            vshrq_n_u32(destinationWords, 24);
-        const uint32x4_t outputAlpha4 = vaddq_u32(
-            sourceAlpha4,
-            vshrq_n_u32(
-                vmulq_n_u32(destinationAlpha4, alphaCoefficient), 23));
-        const uint32x4_t output = vorrq_u32(
-            vandq_u32(vreinterpretq_u32_u8(blendedBytes), rgbMask),
-            vshlq_n_u32(outputAlpha4, 24));
-        vst1q_u32(destination + offset, output);
-    }
-
-    for (; offset < count; ++offset) {
-        destination[offset] = BlendPixel(destination[offset], source);
-    }
+    for (; x < count; ++x)
+        dst[x] = BlendPixel(dst[x], src);
 }
 
-std::uint32_t ModulateColor(std::uint32_t texture,
-                            std::uint32_t tint) {
-    std::uint32_t result = 0;
+uint32_t ModulateColor(uint32_t texture, uint32_t tint) {
+    uint32_t result = 0;
     for (unsigned shift = 0; shift < 32; shift += 8) {
-        const std::uint16_t product = static_cast<std::uint16_t>(
+        const uint16_t product = static_cast<uint16_t>(
             ((texture >> shift) & 255u) * ((tint >> shift) & 255u));
-        result |= static_cast<std::uint32_t>(Scale255Exact(product)) << shift;
+        result |= static_cast<uint32_t>(Scale255Exact(product)) << shift;
     }
     return result;
 }
 
 struct RasterVertex {
-    float x = 0.0f;
-    float y = 0.0f;
-    float u = 0.0f;
-    float v = 0.0f;
-    std::uint32_t color = 0;
+    float x;
+    float y;
+    float u;
+    float v;
+    uint32_t color;
 };
 
-struct RasterClip {
-    int minX = 0;
-    int minY = 0;
-    int maxX = 0;
-    int maxY = 0;
-};
+using RasterClip = PixelRect;
 
 enum class TextureKind {
     Solid,
@@ -170,35 +215,48 @@ enum class TextureKind {
 
 struct TextureView {
     TextureKind kind = TextureKind::Solid;
-    const std::uint8_t* alpha = nullptr;
-    const std::uint32_t* rgba = nullptr;
+    const uint8_t* alpha = nullptr;
+    const uint32_t* rgba = nullptr;
     int width = 0;
     int height = 0;
 };
 
-constexpr std::uintptr_t kDynamicTextureTag = 1u;
+struct PreparedPrimitive {
+    RasterVertex vertices[4]{};
+    TextureView texture;
+    RasterClip clip;
+    uint8_t vertex_count = 0;
+};
 
-struct DynamicTexture {
+struct PreparedFrame {
+    std::vector<PreparedPrimitive> primitives;
+    std::array<std::vector<uint32_t>, RenderPool::kWorkers> bands;
+    PixelRect content_rect;
+};
+
+constexpr uintptr_t kManagedTextureTag = 1u;
+
+struct ManagedTexture {
     ImTextureFormat format = ImTextureFormat_Alpha8;
     int width = 0;
     int height = 0;
-    std::vector<std::uint8_t> alpha;
-    std::vector<std::uint32_t> rgba;
+    std::vector<uint8_t> alpha;
+    std::vector<uint32_t> rgba;
 };
 
-static_assert(alignof(DynamicTexture) > kDynamicTextureTag);
+static_assert(alignof(ManagedTexture) > kManagedTextureTag);
 
 template <typename Id>
-std::uintptr_t TextureIdBits(Id id) {
+uintptr_t TextureIdBits(Id id) {
     if constexpr (std::is_pointer_v<Id>) {
-        return reinterpret_cast<std::uintptr_t>(id);
+        return reinterpret_cast<uintptr_t>(id);
     } else {
-        return static_cast<std::uintptr_t>(id);
+        return static_cast<uintptr_t>(id);
     }
 }
 
 template <typename Id>
-Id TextureIdFromBits(std::uintptr_t bits) {
+Id TextureIdFromBits(uintptr_t bits) {
     if constexpr (std::is_pointer_v<Id>) {
         return reinterpret_cast<Id>(bits);
     } else {
@@ -206,62 +264,44 @@ Id TextureIdFromBits(std::uintptr_t bits) {
     }
 }
 
-bool TryPixelCount(int width, int height, std::size_t* pixelCount) {
-    if (pixelCount == nullptr || width <= 0 || height <= 0) {
-        return false;
-    }
-    const std::size_t unsignedWidth = static_cast<std::size_t>(width);
-    const std::size_t unsignedHeight = static_cast<std::size_t>(height);
-    if (unsignedWidth >
-        std::numeric_limits<std::size_t>::max() / unsignedHeight) {
-        return false;
-    }
-    const std::size_t count = unsignedWidth * unsignedHeight;
-    if (count >
-            std::numeric_limits<std::size_t>::max() /
-                sizeof(std::uint32_t) ||
-        count > static_cast<std::size_t>(
-                    std::numeric_limits<int>::max())) {
-        return false;
-    }
-    *pixelCount = count;
-    return true;
+template <typename Id>
+bool IsManagedTextureId(Id id) {
+    return (TextureIdBits(id) & kManagedTextureTag) != 0;
 }
 
-bool IsDynamicTextureId(ImTextureID id) {
-    return (TextureIdBits(id) & kDynamicTextureTag) != 0;
+ImTextureID MakeManagedTextureId(ManagedTexture* texture) {
+    const uintptr_t address = reinterpret_cast<uintptr_t>(texture);
+    return TextureIdFromBits<ImTextureID>(address | kManagedTextureTag);
 }
 
-ImTextureID MakeDynamicTextureId(DynamicTexture* texture) {
-    return TextureIdFromBits<ImTextureID>(
-        reinterpret_cast<std::uintptr_t>(texture) | kDynamicTextureTag);
+template <typename Id>
+ManagedTexture* ManagedTextureFromId(Id id) {
+    const uintptr_t address =
+        TextureIdBits(id) & ~kManagedTextureTag;
+    return reinterpret_cast<ManagedTexture*>(address);
 }
 
-DynamicTexture* DynamicTextureFromId(ImTextureID id) {
-    return reinterpret_cast<DynamicTexture*>(
-        TextureIdBits(id) & ~kDynamicTextureTag);
-}
-
-bool ResizeDynamicTexture(DynamicTexture* output,
-                          const ImTextureData* input) {
-    if (output == nullptr || input == nullptr || input->Pixels == nullptr ||
-        input->Width <= 0 || input->Height <= 0 ||
-        (input->Format != ImTextureFormat_Alpha8 &&
-         input->Format != ImTextureFormat_RGBA32)) {
+bool ResizeManagedTexture(ManagedTexture* output, const ImTextureData* input) {
+    if (output == nullptr || input == nullptr || input->Pixels == nullptr
+        || input->Width <= 0 || input->Height <= 0)
         return false;
-    }
-
-    std::size_t pixelCount = 0;
-    if (!TryPixelCount(input->Width, input->Height, &pixelCount)) {
+    if (input->Format != ImTextureFormat_Alpha8
+        && input->Format != ImTextureFormat_RGBA32)
         return false;
-    }
 
-    std::vector<std::uint8_t> alpha;
-    std::vector<std::uint32_t> rgba;
-    if (input->Format == ImTextureFormat_Alpha8) {
-        alpha.resize(pixelCount);
-    } else {
-        rgba.resize(pixelCount);
+    size_t pixel_count = 0;
+    if (!TryPixelCount(input->Width, input->Height, &pixel_count))
+        return false;
+
+    std::vector<uint8_t> alpha;
+    std::vector<uint32_t> rgba;
+    try {
+        if (input->Format == ImTextureFormat_Alpha8)
+            alpha.resize(pixel_count);
+        else
+            rgba.resize(pixel_count);
+    } catch (...) {
+        return false;
     }
 
     output->format = input->Format;
@@ -272,116 +312,86 @@ bool ResizeDynamicTexture(DynamicTexture* output,
     return true;
 }
 
-void CopyDynamicTextureRect(DynamicTexture* output,
-                            const ImTextureData* input,
-                            int x,
-                            int y,
-                            int width,
-                            int height) {
-    if (output == nullptr || input == nullptr || input->Pixels == nullptr ||
-        output->width != input->Width ||
-        output->height != input->Height ||
-        output->format != input->Format) {
+void CopyManagedTextureRect(ManagedTexture* output, const ImTextureData* input,
+                            int x, int y, int width, int height) {
+    if (output == nullptr || input == nullptr || input->Pixels == nullptr
+        || output->width != input->Width || output->height != input->Height
+        || output->format != input->Format)
         return;
-    }
 
-    const int minimumX = std::clamp(x, 0, input->Width);
-    const int minimumY = std::clamp(y, 0, input->Height);
-    const int maximumX = std::clamp(x + width, 0, input->Width);
-    const int maximumY = std::clamp(y + height, 0, input->Height);
-    if (maximumX <= minimumX || maximumY <= minimumY) {
+    const int x0 = std::clamp(x, 0, input->Width);
+    const int y0 = std::clamp(y, 0, input->Height);
+    const int x1 = std::clamp(x + width, 0, input->Width);
+    const int y1 = std::clamp(y + height, 0, input->Height);
+    if (x1 <= x0 || y1 <= y0)
         return;
-    }
 
-    const std::size_t rowPixels =
-        static_cast<std::size_t>(maximumX - minimumX);
+    const size_t copy_pixels = static_cast<size_t>(x1 - x0);
     if (input->Format == ImTextureFormat_Alpha8) {
-        for (int row = minimumY; row < maximumY; ++row) {
-            const std::size_t offset =
-                static_cast<std::size_t>(row) * input->Width + minimumX;
-            std::memcpy(
-                output->alpha.data() + offset,
-                input->Pixels + offset,
-                rowPixels);
+        for (int row = y0; row < y1; ++row) {
+            const size_t offset = static_cast<size_t>(row) * input->Width + x0;
+            std::memcpy(output->alpha.data() + offset,
+                        input->Pixels + offset, copy_pixels);
         }
-        return;
-    }
-
-    for (int row = minimumY; row < maximumY; ++row) {
-        const std::size_t offset =
-            static_cast<std::size_t>(row) * input->Width + minimumX;
-        std::memcpy(
-            output->rgba.data() + offset,
-            input->Pixels + offset * sizeof(std::uint32_t),
-            rowPixels * sizeof(std::uint32_t));
+    } else {
+        for (int row = y0; row < y1; ++row) {
+            const size_t offset = static_cast<size_t>(row) * input->Width + x0;
+            std::memcpy(output->rgba.data() + offset,
+                        input->Pixels + offset * sizeof(uint32_t),
+                        copy_pixels * sizeof(uint32_t));
+        }
     }
 }
 
-bool UpdateDynamicTexture(ImTextureData* texture) {
-    if (texture == nullptr) {
+bool UpdateManagedTexture(ImTextureData* texture) {
+    if (texture == nullptr)
         return false;
-    }
 
     if (texture->Status == ImTextureStatus_WantCreate) {
-        auto dynamic = std::make_unique<DynamicTexture>();
-        if (!ResizeDynamicTexture(dynamic.get(), texture)) {
+        auto managed = std::make_unique<ManagedTexture>();
+        if (!ResizeManagedTexture(managed.get(), texture)) {
             return false;
         }
-        CopyDynamicTextureRect(
-            dynamic.get(), texture, 0, 0, texture->Width, texture->Height);
-        texture->BackendUserData = dynamic.get();
-        texture->SetTexID(MakeDynamicTextureId(dynamic.get()));
+        CopyManagedTextureRect(managed.get(), texture, 0, 0,
+                               texture->Width, texture->Height);
+        texture->BackendUserData = managed.get();
+        texture->SetTexID(MakeManagedTextureId(managed.get()));
         texture->SetStatus(ImTextureStatus_OK);
-        dynamic.release();
+        managed.release();
         return true;
     }
 
     if (texture->Status == ImTextureStatus_WantUpdates) {
-        auto* dynamic =
-            static_cast<DynamicTexture*>(texture->BackendUserData);
-        if (dynamic == nullptr || !IsDynamicTextureId(texture->TexID) ||
-            DynamicTextureFromId(texture->TexID) != dynamic) {
+        auto* managed = static_cast<ManagedTexture*>(texture->BackendUserData);
+        if (managed == nullptr || !IsManagedTextureId(texture->TexID)
+            || ManagedTextureFromId(texture->TexID) != managed)
             return false;
-        }
-        if (dynamic->width != texture->Width ||
-            dynamic->height != texture->Height ||
-            dynamic->format != texture->Format) {
-            if (!ResizeDynamicTexture(dynamic, texture)) {
+        if (managed->width != texture->Width || managed->height != texture->Height
+            || managed->format != texture->Format) {
+            if (!ResizeManagedTexture(managed, texture))
                 return false;
-            }
-            CopyDynamicTextureRect(
-                dynamic, texture, 0, 0, texture->Width, texture->Height);
+            CopyManagedTextureRect(managed, texture, 0, 0,
+                                   texture->Width, texture->Height);
         } else if (!texture->Updates.empty()) {
-            for (const ImTextureRect& rectangle : texture->Updates) {
-                CopyDynamicTextureRect(
-                    dynamic,
-                    texture,
-                    rectangle.x,
-                    rectangle.y,
-                    rectangle.w,
-                    rectangle.h);
+            for (const ImTextureRect& rect : texture->Updates) {
+                CopyManagedTextureRect(managed, texture, rect.x, rect.y,
+                                       rect.w, rect.h);
             }
         } else {
-            const ImTextureRect& rectangle = texture->UpdateRect;
-            CopyDynamicTextureRect(
-                dynamic,
-                texture,
-                rectangle.x,
-                rectangle.y,
-                rectangle.w,
-                rectangle.h);
+            const ImTextureRect& rect = texture->UpdateRect;
+            CopyManagedTextureRect(managed, texture, rect.x, rect.y,
+                                   rect.w, rect.h);
         }
         texture->SetStatus(ImTextureStatus_OK);
         return true;
     }
 
-    if (texture->Status == ImTextureStatus_WantDestroy &&
-        texture->UnusedFrames > 0) {
-        auto* dynamic =
-            static_cast<DynamicTexture*>(texture->BackendUserData);
-        if (dynamic != nullptr && IsDynamicTextureId(texture->TexID) &&
-            DynamicTextureFromId(texture->TexID) == dynamic) {
-            delete dynamic;
+    if (texture->Status == ImTextureStatus_WantDestroy
+        && texture->UnusedFrames > 0) {
+        auto* managed = static_cast<ManagedTexture*>(texture->BackendUserData);
+        if (managed != nullptr && IsManagedTextureId(texture->TexID)
+            && ManagedTextureFromId(texture->TexID) == managed) {
+            delete managed;
         }
         texture->BackendUserData = nullptr;
         texture->SetTexID(ImTextureID_Invalid);
@@ -390,579 +400,569 @@ bool UpdateDynamicTexture(ImTextureData* texture) {
     return true;
 }
 
-bool UpdateDynamicTextures(ImDrawData* drawData) {
-    if (drawData == nullptr || drawData->Textures == nullptr) {
+bool UpdateManagedTextures(ImDrawData* draw_data) {
+    if (draw_data == nullptr || draw_data->Textures == nullptr)
         return true;
-    }
-    for (ImTextureData* texture : *drawData->Textures) {
-        if (texture != nullptr && texture->Status != ImTextureStatus_OK &&
-            !UpdateDynamicTexture(texture)) {
+    for (ImTextureData* texture : *draw_data->Textures) {
+        if (texture->Status != ImTextureStatus_OK
+            && !UpdateManagedTexture(texture))
             return false;
-        }
     }
     return true;
 }
 
-void DestroyDynamicTextures() {
-    if (ImGui::GetCurrentContext() == nullptr) {
+void DestroyManagedTextures() {
+    if (ImGui::GetCurrentContext() == nullptr)
         return;
-    }
     for (ImTextureData* texture : ImGui::GetPlatformIO().Textures) {
-        if (texture == nullptr || texture->BackendUserData == nullptr ||
-            !IsDynamicTextureId(texture->TexID)) {
+        if (texture == nullptr || texture->BackendUserData == nullptr
+            || !IsManagedTextureId(texture->TexID))
             continue;
-        }
-        auto* dynamic =
-            static_cast<DynamicTexture*>(texture->BackendUserData);
-        if (DynamicTextureFromId(texture->TexID) == dynamic) {
-            delete dynamic;
-        }
+        auto* managed = static_cast<ManagedTexture*>(texture->BackendUserData);
+        if (ManagedTextureFromId(texture->TexID) == managed)
+            delete managed;
         texture->BackendUserData = nullptr;
         texture->SetTexID(ImTextureID_Invalid);
         texture->SetStatus(ImTextureStatus_Destroyed);
     }
 }
 
-int ClampTextureCoordinate(int value, int size) {
-    if (value < 0) {
-        return 0;
-    }
-    if (value >= size) {
-        return size - 1;
-    }
-    return value;
+struct BilinearCoordinates {
+    int x0 = 0;
+    int x1 = 0;
+    int y0 = 0;
+    int y1 = 0;
+    float xWeight = 0.0f;
+    float yWeight = 0.0f;
+};
+
+BilinearCoordinates ResolveBilinearCoordinates(
+    float u, float v, int width, int height) {
+    const float x = std::clamp(
+        u * static_cast<float>(width) - 0.5f,
+        0.0f,
+        static_cast<float>(width - 1));
+    const float y = std::clamp(
+        v * static_cast<float>(height) - 0.5f,
+        0.0f,
+        static_cast<float>(height - 1));
+    BilinearCoordinates coordinates;
+    coordinates.x0 = static_cast<int>(x);
+    coordinates.y0 = static_cast<int>(y);
+    coordinates.x1 = std::min(coordinates.x0 + 1, width - 1);
+    coordinates.y1 = std::min(coordinates.y0 + 1, height - 1);
+    coordinates.xWeight = x - static_cast<float>(coordinates.x0);
+    coordinates.yWeight = y - static_cast<float>(coordinates.y0);
+    return coordinates;
 }
 
-std::uint32_t InterpolateColor(const RasterVertex& first,
-                               const RasterVertex& second,
-                               const RasterVertex& third,
-                               float firstWeight,
-                               float secondWeight,
-                               float thirdWeight) {
-    std::uint32_t result = 0;
+float BilinearValue(float topLeft,
+                    float topRight,
+                    float bottomLeft,
+                    float bottomRight,
+                    const BilinearCoordinates& coordinates) {
+    const float top = topLeft +
+        (topRight - topLeft) * coordinates.xWeight;
+    const float bottom = bottomLeft +
+        (bottomRight - bottomLeft) * coordinates.xWeight;
+    return top + (bottom - top) * coordinates.yWeight;
+}
+
+uint32_t BilinearRgba(const TextureView& texture,
+                      const BilinearCoordinates& coordinates) {
+    const uint32_t topLeft =
+        texture.rgba[coordinates.y0 * texture.width + coordinates.x0];
+    const uint32_t topRight =
+        texture.rgba[coordinates.y0 * texture.width + coordinates.x1];
+    const uint32_t bottomLeft =
+        texture.rgba[coordinates.y1 * texture.width + coordinates.x0];
+    const uint32_t bottomRight =
+        texture.rgba[coordinates.y1 * texture.width + coordinates.x1];
+    uint32_t result = 0;
     for (unsigned shift = 0; shift < 32; shift += 8) {
-        const float value =
-            static_cast<float>((first.color >> shift) & 255u) * firstWeight +
-            static_cast<float>((second.color >> shift) & 255u) * secondWeight +
-            static_cast<float>((third.color >> shift) & 255u) * thirdWeight;
-        result |= static_cast<std::uint32_t>(value) << shift;
+        const float value = BilinearValue(
+            static_cast<float>((topLeft >> shift) & 255u),
+            static_cast<float>((topRight >> shift) & 255u),
+            static_cast<float>((bottomLeft >> shift) & 255u),
+            static_cast<float>((bottomRight >> shift) & 255u),
+            coordinates);
+        result |= static_cast<uint32_t>(value + 0.5f) << shift;
     }
     return result;
 }
 
-std::uint32_t ShadePixel(const TextureView& texture,
-                         float u,
-                         float v,
-                         std::uint32_t color) {
-    if (texture.kind == TextureKind::Solid) {
+uint32_t InterpolateColor(const RasterVertex& a, const RasterVertex& b,
+                          const RasterVertex& c, float wa, float wb, float wc) {
+    uint32_t result = 0;
+    for (unsigned shift = 0; shift < 32; shift += 8) {
+        const float value = static_cast<float>((a.color >> shift) & 255u) * wa
+                          + static_cast<float>((b.color >> shift) & 255u) * wb
+                          + static_cast<float>((c.color >> shift) & 255u) * wc;
+        result |= static_cast<uint32_t>(value) << shift;
+    }
+    return result;
+}
+
+uint32_t ShadePixel(const TextureView& texture, float u, float v, uint32_t color) {
+    if (texture.kind == TextureKind::Solid)
         return color;
-    }
-    if (texture.width <= 0 || texture.height <= 0) {
-        return 0;
-    }
 
-    const int textureX = ClampTextureCoordinate(
-        static_cast<int>(u * texture.width), texture.width);
-    const int textureY = ClampTextureCoordinate(
-        static_cast<int>(v * texture.height), texture.height);
-    const std::size_t index =
-        static_cast<std::size_t>(textureY) * texture.width + textureX;
-
-    if (texture.kind == TextureKind::Rgba) {
-        return texture.rgba == nullptr
-            ? 0
-            : ModulateColor(texture.rgba[index], color);
-    }
-
-    if (texture.alpha == nullptr) {
+    if (texture.width <= 0 || texture.height <= 0)
         return 0;
-    }
-    const std::uint32_t coverage = texture.alpha[index];
-    if (coverage == 0) {
+    const BilinearCoordinates coordinates = ResolveBilinearCoordinates(
+        u, v, texture.width, texture.height);
+    if (texture.kind == TextureKind::Rgba)
+        return texture.rgba != nullptr
+            ? ModulateColor(BilinearRgba(texture, coordinates), color)
+            : 0;
+
+    if (texture.alpha == nullptr)
         return 0;
-    }
-    const std::uint32_t alpha =
-        Div255Floor(coverage * (color >> 24));
+    const uint32_t coverage = static_cast<uint32_t>(BilinearValue(
+        static_cast<float>(
+            texture.alpha[coordinates.y0 * texture.width + coordinates.x0]),
+        static_cast<float>(
+            texture.alpha[coordinates.y0 * texture.width + coordinates.x1]),
+        static_cast<float>(
+            texture.alpha[coordinates.y1 * texture.width + coordinates.x0]),
+        static_cast<float>(
+            texture.alpha[coordinates.y1 * texture.width + coordinates.x1]),
+        coordinates) + 0.5f);
+    if (coverage == 0)
+        return 0;
+    const uint32_t alpha = Div255Floor(coverage * (color >> 24));
     return (color & 0x00FFFFFFu) | (alpha << 24);
 }
 
-bool IsWhiteUv(const RasterVertex& vertex,
-               float whiteU,
-               float whiteV,
+bool IsWhiteUv(const RasterVertex& vertex, float white_u, float white_v,
                float tolerance) {
-    return std::fabs(vertex.u - whiteU) < tolerance &&
-           std::fabs(vertex.v - whiteV) < tolerance;
+    return std::fabs(vertex.u - white_u) < tolerance
+        && std::fabs(vertex.v - white_v) < tolerance;
 }
 
-bool IsInside(float firstWeight,
-              float secondWeight,
-              float thirdWeight) {
-    return firstWeight >= 0.0f &&
-           secondWeight >= 0.0f &&
-           thirdWeight >= 0.0f;
-}
-
-bool TryRasterQuad(const RasterVertex& first,
-                   const RasterVertex& second,
-                   const RasterVertex& third,
-                   const RasterVertex& fourth,
-                   const TextureView& texture,
-                   const RasterClip& clip,
-                   std::uint32_t* buffer,
-                   int stride,
-                   float whiteU,
-                   float whiteV,
+bool TryRasterQuad(const RasterVertex& a, const RasterVertex& b,
+                   const RasterVertex& c, const RasterVertex& d,
+                   const TextureView& texture, const RasterClip& clip,
+                   uint32_t* buffer, int stride, float white_u, float white_v,
                    const std::atomic<bool>& abort) {
-    if (std::fabs(first.x - fourth.x) > 0.01f ||
-        std::fabs(second.x - third.x) > 0.01f ||
-        std::fabs(first.y - second.y) > 0.01f ||
-        std::fabs(third.y - fourth.y) > 0.01f) {
+    if (std::fabs(a.x - d.x) > 0.01f || std::fabs(b.x - c.x) > 0.01f
+        || std::fabs(a.y - b.y) > 0.01f || std::fabs(c.y - d.y) > 0.01f)
         return false;
-    }
-    if (first.color != second.color ||
-        first.color != third.color ||
-        first.color != fourth.color) {
+    if (a.color != b.color || a.color != c.color || a.color != d.color)
         return false;
-    }
 
-    const float left =
-        std::min({first.x, second.x, third.x, fourth.x});
-    const float right =
-        std::max({first.x, second.x, third.x, fourth.x});
-    const float top =
-        std::min({first.y, second.y, third.y, fourth.y});
-    const float bottom =
-        std::max({first.y, second.y, third.y, fourth.y});
-    const int minX =
-        std::max(clip.minX, static_cast<int>(std::floor(left)));
-    const int minY =
-        std::max(clip.minY, static_cast<int>(std::floor(top)));
-    const int maxX =
-        std::min(clip.maxX, static_cast<int>(std::ceil(right)));
-    const int maxY =
-        std::min(clip.maxY, static_cast<int>(std::ceil(bottom)));
-    if (maxX <= minX || maxY <= minY) {
+    const float left = std::min({a.x, b.x, c.x, d.x});
+    const float right = std::max({a.x, b.x, c.x, d.x});
+    const float top = std::min({a.y, b.y, c.y, d.y});
+    const float bottom = std::max({a.y, b.y, c.y, d.y});
+    const int x0 = std::max(clip.x0, FirstPixelAtOrAfter(left));
+    const int y0 = std::max(clip.y0, FirstPixelAtOrAfter(top));
+    const int x1 = std::min(clip.x1, EndPixelBefore(right));
+    const int y1 = std::min(clip.y1, EndPixelBefore(bottom));
+    if (x1 <= x0 || y1 <= y0)
         return true;
-    }
 
-    const bool solid =
-        texture.kind != TextureKind::Rgba &&
-        IsWhiteUv(first, whiteU, whiteV, 0.001f) &&
-        IsWhiteUv(second, whiteU, whiteV, 0.001f) &&
-        IsWhiteUv(third, whiteU, whiteV, 0.001f) &&
-        IsWhiteUv(fourth, whiteU, whiteV, 0.001f);
+    const bool solid = texture.kind != TextureKind::Rgba
+        && IsWhiteUv(a, white_u, white_v, 0.001f)
+        && IsWhiteUv(b, white_u, white_v, 0.001f)
+        && IsWhiteUv(c, white_u, white_v, 0.001f)
+        && IsWhiteUv(d, white_u, white_v, 0.001f);
     if (solid) {
-        for (int y = minY; y < maxY; ++y) {
-            if ((y & 15) == 0 &&
-                abort.load(std::memory_order_relaxed)) {
+        for (int y = y0; y < y1; ++y) {
+            if ((y & 15) == 0 && abort.load(std::memory_order_relaxed))
                 return true;
-            }
-            BlendSpan(buffer + y * stride + minX,
-                      maxX - minX,
-                      first.color);
+            BlendSpan(buffer + y * stride + x0, x1 - x0, a.color);
         }
         return true;
     }
 
-    if (texture.kind != TextureKind::FontAlpha ||
-        texture.width <= 0 ||
-        texture.height <= 0) {
+    // RGBA images remain two triangles so their shared-edge blend matches the
+    // software rasterizer. Only Alpha8 font quads use this sampling fast path.
+    if (texture.kind != TextureKind::FontAlpha)
         return false;
-    }
-
-    const bool axisAlignedUv =
-        std::fabs(first.u - fourth.u) <= 0.0005f &&
-        std::fabs(second.u - third.u) <= 0.0005f &&
-        std::fabs(first.v - second.v) <= 0.0005f &&
-        std::fabs(third.v - fourth.v) <= 0.0005f;
-    if (!axisAlignedUv) {
+    if (texture.width <= 0 || texture.height <= 0)
         return false;
-    }
+    const bool axis_uv = std::fabs(a.u - d.u) <= 0.0005f
+        && std::fabs(b.u - c.u) <= 0.0005f
+        && std::fabs(a.v - b.v) <= 0.0005f
+        && std::fabs(c.v - d.v) <= 0.0005f;
+    if (!axis_uv)
+        return false;
 
-    const float deltaX = second.x - first.x;
-    const float deltaY = fourth.y - first.y;
-    if (std::fabs(deltaX) <= 0.001f ||
-        std::fabs(deltaY) <= 0.001f) {
+    const float dx = b.x - a.x;
+    const float dy = d.y - a.y;
+    if (std::fabs(dx) <= 0.001f || std::fabs(dy) <= 0.001f)
         return true;
-    }
+    const float du_dx = (b.u - a.u) / dx;
+    const float dv_dx = (b.v - a.v) / dx;
+    const float du_dy = (d.u - a.u) / dy;
+    const float dv_dy = (d.v - a.v) / dy;
 
-    const float uPerX = (second.u - first.u) / deltaX;
-    const float vPerX = (second.v - first.v) / deltaX;
-    const float uPerY = (fourth.u - first.u) / deltaY;
-    const float vPerY = (fourth.v - first.v) / deltaY;
-
-    for (int y = minY; y < maxY; ++y) {
-        if ((y & 15) == 0 &&
-            abort.load(std::memory_order_relaxed)) {
+    for (int y = y0; y < y1; ++y) {
+        if ((y & 15) == 0 && abort.load(std::memory_order_relaxed))
             return true;
-        }
-        const float pixelY = static_cast<float>(y) + 0.5f;
-        float u = first.u + (pixelY - first.y) * uPerY +
-                  (static_cast<float>(minX) + 0.5f - first.x) * uPerX;
-        float v = first.v + (pixelY - first.y) * vPerY +
-                  (static_cast<float>(minX) + 0.5f - first.x) * vPerX;
-        std::uint32_t* destination = buffer + y * stride + minX;
-        for (int x = minX; x < maxX; ++x, ++destination) {
-            const std::uint32_t source =
-                ShadePixel(texture, u, v, first.color);
-            if ((source >> 24) != 0) {
-                *destination = BlendPixel(*destination, source);
-            }
-            u += uPerX;
-            v += vPerX;
+        const float py = static_cast<float>(y) + 0.5f;
+        float u = a.u + (py - a.y) * du_dy
+                + (static_cast<float>(x0) + 0.5f - a.x) * du_dx;
+        float v = a.v + (py - a.y) * dv_dy
+                + (static_cast<float>(x0) + 0.5f - a.x) * dv_dx;
+        uint32_t* dst = buffer + y * stride + x0;
+        for (int x = x0; x < x1; ++x, ++dst) {
+            const uint32_t src = ShadePixel(texture, u, v, a.color);
+            if ((src >> 24) != 0)
+                *dst = BlendPixel(*dst, src);
+            u += du_dx;
+            v += dv_dx;
         }
     }
     return true;
 }
 
-float EdgeXAtY(const RasterVertex& first,
-               const RasterVertex& second,
-               float y) {
-    const float deltaY = second.y - first.y;
-    if (std::fabs(deltaY) <= 0.000001f) {
-        return first.x;
-    }
-    return first.x +
-           (y - first.y) * (second.x - first.x) / deltaY;
-}
-
-void RasterTriangle(const RasterVertex& first,
-                    const RasterVertex& second,
-                    const RasterVertex& third,
-                    const TextureView& texture,
-                    const RasterClip& clip,
-                    std::uint32_t* buffer,
-                    int stride,
-                    float whiteU,
-                    float whiteV,
+void RasterTriangle(const RasterVertex& a, const RasterVertex& b,
+                    const RasterVertex& c, const TextureView& texture,
+                    const RasterClip& clip, uint32_t* buffer, int stride,
+                    float white_u, float white_v,
                     const std::atomic<bool>& abort) {
-    const float firstSecondX = second.x - first.x;
-    const float firstSecondY = second.y - first.y;
-    const float firstThirdX = third.x - first.x;
-    const float firstThirdY = third.y - first.y;
-    const float determinant =
-        firstSecondX * firstThirdY - firstThirdX * firstSecondY;
-    if (std::fabs(determinant) < 0.5f) {
+    RasterVertex vertices[3]{a, b, c};
+    SubpixelPoint points[3];
+    if (!ToSubpixel(a.x, a.y, &points[0])
+        || !ToSubpixel(b.x, b.y, &points[1])
+        || !ToSubpixel(c.x, c.y, &points[2]))
         return;
-    }
 
-    const RasterVertex* top = &first;
-    const RasterVertex* middle = &second;
-    const RasterVertex* bottom = &third;
-    if (middle->y < top->y) {
-        std::swap(top, middle);
-    }
-    if (bottom->y < middle->y) {
-        std::swap(middle, bottom);
-    }
-    if (middle->y < top->y) {
-        std::swap(top, middle);
-    }
-
-    const int minY =
-        std::max(clip.minY, static_cast<int>(top->y));
-    const int maxY =
-        std::min(clip.maxY, static_cast<int>(bottom->y + 1.0f));
-    if (maxY <= minY) {
+    int64_t area = EdgeValue(points[0], points[1], points[2]);
+    if (area == 0)
         return;
+    if (area < 0) {
+        std::swap(points[1], points[2]);
+        std::swap(vertices[1], vertices[2]);
+        area = -area;
     }
 
-    const float inverseDeterminant = 1.0f / determinant;
-    const float secondStep = firstThirdY * inverseDeterminant;
-    const float thirdStep = -firstSecondY * inverseDeterminant;
-    const float firstStep = -(secondStep + thirdStep);
-    const bool sameColor =
-        first.color == second.color && first.color == third.color;
-    const bool solid =
-        sameColor &&
-        texture.kind != TextureKind::Rgba &&
-        IsWhiteUv(first, whiteU, whiteV, 0.001f) &&
-        IsWhiteUv(second, whiteU, whiteV, 0.001f) &&
-        IsWhiteUv(third, whiteU, whiteV, 0.001f);
+    const int64_t min_fixed_x = std::min({points[0].x, points[1].x, points[2].x});
+    const int64_t max_fixed_x = std::max({points[0].x, points[1].x, points[2].x});
+    const int64_t min_fixed_y = std::min({points[0].y, points[1].y, points[2].y});
+    const int64_t max_fixed_y = std::max({points[0].y, points[1].y, points[2].y});
+    const float fixed_scale = static_cast<float>(
+        lengjing::render::cpu::kSubpixelScale);
+    const int x0 = std::max(clip.x0, FirstPixelAtOrAfter(
+        static_cast<float>(min_fixed_x) / fixed_scale));
+    const int y0 = std::max(clip.y0, FirstPixelAtOrAfter(
+        static_cast<float>(min_fixed_y) / fixed_scale));
+    const int x1 = std::min(clip.x1, EndPixelAtOrBefore(
+        static_cast<float>(max_fixed_x) / fixed_scale));
+    const int y1 = std::min(clip.y1, EndPixelAtOrBefore(
+        static_cast<float>(max_fixed_y) / fixed_scale));
+    if (x1 <= x0 || y1 <= y0)
+        return;
 
-    for (int y = minY; y < maxY; ++y) {
-        if ((y & 15) == 0 &&
-            abort.load(std::memory_order_relaxed)) {
+    const bool edge0_top_left = IsTopLeftEdge(points[1], points[2]);
+    const bool edge1_top_left = IsTopLeftEdge(points[2], points[0]);
+    const bool edge2_top_left = IsTopLeftEdge(points[0], points[1]);
+    const int64_t edge0_step_x =
+        -(points[2].y - points[1].y)
+        * lengjing::render::cpu::kSubpixelScale;
+    const int64_t edge1_step_x =
+        -(points[0].y - points[2].y)
+        * lengjing::render::cpu::kSubpixelScale;
+    const int64_t edge2_step_x =
+        -(points[1].y - points[0].y)
+        * lengjing::render::cpu::kSubpixelScale;
+    const int64_t edge0_step_y =
+        (points[2].x - points[1].x)
+        * lengjing::render::cpu::kSubpixelScale;
+    const int64_t edge1_step_y =
+        (points[0].x - points[2].x)
+        * lengjing::render::cpu::kSubpixelScale;
+    const int64_t edge2_step_y =
+        (points[1].x - points[0].x)
+        * lengjing::render::cpu::kSubpixelScale;
+    const SubpixelPoint first_center = PixelCenter(x0, y0);
+    int64_t edge0_row = EdgeValue(points[1], points[2], first_center);
+    int64_t edge1_row = EdgeValue(points[2], points[0], first_center);
+    int64_t edge2_row = EdgeValue(points[0], points[1], first_center);
+    const float inverse_area = 1.0f / static_cast<float>(area);
+    const bool same_color = vertices[0].color == vertices[1].color
+        && vertices[0].color == vertices[2].color;
+    const bool solid = same_color && texture.kind != TextureKind::Rgba
+        && IsWhiteUv(vertices[0], white_u, white_v, 0.001f)
+        && IsWhiteUv(vertices[1], white_u, white_v, 0.001f)
+        && IsWhiteUv(vertices[2], white_u, white_v, 0.001f);
+
+    for (int y = y0; y < y1; ++y) {
+        if ((y & 15) == 0 && abort.load(std::memory_order_relaxed))
             return;
-        }
-        const float pixelY = static_cast<float>(y) + 0.5f;
-        const float longX = EdgeXAtY(*top, *bottom, pixelY);
-        const float shortX = pixelY < middle->y
-            ? EdgeXAtY(*top, *middle, pixelY)
-            : EdgeXAtY(*middle, *bottom, pixelY);
-        const float left = std::min(longX, shortX);
-        const float right = std::max(longX, shortX);
-        const int minX =
-            std::max(clip.minX, static_cast<int>(left));
-        const int maxX =
-            std::min(clip.maxX, static_cast<int>(right + 1.0f));
-        if (maxX <= minX) {
-            continue;
-        }
-
-        const float pixelX = static_cast<float>(minX) + 0.5f;
-        float secondWeight =
-            ((pixelX - first.x) * firstThirdY +
-             (pixelY - first.y) * (first.x - third.x)) *
-            inverseDeterminant;
-        float thirdWeight =
-            (firstSecondX * (pixelY - first.y) +
-             (pixelX - first.x) * (first.y - second.y)) *
-            inverseDeterminant;
-        float firstWeight = 1.0f - secondWeight - thirdWeight;
+        int64_t edge0 = edge0_row;
+        int64_t edge1 = edge1_row;
+        int64_t edge2 = edge2_row;
 
         if (solid) {
-            int runStart = -1;
-            int runEnd = -1;
-            if ((first.color >> 24) == 255u && maxX - minX >= 17) {
-                runStart = minX;
-                float leftFirst = firstWeight;
-                float leftSecond = secondWeight;
-                float leftThird = thirdWeight;
-                while (runStart < maxX &&
-                       !IsInside(leftFirst, leftSecond, leftThird)) {
-                    ++runStart;
-                    leftFirst += firstStep;
-                    leftSecond += secondStep;
-                    leftThird += thirdStep;
-                }
-                if (runStart < maxX) {
-                    runEnd = maxX;
-                    const float rightOffset =
-                        static_cast<float>(maxX - minX - 1);
-                    float rightFirst =
-                        firstWeight + firstStep * rightOffset;
-                    float rightSecond =
-                        secondWeight + secondStep * rightOffset;
-                    float rightThird =
-                        thirdWeight + thirdStep * rightOffset;
-                    while (runEnd > runStart &&
-                           !IsInside(rightFirst,
-                                     rightSecond,
-                                     rightThird)) {
-                        --runEnd;
-                        rightFirst -= firstStep;
-                        rightSecond -= secondStep;
-                        rightThird -= thirdStep;
-                    }
-                }
-            } else {
-                for (int x = minX; x < maxX; ++x) {
-                    if (IsInside(firstWeight,
-                                 secondWeight,
-                                 thirdWeight)) {
-                        if (runStart < 0) {
-                            runStart = x;
-                        }
-                        runEnd = x + 1;
-                    } else if (runStart >= 0) {
+            int run_start = x0;
+            int64_t left_edge0 = edge0;
+            int64_t left_edge1 = edge1;
+            int64_t left_edge2 = edge2;
+            while (run_start < x1) {
+                const bool covered = EdgeCovers(left_edge0, edge0_top_left)
+                    && EdgeCovers(left_edge1, edge1_top_left)
+                    && EdgeCovers(left_edge2, edge2_top_left);
+                if (covered)
+                    break;
+                ++run_start;
+                left_edge0 += edge0_step_x;
+                left_edge1 += edge1_step_x;
+                left_edge2 += edge2_step_x;
+            }
+            if (run_start < x1) {
+                int run_end = x1;
+                const int64_t right_offset = x1 - x0 - 1;
+                int64_t right_edge0 = edge0 + edge0_step_x * right_offset;
+                int64_t right_edge1 = edge1 + edge1_step_x * right_offset;
+                int64_t right_edge2 = edge2 + edge2_step_x * right_offset;
+                while (run_end > run_start) {
+                    const bool covered = EdgeCovers(right_edge0, edge0_top_left)
+                        && EdgeCovers(right_edge1, edge1_top_left)
+                        && EdgeCovers(right_edge2, edge2_top_left);
+                    if (covered)
                         break;
-                    }
-                    firstWeight += firstStep;
-                    secondWeight += secondStep;
-                    thirdWeight += thirdStep;
+                    --run_end;
+                    right_edge0 -= edge0_step_x;
+                    right_edge1 -= edge1_step_x;
+                    right_edge2 -= edge2_step_x;
                 }
+                BlendSpan(buffer + y * stride + run_start,
+                          run_end - run_start, vertices[0].color);
             }
-
-            if (runStart >= 0) {
-                BlendSpan(buffer + y * stride + runStart,
-                          runEnd - runStart,
-                          first.color);
-            }
-            continue;
-        }
-
-        std::uint32_t* destination =
-            buffer + y * stride + minX;
-        for (int x = minX; x < maxX; ++x, ++destination) {
-            if (IsInside(firstWeight,
-                         secondWeight,
-                         thirdWeight)) {
-                const std::uint32_t color = sameColor
-                    ? first.color
-                    : InterpolateColor(first,
-                                       second,
-                                       third,
-                                       firstWeight,
-                                       secondWeight,
-                                       thirdWeight);
-                const float u =
-                    first.u * firstWeight +
-                    second.u * secondWeight +
-                    third.u * thirdWeight;
-                const float v =
-                    first.v * firstWeight +
-                    second.v * secondWeight +
-                    third.v * thirdWeight;
-                const std::uint32_t source =
-                    ShadePixel(texture, u, v, color);
-                if ((source >> 24) != 0) {
-                    *destination =
-                        BlendPixel(*destination, source);
+        } else {
+            uint32_t* dst = buffer + y * stride + x0;
+            for (int x = x0; x < x1; ++x, ++dst) {
+                const bool covered = EdgeCovers(edge0, edge0_top_left)
+                    && EdgeCovers(edge1, edge1_top_left)
+                    && EdgeCovers(edge2, edge2_top_left);
+                if (covered) {
+                    const float wa = static_cast<float>(edge0) * inverse_area;
+                    const float wb = static_cast<float>(edge1) * inverse_area;
+                    const float wc = static_cast<float>(edge2) * inverse_area;
+                    const uint32_t color = same_color
+                        ? vertices[0].color
+                        : InterpolateColor(vertices[0], vertices[1], vertices[2],
+                                           wa, wb, wc);
+                    const float u = vertices[0].u * wa
+                        + vertices[1].u * wb + vertices[2].u * wc;
+                    const float v = vertices[0].v * wa
+                        + vertices[1].v * wb + vertices[2].v * wc;
+                    const uint32_t src = ShadePixel(texture, u, v, color);
+                    if ((src >> 24) != 0)
+                        *dst = BlendPixel(*dst, src);
                 }
+                edge0 += edge0_step_x;
+                edge1 += edge1_step_x;
+                edge2 += edge2_step_x;
             }
-            firstWeight += firstStep;
-            secondWeight += secondStep;
-            thirdWeight += thirdStep;
         }
+        edge0_row += edge0_step_y;
+        edge1_row += edge1_step_y;
+        edge2_row += edge2_step_y;
     }
 }
 
-std::shared_ptr<CpuSubmitState> MakeSubmitState() {
-    return std::shared_ptr<CpuSubmitState>(
-        new CpuSubmitState(),
-        [](CpuSubmitState* state) {
-            if (state->window != nullptr) {
-                ANativeWindow_release(state->window);
-            }
-            delete state;
-        });
+bool IsFiniteVertex(const RasterVertex& vertex) {
+    return std::isfinite(vertex.x) && std::isfinite(vertex.y)
+        && std::isfinite(vertex.u) && std::isfinite(vertex.v);
 }
 
-void ClearNativeBuffer(ANativeWindow_Buffer& buffer) {
-    if (buffer.bits == nullptr ||
-        buffer.format != WINDOW_FORMAT_RGBA_8888 ||
-        buffer.width <= 0 ||
-        buffer.height <= 0 ||
-        buffer.stride < buffer.width) {
-        return;
-    }
-    auto* pixels = static_cast<std::uint32_t*>(buffer.bits);
-    const std::size_t rowBytes =
-        static_cast<std::size_t>(buffer.width) *
-        sizeof(std::uint32_t);
-    for (int y = 0; y < buffer.height; ++y) {
-        std::memset(
-            pixels + static_cast<std::size_t>(y) * buffer.stride,
-            0,
-            rowBytes);
-    }
-}
+PixelRect PrimitiveBounds(const RasterVertex* vertices, int count) {
+    if (vertices == nullptr || count < 3 || count > 4)
+        return {};
 
-void RunSubmitLoop(const std::shared_ptr<CpuSubmitState>& state) {
-    std::vector<std::uint32_t> localBuffer;
-    std::uint64_t localBufferGeneration = 0;
-    int consecutiveWindowFailures = 0;
-    const auto recordWindowFailure = [&] {
-        ++consecutiveWindowFailures;
-        if (consecutiveWindowFailures <
-            kMaximumConsecutiveWindowFailures) {
-            return false;
-        }
-        state->surfaceRecoveryRequired.store(
-            true, std::memory_order_release);
-        state->running.store(false, std::memory_order_release);
-        state->condition.notify_all();
-        return true;
+    SubpixelPoint point;
+    if (!IsFiniteVertex(vertices[0])
+        || !ToSubpixel(vertices[0].x, vertices[0].y, &point))
+        return {};
+    int64_t min_x = point.x;
+    int64_t min_y = point.y;
+    int64_t max_x = point.x;
+    int64_t max_y = point.y;
+    for (int i = 1; i < count; ++i) {
+        if (!IsFiniteVertex(vertices[i])
+            || !ToSubpixel(vertices[i].x, vertices[i].y, &point))
+            return {};
+        min_x = std::min(min_x, point.x);
+        min_y = std::min(min_y, point.y);
+        max_x = std::max(max_x, point.x);
+        max_y = std::max(max_y, point.y);
+    }
+
+    const float scale = static_cast<float>(
+        lengjing::render::cpu::kSubpixelScale);
+    return {
+        FirstPixelAtOrAfter(static_cast<float>(min_x) / scale),
+        FirstPixelAtOrAfter(static_cast<float>(min_y) / scale),
+        EndPixelAtOrBefore(static_cast<float>(max_x) / scale),
+        EndPixelAtOrBefore(static_cast<float>(max_y) / scale),
     };
+}
 
-    while (state->running.load(std::memory_order_acquire)) {
+void AppendPreparedPrimitive(PreparedFrame* frame,
+                             const RasterVertex* vertices,
+                             int vertex_count,
+                             const TextureView& texture,
+                             const PixelRect& command_clip,
+                             const PixelRect& surface_bounds) {
+    if (frame == nullptr || vertices == nullptr)
+        return;
+    const PixelRect clip = IntersectRect(
+        IntersectRect(PrimitiveBounds(vertices, vertex_count), command_clip),
+        surface_bounds);
+    if (!clip.valid())
+        return;
+
+    PreparedPrimitive primitive;
+    std::copy_n(vertices, vertex_count, primitive.vertices);
+    primitive.vertex_count = static_cast<uint8_t>(vertex_count);
+    primitive.texture = texture;
+    primitive.clip = clip;
+    frame->primitives.push_back(std::move(primitive));
+    frame->content_rect = UnionRect(frame->content_rect, clip);
+}
+
+void BuildPrimitiveBands(PreparedFrame* frame, int height) {
+    if (frame == nullptr || height <= 0)
+        return;
+
+    std::array<size_t, RenderPool::kWorkers> counts{};
+    for (const PreparedPrimitive& primitive : frame->primitives) {
+        for (int band = 0; band < RenderPool::kWorkers; ++band) {
+            const int y0 = height * band / RenderPool::kWorkers;
+            const int y1 = height * (band + 1) / RenderPool::kWorkers;
+            if (primitive.clip.y1 > y0 && primitive.clip.y0 < y1)
+                ++counts[band];
+        }
+    }
+    for (int band = 0; band < RenderPool::kWorkers; ++band)
+        frame->bands[band].reserve(counts[band]);
+
+    for (size_t index = 0; index < frame->primitives.size(); ++index) {
+        const PreparedPrimitive& primitive = frame->primitives[index];
+        for (int band = 0; band < RenderPool::kWorkers; ++band) {
+            const int y0 = height * band / RenderPool::kWorkers;
+            const int y1 = height * (band + 1) / RenderPool::kWorkers;
+            if (primitive.clip.y1 > y0 && primitive.clip.y0 < y1)
+                frame->bands[band].push_back(static_cast<uint32_t>(index));
+        }
+    }
+}
+
+void RasterPreparedBand(const PreparedFrame& frame, int band,
+                        uint32_t* buffer, int stride, int height,
+                        float white_u, float white_v,
+                        const std::atomic<bool>& abort) {
+    if (buffer == nullptr || stride <= 0 || height <= 0
+        || band < 0 || band >= RenderPool::kWorkers)
+        return;
+    const PixelRect band_clip{
+        0,
+        height * band / RenderPool::kWorkers,
+        stride,
+        height * (band + 1) / RenderPool::kWorkers,
+    };
+    for (uint32_t index : frame.bands[band]) {
+        if (abort.load(std::memory_order_relaxed))
+            return;
+        if (index >= frame.primitives.size())
+            continue;
+        const PreparedPrimitive& primitive = frame.primitives[index];
+        const PixelRect clip = IntersectRect(primitive.clip, band_clip);
+        if (!clip.valid())
+            continue;
+
+        const RasterVertex* v = primitive.vertices;
+        if (primitive.vertex_count == 4) {
+            if (TryRasterQuad(v[0], v[1], v[2], v[3], primitive.texture,
+                              clip, buffer, stride, white_u, white_v, abort))
+                continue;
+            RasterTriangle(v[0], v[1], v[2], primitive.texture, clip,
+                           buffer, stride, white_u, white_v, abort);
+            if (abort.load(std::memory_order_relaxed))
+                return;
+            RasterTriangle(v[0], v[2], v[3], primitive.texture, clip,
+                           buffer, stride, white_u, white_v, abort);
+        } else if (primitive.vertex_count == 3) {
+            RasterTriangle(v[0], v[1], v[2], primitive.texture, clip,
+                           buffer, stride, white_u, white_v, abort);
+        }
+    }
+}
+
+std::shared_ptr<SubmitState> MakeSubmitState() {
+    return std::shared_ptr<SubmitState>(new SubmitState(), [](SubmitState* state) {
+        if (state->m_Window != nullptr)
+            ANativeWindow_release(state->m_Window);
+        delete state;
+    });
+}
+
+void RunSubmitLoop(const std::shared_ptr<SubmitState>& state) {
+    std::vector<uint32_t> local_buffer;
+    PixelRect local_content_rect;
+    int consecutive_failures = 0;
+
+    while (state->m_Running.load(std::memory_order_acquire)) {
         int width = 0;
         int height = 0;
-        int minX = 0;
-        int minY = 0;
-        int maxX = 0;
-        int maxY = 0;
-        std::uint64_t generation = 0;
+        PixelRect dirty_rect;
         {
-            std::unique_lock<std::mutex> lock(state->mutex);
-            state->condition.wait(lock, [&] {
-                return !state->running.load(std::memory_order_acquire) ||
-                       state->hasWork;
+            std::unique_lock<std::mutex> lock(state->m_Mutex);
+            state->m_Cond.wait(lock, [&] {
+                return !state->m_Running.load(std::memory_order_acquire)
+                    || state->m_HasWork;
             });
-            if (!state->running.load(std::memory_order_acquire)) {
+            if (!state->m_Running.load(std::memory_order_acquire))
                 break;
-            }
-            localBuffer.swap(state->buffer);
-            std::swap(
-                localBufferGeneration,
-                state->bufferGeneration);
-            width = state->bufferWidth;
-            height = state->bufferHeight;
-            minX = state->dirtyMinX;
-            minY = state->dirtyMinY;
-            maxX = state->dirtyMaxX;
-            maxY = state->dirtyMaxY;
-            generation = localBufferGeneration;
-            state->hasWork = false;
+            local_buffer.swap(state->buffer);
+            std::swap(local_content_rect, state->m_ContentRect);
+            width = state->m_BufW;
+            height = state->m_BufH;
+            dirty_rect = state->m_DirtyRect;
+            state->m_HasWork = false;
         }
-        state->condition.notify_all();
 
-        const std::size_t expectedPixels =
-            width > 0 && height > 0
-                ? static_cast<std::size_t>(width) *
-                      static_cast<std::size_t>(height)
-                : 0;
-        if (localBuffer.size() != expectedPixels ||
-            maxX <= minX ||
-            maxY <= minY ||
-            state->window == nullptr) {
+        size_t pixel_count = 0;
+        if (!TryPixelCount(width, height, &pixel_count)
+            || local_buffer.size() != pixel_count
+            || !dirty_rect.valid() || state->m_Window == nullptr) {
+            if (!BackOffSubmitFailure(state, &consecutive_failures))
+                break;
             continue;
         }
 
-        ANativeWindow* window = state->window;
+        state->m_LastPostMs.store(NowMs(), std::memory_order_release);
+        ANativeWindow* window = state->m_Window;
         ANativeWindow_acquire(window);
 
-        const int windowWidth = ANativeWindow_getWidth(window);
-        const int windowHeight = ANativeWindow_getHeight(window);
-        if (windowWidth != width || windowHeight != height) {
-            ANativeWindow_setBuffersGeometry(
-                window, width, height, WINDOW_FORMAT_RGBA_8888);
+        const int window_width = ANativeWindow_getWidth(window);
+        const int window_height = ANativeWindow_getHeight(window);
+        if (window_width != width || window_height != height) {
             ANativeWindow_release(window);
-            if (recordWindowFailure()) {
+            if (!BackOffSubmitFailure(state, &consecutive_failures))
                 break;
-            }
             continue;
         }
 
+        dirty_rect = ClampRect(dirty_rect, width, height);
         ARect dirty{
-            std::clamp(minX, 0, width),
-            std::clamp(minY, 0, height),
-            std::clamp(maxX, 0, width),
-            std::clamp(maxY, 0, height),
+            dirty_rect.x0,
+            dirty_rect.y0,
+            dirty_rect.x1,
+            dirty_rect.y1,
         };
-        ANativeWindow_Buffer nativeBuffer{};
-        state->windowCallStartedMs.store(
-            NowMs(), std::memory_order_release);
-        state->insideWindowLock.store(true, std::memory_order_release);
-        const int lockResult =
-            ANativeWindow_lock(window, &nativeBuffer, &dirty);
-        state->insideWindowLock.store(false, std::memory_order_release);
-        state->windowCallStartedMs.store(0, std::memory_order_release);
-        if (lockResult != 0) {
+        ANativeWindow_Buffer native_buffer{};
+        state->m_InLock.store(true, std::memory_order_release);
+        const int lock_result = ANativeWindow_lock(window, &native_buffer, &dirty);
+        state->m_InLock.store(false, std::memory_order_release);
+        if (lock_result != 0) {
             ANativeWindow_release(window);
-            if (recordWindowFailure()) {
+            if (!BackOffSubmitFailure(state, &consecutive_failures))
                 break;
-            }
-            continue;
-        }
-
-        if (!state->running.load(std::memory_order_acquire)) {
-            ClearNativeBuffer(nativeBuffer);
-            state->windowCallStartedMs.store(
-                NowMs(), std::memory_order_release);
-            state->insideWindowPost.store(true, std::memory_order_release);
-            ANativeWindow_unlockAndPost(window);
-            state->insideWindowPost.store(false, std::memory_order_release);
-            state->windowCallStartedMs.store(0, std::memory_order_release);
-            ANativeWindow_release(window);
-            break;
-        }
-
-        if (nativeBuffer.width != width ||
-            nativeBuffer.height != height) {
-            state->windowCallStartedMs.store(
-                NowMs(), std::memory_order_release);
-            state->insideWindowPost.store(true, std::memory_order_release);
-            ANativeWindow_unlockAndPost(window);
-            state->insideWindowPost.store(false, std::memory_order_release);
-            state->windowCallStartedMs.store(0, std::memory_order_release);
-            ANativeWindow_setBuffersGeometry(
-                window, width, height, WINDOW_FORMAT_RGBA_8888);
-            ANativeWindow_release(window);
-            if (recordWindowFailure()) {
-                break;
-            }
             continue;
         }
 
@@ -970,159 +970,152 @@ void RunSubmitLoop(const std::shared_ptr<CpuSubmitState>& state) {
         dirty.top = std::clamp(dirty.top, 0, height);
         dirty.right = std::clamp(dirty.right, 0, width);
         dirty.bottom = std::clamp(dirty.bottom, 0, height);
-        const int copyWidth = dirty.right - dirty.left;
-        const int copyHeight = dirty.bottom - dirty.top;
-        bool copiedFrame = false;
-        if (nativeBuffer.bits != nullptr &&
-            nativeBuffer.format == WINDOW_FORMAT_RGBA_8888 &&
-            nativeBuffer.stride >= width &&
-            copyWidth > 0 &&
-            copyHeight > 0) {
-            auto* output =
-                static_cast<std::uint32_t*>(nativeBuffer.bits);
-            const std::uint32_t* input = localBuffer.data();
-            const std::size_t rowBytes =
-                static_cast<std::size_t>(copyWidth) *
-                sizeof(std::uint32_t);
-            if (dirty.left == 0 &&
-                copyWidth == width &&
-                nativeBuffer.stride == width) {
-                std::memcpy(
-                    output +
-                        static_cast<std::size_t>(dirty.top) *
-                            nativeBuffer.stride,
-                    input +
-                        static_cast<std::size_t>(dirty.top) * width,
-                    rowBytes * static_cast<std::size_t>(copyHeight));
+        const int copy_width = dirty.right - dirty.left;
+        const int copy_height = dirty.bottom - dirty.top;
+        size_t native_pixel_count = 0;
+        const bool buffer_valid = native_buffer.bits != nullptr
+            && native_buffer.width == width
+            && native_buffer.height == height
+            && native_buffer.stride >= width
+            && native_buffer.format == WINDOW_FORMAT_RGBA_8888
+            && TryPixelCount(native_buffer.stride, height, &native_pixel_count)
+            && copy_width > 0 && copy_height > 0;
+        if (buffer_valid
+            && state->m_Running.load(std::memory_order_acquire)) {
+            auto* output = static_cast<uint32_t*>(native_buffer.bits);
+            const uint32_t* input = local_buffer.data();
+            const size_t row_bytes = static_cast<size_t>(copy_width) * sizeof(uint32_t);
+            if (dirty.left == 0 && copy_width == width
+                && native_buffer.stride == width) {
+                std::memcpy(output + static_cast<size_t>(dirty.top)
+                                * native_buffer.stride,
+                            input + static_cast<size_t>(dirty.top) * width,
+                            row_bytes * copy_height);
             } else {
                 for (int y = dirty.top; y < dirty.bottom; ++y) {
-                    std::memcpy(
-                        output +
-                            static_cast<std::size_t>(y) *
-                                nativeBuffer.stride +
-                            dirty.left,
-                        input +
-                            static_cast<std::size_t>(y) * width +
-                            dirty.left,
-                        rowBytes);
+                    std::memcpy(output + static_cast<size_t>(y)
+                                    * native_buffer.stride + dirty.left,
+                                input + static_cast<size_t>(y) * width
+                                    + dirty.left,
+                                row_bytes);
                 }
             }
-            copiedFrame = true;
         }
 
-        const bool stillRunning =
-            state->running.load(std::memory_order_acquire);
-        if (!stillRunning) {
-            ClearNativeBuffer(nativeBuffer);
-            copiedFrame = false;
-        }
-        state->windowCallStartedMs.store(
-            NowMs(), std::memory_order_release);
-        state->insideWindowPost.store(true, std::memory_order_release);
-        const int postResult = ANativeWindow_unlockAndPost(window);
-        state->insideWindowPost.store(false, std::memory_order_release);
-        state->windowCallStartedMs.store(0, std::memory_order_release);
-        if (postResult == 0 && copiedFrame) {
-            consecutiveWindowFailures = 0;
-            if (state->running.load(std::memory_order_acquire)) {
-                state->presentedGeneration.store(
-                    generation, std::memory_order_release);
-                if (state->presentationRate != nullptr) {
-                    state->presentationRate->Record();
-                }
-            }
-        } else if (stillRunning && recordWindowFailure()) {
-            ANativeWindow_release(window);
-            break;
+        state->m_InPost.store(true, std::memory_order_release);
+        const int post_result = ANativeWindow_unlockAndPost(window);
+        state->m_InPost.store(false, std::memory_order_release);
+        bool geometry_repaired = true;
+        if (!buffer_valid) {
+            geometry_repaired = ANativeWindow_setBuffersGeometry(
+                window, width, height, WINDOW_FORMAT_RGBA_8888) == 0;
         }
         ANativeWindow_release(window);
-        if (!stillRunning) {
-            break;
+
+        if (buffer_valid && post_result == 0
+            && state->m_Running.load(std::memory_order_acquire)) {
+            consecutive_failures = 0;
+            state->m_RetryAfterMs.store(0, std::memory_order_release);
+            state->m_LastPostMs.store(NowMs(), std::memory_order_release);
+            if (state->m_PresentationRate != nullptr)
+                state->m_PresentationRate->Record();
+            continue;
+        }
+
+        if (!geometry_repaired || post_result != 0 || !buffer_valid) {
+            if (!BackOffSubmitFailure(state, &consecutive_failures))
+                break;
         }
     }
-
-    state->running.store(false, std::memory_order_release);
-    state->exited.store(true, std::memory_order_release);
+    state->m_Running.store(false, std::memory_order_release);
+    state->m_Exited.store(true, std::memory_order_release);
+    state->m_Cond.notify_all();
 }
 
-bool HasValidFrameSize(int width, int height) {
-    if (width <= 0 || height <= 0) {
-        return false;
+} // namespace
+
+struct CPUGraphics::FrameScratch {
+    PreparedFrame frame;
+
+    PreparedFrame& Reset() {
+        frame.primitives.clear();
+        for (auto& band : frame.bands)
+            band.clear();
+        frame.content_rect = {};
+        return frame;
     }
-    constexpr std::size_t kMaxPixels = 64u * 1024u * 1024u;
-    const std::size_t unsignedWidth = static_cast<std::size_t>(width);
-    const std::size_t unsignedHeight = static_cast<std::size_t>(height);
-    return unsignedWidth <= kMaxPixels / unsignedHeight;
-}
+};
 
-}  // namespace
-
-CpuRasterPool::CpuRasterPool() {
-    for (int index = 0; index < kWorkerCount; ++index) {
-        threads_[index] =
-            std::thread(&CpuRasterPool::WorkerMain, this, index);
+RenderPool::RenderPool() {
+    try {
+        for (int i = 0; i < kWorkers; ++i)
+            m_Threads[i] = std::thread(&RenderPool::worker, this, i);
+    } catch (...) {
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            m_Alive = false;
+        }
+        m_CondWork.notify_all();
+        for (std::thread& thread : m_Threads) {
+            if (thread.joinable())
+                thread.join();
+        }
+        throw;
     }
 }
 
-CpuRasterPool::~CpuRasterPool() {
+RenderPool::~RenderPool() {
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        alive_ = false;
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        m_Alive = false;
     }
-    workCondition_.notify_all();
-    for (std::thread& thread : threads_) {
-        if (thread.joinable()) {
+    m_CondWork.notify_all();
+    for (std::thread& thread : m_Threads) {
+        if (thread.joinable())
             thread.join();
-        }
     }
 }
 
-void CpuRasterPool::Run(std::function<void()> first,
-                        std::function<void()> second,
-                        std::function<void()> third,
-                        std::function<void()> fourth) {
+void RenderPool::run(std::function<void()> t0, std::function<void()> t1,
+                     std::function<void()> t2, std::function<void()> t3) {
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        tasks_[0] = std::move(first);
-        tasks_[1] = std::move(second);
-        tasks_[2] = std::move(third);
-        tasks_[3] = std::move(fourth);
-        doneCount_.store(0, std::memory_order_release);
-        ++generation_;
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        m_Tasks[0] = std::move(t0);
+        m_Tasks[1] = std::move(t1);
+        m_Tasks[2] = std::move(t2);
+        m_Tasks[3] = std::move(t3);
+        m_Done.store(0, std::memory_order_release);
+        ++m_Generation;
     }
-    workCondition_.notify_all();
+    m_CondWork.notify_all();
 }
 
-bool CpuRasterPool::WaitFor(std::chrono::milliseconds timeout) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    return doneCondition_.wait_for(lock, timeout, [&] {
-        return doneCount_.load(std::memory_order_acquire) >= kWorkerCount;
+bool RenderPool::wait_for_ms(int ms) {
+    std::unique_lock<std::mutex> lock(m_Mutex);
+    return m_CondDone.wait_for(lock, std::chrono::milliseconds(ms), [&] {
+        return m_Done.load(std::memory_order_acquire) >= kWorkers;
     });
 }
 
-void CpuRasterPool::WorkerMain(int index) {
-    int seenGeneration = 0;
+void RenderPool::worker(int index) {
+    int seen = 0;
     while (true) {
         std::function<void()> task;
         {
-            std::unique_lock<std::mutex> lock(mutex_);
-            workCondition_.wait(lock, [&] {
-                return !alive_ || generation_ > seenGeneration;
+            std::unique_lock<std::mutex> lock(m_Mutex);
+            m_CondWork.wait(lock, [&] {
+                return !m_Alive || m_Generation > seen;
             });
-            if (!alive_) {
+            if (!m_Alive)
                 return;
-            }
-            seenGeneration = generation_;
-            seenGeneration_[index] = seenGeneration;
-            task = tasks_[index];
+            seen = m_Generation;
+            m_Seen[index] = seen;
+            task = m_Tasks[index];
         }
-        if (task) {
+        if (task)
             task();
-        }
-        if (doneCount_.fetch_add(1, std::memory_order_acq_rel) + 1 ==
-            kWorkerCount) {
-            doneCondition_.notify_one();
-        }
+        if (m_Done.fetch_add(1, std::memory_order_acq_rel) + 1 == kWorkers)
+            m_CondDone.notify_one();
     }
 }
 
@@ -1132,60 +1125,78 @@ CPUGraphics::CPUGraphics() {
 
 CPUGraphics::~CPUGraphics() {
     StopSubmitThread(true);
-    abortRaster_.store(true, std::memory_order_release);
-    rasterPool_.reset();
+    m_Abort.store(true, std::memory_order_release);
+    m_Pool.reset();
 }
 
 bool CPUGraphics::Create() {
+    m_SurfaceRecoveryRequested->store(false, std::memory_order_release);
+    m_SurfaceReady = false;
+    m_GeometryFailures = 0;
+    m_NextGeometryRetryMs = 0;
+
     int width = 0;
     int height = 0;
     {
-        std::lock_guard<std::mutex> lock(windowMutex_);
-        if (m_Window != nullptr) {
-            width = ANativeWindow_getWidth(m_Window);
-            height = ANativeWindow_getHeight(m_Window);
-        }
+        std::lock_guard<std::mutex> lock(m_WindowMutex);
+        if (m_Window == nullptr)
+            return false;
+        width = ANativeWindow_getWidth(m_Window);
+        height = ANativeWindow_getHeight(m_Window);
     }
     if (width <= 0 || height <= 0) {
         width = static_cast<int>(m_Width);
         height = static_cast<int>(m_Height);
     }
-    if (!HasValidFrameSize(width, height)) {
+    if (width <= 0 || height <= 0)
+        return false;
+
+    size_t pixel_count = 0;
+    if (!TryPixelCount(width, height, &pixel_count))
+        return false;
+
+    std::vector<uint32_t> buffer;
+    try {
+        buffer.assign(pixel_count, 0u);
+    } catch (...) {
         return false;
     }
 
-    m_Width = static_cast<float>(width);
-    m_Height = static_cast<float>(height);
-    bufferWidth_ = width;
-    bufferHeight_ = height;
-    previousMinX_ = width;
-    previousMinY_ = height;
-    previousMaxX_ = 0;
-    previousMaxY_ = 0;
-    nextGeneration_ = 0;
-    pendingDamage_.clear();
-    surfaceRecoveryRequested_.store(false, std::memory_order_release);
-    frontBuffer_.assign(
-        static_cast<std::size_t>(width) * height, 0u);
+    int geometry_result = -1;
     {
-        std::lock_guard<std::mutex> lock(windowMutex_);
+        std::lock_guard<std::mutex> lock(m_WindowMutex);
         if (m_Window != nullptr) {
-            ANativeWindow_setBuffersGeometry(
-                m_Window,
-                width,
-                height,
-                WINDOW_FORMAT_RGBA_8888);
+            geometry_result = ANativeWindow_setBuffersGeometry(
+                m_Window, width, height, WINDOW_FORMAT_RGBA_8888);
         }
     }
-    StartSubmitThread();
+    if (geometry_result != 0)
+        return false;
+
+    m_Width = static_cast<float>(width);
+    m_Height = static_cast<float>(height);
+    {
+        std::lock_guard<std::mutex> lock(m_RenderMutex);
+        m_BufWidth = width;
+        m_BufHeight = height;
+        m_BufferContentRect = {};
+        m_LastSubmittedContentRect = {};
+        m_Buffer = std::move(buffer);
+    }
+    m_Abort.store(false, std::memory_order_release);
+    m_SurfaceReady = true;
+    if (!StartSubmitThread()) {
+        m_SurfaceReady = false;
+        return false;
+    }
     return true;
 }
 
 bool CPUGraphics::Setup() {
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->TexDesiredFormat = ImTextureFormat_Alpha8;
-    io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset |
-                       ImGuiBackendFlags_RendererHasTextures;
+    io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset
+                    | ImGuiBackendFlags_RendererHasTextures;
     io.BackendRendererName = "CPU";
     return true;
 }
@@ -1194,47 +1205,15 @@ void CPUGraphics::PrepareFrame(bool resize) {
     int width = 0;
     int height = 0;
     {
-        std::lock_guard<std::mutex> lock(windowMutex_);
-        if (m_Window == nullptr) {
+        std::lock_guard<std::mutex> lock(m_WindowMutex);
+        if (m_Window == nullptr)
             return;
-        }
         width = ANativeWindow_getWidth(m_Window);
         height = ANativeWindow_getHeight(m_Window);
     }
-    if (!HasValidFrameSize(width, height)) {
+    if (width <= 0 || height <= 0) {
+        m_SurfaceReady = false;
         return;
-    }
-
-    const bool changed =
-        resize || width != bufferWidth_ || height != bufferHeight_;
-    if (changed) {
-        if (!StopSubmitThread(false)) {
-            return;
-        }
-        {
-            std::lock_guard<std::mutex> lock(renderMutex_);
-            bufferWidth_ = width;
-            bufferHeight_ = height;
-            previousMinX_ = width;
-            previousMinY_ = height;
-            previousMaxX_ = 0;
-            previousMaxY_ = 0;
-            nextGeneration_ = 0;
-            pendingDamage_.clear();
-            frontBuffer_.assign(
-                static_cast<std::size_t>(width) * height, 0u);
-        }
-        {
-            std::lock_guard<std::mutex> lock(windowMutex_);
-            if (m_Window != nullptr) {
-                ANativeWindow_setBuffersGeometry(
-                    m_Window,
-                    width,
-                    height,
-                    WINDOW_FORMAT_RGBA_8888);
-            }
-        }
-        StartSubmitThread();
     }
 
     m_Width = static_cast<float>(width);
@@ -1242,760 +1221,501 @@ void CPUGraphics::PrepareFrame(bool resize) {
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(m_Width, m_Height);
     io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
-    WaitForSubmitSlot();
-}
 
-void CPUGraphics::StartSubmitThread() {
-    std::lock_guard<std::mutex> lock(threadMutex_);
-    const std::int64_t now = NowMs();
+    const bool changed = resize || !m_SurfaceReady
+        || width != m_BufWidth || height != m_BufHeight;
+    if (changed) {
+        const int64_t now = NowMs();
+        if (now < m_NextGeometryRetryMs)
+            return;
 
-    if (submitState_ != nullptr &&
-        submitState_->surfaceRecoveryRequired.load(
-            std::memory_order_acquire)) {
-        surfaceRecoveryRequested_.store(
-            true, std::memory_order_release);
-        submitState_->running.store(false, std::memory_order_release);
-        submitState_->condition.notify_all();
-        return;
-    }
-
-    if (submitState_ != nullptr &&
-        submitState_->running.load(std::memory_order_acquire)) {
-        const bool blocked =
-            submitState_->insideWindowLock.load(std::memory_order_acquire) ||
-            submitState_->insideWindowPost.load(std::memory_order_acquire);
-        const std::int64_t callStarted =
-            submitState_->windowCallStartedMs.load(
-                std::memory_order_acquire);
-        const bool stuck =
-            blocked &&
-            callStarted > 0 &&
-            now - callStarted > kWindowWatchdogMs;
-        if (!stuck) {
+        size_t pixel_count = 0;
+        if (!TryPixelCount(width, height, &pixel_count)) {
+            m_SurfaceReady = false;
+            ScheduleGeometryRetry(
+                &m_GeometryFailures, &m_NextGeometryRetryMs);
             return;
         }
 
-        surfaceRecoveryRequested_.store(true, std::memory_order_release);
-        submitState_->running.store(false, std::memory_order_release);
-        submitState_->condition.notify_all();
-        return;
-    } else if (submitThread_.joinable()) {
-        if (submitState_ != nullptr &&
-            !submitState_->exited.load(std::memory_order_acquire)) {
+        m_SurfaceReady = false;
+        if (!StopSubmitThread(false)) {
+            ScheduleGeometryRetry(
+                &m_GeometryFailures, &m_NextGeometryRetryMs);
             return;
         }
-        submitThread_.join();
-        submitState_.reset();
-    }
 
-    std::shared_ptr<CpuSubmitState> state = MakeSubmitState();
-    state->presentationRate = GetPresentationRateTracker();
-    {
-        std::lock_guard<std::mutex> windowLock(windowMutex_);
-        state->window = m_Window;
-        if (state->window != nullptr) {
-            ANativeWindow_acquire(state->window);
+        std::vector<uint32_t> buffer;
+        try {
+            buffer.assign(pixel_count, 0u);
+        } catch (...) {
+            ScheduleGeometryRetry(
+                &m_GeometryFailures, &m_NextGeometryRetryMs);
+            return;
         }
-    }
-    if (state->window == nullptr) {
-        return;
-    }
 
-    state->exited.store(false, std::memory_order_release);
-    state->running.store(true, std::memory_order_release);
-    submitState_ = state;
-    submitThread_ = std::thread([state] {
-        RunSubmitLoop(state);
-    });
-}
-
-bool CPUGraphics::StopSubmitThread(bool detachIfBlocked) {
-    std::lock_guard<std::mutex> lock(threadMutex_);
-    std::shared_ptr<CpuSubmitState> state = submitState_;
-    if (state != nullptr) {
+        int geometry_result = -1;
         {
-            std::lock_guard<std::mutex> stateLock(state->mutex);
-            state->running.store(false, std::memory_order_release);
-            state->hasWork = false;
+            std::lock_guard<std::mutex> lock(m_WindowMutex);
+            if (m_Window != nullptr) {
+                geometry_result = ANativeWindow_setBuffersGeometry(
+                    m_Window, width, height, WINDOW_FORMAT_RGBA_8888);
+            }
         }
-        state->condition.notify_all();
-    }
+        if (geometry_result != 0) {
+            ScheduleGeometryRetry(
+                &m_GeometryFailures, &m_NextGeometryRetryMs);
+            return;
+        }
 
-    if (submitThread_.joinable()) {
-        const auto deadline =
-            Clock::now() + std::chrono::milliseconds(kSubmitStopWaitMs);
-        while (state != nullptr &&
-               !state->exited.load(std::memory_order_acquire) &&
-               Clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        {
+            std::lock_guard<std::mutex> lock(m_RenderMutex);
+            m_BufWidth = width;
+            m_BufHeight = height;
+            m_BufferContentRect = {};
+            m_LastSubmittedContentRect = {};
+            m_Buffer = std::move(buffer);
         }
-        if (state == nullptr ||
-            state->exited.load(std::memory_order_acquire)) {
-            submitThread_.join();
-        } else if (detachIfBlocked) {
-            submitThread_.detach();
+        m_GeometryFailures = 0;
+        m_NextGeometryRetryMs = 0;
+        m_SurfaceReady = true;
+        if (!StartSubmitThread()) {
+            m_SurfaceReady = false;
+            ScheduleGeometryRetry(
+                &m_GeometryFailures, &m_NextGeometryRetryMs);
+            m_NextGeometryRetryMs = std::max(
+                m_NextGeometryRetryMs, NowMs() + kSubmitRestartDelayMs);
+        }
+    }
+}
+
+bool CPUGraphics::StartSubmitThread() {
+    std::lock_guard<std::mutex> lock(m_ThreadMutex);
+    const int64_t now = NowMs();
+    if (m_Submit != nullptr) {
+        if (m_Submit->m_Exited.load(std::memory_order_acquire)) {
+            if (m_SubmitThread.joinable())
+                m_SubmitThread.join();
+            const int64_t retry_after =
+                m_Submit->m_RetryAfterMs.load(std::memory_order_acquire);
+            if (now < retry_after)
+                return false;
+            m_Submit.reset();
+        } else if (!m_Submit->m_Running.load(std::memory_order_acquire)) {
+            return false;
         } else {
+            const int64_t last = m_Submit->m_LastPostMs.load(std::memory_order_acquire);
+            const bool stuck = (m_Submit->m_InLock.load(std::memory_order_acquire)
+                                || m_Submit->m_InPost.load(std::memory_order_acquire))
+                && last > 0 && now - last > kWindowLockWatchdogMs;
+            if (!stuck)
+                return true;
+            m_Submit->m_RetryAfterMs.store(
+                now + kSubmitRestartDelayMs, std::memory_order_release);
+            m_Submit->m_Running.store(false, std::memory_order_release);
+            m_Submit->m_Cond.notify_all();
+            m_SurfaceRecoveryRequested->store(
+                true, std::memory_order_release);
             return false;
         }
     }
-    submitState_.reset();
+    if (m_SubmitThread.joinable())
+        return false;
+
+    try {
+        std::shared_ptr<SubmitState> state = MakeSubmitState();
+        {
+            std::lock_guard<std::mutex> window_lock(m_WindowMutex);
+            state->m_Window = m_Window;
+            if (state->m_Window != nullptr)
+                ANativeWindow_acquire(state->m_Window);
+        }
+        if (state->m_Window == nullptr)
+            return false;
+
+        state->m_Running.store(true, std::memory_order_release);
+        state->m_Exited.store(false, std::memory_order_release);
+        state->m_LastPostMs.store(now, std::memory_order_release);
+        state->m_RetryAfterMs.store(0, std::memory_order_release);
+        state->m_PresentationRate = GetPresentationRateTracker();
+        state->m_SurfaceRecoveryRequested = m_SurfaceRecoveryRequested;
+        m_Submit = state;
+        try {
+            m_SubmitThread = std::thread([state] {
+                RunSubmitLoop(state);
+            });
+        } catch (...) {
+            state->m_Running.store(false, std::memory_order_release);
+            state->m_Exited.store(true, std::memory_order_release);
+            state->m_RetryAfterMs.store(
+                now + kSubmitRestartDelayMs, std::memory_order_release);
+            return false;
+        }
+    } catch (...) {
+        return false;
+    }
     return true;
 }
 
-bool CPUGraphics::ConsumeSurfaceRecoveryRequest() {
-    bool requested = surfaceRecoveryRequested_.exchange(
-        false, std::memory_order_acq_rel);
-    std::lock_guard<std::mutex> lock(threadMutex_);
-    if (submitState_ != nullptr &&
-        submitState_->surfaceRecoveryRequired.exchange(
-            false, std::memory_order_acq_rel)) {
-        requested = true;
-        submitState_->running.store(false, std::memory_order_release);
-        submitState_->condition.notify_all();
-    }
-    return requested;
-}
-
-void CPUGraphics::WaitForSubmitSlot() {
-    std::shared_ptr<CpuSubmitState> state;
-    {
-        std::lock_guard<std::mutex> lock(threadMutex_);
-        state = submitState_;
-    }
+bool CPUGraphics::StopSubmitThread(bool abandonIfBlocked) {
+    std::lock_guard<std::mutex> lock(m_ThreadMutex);
+    std::shared_ptr<SubmitState> state = m_Submit;
     if (state == nullptr) {
-        return;
+        const bool thread_joinable = m_SubmitThread.joinable();
+        if (thread_joinable && abandonIfBlocked)
+            m_SubmitThread.detach();
+        return !thread_joinable;
     }
 
-    std::unique_lock<std::mutex> lock(state->mutex);
-    state->condition.wait_for(
-        lock,
-        std::chrono::milliseconds(20),
-        [&] {
-            return !state->running.load(std::memory_order_acquire) ||
-                !state->hasWork;
-        });
+    {
+        std::lock_guard<std::mutex> state_lock(state->m_Mutex);
+        state->m_Running.store(false, std::memory_order_release);
+        state->m_HasWork = false;
+    }
+    state->m_Cond.notify_all();
+    if (!state->m_Exited.load(std::memory_order_acquire)) {
+        std::unique_lock<std::mutex> state_lock(state->m_Mutex);
+        state->m_Cond.wait_for(
+            state_lock, std::chrono::milliseconds(kSubmitStopWaitMs), [&] {
+                return state->m_Exited.load(std::memory_order_acquire);
+            });
+    }
+
+    if (state->m_Exited.load(std::memory_order_acquire)) {
+        if (m_SubmitThread.joinable())
+            m_SubmitThread.join();
+        if (m_Submit == state)
+            m_Submit.reset();
+        return true;
+    }
+
+    if (abandonIfBlocked && m_SubmitThread.joinable())
+        m_SubmitThread.detach();
+    return false;
 }
 
-void CPUGraphics::RenderBand(ImDrawData* drawData,
-                             std::uint32_t* buffer,
-                             int stride,
-                             int bandMinY,
-                             int dirtyMinX,
-                             int dirtyMinY,
-                             int bandMaxY,
-                             int dirtyMaxX,
-                             int dirtyMaxY) {
-    if (drawData == nullptr ||
-        buffer == nullptr ||
-        stride <= 0 ||
-        abortRaster_.load(std::memory_order_relaxed)) {
-        return;
-    }
-
-    const ImVec2 displayPosition = drawData->DisplayPos;
-    const ImVec2 scale = drawData->FramebufferScale;
-    const ImVec2 whiteUv = ImGui::GetIO().Fonts->TexUvWhitePixel;
-
-    for (int listIndex = 0;
-         listIndex < drawData->CmdListsCount;
-         ++listIndex) {
-        if (abortRaster_.load(std::memory_order_relaxed)) {
-            return;
-        }
-        const ImDrawList* drawList = drawData->CmdLists[listIndex];
-        if (drawList == nullptr) {
-            continue;
-        }
-
-        for (int commandIndex = 0;
-             commandIndex < drawList->CmdBuffer.Size;
-             ++commandIndex) {
-            if (abortRaster_.load(std::memory_order_relaxed)) {
-                return;
-            }
-            const ImDrawCmd& command =
-                drawList->CmdBuffer[commandIndex];
-            if (command.UserCallback != nullptr) {
-                continue;
-            }
-
-            RasterClip clip{
-                std::max(
-                    0,
-                    std::max(
-                        dirtyMinX,
-                        static_cast<int>(
-                            (command.ClipRect.x - displayPosition.x) *
-                            scale.x))),
-                std::max(
-                    bandMinY,
-                    std::max(
-                        dirtyMinY,
-                        static_cast<int>(
-                            (command.ClipRect.y - displayPosition.y) *
-                            scale.y))),
-                std::min(
-                    bufferWidth_,
-                    std::min(
-                        dirtyMaxX,
-                        static_cast<int>(
-                            (command.ClipRect.z - displayPosition.x) *
-                            scale.x))),
-                std::min(
-                    bandMaxY,
-                    std::min(
-                        dirtyMaxY,
-                        static_cast<int>(
-                            (command.ClipRect.w - displayPosition.y) *
-                            scale.y))),
-            };
-            if (clip.maxX <= clip.minX ||
-                clip.maxY <= clip.minY) {
-                continue;
-            }
-
-            TextureView texture;
-            ImTextureID textureId = command.GetTexID();
-            if (IsDynamicTextureId(textureId)) {
-                const DynamicTexture* dynamic =
-                    DynamicTextureFromId(textureId);
-                if (dynamic == nullptr || dynamic->width <= 0 ||
-                    dynamic->height <= 0) {
-                    continue;
-                }
-                if (dynamic->format == ImTextureFormat_Alpha8) {
-                    if (dynamic->alpha.empty()) {
-                        continue;
-                    }
-                    texture.kind = TextureKind::FontAlpha;
-                    texture.alpha = dynamic->alpha.data();
-                } else {
-                    if (dynamic->rgba.empty()) {
-                        continue;
-                    }
-                    texture.kind = TextureKind::Rgba;
-                    texture.rgba = dynamic->rgba.data();
-                }
-                texture.width = dynamic->width;
-                texture.height = dynamic->height;
-            } else {
-                const CpuTextureData* textureData = nullptr;
-                for (const BaseTexData* candidate : m_Textures) {
-                    if (candidate != nullptr &&
-                        TextureIdBits(candidate->DS) ==
-                            TextureIdBits(textureId)) {
-                        textureData =
-                            static_cast<const CpuTextureData*>(candidate);
-                        break;
-                    }
-                }
-                if (textureData == nullptr ||
-                    textureData->Width <= 0 ||
-                    textureData->Height <= 0 ||
-                    textureData->pixels.empty()) {
-                    continue;
-                }
-                texture.kind = TextureKind::Rgba;
-                texture.rgba = textureData->pixels.data();
-                texture.width = textureData->Width;
-                texture.height = textureData->Height;
-            }
-
-            if (command.IdxOffset >
-                static_cast<unsigned int>(drawList->IdxBuffer.Size)) {
-                continue;
-            }
-            const unsigned int availableIndices =
-                static_cast<unsigned int>(drawList->IdxBuffer.Size) -
-                command.IdxOffset;
-            const unsigned int elementCount =
-                std::min(command.ElemCount, availableIndices);
-            if (elementCount < 3 || drawList->IdxBuffer.Data == nullptr) {
-                continue;
-            }
-            const ImDrawIdx* indices =
-                drawList->IdxBuffer.Data + command.IdxOffset;
-
-            auto readVertex =
-                [&](unsigned int index, RasterVertex& output) -> bool {
-                const std::size_t resolved =
-                    static_cast<std::size_t>(command.VtxOffset) + index;
-                if (resolved >=
-                    static_cast<std::size_t>(
-                        drawList->VtxBuffer.Size)) {
-                    return false;
-                }
-                const ImDrawVert& vertex =
-                    drawList->VtxBuffer[
-                        static_cast<int>(resolved)];
-                output = {
-                    (vertex.pos.x - displayPosition.x) * scale.x,
-                    (vertex.pos.y - displayPosition.y) * scale.y,
-                    vertex.uv.x,
-                    vertex.uv.y,
-                    vertex.col,
-                };
-                return true;
-            };
-
-            unsigned int indexPosition = 0;
-            while (indexPosition + 2 < elementCount) {
-                if (indexPosition + 5 < elementCount &&
-                    indices[indexPosition] ==
-                        indices[indexPosition + 3] &&
-                    indices[indexPosition + 2] ==
-                        indices[indexPosition + 4]) {
-                    RasterVertex first{};
-                    RasterVertex second{};
-                    RasterVertex third{};
-                    RasterVertex fourth{};
-                    if (readVertex(indices[indexPosition], first) &&
-                        readVertex(indices[indexPosition + 1], second) &&
-                        readVertex(indices[indexPosition + 2], third) &&
-                        readVertex(indices[indexPosition + 5], fourth) &&
-                        TryRasterQuad(
-                            first,
-                            second,
-                            third,
-                            fourth,
-                            texture,
-                            clip,
-                            buffer,
-                            stride,
-                            whiteUv.x,
-                            whiteUv.y,
-                            abortRaster_)) {
-                        indexPosition += 6;
-                        continue;
-                    }
-                }
-
-                RasterVertex first{};
-                RasterVertex second{};
-                RasterVertex third{};
-                if (readVertex(indices[indexPosition], first) &&
-                    readVertex(indices[indexPosition + 1], second) &&
-                    readVertex(indices[indexPosition + 2], third)) {
-                    RasterTriangle(
-                        first,
-                        second,
-                        third,
-                        texture,
-                        clip,
-                        buffer,
-                        stride,
-                        whiteUv.x,
-                        whiteUv.y,
-                        abortRaster_);
-                }
-                indexPosition += 3;
-            }
-        }
-    }
+void CPUGraphics::SubmitLoop(std::shared_ptr<SubmitState> state) {
+    RunSubmitLoop(state);
 }
 
-void CPUGraphics::Render(ImDrawData* drawData) {
-    if (drawData == nullptr || !drawData->Valid) {
+bool CPUGraphics::ConsumeSurfaceRecoveryRequest() {
+    return m_SurfaceRecoveryRequested->exchange(
+        false, std::memory_order_acq_rel);
+}
+
+void CPUGraphics::Render(ImDrawData* draw_data) {
+    if (draw_data == nullptr || !draw_data->Valid || !m_SurfaceReady)
         return;
-    }
     try {
-        if (!UpdateDynamicTextures(drawData)) {
+        if (!UpdateManagedTextures(draw_data))
             return;
-        }
     } catch (...) {
         return;
     }
-    StartSubmitThread();
-
-    std::shared_ptr<CpuSubmitState> state;
-    {
-        std::lock_guard<std::mutex> lock(threadMutex_);
-        state = submitState_;
-    }
-    if (state == nullptr ||
-        !state->running.load(std::memory_order_acquire)) {
+    if (!StartSubmitThread())
         return;
-    }
-    std::uint64_t availableBufferGeneration = 0;
+
+    std::shared_ptr<SubmitState> state;
     {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        if (state->hasWork) {
+        std::lock_guard<std::mutex> lock(m_ThreadMutex);
+        state = m_Submit;
+    }
+    if (state == nullptr || !state->m_Running.load(std::memory_order_acquire))
+        return;
+    {
+        std::lock_guard<std::mutex> lock(state->m_Mutex);
+        if (state->m_HasWork)
             return;
-        }
-        availableBufferGeneration = state->bufferGeneration;
     }
 
-    std::lock_guard<std::mutex> renderLock(renderMutex_);
-    if (rasterPool_ == nullptr) {
-        rasterPool_ = std::make_unique<CpuRasterPool>();
-    }
-    if (bufferWidth_ <= 0 || bufferHeight_ <= 0) {
+    std::lock_guard<std::mutex> render_lock(m_RenderMutex);
+    if (m_BufWidth <= 0 || m_BufHeight <= 0)
+        return;
+
+    size_t pixel_count = 0;
+    if (!TryPixelCount(m_BufWidth, m_BufHeight, &pixel_count))
+        return;
+    try {
+        if (!m_Pool)
+            m_Pool = std::make_unique<RenderPool>();
+        if (!m_FrameScratch)
+            m_FrameScratch = std::make_unique<FrameScratch>();
+        if (m_Buffer.size() != pixel_count)
+            m_Buffer.assign(pixel_count, 0u);
+    } catch (...) {
         return;
     }
 
-    const std::size_t pixelCount =
-        static_cast<std::size_t>(bufferWidth_) * bufferHeight_;
-    if (frontBuffer_.size() != pixelCount) {
-        frontBuffer_.assign(pixelCount, 0u);
-    }
+    const ImVec2 display_pos = draw_data->DisplayPos;
+    const ImVec2 scale = draw_data->FramebufferScale;
+    if (!std::isfinite(display_pos.x) || !std::isfinite(display_pos.y)
+        || !std::isfinite(scale.x) || !std::isfinite(scale.y)
+        || scale.x <= 0.0f || scale.y <= 0.0f)
+        return;
 
-    const ImVec2 displayPosition = drawData->DisplayPos;
-    const ImVec2 scale = drawData->FramebufferScale;
-    int minX = bufferWidth_;
-    int minY = bufferHeight_;
-    int maxX = 0;
-    int maxY = 0;
-    for (int listIndex = 0;
-         listIndex < drawData->CmdListsCount;
-         ++listIndex) {
-        const ImDrawList* drawList = drawData->CmdLists[listIndex];
-        if (drawList == nullptr) {
-            continue;
+    PreparedFrame& frame = m_FrameScratch->Reset();
+    const PixelRect surface_bounds{0, 0, m_BufWidth, m_BufHeight};
+    try {
+        if (draw_data->TotalIdxCount > 0) {
+            frame.primitives.reserve(
+                static_cast<size_t>(draw_data->TotalIdxCount) / 3u);
         }
-        for (int commandIndex = 0;
-             commandIndex < drawList->CmdBuffer.Size;
-             ++commandIndex) {
-            const ImDrawCmd& command =
-                drawList->CmdBuffer[commandIndex];
-            if (command.UserCallback != nullptr ||
-                command.ElemCount == 0) {
+        for (const ImDrawList* draw_list : draw_data->CmdLists) {
+            if (draw_list == nullptr)
                 continue;
-            }
-
-            const std::size_t indexBegin =
-                static_cast<std::size_t>(command.IdxOffset);
-            if (indexBegin >=
-                static_cast<std::size_t>(drawList->IdxBuffer.Size)) {
-                continue;
-            }
-            const std::size_t indexEnd = std::min(
-                static_cast<std::size_t>(drawList->IdxBuffer.Size),
-                indexBegin + static_cast<std::size_t>(command.ElemCount));
-            float vertexMinX = std::numeric_limits<float>::max();
-            float vertexMinY = std::numeric_limits<float>::max();
-            float vertexMaxX = std::numeric_limits<float>::lowest();
-            float vertexMaxY = std::numeric_limits<float>::lowest();
-            for (std::size_t indexPosition = indexBegin;
-                 indexPosition < indexEnd;
-                 ++indexPosition) {
-                const std::size_t vertexIndex =
-                    static_cast<std::size_t>(command.VtxOffset) +
-                    static_cast<std::size_t>(
-                        drawList->IdxBuffer[
-                            static_cast<int>(indexPosition)]);
-                if (vertexIndex >=
-                    static_cast<std::size_t>(drawList->VtxBuffer.Size)) {
+            for (const ImDrawCmd& command : draw_list->CmdBuffer) {
+                if (command.UserCallback != nullptr)
                     continue;
+
+                const double clip_x0 = static_cast<double>(
+                    (command.ClipRect.x - display_pos.x) * scale.x);
+                const double clip_y0 = static_cast<double>(
+                    (command.ClipRect.y - display_pos.y) * scale.y);
+                const double clip_x1 = static_cast<double>(
+                    (command.ClipRect.z - display_pos.x) * scale.x);
+                const double clip_y1 = static_cast<double>(
+                    (command.ClipRect.w - display_pos.y) * scale.y);
+                if (!std::isfinite(clip_x0) || !std::isfinite(clip_y0)
+                    || !std::isfinite(clip_x1) || !std::isfinite(clip_y1))
+                    continue;
+                const PixelRect command_clip = ClampRect({
+                    SaturatingInt(std::floor(clip_x0)),
+                    SaturatingInt(std::floor(clip_y0)),
+                    SaturatingInt(std::ceil(clip_x1)),
+                    SaturatingInt(std::ceil(clip_y1)),
+                }, m_BufWidth, m_BufHeight);
+                if (!command_clip.valid())
+                    continue;
+
+                TextureView texture;
+                const ImTextureID texture_id = command.GetTexID();
+                if (IsManagedTextureId(texture_id)) {
+                    const ManagedTexture* data = ManagedTextureFromId(texture_id);
+                    if (data == nullptr || data->width <= 0 || data->height <= 0)
+                        continue;
+                    if (data->format == ImTextureFormat_Alpha8) {
+                        if (data->alpha.empty())
+                            continue;
+                        texture.kind = TextureKind::FontAlpha;
+                        texture.alpha = data->alpha.data();
+                    } else {
+                        if (data->rgba.empty())
+                            continue;
+                        texture.kind = TextureKind::Rgba;
+                        texture.rgba = data->rgba.data();
+                    }
+                    texture.width = data->width;
+                    texture.height = data->height;
+                } else {
+                    const CpuTextureData* data = nullptr;
+                    for (const BaseTexData* candidate : m_Textures) {
+                        if (candidate != nullptr
+                            && TextureIdBits(candidate->DS)
+                                == TextureIdBits(texture_id)) {
+                            data = static_cast<const CpuTextureData*>(candidate);
+                            break;
+                        }
+                    }
+                    if (data == nullptr || data->Width <= 0 || data->Height <= 0
+                        || data->pixels.empty())
+                        continue;
+                    texture.kind = TextureKind::Rgba;
+                    texture.rgba = data->pixels.data();
+                    texture.width = data->Width;
+                    texture.height = data->Height;
                 }
-                const ImVec2& position =
-                    drawList->VtxBuffer[
-                        static_cast<int>(vertexIndex)].pos;
-                const float framebufferX =
-                    (position.x - displayPosition.x) * scale.x;
-                const float framebufferY =
-                    (position.y - displayPosition.y) * scale.y;
-                vertexMinX = std::min(vertexMinX, framebufferX);
-                vertexMinY = std::min(vertexMinY, framebufferY);
-                vertexMaxX = std::max(vertexMaxX, framebufferX);
-                vertexMaxY = std::max(vertexMaxY, framebufferY);
-            }
-            if (vertexMaxX < vertexMinX ||
-                vertexMaxY < vertexMinY) {
-                continue;
-            }
 
-            constexpr float dirtyPadding = 2.0f;
-            const int clipMinX = static_cast<int>(std::floor(
-                (command.ClipRect.x - displayPosition.x) * scale.x));
-            const int clipMinY = static_cast<int>(std::floor(
-                (command.ClipRect.y - displayPosition.y) * scale.y));
-            const int clipMaxX = static_cast<int>(std::ceil(
-                (command.ClipRect.z - displayPosition.x) * scale.x));
-            const int clipMaxY = static_cast<int>(std::ceil(
-                (command.ClipRect.w - displayPosition.y) * scale.y));
-            const int commandMinX = std::max(
-                clipMinX,
-                static_cast<int>(
-                    std::floor(vertexMinX - dirtyPadding)));
-            const int commandMinY = std::max(
-                clipMinY,
-                static_cast<int>(
-                    std::floor(vertexMinY - dirtyPadding)));
-            const int commandMaxX = std::min(
-                clipMaxX,
-                static_cast<int>(
-                    std::ceil(vertexMaxX + dirtyPadding)));
-            const int commandMaxY = std::min(
-                clipMaxY,
-                static_cast<int>(
-                    std::ceil(vertexMaxY + dirtyPadding)));
-            if (commandMaxX <= commandMinX ||
-                commandMaxY <= commandMinY) {
-                continue;
+                if (command.IdxOffset
+                    > static_cast<unsigned int>(draw_list->IdxBuffer.Size)
+                    || draw_list->IdxBuffer.Data == nullptr
+                    || draw_list->VtxBuffer.Data == nullptr)
+                    continue;
+                const unsigned int available_indices =
+                    static_cast<unsigned int>(draw_list->IdxBuffer.Size)
+                    - command.IdxOffset;
+                const unsigned int element_count =
+                    std::min(command.ElemCount, available_indices);
+                if (element_count < 3)
+                    continue;
+                const ImDrawIdx* indices =
+                    draw_list->IdxBuffer.Data + command.IdxOffset;
+                auto vertex_at = [&](unsigned int index,
+                                     RasterVertex* output) -> bool {
+                    if (output == nullptr)
+                        return false;
+                    const size_t resolved =
+                        static_cast<size_t>(command.VtxOffset) + index;
+                    if (resolved >= static_cast<size_t>(draw_list->VtxBuffer.Size))
+                        return false;
+                    const ImDrawVert& vertex =
+                        draw_list->VtxBuffer[static_cast<int>(resolved)];
+                    *output = {
+                        (vertex.pos.x - display_pos.x) * scale.x,
+                        (vertex.pos.y - display_pos.y) * scale.y,
+                        vertex.uv.x,
+                        vertex.uv.y,
+                        vertex.col,
+                    };
+                    return IsFiniteVertex(*output);
+                };
+
+                unsigned int index_pos = 0;
+                while (index_pos + 2 < element_count) {
+                    if (index_pos + 5 < element_count
+                        && indices[index_pos] == indices[index_pos + 3]
+                        && indices[index_pos + 2] == indices[index_pos + 4]) {
+                        RasterVertex quad[4];
+                        if (vertex_at(indices[index_pos], &quad[0])
+                            && vertex_at(indices[index_pos + 1], &quad[1])
+                            && vertex_at(indices[index_pos + 2], &quad[2])
+                            && vertex_at(indices[index_pos + 5], &quad[3])) {
+                            AppendPreparedPrimitive(
+                                &frame, quad, 4, texture, command_clip,
+                                surface_bounds);
+                            index_pos += 6;
+                            continue;
+                        }
+                    }
+
+                    RasterVertex triangle[3];
+                    if (vertex_at(indices[index_pos], &triangle[0])
+                        && vertex_at(indices[index_pos + 1], &triangle[1])
+                        && vertex_at(indices[index_pos + 2], &triangle[2])) {
+                        AppendPreparedPrimitive(
+                            &frame, triangle, 3, texture, command_clip,
+                            surface_bounds);
+                    }
+                    index_pos += 3;
+                }
             }
-            minX = std::min(minX, commandMinX);
-            minY = std::min(minY, commandMinY);
-            maxX = std::max(maxX, commandMaxX);
-            maxY = std::max(maxY, commandMaxY);
         }
-    }
-
-    const int currentMinX = std::clamp(minX, 0, bufferWidth_);
-    const int currentMinY = std::clamp(minY, 0, bufferHeight_);
-    const int currentMaxX = std::clamp(maxX, 0, bufferWidth_);
-    const int currentMaxY = std::clamp(maxY, 0, bufferHeight_);
-    const bool hasCurrentDirty =
-        currentMaxX > currentMinX && currentMaxY > currentMinY;
-    const bool hasPreviousDirty =
-        previousMaxX_ > previousMinX_ &&
-        previousMaxY_ > previousMinY_;
-
-    int damageMinX = hasCurrentDirty ? currentMinX : previousMinX_;
-    int damageMinY = hasCurrentDirty ? currentMinY : previousMinY_;
-    int damageMaxX = hasCurrentDirty ? currentMaxX : previousMaxX_;
-    int damageMaxY = hasCurrentDirty ? currentMaxY : previousMaxY_;
-    if (hasCurrentDirty && hasPreviousDirty) {
-        damageMinX = std::min(damageMinX, previousMinX_);
-        damageMinY = std::min(damageMinY, previousMinY_);
-        damageMaxX = std::max(damageMaxX, previousMaxX_);
-        damageMaxY = std::max(damageMaxY, previousMaxY_);
-    }
-    damageMinX = std::clamp(damageMinX, 0, bufferWidth_);
-    damageMinY = std::clamp(damageMinY, 0, bufferHeight_);
-    damageMaxX = std::clamp(damageMaxX, 0, bufferWidth_);
-    damageMaxY = std::clamp(damageMaxY, 0, bufferHeight_);
-    const bool hasFrameDamage =
-        damageMaxX > damageMinX && damageMaxY > damageMinY;
-
-    const std::uint64_t presentedGeneration =
-        state->presentedGeneration.load(std::memory_order_acquire);
-    const std::uint64_t reusableGeneration =
-        std::min(presentedGeneration, availableBufferGeneration);
-    while (!pendingDamage_.empty() &&
-           pendingDamage_.front().generation <= reusableGeneration) {
-        pendingDamage_.pop_front();
-    }
-    if (!hasFrameDamage && pendingDamage_.empty()) {
+        BuildPrimitiveBands(&frame, m_BufHeight);
+    } catch (...) {
         return;
     }
 
-    if (hasFrameDamage && !hasCurrentDirty) {
-        for (int y = damageMinY; y < damageMaxY; ++y) {
-            std::memset(
-                frontBuffer_.data() +
-                    static_cast<std::size_t>(y) * bufferWidth_ +
-                    damageMinX,
-                0,
-                static_cast<std::size_t>(damageMaxX - damageMinX) *
-                    sizeof(std::uint32_t));
-        }
-    } else if (hasFrameDamage) {
-        abortRaster_.store(false, std::memory_order_release);
-        const int bandHeight =
-            bufferHeight_ / CpuRasterPool::kWorkerCount;
-        auto makeTask =
-            [=, this](int bandMinY, int bandMaxY) {
-                return [=, this] {
-                    const int clearMinY =
-                        std::max(bandMinY, damageMinY);
-                    const int clearMaxY =
-                        std::min(bandMaxY, damageMaxY);
-                    for (int y = clearMinY; y < clearMaxY; ++y) {
-                        if ((y & 15) == 0 &&
-                            abortRaster_.load(std::memory_order_relaxed)) {
-                            return;
-                        }
-                        std::memset(
-                            frontBuffer_.data() +
-                                static_cast<std::size_t>(y) *
-                                    bufferWidth_ +
-                                damageMinX,
-                            0,
-                            static_cast<std::size_t>(
-                                damageMaxX - damageMinX) *
-                                sizeof(std::uint32_t));
-                    }
-                    RenderBand(
-                        drawData,
-                        frontBuffer_.data(),
-                        bufferWidth_,
-                        bandMinY,
-                        damageMinX,
-                        damageMinY,
-                        bandMaxY,
-                        damageMaxX,
-                        damageMaxY);
-                };
-            };
-        rasterPool_->Run(
-            makeTask(0, bandHeight),
-            makeTask(bandHeight, bandHeight * 2),
-            makeTask(bandHeight * 2, bandHeight * 3),
-            makeTask(bandHeight * 3, bufferHeight_));
-        if (!rasterPool_->WaitFor(
-                std::chrono::milliseconds(kRasterWaitMs))) {
-            abortRaster_.store(true, std::memory_order_release);
-            if (!rasterPool_->WaitFor(
-                    std::chrono::milliseconds(kRasterAbortWaitMs))) {
-                while (!rasterPool_->WaitFor(
-                    std::chrono::milliseconds(50))) {
+    const PixelRect submit_dirty = ClampRect(
+        UnionRect(m_LastSubmittedContentRect, frame.content_rect),
+        m_BufWidth, m_BufHeight);
+    if (!submit_dirty.valid())
+        return;
+    const PixelRect clear_rect = ClampRect(
+        UnionRect(m_BufferContentRect, frame.content_rect),
+        m_BufWidth, m_BufHeight);
+
+    m_Abort.store(false, std::memory_order_release);
+    const ImVec2 white_uv = ImGui::GetIO().Fonts->TexUvWhitePixel;
+    auto make_task = [&, this](int band) {
+        return [&, this, band] {
+            const int band_y0 = m_BufHeight * band / RenderPool::kWorkers;
+            const int band_y1 =
+                m_BufHeight * (band + 1) / RenderPool::kWorkers;
+            const int clear_y0 = std::max(band_y0, clear_rect.y0);
+            const int clear_y1 = std::min(band_y1, clear_rect.y1);
+            if (clear_rect.valid()) {
+                for (int y = clear_y0; y < clear_y1; ++y) {
+                    std::memset(
+                        m_Buffer.data() + static_cast<size_t>(y) * m_BufWidth
+                            + clear_rect.x0,
+                        0,
+                        static_cast<size_t>(clear_rect.x1 - clear_rect.x0)
+                            * sizeof(uint32_t));
                 }
             }
-            std::fill(frontBuffer_.begin(), frontBuffer_.end(), 0u);
-            previousMinX_ = 0;
-            previousMinY_ = 0;
-            previousMaxX_ = bufferWidth_;
-            previousMaxY_ = bufferHeight_;
-            return;
-        }
+            RasterPreparedBand(frame, band, m_Buffer.data(), m_BufWidth,
+                               m_BufHeight, white_uv.x, white_uv.y, m_Abort);
+        };
+    };
+    try {
+        m_Pool->run(make_task(0), make_task(1), make_task(2), make_task(3));
+    } catch (...) {
+        return;
     }
-
-    if (hasFrameDamage) {
-        if (hasCurrentDirty) {
-            previousMinX_ = currentMinX;
-            previousMinY_ = currentMinY;
-            previousMaxX_ = currentMaxX;
-            previousMaxY_ = currentMaxY;
-        } else {
-            previousMinX_ = bufferWidth_;
-            previousMinY_ = bufferHeight_;
-            previousMaxX_ = 0;
-            previousMaxY_ = 0;
-        }
-    }
-
-    const std::uint64_t generation = ++nextGeneration_;
-    if (hasFrameDamage) {
-        pendingDamage_.push_back(PendingDamage{
-            generation,
-            damageMinX,
-            damageMinY,
-            damageMaxX,
-            damageMaxY,
-        });
-        if (pendingDamage_.size() > kMaximumPendingDamage) {
-            PendingDamage collapsed = pendingDamage_.front();
-            for (const PendingDamage& pending : pendingDamage_) {
-                collapsed.generation = std::max(
-                    collapsed.generation, pending.generation);
-                collapsed.minimumX = std::min(
-                    collapsed.minimumX, pending.minimumX);
-                collapsed.minimumY = std::min(
-                    collapsed.minimumY, pending.minimumY);
-                collapsed.maximumX = std::max(
-                    collapsed.maximumX, pending.maximumX);
-                collapsed.maximumY = std::max(
-                    collapsed.maximumY, pending.maximumY);
+    if (!m_Pool->wait_for_ms(250)) {
+        m_Abort.store(true, std::memory_order_release);
+        if (!m_Pool->wait_for_ms(500)) {
+            // Tasks execute bounded loops and observe m_Abort.
+            while (!m_Pool->wait_for_ms(50)) {
             }
-            pendingDamage_.clear();
-            pendingDamage_.push_back(collapsed);
         }
+        std::fill(m_Buffer.begin(), m_Buffer.end(), 0u);
+        m_BufferContentRect = {};
+        return;
     }
-
-    int submitMinX = bufferWidth_;
-    int submitMinY = bufferHeight_;
-    int submitMaxX = 0;
-    int submitMaxY = 0;
-    for (const PendingDamage& pending : pendingDamage_) {
-        submitMinX = std::min(submitMinX, pending.minimumX);
-        submitMinY = std::min(submitMinY, pending.minimumY);
-        submitMaxX = std::max(submitMaxX, pending.maximumX);
-        submitMaxY = std::max(submitMaxY, pending.maximumY);
-    }
+    m_BufferContentRect = frame.content_rect;
 
     {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        if (!state->running.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> lock(state->m_Mutex);
+        if (!state->m_Running.load(std::memory_order_acquire)
+            || state->m_HasWork)
+            return;
+        state->buffer.swap(m_Buffer);
+        std::swap(state->m_ContentRect, m_BufferContentRect);
+        state->m_BufW = m_BufWidth;
+        state->m_BufH = m_BufHeight;
+        state->m_DirtyRect = submit_dirty;
+        state->m_HasWork = true;
+    }
+    m_LastSubmittedContentRect = frame.content_rect;
+    state->m_Cond.notify_one();
+    if (m_Buffer.size() != pixel_count) {
+        try {
+            m_Buffer.assign(pixel_count, 0u);
+            m_BufferContentRect = {};
+        } catch (...) {
             return;
         }
-        const bool needsCompleteBuffer =
-            state->buffer.size() != pixelCount ||
-            state->bufferWidth != bufferWidth_ ||
-            state->bufferHeight != bufferHeight_;
-        if (needsCompleteBuffer) {
-            state->buffer = frontBuffer_;
-            submitMinX = 0;
-            submitMinY = 0;
-            submitMaxX = bufferWidth_;
-            submitMaxY = bufferHeight_;
-        } else {
-            const std::size_t rowBytes =
-                static_cast<std::size_t>(submitMaxX - submitMinX) *
-                sizeof(std::uint32_t);
-            for (int y = submitMinY; y < submitMaxY; ++y) {
-                std::memcpy(
-                    state->buffer.data() +
-                        static_cast<std::size_t>(y) * bufferWidth_ +
-                        submitMinX,
-                    frontBuffer_.data() +
-                        static_cast<std::size_t>(y) * bufferWidth_ +
-                        submitMinX,
-                    rowBytes);
-            }
-        }
-        state->bufferWidth = bufferWidth_;
-        state->bufferHeight = bufferHeight_;
-        state->dirtyMinX = submitMinX;
-        state->dirtyMinY = submitMinY;
-        state->dirtyMaxX = submitMaxX;
-        state->dirtyMaxY = submitMaxY;
-        state->bufferGeneration = generation;
-        state->hasWork = true;
     }
-    state->condition.notify_one();
 }
 
 void CPUGraphics::PrepareShutdown() {
-    DestroyDynamicTextures();
+    DestroyManagedTextures();
     if (ImGui::GetCurrentContext() != nullptr) {
         ImGuiIO& io = ImGui::GetIO();
-        io.BackendFlags &= ~(
-            ImGuiBackendFlags_RendererHasVtxOffset |
-            ImGuiBackendFlags_RendererHasTextures);
+        io.BackendFlags &= ~(ImGuiBackendFlags_RendererHasVtxOffset
+                           | ImGuiBackendFlags_RendererHasTextures);
         io.BackendRendererName = nullptr;
     }
 }
 
 void CPUGraphics::Cleanup() {
+    m_SurfaceReady = false;
     StopSubmitThread(true);
-    abortRaster_.store(true, std::memory_order_release);
-    rasterPool_.reset();
-    pendingDamage_.clear();
-    nextGeneration_ = 0;
-    surfaceRecoveryRequested_.store(false, std::memory_order_release);
-    frontBuffer_.clear();
-    frontBuffer_.shrink_to_fit();
+    m_Abort.store(true, std::memory_order_release);
+    m_Pool.reset();
+    m_FrameScratch.reset();
+    m_Buffer.clear();
+    m_BufferContentRect = {};
+    m_LastSubmittedContentRect = {};
+    m_BufWidth = 0;
+    m_BufHeight = 0;
+    m_GeometryFailures = 0;
+    m_NextGeometryRetryMs = 0;
+    m_SurfaceRecoveryRequested->store(false, std::memory_order_release);
 }
 
-BaseTexData* CPUGraphics::LoadTexture(BaseTexData* texture,
-                                     void* pixelData) {
-    if (texture == nullptr ||
-        pixelData == nullptr ||
-        texture->Width <= 0 ||
-        texture->Height <= 0) {
+BaseTexData* CPUGraphics::LoadTexture(BaseTexData* texture, void* pixel_data) {
+    if (texture == nullptr)
         return nullptr;
-    }
-    const std::size_t width =
-        static_cast<std::size_t>(texture->Width);
-    const std::size_t height =
-        static_cast<std::size_t>(texture->Height);
-    if (width >
-        std::numeric_limits<std::size_t>::max() / height) {
-        return nullptr;
-    }
 
-    auto* result = new CpuTextureData();
-    result->Width = texture->Width;
-    result->Height = texture->Height;
-    result->Channels = 4;
-    const std::size_t pixelCount = width * height;
-    result->pixels.resize(pixelCount);
-    std::memcpy(
-        result->pixels.data(),
-        pixelData,
-        pixelCount * sizeof(std::uint32_t));
-    result->DS = result;
-    return result;
+    size_t pixel_count = 0;
+    if (!TryPixelCount(texture->Width, texture->Height, &pixel_count))
+        return nullptr;
+
+    try {
+        auto result = std::make_unique<CpuTextureData>();
+        result->Width = texture->Width;
+        result->Height = texture->Height;
+        result->Channels = texture->Channels;
+        result->pixels.resize(pixel_count);
+        if (pixel_data != nullptr) {
+            std::memcpy(result->pixels.data(), pixel_data,
+                        pixel_count * sizeof(uint32_t));
+        }
+        result->DS = result.get();
+        return result.release();
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 void CPUGraphics::RemoveTexture(BaseTexData* texture) {

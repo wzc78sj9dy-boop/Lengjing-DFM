@@ -56,8 +56,15 @@ struct ScreenPoint {
     float y = 0.0f;
 };
 
+struct DisplayGeometry {
+    int width = 1;
+    int height = 1;
+    int orientation = 0;
+};
+
 struct UiTouchEvent {
-    ScreenPoint position{};
+    int rawX = -1;
+    int rawY = -1;
     bool hasPosition = false;
     bool down = false;
 };
@@ -67,20 +74,21 @@ std::array<bool, kFingerCount> g_writtenActive{};
 std::recursive_mutex g_fingerMutex;
 std::mutex g_outputMutex;
 std::mutex g_rangeMutex;
+std::mutex g_displayMutex;
 std::mutex g_lifecycleMutex;
 std::mutex g_uiEventMutex;
 
 std::atomic<TouchCallback> g_callback{nullptr};
 std::atomic_bool g_running{false};
 std::atomic_int g_mode{0};
-std::atomic_int g_screenWidth{1};
-std::atomic_int g_screenHeight{1};
-std::atomic_int g_orientation{0};
 std::atomic_uint g_trackingSequence{0};
 std::atomic_bool g_ignoreWriteSlot{false};
+std::atomic_int g_debugQueueLogCount{0};
+std::atomic_int g_debugPumpLogCount{0};
 
 DeviceRange g_inputRange{};
 DeviceRange g_outputRange{};
+DisplayGeometry g_displayGeometry{};
 std::deque<UiTouchEvent> g_uiEvents;
 std::thread g_worker;
 int g_writeTouchFile = -1;
@@ -96,6 +104,11 @@ bool IsUiTouchSlot(int slot) {
           slot == kAimWriteSlot);
 }
 
+DisplayGeometry LoadDisplayGeometry() {
+    std::lock_guard<std::mutex> lock(g_displayMutex);
+    return g_displayGeometry;
+}
+
 template <std::size_t N>
 bool TestBit(const std::array<unsigned long, N>& bits, int bit) {
     constexpr int bitsPerWord = static_cast<int>(sizeof(unsigned long) * 8);
@@ -105,9 +118,10 @@ bool TestBit(const std::array<unsigned long, N>& bits, int bit) {
 }
 
 DeviceRange ConfiguredRange() {
-    const int width = std::max(1, g_screenWidth.load(std::memory_order_acquire));
-    const int height = std::max(1, g_screenHeight.load(std::memory_order_acquire));
-    const int orientation = g_orientation.load(std::memory_order_acquire) & 3;
+    const DisplayGeometry display = LoadDisplayGeometry();
+    const int width = std::max(1, display.width);
+    const int height = std::max(1, display.height);
+    const int orientation = display.orientation & 3;
     const int naturalWidth = orientation == 1 || orientation == 3 ? height : width;
     const int naturalHeight = orientation == 1 || orientation == 3 ? width : height;
     DeviceRange range{};
@@ -216,6 +230,39 @@ int OpenTouchInput(DeviceRange& range, std::string* selectedPath = nullptr) {
     return selectedFile;
 }
 
+int SeedInputState(int file) {
+    int currentSlot = 0;
+    input_absinfo slotInfo{};
+    if (ioctl(file, EVIOCGABS(ABS_MT_SLOT), &slotInfo) >= 0 &&
+        IsValidSlot(slotInfo.value)) {
+        currentSlot = slotInfo.value;
+    }
+
+    std::array<int, kFingerCount + 1> xValues{};
+    std::array<int, kFingerCount + 1> yValues{};
+    xValues[0] = ABS_MT_POSITION_X;
+    yValues[0] = ABS_MT_POSITION_Y;
+    const bool hasX =
+        ioctl(file, EVIOCGMTSLOTS(sizeof(xValues)), xValues.data()) >= 0;
+    const bool hasY =
+        ioctl(file, EVIOCGMTSLOTS(sizeof(yValues)), yValues.data()) >= 0;
+    if (!hasX && !hasY) {
+        return currentSlot;
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(g_fingerMutex);
+    for (int slot = 0; slot < kFingerCount; ++slot) {
+        TouchFinger& finger = g_fingers[static_cast<std::size_t>(slot)];
+        if (hasX) {
+            finger.x = xValues[static_cast<std::size_t>(slot + 1)];
+        }
+        if (hasY) {
+            finger.y = yValues[static_cast<std::size_t>(slot + 1)];
+        }
+    }
+    return currentSlot;
+}
+
 float NormalizeAxis(int value, int minimum, int maximum) {
     if (maximum <= minimum) {
         return 0.0f;
@@ -228,33 +275,31 @@ float NormalizeAxis(int value, int minimum, int maximum) {
 
 ScreenPoint DeviceToScreen(int rawX, int rawY) {
     const DeviceRange range = LoadInputRange();
+    const DisplayGeometry geometry = LoadDisplayGeometry();
     const float naturalX = NormalizeAxis(rawX, range.minimumX, range.maximumX);
     const float naturalY = NormalizeAxis(rawY, range.minimumY, range.maximumY);
-    const float width = static_cast<float>(
-        std::max(1, g_screenWidth.load(std::memory_order_acquire)));
-    const float height = static_cast<float>(
-        std::max(1, g_screenHeight.load(std::memory_order_acquire)));
+    const float width = static_cast<float>(std::max(1, geometry.width));
+    const float height = static_cast<float>(std::max(1, geometry.height));
 
     const lengjing::touch::NormalizedPoint display =
         lengjing::touch::NaturalToDisplay(
             {naturalX, naturalY},
-            g_orientation.load(std::memory_order_acquire));
+            geometry.orientation);
     return ScreenPoint{display.x * width, display.y * height};
 }
 
 ScreenPoint ScreenToDevice(int screenX, int screenY) {
     const DeviceRange range = LoadOutputRange();
-    const float width = static_cast<float>(
-        std::max(1, g_screenWidth.load(std::memory_order_acquire)));
-    const float height = static_cast<float>(
-        std::max(1, g_screenHeight.load(std::memory_order_acquire)));
+    const DisplayGeometry geometry = LoadDisplayGeometry();
+    const float width = static_cast<float>(std::max(1, geometry.width));
+    const float height = static_cast<float>(std::max(1, geometry.height));
     const float displayX = std::clamp(static_cast<float>(screenX) / width, 0.0f, 1.0f);
     const float displayY = std::clamp(static_cast<float>(screenY) / height, 0.0f, 1.0f);
 
     const lengjing::touch::NormalizedPoint natural =
         lengjing::touch::DisplayToNatural(
             {displayX, displayY},
-            g_orientation.load(std::memory_order_acquire));
+            geometry.orientation);
 
     return ScreenPoint{
         static_cast<float>(range.minimumX) +
@@ -463,10 +508,25 @@ void ResetFingerStatus(int slot) {
 void QueueUiInput(const TouchFinger& finger) {
     UiTouchEvent event{};
     if (finger.x >= 0 && finger.y >= 0) {
-        event.position = DeviceToScreen(finger.x, finger.y);
+        event.rawX = finger.x;
+        event.rawY = finger.y;
         event.hasPosition = true;
     }
     event.down = finger.tracking_id >= 0 && finger.status != FINGER_UP;
+
+    const int debugIndex =
+        g_debugQueueLogCount.fetch_add(1, std::memory_order_relaxed);
+    if (debugIndex < 20) {
+        std::fprintf(
+            stderr,
+            "[touch-debug] queue raw=(%d,%d) down=%d tracking=%d status=%d\n",
+            event.rawX,
+            event.rawY,
+            event.down ? 1 : 0,
+            finger.tracking_id,
+            finger.status);
+        std::fflush(stderr);
+    }
 
     std::lock_guard<std::mutex> lock(g_uiEventMutex);
     if (g_uiEvents.size() >= kUiEventCapacity) {
@@ -576,7 +636,7 @@ void ProcessInputEvents(const input_event* events,
 
 void InputWorker(int inputFile) {
     g_insideInputWorker = true;
-    int currentSlot = 0;
+    int currentSlot = inputFile >= 0 ? SeedInputState(inputFile) : 0;
     int uiSlot = -1;
     std::array<bool, kFingerCount> dirty{};
 
@@ -586,6 +646,7 @@ void InputWorker(int inputFile) {
             inputFile = OpenTouchInput(range);
             if (inputFile >= 0) {
                 StoreInputRange(range);
+                currentSlot = SeedInputState(inputFile);
             } else {
                 std::this_thread::sleep_for(
                     std::chrono::milliseconds(kRetryDelayMilliseconds));
@@ -931,20 +992,60 @@ void PumpTouchInput() {
     ImGuiIO& io = ImGui::GetIO();
     io.AddMouseSourceEvent(ImGuiMouseSource_TouchScreen);
     for (const UiTouchEvent& event : events) {
+        ScreenPoint position{};
         if (event.hasPosition) {
-            io.AddMousePosEvent(event.position.x, event.position.y);
+            position = DeviceToScreen(event.rawX, event.rawY);
+            io.AddMousePosEvent(position.x, position.y);
         }
         io.AddMouseButtonEvent(0, event.down);
+        const int debugIndex =
+            g_debugPumpLogCount.fetch_add(1, std::memory_order_relaxed);
+        if (debugIndex < 20) {
+            std::fprintf(
+                stderr,
+                "[touch-debug] pump batch=%zu raw=(%d,%d) pos=(%.1f,%.1f) has=%d down=%d\n",
+                events.size(),
+                event.rawX,
+                event.rawY,
+                position.x,
+                position.y,
+                event.hasPosition ? 1 : 0,
+                event.down ? 1 : 0);
+            std::fflush(stderr);
+        }
     }
 }
 
 void ConfigureTouchDisplay(int width, int height, int orientation) {
-    g_screenWidth.store(std::max(1, width), std::memory_order_release);
-    g_screenHeight.store(std::max(1, height), std::memory_order_release);
-    setOrientation(orientation);
+    const DisplayGeometry next{
+        std::max(1, width),
+        std::max(1, height),
+        lengjing::touch::NormalizeOrientation(orientation),
+    };
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(g_displayMutex);
+        changed =
+            g_displayGeometry.width != next.width ||
+            g_displayGeometry.height != next.height ||
+            g_displayGeometry.orientation != next.orientation;
+        g_displayGeometry = next;
+    }
+    if (changed) {
+        QueueUiRelease();
+    }
 }
 
 void setOrientation(int orientation) {
-    const int normalized = ((orientation % 4) + 4) % 4;
-    g_orientation.store(normalized, std::memory_order_release);
+    const int normalized =
+        lengjing::touch::NormalizeOrientation(orientation);
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(g_displayMutex);
+        changed = g_displayGeometry.orientation != normalized;
+        g_displayGeometry.orientation = normalized;
+    }
+    if (changed) {
+        QueueUiRelease();
+    }
 }

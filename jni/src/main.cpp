@@ -1,4 +1,6 @@
 #include "app/AppController.h"
+#include "app/RenderBackendSelection.h"
+#include "auth/RemoteAuth.h"
 #include "platform/MenuKeyMonitor.h"
 
 #include "Android_Graphics/GraphicsManager.h"
@@ -14,6 +16,7 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <dlfcn.h>
 #include <memory>
 #include <mutex>
@@ -26,9 +29,15 @@
 #define LENGJING_VERSION "dev"
 #endif
 
+#ifndef LENGJING_ENABLE_RUNTIME_AUTH
+#define LENGJING_ENABLE_RUNTIME_AUTH 0
+#endif
+
 namespace {
 
 std::atomic_bool gStopRequested{false};
+constexpr bool kRuntimeAuthEnabled =
+    LENGJING_ENABLE_RUNTIME_AUTH != 0;
 
 void HandleSignal(int) {
     gStopRequested.store(true, std::memory_order_release);
@@ -41,10 +50,40 @@ std::string CurrentDirectory() {
         : std::string("/data/local/tmp");
 }
 
+std::shared_ptr<const lengjing::auth::CloudLayoutDocument>
+FetchAuthenticatedCloudLayout(lengjing::auth::AuthSession& session) {
+    const lengjing::auth::T3AuthConfig& config =
+        lengjing::auth::kDefaultT3AuthConfig;
+    if (!config.cloudVariable.HasAnyValue()) {
+        return {};
+    }
+    const lengjing::auth::CloudRuntimeIdentity identity =
+        lengjing::auth::ResolveCloudRuntimeIdentity(config);
+    if (!config.cloudVariable.IsConfigured() ||
+        !config.cloudIdentity.IsConfigured() || !identity.IsValid()) {
+        std::fprintf(
+            stderr,
+            "[验证] 云偏移配置不完整，使用内置偏移\n");
+        return {};
+    }
+
+    lengjing::auth::CloudLayoutStore store(identity);
+    const lengjing::auth::CloudLayoutUpdateResult result =
+        session.RefreshCloudLayout(store);
+    if (!result.Succeeded() || result.snapshot == nullptr) {
+        std::fprintf(
+            stderr,
+            "[验证] 云偏移不可用，使用内置偏移\n");
+        return {};
+    }
+    return result.snapshot;
+}
+
 std::vector<std::string> DriverOptions() {
     return {
         "纯C（支持虚拟机）",
         "棱镜内核驱动（推荐）",
+        "内核 RPC",
     };
 }
 
@@ -93,35 +132,59 @@ public:
             return;
         }
         const int target = std::max(0, framesPerSecond);
-        if (window_ == window && target_ == target) {
+        if (appliedWindow_ == window && appliedTarget_ == target) {
+            ResetRetry();
             return;
         }
 
-        window_ = window;
-        target_ = target;
+        const auto now = std::chrono::steady_clock::now();
+        if (retryWindow_ == window && retryTarget_ == target &&
+            now < nextRetry_) {
+            return;
+        }
+
         const float frameRate = static_cast<float>(target);
+        std::int32_t result = -1;
         if (SetWithStrategy() != nullptr) {
             constexpr std::int8_t kSeamlessOnly = 0;
             constexpr std::int8_t kAlways = 1;
-            SetWithStrategy()(
+            result = SetWithStrategy()(
                 window,
                 frameRate,
                 ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT,
                 target > 0 ? kAlways : kSeamlessOnly);
         } else if (SetBasic() != nullptr) {
-            SetBasic()(
+            result = SetBasic()(
                 window,
                 frameRate,
                 ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT);
         }
+        if (result == 0) {
+            appliedWindow_ = window;
+            appliedTarget_ = target;
+            ResetRetry();
+            return;
+        }
+
+        if (retryWindow_ != window || retryTarget_ != target) {
+            retryDelay_ = kInitialRetryDelay;
+        }
+        retryWindow_ = window;
+        retryTarget_ = target;
+        nextRetry_ = now + retryDelay_;
+        retryDelay_ = std::min(retryDelay_ * 2, kMaximumRetryDelay);
     }
 
     void Reset() {
-        window_ = nullptr;
-        target_ = -1;
+        appliedWindow_ = nullptr;
+        appliedTarget_ = -1;
+        ResetRetry();
     }
 
 private:
+    static constexpr std::chrono::milliseconds kInitialRetryDelay{50};
+    static constexpr std::chrono::milliseconds kMaximumRetryDelay{1000};
+
     using SetWithStrategyFunction =
         std::int32_t (*)(ANativeWindow*, float, std::int8_t, std::int8_t);
     using SetBasicFunction =
@@ -153,9 +216,62 @@ private:
         return function;
     }
 
-    ANativeWindow* window_ = nullptr;
-    int target_ = -1;
+    void ResetRetry() {
+        retryWindow_ = nullptr;
+        retryTarget_ = -1;
+        nextRetry_ = {};
+        retryDelay_ = kInitialRetryDelay;
+    }
+
+    ANativeWindow* appliedWindow_ = nullptr;
+    int appliedTarget_ = -1;
+    ANativeWindow* retryWindow_ = nullptr;
+    int retryTarget_ = -1;
+    std::chrono::steady_clock::time_point nextRetry_{};
+    std::chrono::milliseconds retryDelay_ = kInitialRetryDelay;
 };
+
+struct GraphicsInitialization {
+    std::unique_ptr<AndroidImgui> graphics;
+    lengjing::ui::RenderBackend activeBackend =
+        lengjing::ui::RenderBackend::Cpu;
+    bool fallbackApplied = false;
+};
+
+GraphicsInitialization InitializeGraphics(
+    ANativeWindow* window,
+    int width,
+    int height,
+    lengjing::ui::RenderBackend requestedBackend) {
+    GraphicsInitialization result;
+    const lengjing::ui::RenderBackend normalizedRequest =
+        lengjing::app::NormalizeRenderBackend(requestedBackend);
+
+    const auto tryBackend = [&](lengjing::ui::RenderBackend backend) {
+        std::unique_ptr<AndroidImgui> candidate =
+            GraphicsManager::getGraphicsInterface(
+                lengjing::app::GraphicsApiForRenderBackend(backend));
+        if (candidate == nullptr ||
+            !candidate->Init_Render(window, width, height)) {
+            return false;
+        }
+        result.graphics = std::move(candidate);
+        result.activeBackend = backend;
+        return true;
+    };
+
+    if (tryBackend(normalizedRequest)) {
+        return result;
+    }
+    if (normalizedRequest != lengjing::ui::RenderBackend::Cpu) {
+        result.fallbackApplied = true;
+        if (tryBackend(lengjing::ui::RenderBackend::Cpu)) {
+            return result;
+        }
+    }
+    result.graphics.reset();
+    return result;
+}
 
 }  // namespace
 
@@ -168,6 +284,15 @@ int main() {
     const std::string programDirectory = CurrentDirectory();
     const std::string configPath = programDirectory + "/lengjing.json";
 
+    lengjing::auth::AuthSession authSession;
+    std::shared_ptr<const lengjing::auth::CloudLayoutDocument> cloudLayout;
+    if constexpr (kRuntimeAuthEnabled) {
+        if (!lengjing::auth::LoginInteractive(authSession)) {
+            return 2;
+        }
+        cloudLayout = FetchAuthenticatedCloudLayout(authSession);
+    }
+
     auto display = android::ANativeWindowCreator::GetDisplayInfo();
     int surfaceWidth = display.width;
     int surfaceHeight = display.height;
@@ -177,34 +302,57 @@ int main() {
     }
 
     ANativeWindow* window = android::ANativeWindowCreator::Create(
-        "lengjing-surface", surfaceWidth, surfaceHeight, false);
+        "lengjing-surface", surfaceWidth, surfaceHeight, true);
     if (window == nullptr) {
         std::fprintf(stderr, "无法创建绘制窗口\n");
         return 1;
     }
-
-    std::unique_ptr<AndroidImgui> graphics =
-        GraphicsManager::getGraphicsInterface(GraphicsManager::CPU);
-    if (graphics == nullptr || !graphics->Init_Render(window, surfaceWidth, surfaceHeight)) {
-        std::fprintf(stderr, "无法初始化图形接口\n");
-        android::ANativeWindowCreator::Destroy(window);
-        return 1;
-    }
-
-    InstallChineseFont();
-    BaseTexData* menuLogo = graphics->LoadTextureFromMemory(
-        const_cast<unsigned char*>(lengjing::ui::assets::kMenuLogoPng),
-        static_cast<int>(lengjing::ui::assets::kMenuLogoPngSize));
-    ConfigureTouchDisplay(surfaceWidth, surfaceHeight, display.orientation);
-    TouchScreenHandle(0);
 
     lengjing::app::AppOptions options;
     options.configPath = configPath;
     options.programDirectory = programDirectory;
     options.driverOptions = DriverOptions();
     options.buildVersion = LENGJING_VERSION;
-    options.menuLogoTexture = menuLogo != nullptr ? menuLogo->DS : nullptr;
+    options.cloudLayout = cloudLayout;
+    if (const char* decryptRva =
+            std::getenv("LENGJING_COORDINATE_DECRYPT_RVA")) {
+        options.algorithmPosition =
+            lengjing::game::native::ParseAlgorithmPositionDecryptRva(
+                decryptRva);
+    }
     lengjing::app::AppController controller(std::move(options));
+
+    GraphicsInitialization initialGraphics = InitializeGraphics(
+        window,
+        surfaceWidth,
+        surfaceHeight,
+        controller.DesiredRenderBackend());
+    if (initialGraphics.graphics == nullptr) {
+        std::fprintf(stderr, "无法初始化图形接口\n");
+        android::ANativeWindowCreator::Destroy(window);
+        return 1;
+    }
+    std::unique_ptr<AndroidImgui> graphics =
+        std::move(initialGraphics.graphics);
+    lengjing::ui::RenderBackend activeBackend =
+        initialGraphics.activeBackend;
+    controller.ReportRenderBackend(
+        activeBackend, initialGraphics.fallbackApplied);
+    if (initialGraphics.fallbackApplied) {
+        std::fprintf(
+            stderr,
+            "[render] selected backend initialization failed, using CPU\n");
+    }
+
+    InstallChineseFont();
+    BaseTexData* menuLogo = graphics->LoadTextureFromMemory(
+        const_cast<unsigned char*>(lengjing::ui::assets::kMenuLogoPng),
+        static_cast<int>(lengjing::ui::assets::kMenuLogoPngSize));
+    controller.SetMenuLogoTexture(
+        menuLogo != nullptr ? menuLogo->DS : nullptr);
+    ConfigureTouchDisplay(surfaceWidth, surfaceHeight, display.orientation);
+    TouchScreenHandle(0);
+
     controller.SetDisplayGeometry(
         surfaceWidth, surfaceHeight, display.orientation);
 
@@ -232,21 +380,34 @@ int main() {
     SurfaceFrameRateHint frameRateHint;
     frameRateHint.Apply(window, controller.TargetFrameRate());
     const auto recreateSurface =
-        [&](int width, int height) {
+        [&](int width,
+            int height,
+            int nextOrientation,
+            lengjing::ui::RenderBackend requestedBackend) {
             controller.SetMenuLogoTexture(nullptr);
+            menuLogo = nullptr;
             bool recreated = false;
+            GraphicsInitialization initialization;
             {
                 std::lock_guard<std::mutex> lock(surfaceMutex);
-                graphics->Shutdown();
-                android::ANativeWindowCreator::Destroy(window);
+                if (graphics != nullptr) {
+                    graphics->Shutdown();
+                    graphics.reset();
+                }
+                if (window != nullptr) {
+                    android::ANativeWindowCreator::Destroy(window);
+                    window = nullptr;
+                }
                 window = android::ANativeWindowCreator::Create(
-                    "lengjing-surface", width, height, false);
-                graphics = GraphicsManager::getGraphicsInterface(
-                    GraphicsManager::CPU);
-                recreated =
-                    window != nullptr &&
-                    graphics != nullptr &&
-                    graphics->Init_Render(window, width, height);
+                    "lengjing-surface", width, height, true);
+                if (window != nullptr) {
+                    initialization = InitializeGraphics(
+                        window, width, height, requestedBackend);
+                    recreated = initialization.graphics != nullptr;
+                    if (recreated) {
+                        graphics = std::move(initialization.graphics);
+                    }
+                }
                 frameRateHint.Reset();
                 if (!recreated && window != nullptr) {
                     android::ANativeWindowCreator::Destroy(window);
@@ -256,6 +417,14 @@ int main() {
             if (!recreated) {
                 return false;
             }
+            activeBackend = initialization.activeBackend;
+            controller.ReportRenderBackend(
+                activeBackend, initialization.fallbackApplied);
+            if (initialization.fallbackApplied) {
+                std::fprintf(
+                    stderr,
+                    "[render] selected backend initialization failed, using CPU\n");
+            }
             InstallChineseFont();
             menuLogo = graphics->LoadTextureFromMemory(
                 const_cast<unsigned char*>(
@@ -264,12 +433,17 @@ int main() {
                     lengjing::ui::assets::kMenuLogoPngSize));
             controller.SetMenuLogoTexture(
                 menuLogo != nullptr ? menuLogo->DS : nullptr);
+            ConfigureTouchDisplay(width, height, nextOrientation);
+            controller.SetDisplayGeometry(width, height, nextOrientation);
             return true;
         };
     auto nextDisplayRefresh = std::chrono::steady_clock::time_point{};
+    auto nextSurfaceRetry = std::chrono::steady_clock::time_point{};
+    bool surfaceFailureReported = false;
     int orientation = display.orientation;
     while (!gStopRequested.load(std::memory_order_acquire) &&
-           !controller.ExitRequested()) {
+           !controller.ExitRequested() &&
+           (!kRuntimeAuthEnabled || !authSession.ExitRequested())) {
         const auto keyRequest = menuKeys.ConsumeRequest();
         if (keyRequest == lengjing::platform::MenuKeyRequest::Show) {
             controller.SetMenuVisible(true);
@@ -278,7 +452,10 @@ int main() {
         }
 
         const auto now = std::chrono::steady_clock::now();
+        const bool surfaceUnavailable =
+            graphics == nullptr || window == nullptr;
         const bool recoverSurface =
+            graphics != nullptr &&
             graphics->ConsumeSurfaceRecoveryRequest();
         const bool refreshDisplay = now >= nextDisplayRefresh;
         if (refreshDisplay) {
@@ -296,30 +473,66 @@ int main() {
             surfaceHeight != targetHeight;
         const bool orientationChanged =
             displayValid && orientation != display.orientation;
-        if ((recoverSurface || sizeChanged) &&
-            !recreateSurface(targetWidth, targetHeight)) {
-            std::fprintf(stderr, "无法重建绘制窗口\n");
-            gStopRequested.store(true, std::memory_order_release);
-            break;
+        const lengjing::ui::RenderBackend desiredBackend =
+            controller.DesiredRenderBackend();
+        const bool backendChanged = desiredBackend != activeBackend;
+        const int targetOrientation =
+            displayValid ? display.orientation : orientation;
+        const bool recreationRequested =
+            surfaceUnavailable || recoverSurface || sizeChanged ||
+            orientationChanged || backendChanged;
+        if (recreationRequested) {
+            if (surfaceUnavailable && now < nextSurfaceRetry) {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(20));
+                continue;
+            }
+            if (!recreateSurface(
+                    targetWidth,
+                    targetHeight,
+                    targetOrientation,
+                    desiredBackend)) {
+                if (!surfaceFailureReported) {
+                    std::fprintf(
+                        stderr,
+                        "无法重建绘制窗口，正在重试\n");
+                    surfaceFailureReported = true;
+                }
+                nextSurfaceRetry =
+                    now + std::chrono::milliseconds(100);
+                nextDisplayRefresh = now;
+                continue;
+            }
+            surfaceFailureReported = false;
+            nextSurfaceRetry = std::chrono::steady_clock::time_point{};
         }
-        if (sizeChanged || orientationChanged) {
+        if (recreationRequested) {
             surfaceWidth = targetWidth;
             surfaceHeight = targetHeight;
-            if (displayValid) {
-                orientation = display.orientation;
-            }
-            ConfigureTouchDisplay(
-                surfaceWidth, surfaceHeight, orientation);
-            controller.SetDisplayGeometry(
-                surfaceWidth, surfaceHeight, orientation);
+            orientation = targetOrientation;
         }
 
         PumpTouchInput();
         frameRateHint.Apply(window, controller.TargetFrameRate());
+        limiter.Wait(controller.TargetFrameRate());
         graphics->NewFrame();
         controller.RenderFrame(graphics->PresentedFrameRate());
         graphics->EndFrame();
-        limiter.Wait(controller.TargetFrameRate());
+    }
+
+    std::fprintf(
+        stderr,
+        "[touch-debug] exit signal=%d controller=%d auth=%d graphics=%d window=%d\n",
+        gStopRequested.load(std::memory_order_acquire) ? 1 : 0,
+        controller.ExitRequested() ? 1 : 0,
+        kRuntimeAuthEnabled && authSession.ExitRequested() ? 1 : 0,
+        graphics != nullptr ? 1 : 0,
+        window != nullptr ? 1 : 0);
+    std::fflush(stderr);
+
+    if (kRuntimeAuthEnabled && authSession.ExitRequested()) {
+        controller.StopRuntime();
+        std::fprintf(stderr, "[验证] 会话已失效\n");
     }
 
     menuKeys.Stop();
@@ -328,7 +541,13 @@ int main() {
     if (mirrorThread.joinable()) {
         mirrorThread.join();
     }
-    graphics->Shutdown();
-    android::ANativeWindowCreator::Destroy(window);
+    controller.SetMenuLogoTexture(nullptr);
+    menuLogo = nullptr;
+    if (graphics != nullptr) {
+        graphics->Shutdown();
+    }
+    if (window != nullptr) {
+        android::ANativeWindowCreator::Destroy(window);
+    }
     return 0;
 }
