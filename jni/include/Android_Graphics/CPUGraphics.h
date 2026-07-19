@@ -1,13 +1,12 @@
-#ifndef LENGJING_CPU_GRAPHICS_H
+﻿#ifndef LENGJING_CPU_GRAPHICS_H
 #define LENGJING_CPU_GRAPHICS_H
 
 #include <android/native_window.h>
-
+#include <array>
 #include <atomic>
-#include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdint>
-#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -15,118 +14,101 @@
 #include <vector>
 
 #include "AndroidImgui.h"
+#include "CPURasterRules.h"
 
-class CpuRasterPool {
+class RenderPool {
 public:
-    static constexpr int kWorkerCount = 4;
+    static constexpr int kWorkers = 4;
 
-    CpuRasterPool();
-    ~CpuRasterPool();
+    RenderPool();
+    ~RenderPool();
 
-    void Run(std::function<void()> first,
-             std::function<void()> second,
-             std::function<void()> third,
-             std::function<void()> fourth);
-    bool WaitFor(std::chrono::milliseconds timeout);
+    void run(std::array<std::function<void()>, kWorkers> tasks);
+    bool wait_for_ms(int ms);
 
 private:
-    void WorkerMain(int index);
+    std::thread m_Threads[kWorkers];
+    std::mutex m_Mutex;
+    std::condition_variable m_CondWork;
+    std::condition_variable m_CondDone;
+    std::function<void()> m_Tasks[kWorkers];
+    int m_Generation = 0;
+    int m_Seen[kWorkers] = {0};
+    std::atomic<int> m_Done{0};
+    bool m_Alive = true;
 
-    std::thread threads_[kWorkerCount];
-    std::mutex mutex_;
-    std::condition_variable workCondition_;
-    std::condition_variable doneCondition_;
-    std::function<void()> tasks_[kWorkerCount];
-    int generation_ = 0;
-    int seenGeneration_[kWorkerCount]{};
-    std::atomic<int> doneCount_{0};
-    bool alive_ = true;
+    void worker(int index);
 };
 
-struct CpuSubmitState {
-    std::mutex mutex;
-    std::condition_variable condition;
-    std::vector<std::uint32_t> buffer;
-    int bufferWidth = 0;
-    int bufferHeight = 0;
-    int dirtyMinX = 0;
-    int dirtyMinY = 0;
-    int dirtyMaxX = 0;
-    int dirtyMaxY = 0;
-    std::uint64_t bufferGeneration = 0;
-    bool hasWork = false;
-    std::atomic<bool> running{false};
-    std::atomic<bool> exited{true};
-    std::atomic<bool> insideWindowLock{false};
-    std::atomic<bool> insideWindowPost{false};
-    std::atomic<bool> surfaceRecoveryRequired{false};
-    std::atomic<std::int64_t> windowCallStartedMs{0};
-    std::atomic<std::uint64_t> presentedGeneration{0};
-    std::shared_ptr<lengjing::render::PresentationRateTracker>
-        presentationRate;
-    ANativeWindow* window = nullptr;
+struct SubmitState {
+    std::mutex m_Mutex;
+    std::condition_variable m_Cond;
+    std::vector<uint32_t> buffer;
+    int m_BufW = 0;
+    int m_BufH = 0;
+    lengjing::render::cpu::PixelRect m_ContentRect;
+    lengjing::render::cpu::PixelRect m_DirtyRect;
+    bool m_HasWork = false;
+    std::atomic<bool> m_Running{false};
+    std::atomic<bool> m_Exited{true};
+    std::atomic<bool> m_InLock{false};
+    std::atomic<bool> m_InPost{false};
+    std::atomic<bool> m_ForceFullDamage{true};
+    std::atomic<int64_t> m_LastPostMs{0};
+    std::atomic<int64_t> m_RetryAfterMs{0};
+    ANativeWindow* m_Window = nullptr;
+    std::shared_ptr<lengjing::render::PresentationRateTracker> m_PresentationRate;
+    std::shared_ptr<std::atomic_bool> m_SurfaceRecoveryRequested;
 };
 
 class CPUGraphics final : public AndroidImgui {
+private:
+    struct FrameScratch;
+
+    struct CpuTextureData : BaseTexData {
+        std::vector<uint32_t> pixels;
+    };
+
+    int m_BufWidth = 0;
+    int m_BufHeight = 0;
+    lengjing::render::cpu::PixelRect m_BufferContentRect;
+    lengjing::render::cpu::PixelRect m_LastSubmittedContentRect;
+    std::vector<uint32_t> m_Buffer;
+    std::vector<uint64_t> m_BufferGroupHashes;
+    std::vector<lengjing::render::cpu::PixelRect> m_BufferGroupBounds;
+
+    std::shared_ptr<SubmitState> m_Submit;
+    std::thread m_SubmitThread;
+    std::mutex m_ThreadMutex;
+    std::mutex m_WindowMutex;
+    std::mutex m_RenderMutex;
+    std::atomic<bool> m_Abort{false};
+    bool m_SurfaceReady = false;
+    bool m_ForceCanonicalFullSubmit = true;
+    int m_GeometryFailures = 0;
+    int64_t m_NextGeometryRetryMs = 0;
+    std::shared_ptr<std::atomic_bool> m_SurfaceRecoveryRequested =
+        std::make_shared<std::atomic_bool>(false);
+    std::unique_ptr<RenderPool> m_Pool;
+    std::unique_ptr<FrameScratch> m_FrameScratch;
+
+    bool StartSubmitThread();
+    bool StopSubmitThread(bool abandonIfBlocked = false);
+    void SubmitLoop(std::shared_ptr<SubmitState> state);
+
 public:
     CPUGraphics();
     ~CPUGraphics() override;
+
     bool ConsumeSurfaceRecoveryRequest() override;
-
-private:
-    struct PendingDamage {
-        std::uint64_t generation = 0;
-        int minimumX = 0;
-        int minimumY = 0;
-        int maximumX = 0;
-        int maximumY = 0;
-    };
-
-    struct CpuTextureData : BaseTexData {
-        std::vector<std::uint32_t> pixels;
-    };
-
     bool Create() override;
     bool Setup() override;
     void PrepareFrame(bool resize) override;
-    void Render(ImDrawData* drawData) override;
+    void Render(ImDrawData* draw_data) override;
     void PrepareShutdown() override;
     void Cleanup() override;
-    BaseTexData* LoadTexture(BaseTexData* texture, void* pixelData) override;
+    BaseTexData* LoadTexture(BaseTexData* texture, void* pixel_data) override;
     void RemoveTexture(BaseTexData* texture) override;
-
-    void StartSubmitThread();
-    bool StopSubmitThread(bool detachIfBlocked);
-    void WaitForSubmitSlot();
-    void RenderBand(ImDrawData* drawData,
-                    std::uint32_t* buffer,
-                    int stride,
-                    int bandMinY,
-                    int dirtyMinX,
-                    int dirtyMinY,
-                    int bandMaxY,
-                    int dirtyMaxX,
-                    int dirtyMaxY);
-
-    int bufferWidth_ = 0;
-    int bufferHeight_ = 0;
-    int previousMinX_ = 0;
-    int previousMinY_ = 0;
-    int previousMaxX_ = 0;
-    int previousMaxY_ = 0;
-    std::uint64_t nextGeneration_ = 0;
-    std::deque<PendingDamage> pendingDamage_;
-    std::vector<std::uint32_t> frontBuffer_;
-
-    std::shared_ptr<CpuSubmitState> submitState_;
-    std::thread submitThread_;
-    std::mutex threadMutex_;
-    std::mutex windowMutex_;
-    std::mutex renderMutex_;
-    std::atomic<bool> abortRaster_{false};
-    std::atomic<bool> surfaceRecoveryRequested_{false};
-    std::unique_ptr<CpuRasterPool> rasterPool_;
-
 };
 
 #endif
