@@ -48,6 +48,7 @@ struct SubmitState {
     int m_BufH = 0;
     lengjing::render::cpu::PixelRect m_ContentRect;
     lengjing::render::cpu::PixelRect m_DirtyRect;
+    lengjing::render::cpu::PixelRect m_UpdateRect;
     bool m_HasWork = false;
     std::atomic<bool> m_Running{false};
     std::atomic<bool> m_Exited{true};

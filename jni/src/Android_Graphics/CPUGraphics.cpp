@@ -318,11 +318,9 @@ struct PreparedTriangleState {
 
 struct PreparedPrimitive {
     RasterVertex vertices[4]{};
-    PreparedTriangleState triangles[2]{};
     TextureView texture;
     RasterClip clip;
     uint8_t vertex_count = 0;
-    uint8_t triangle_count = 0;
 };
 
 struct PreparedFrame {
@@ -931,6 +929,146 @@ bool TryRasterQuad(const RasterVertex& a, const RasterVertex& b,
     return true;
 }
 
+int64_t CeilDivide(int64_t numerator, int64_t denominator) {
+    int64_t quotient = numerator / denominator;
+    if (numerator % denominator > 0)
+        ++quotient;
+    return quotient;
+}
+
+bool TryRasterConstantRgbaQuad(const RasterVertex& a, const RasterVertex& b,
+                               const RasterVertex& c, const RasterVertex& d,
+                               const TextureView& texture,
+                               const RasterClip& clip, uint32_t* buffer,
+                               int stride, const std::atomic<bool>& abort) {
+    if (texture.kind != TextureKind::Rgba || texture.rgba == nullptr
+        || texture.width != 1 || texture.height != 1
+        || a.color != b.color || a.color != c.color || a.color != d.color)
+        return false;
+
+    SubpixelPoint points[4];
+    if (!ToSubpixel(a.x, a.y, &points[0])
+        || !ToSubpixel(b.x, b.y, &points[1])
+        || !ToSubpixel(c.x, c.y, &points[2])
+        || !ToSubpixel(d.x, d.y, &points[3]))
+        return false;
+    if (points[0].x != points[3].x || points[1].x != points[2].x
+        || points[0].y != points[1].y || points[2].y != points[3].y)
+        return false;
+
+    const int64_t left = std::min(points[0].x, points[1].x);
+    const int64_t right = std::max(points[0].x, points[1].x);
+    const int64_t top = std::min(points[0].y, points[2].y);
+    const int64_t bottom = std::max(points[0].y, points[2].y);
+    const int x0 = std::max<int64_t>(
+        clip.x0, CeilDivide(left - lengjing::render::cpu::kSubpixelHalf,
+                            lengjing::render::cpu::kSubpixelScale));
+    const int y0 = std::max<int64_t>(
+        clip.y0, CeilDivide(top - lengjing::render::cpu::kSubpixelHalf,
+                            lengjing::render::cpu::kSubpixelScale));
+    const int x1 = std::min<int64_t>(
+        clip.x1, CeilDivide(right - lengjing::render::cpu::kSubpixelHalf,
+                            lengjing::render::cpu::kSubpixelScale));
+    const int y1 = std::min<int64_t>(
+        clip.y1, CeilDivide(bottom - lengjing::render::cpu::kSubpixelHalf,
+                            lengjing::render::cpu::kSubpixelScale));
+    if (x1 <= x0 || y1 <= y0)
+        return true;
+
+    const uint32_t color = ModulateColor(texture.rgba[0], a.color);
+    for (int y = y0; y < y1; ++y) {
+        if ((y & 15) == 0 && abort.load(std::memory_order_relaxed))
+            return true;
+        BlendSpan(buffer + y * stride + x0, x1 - x0, color);
+    }
+    return true;
+}
+
+bool CoversAtOffset(const PreparedTriangleState& state,
+                    const int64_t row_edges[3], int offset) {
+    return EdgeCovers(
+               row_edges[0] + state.step_x[0] * offset, state.top_left[0])
+        && EdgeCovers(
+               row_edges[1] + state.step_x[1] * offset, state.top_left[1])
+        && EdgeCovers(
+               row_edges[2] + state.step_x[2] * offset, state.top_left[2]);
+}
+
+int CoverageSearchDirection(const PreparedTriangleState& state,
+                            const int64_t row_edges[3], int offset) {
+    bool search_left = false;
+    bool search_right = false;
+    for (int edge = 0; edge < 3; ++edge) {
+        const int64_t value =
+            row_edges[edge] + state.step_x[edge] * offset;
+        const int64_t threshold = state.top_left[edge] ? 0 : 1;
+        if (value >= threshold)
+            continue;
+        if (state.step_x[edge] > 0)
+            search_right = true;
+        else if (state.step_x[edge] < 0)
+            search_left = true;
+        else
+            return 0;
+    }
+    if (search_left == search_right)
+        return 0;
+    return search_right ? 1 : -1;
+}
+
+bool LocateCoveredOffset(const PreparedTriangleState& state,
+                         const int64_t row_edges[3], int width, int guess,
+                         int* result) {
+    if (width <= 0 || result == nullptr)
+        return false;
+    int offset = std::clamp(guess, 0, width - 1);
+    for (int attempts = 0; attempts < width; ++attempts) {
+        if (CoversAtOffset(state, row_edges, offset)) {
+            *result = offset;
+            return true;
+        }
+        const int direction = CoverageSearchDirection(
+            state, row_edges, offset);
+        if (direction == 0)
+            return false;
+        offset += direction;
+        if (offset < 0 || offset >= width)
+            return false;
+    }
+    return false;
+}
+
+bool ResolveGuessedCoveredSpan(const PreparedTriangleState& state,
+                               const int64_t row_edges[3], int width,
+                               int guessed_begin, int guessed_end,
+                               int* begin, int* end) {
+    int first = 0;
+    if (!LocateCoveredOffset(
+            state, row_edges, width, guessed_begin, &first))
+        return false;
+    while (first > 0 && CoversAtOffset(state, row_edges, first - 1))
+        --first;
+
+    int last = 0;
+    if (!LocateCoveredOffset(
+            state, row_edges, width, guessed_end - 1, &last))
+        return false;
+    while (last + 1 < width
+           && CoversAtOffset(state, row_edges, last + 1))
+        ++last;
+
+    *begin = first;
+    *end = last + 1;
+    return true;
+}
+
+float EdgeXAtY(const RasterVertex& a, const RasterVertex& b, float y) {
+    const float dy = b.y - a.y;
+    if (std::fabs(dy) <= 0.000001f)
+        return a.x;
+    return a.x + (y - a.y) * (b.x - a.x) / dy;
+}
+
 void RasterPreparedTriangle(const PreparedTriangleState& state,
                             const RasterVertex* all_vertices,
                             const TextureView& texture,
@@ -954,16 +1092,32 @@ void RasterPreparedTriangle(const PreparedTriangleState& state,
     int64_t edge1_row = EdgeValue(state.points[2], state.points[0], first_center);
     int64_t edge2_row = EdgeValue(state.points[0], state.points[1], first_center);
     const bool same_color = a.color == b.color && a.color == c.color;
+    const bool single_rgba = texture.kind == TextureKind::Rgba
+        && texture.rgba != nullptr && texture.width == 1 && texture.height == 1;
     const bool flat_texture = texture.kind == TextureKind::Solid
         || (texture.kind == TextureKind::FontAlpha
             && IsWhiteUv(a, white_u, white_v, 0.001f)
             && IsWhiteUv(b, white_u, white_v, 0.001f)
-            && IsWhiteUv(c, white_u, white_v, 0.001f));
+            && IsWhiteUv(c, white_u, white_v, 0.001f))
+        || single_rgba;
     const bool solid = same_color && flat_texture;
+    const uint32_t solid_color = single_rgba
+        ? ModulateColor(texture.rgba[0], a.color)
+        : a.color;
     const bool same_rgb = (a.color & 0x00FFFFFFu)
             == (b.color & 0x00FFFFFFu)
         && (a.color & 0x00FFFFFFu) == (c.color & 0x00FFFFFFu);
-    const bool alpha_only = flat_texture && same_rgb && !same_color;
+    const bool alpha_only = !single_rgba && flat_texture
+        && same_rgb && !same_color;
+    const RasterVertex* top = &a;
+    const RasterVertex* middle = &b;
+    const RasterVertex* bottom = &c;
+    if (middle->y < top->y)
+        std::swap(top, middle);
+    if (bottom->y < middle->y)
+        std::swap(middle, bottom);
+    if (middle->y < top->y)
+        std::swap(top, middle);
 
     for (int y = y0; y < y1; ++y) {
         if ((y & 15) == 0 && abort.load(std::memory_order_relaxed))
@@ -972,90 +1126,77 @@ void RasterPreparedTriangle(const PreparedTriangleState& state,
         int64_t edge1 = edge1_row;
         int64_t edge2 = edge2_row;
 
+        const int64_t row_edges[3] = {edge0, edge1, edge2};
+        const float py = static_cast<float>(y) + 0.5f;
+        const float long_x = EdgeXAtY(*top, *bottom, py);
+        const float short_x = py < middle->y
+            ? EdgeXAtY(*top, *middle, py)
+            : EdgeXAtY(*middle, *bottom, py);
+        const float approximate_left = std::min(long_x, short_x);
+        const float approximate_right = std::max(long_x, short_x);
+        const int guessed_begin = std::clamp(
+            FirstPixelAtOrAfter(approximate_left) - x0, 0, x1 - x0 - 1);
+        const int guessed_end = std::clamp(
+            EndPixelAtOrBefore(approximate_right) - x0, 1, x1 - x0);
+        int begin_offset = 0;
+        int end_offset = 0;
+        ResolveGuessedCoveredSpan(
+            state, row_edges, x1 - x0, guessed_begin, guessed_end,
+            &begin_offset, &end_offset);
+        const int run_start = x0 + begin_offset;
+        const int run_end = x0 + end_offset;
+        int64_t left_edge0 = edge0 + state.step_x[0] * begin_offset;
+        int64_t left_edge1 = edge1 + state.step_x[1] * begin_offset;
+        int64_t left_edge2 = edge2 + state.step_x[2] * begin_offset;
+
         if (solid) {
-            int run_start = x0;
-            int64_t left_edge0 = edge0;
-            int64_t left_edge1 = edge1;
-            int64_t left_edge2 = edge2;
-            while (run_start < x1) {
-                const bool covered = EdgeCovers(left_edge0, state.top_left[0])
-                    && EdgeCovers(left_edge1, state.top_left[1])
-                    && EdgeCovers(left_edge2, state.top_left[2]);
-                if (covered)
-                    break;
-                ++run_start;
+            if (run_start < run_end) {
+                BlendSpan(buffer + y * stride + run_start,
+                          run_end - run_start, solid_color);
+            }
+        } else if (alpha_only) {
+            const uint32_t rgb = a.color & 0x00FFFFFFu;
+            uint32_t* dst = buffer + y * stride + run_start;
+            for (int x = run_start; x < run_end; ++x, ++dst) {
+                const float wa = static_cast<float>(left_edge0)
+                    * state.inverse_area;
+                const float wb = static_cast<float>(left_edge1)
+                    * state.inverse_area;
+                const float wc = static_cast<float>(left_edge2)
+                    * state.inverse_area;
+                const uint32_t source_alpha =
+                    InterpolateColor(a, b, c, wa, wb, wc) >> 24;
+                if (source_alpha != 0)
+                    *dst = BlendPixel(*dst, rgb | (source_alpha << 24));
                 left_edge0 += state.step_x[0];
                 left_edge1 += state.step_x[1];
                 left_edge2 += state.step_x[2];
             }
-            if (run_start < x1) {
-                int run_end = x1;
-                const int64_t right_offset = x1 - x0 - 1;
-                int64_t right_edge0 = edge0 + state.step_x[0] * right_offset;
-                int64_t right_edge1 = edge1 + state.step_x[1] * right_offset;
-                int64_t right_edge2 = edge2 + state.step_x[2] * right_offset;
-                while (run_end > run_start) {
-                    const bool covered = EdgeCovers(right_edge0, state.top_left[0])
-                        && EdgeCovers(right_edge1, state.top_left[1])
-                        && EdgeCovers(right_edge2, state.top_left[2]);
-                    if (covered)
-                        break;
-                    --run_end;
-                    right_edge0 -= state.step_x[0];
-                    right_edge1 -= state.step_x[1];
-                    right_edge2 -= state.step_x[2];
-                }
-                BlendSpan(buffer + y * stride + run_start,
-                          run_end - run_start, a.color);
-            }
-        } else if (alpha_only) {
-            const uint32_t rgb = a.color & 0x00FFFFFFu;
-            uint32_t* dst = buffer + y * stride + x0;
-            for (int x = x0; x < x1; ++x, ++dst) {
-                const bool covered = EdgeCovers(edge0, state.top_left[0])
-                    && EdgeCovers(edge1, state.top_left[1])
-                    && EdgeCovers(edge2, state.top_left[2]);
-                if (covered) {
-                    const float wa = static_cast<float>(edge0)
-                        * state.inverse_area;
-                    const float wb = static_cast<float>(edge1)
-                        * state.inverse_area;
-                    const float wc = static_cast<float>(edge2)
-                        * state.inverse_area;
-                    const uint32_t source_alpha =
-                        InterpolateColor(a, b, c, wa, wb, wc) >> 24;
-                    if (source_alpha != 0)
-                        *dst = BlendPixel(*dst, rgb | (source_alpha << 24));
-                }
-                edge0 += state.step_x[0];
-                edge1 += state.step_x[1];
-                edge2 += state.step_x[2];
-            }
         } else {
-            uint32_t* dst = buffer + y * stride + x0;
-            for (int x = x0; x < x1; ++x, ++dst) {
-                const bool covered = EdgeCovers(edge0, state.top_left[0])
-                    && EdgeCovers(edge1, state.top_left[1])
-                    && EdgeCovers(edge2, state.top_left[2]);
-                if (covered) {
-                    const float wa = static_cast<float>(edge0) * state.inverse_area;
-                    const float wb = static_cast<float>(edge1) * state.inverse_area;
-                    const float wc = static_cast<float>(edge2) * state.inverse_area;
-                    const uint32_t color = same_color
-                        ? a.color
-                        : InterpolateColor(a, b, c, wa, wb, wc);
-                    uint32_t src = color;
-                    if (!flat_texture) {
-                        const float u = a.u * wa + b.u * wb + c.u * wc;
-                        const float v = a.v * wa + b.v * wb + c.v * wc;
-                        src = ShadePixel(texture, u, v, color);
-                    }
-                    if ((src >> 24) != 0)
-                        *dst = BlendPixel(*dst, src);
+            uint32_t* dst = buffer + y * stride + run_start;
+            for (int x = run_start; x < run_end; ++x, ++dst) {
+                const float wa = static_cast<float>(left_edge0)
+                    * state.inverse_area;
+                const float wb = static_cast<float>(left_edge1)
+                    * state.inverse_area;
+                const float wc = static_cast<float>(left_edge2)
+                    * state.inverse_area;
+                const uint32_t color = same_color
+                    ? a.color
+                    : InterpolateColor(a, b, c, wa, wb, wc);
+                uint32_t src = color;
+                if (single_rgba) {
+                    src = ModulateColor(texture.rgba[0], color);
+                } else if (!flat_texture) {
+                    const float u = a.u * wa + b.u * wb + c.u * wc;
+                    const float v = a.v * wa + b.v * wb + c.v * wc;
+                    src = ShadePixel(texture, u, v, color);
                 }
-                edge0 += state.step_x[0];
-                edge1 += state.step_x[1];
-                edge2 += state.step_x[2];
+                if ((src >> 24) != 0)
+                    *dst = BlendPixel(*dst, src);
+                left_edge0 += state.step_x[0];
+                left_edge1 += state.step_x[1];
+                left_edge2 += state.step_x[2];
             }
         }
         edge0_row += state.step_y[0];
@@ -1119,21 +1260,6 @@ void AppendPreparedPrimitive(PreparedFrame* frame,
     PreparedPrimitive primitive;
     std::copy_n(vertices, vertex_count, primitive.vertices);
     primitive.vertex_count = static_cast<uint8_t>(vertex_count);
-    if (vertex_count == 4) {
-        if (PrepareTriangleState(
-                primitive.vertices, 0, 1, 2, &primitive.triangles[0]))
-            ++primitive.triangle_count;
-        if (PrepareTriangleState(
-                primitive.vertices, 0, 2, 3,
-                &primitive.triangles[primitive.triangle_count]))
-            ++primitive.triangle_count;
-    } else if (PrepareTriangleState(
-                   primitive.vertices, 0, 1, 2,
-                   &primitive.triangles[0])) {
-        primitive.triangle_count = 1;
-    }
-    if (primitive.triangle_count == 0)
-        return;
     primitive.texture = texture;
     primitive.clip = clip;
     frame->primitives.push_back(std::move(primitive));
@@ -1142,30 +1268,49 @@ void AppendPreparedPrimitive(PreparedFrame* frame,
         *group_bounds = UnionRect(*group_bounds, clip);
 }
 
-void BuildPrimitiveTiles(PreparedFrame* frame, int height) {
+void BuildPrimitiveTiles(PreparedFrame* frame, int height,
+                         const PixelRect& dirty_rect = {}) {
     if (frame == nullptr || height <= 0)
         return;
 
     std::array<size_t, kRasterTiles> counts{};
     for (const PreparedPrimitive& primitive : frame->primitives) {
-        for (int tile = 0; tile < kRasterTiles; ++tile) {
-            const int y0 = height * tile / kRasterTiles;
-            const int y1 = height * (tile + 1) / kRasterTiles;
-            if (primitive.clip.y1 > y0 && primitive.clip.y0 < y1)
-                ++counts[tile];
-        }
+        const PixelRect clip = dirty_rect.valid()
+            ? IntersectRect(primitive.clip, dirty_rect)
+            : primitive.clip;
+        if (!clip.valid())
+            continue;
+        const int first_tile = std::clamp<int64_t>(
+            ((static_cast<int64_t>(clip.y0) + 1) * kRasterTiles - 1)
+                / height,
+            0, kRasterTiles - 1);
+        const int last_tile = std::clamp<int64_t>(
+            (static_cast<int64_t>(clip.y1) * kRasterTiles - 1)
+                / height + 1,
+            first_tile + 1, kRasterTiles);
+        for (int tile = first_tile; tile < last_tile; ++tile)
+            ++counts[tile];
     }
     for (int tile = 0; tile < kRasterTiles; ++tile)
         frame->tiles[tile].reserve(counts[tile]);
 
     for (size_t index = 0; index < frame->primitives.size(); ++index) {
         const PreparedPrimitive& primitive = frame->primitives[index];
-        for (int tile = 0; tile < kRasterTiles; ++tile) {
-            const int y0 = height * tile / kRasterTiles;
-            const int y1 = height * (tile + 1) / kRasterTiles;
-            if (primitive.clip.y1 > y0 && primitive.clip.y0 < y1)
-                frame->tiles[tile].push_back(static_cast<uint32_t>(index));
-        }
+        const PixelRect clip = dirty_rect.valid()
+            ? IntersectRect(primitive.clip, dirty_rect)
+            : primitive.clip;
+        if (!clip.valid())
+            continue;
+        const int first_tile = std::clamp<int64_t>(
+            ((static_cast<int64_t>(clip.y0) + 1) * kRasterTiles - 1)
+                / height,
+            0, kRasterTiles - 1);
+        const int last_tile = std::clamp<int64_t>(
+            (static_cast<int64_t>(clip.y1) * kRasterTiles - 1)
+                / height + 1,
+            first_tile + 1, kRasterTiles);
+        for (int tile = first_tile; tile < last_tile; ++tile)
+            frame->tiles[tile].push_back(static_cast<uint32_t>(index));
     }
 }
 
@@ -1196,21 +1341,32 @@ void RasterPreparedTile(const PreparedFrame& frame, int tile,
 
         const RasterVertex* v = primitive.vertices;
         if (primitive.vertex_count == 4) {
+            if (TryRasterConstantRgbaQuad(
+                    v[0], v[1], v[2], v[3], primitive.texture,
+                    clip, buffer, stride, abort))
+                continue;
             if (TryRasterQuad(v[0], v[1], v[2], v[3], primitive.texture,
                               clip, buffer, stride, white_u, white_v, abort))
                 continue;
-            for (int triangle = 0; triangle < primitive.triangle_count;
-                 ++triangle) {
+            constexpr uint8_t indices[2][3] = {{0, 1, 2}, {0, 2, 3}};
+            for (const auto& triangle : indices) {
+                PreparedTriangleState state;
+                if (!PrepareTriangleState(
+                        v, triangle[0], triangle[1], triangle[2], &state))
+                    continue;
                 RasterPreparedTriangle(
-                    primitive.triangles[triangle], v, primitive.texture, clip,
+                    state, v, primitive.texture, clip,
                     buffer, stride, white_u, white_v, abort);
                 if (abort.load(std::memory_order_relaxed))
                     return;
             }
         } else if (primitive.vertex_count == 3) {
-            RasterPreparedTriangle(
-                primitive.triangles[0], v, primitive.texture, clip,
-                buffer, stride, white_u, white_v, abort);
+            PreparedTriangleState state;
+            if (PrepareTriangleState(v, 0, 1, 2, &state)) {
+                RasterPreparedTriangle(
+                    state, v, primitive.texture, clip,
+                    buffer, stride, white_u, white_v, abort);
+            }
         }
     }
 }
@@ -1233,6 +1389,8 @@ void RunSubmitLoop(const std::shared_ptr<SubmitState>& state) {
         int width = 0;
         int height = 0;
         PixelRect dirty_rect;
+        PixelRect update_rect;
+        bool update_valid = false;
         {
             std::unique_lock<std::mutex> lock(state->m_Mutex);
             state->m_Cond.wait(lock, [&] {
@@ -1241,19 +1399,43 @@ void RunSubmitLoop(const std::shared_ptr<SubmitState>& state) {
             });
             if (!state->m_Running.load(std::memory_order_acquire))
                 break;
-            local_buffer.swap(state->buffer);
-            std::swap(local_content_rect, state->m_ContentRect);
+            local_content_rect = state->m_ContentRect;
             width = state->m_BufW;
             height = state->m_BufH;
             dirty_rect = state->m_DirtyRect;
+            update_rect = state->m_UpdateRect;
+            size_t pixel_count = 0;
+            if (TryPixelCount(width, height, &pixel_count)
+                && state->buffer.size() == pixel_count
+                && dirty_rect.valid() && update_rect.valid()
+                && state->m_Window != nullptr) {
+                update_rect = ClampRect(update_rect, width, height);
+                const bool full_update = update_rect.valid()
+                    && update_rect.x0 == 0 && update_rect.y0 == 0
+                    && update_rect.x1 == width && update_rect.y1 == height;
+                if (full_update) {
+                    local_buffer.swap(state->buffer);
+                    update_valid = true;
+                } else if (update_rect.valid()
+                           && local_buffer.size() == pixel_count) {
+                    const size_t row_bytes = static_cast<size_t>(
+                        update_rect.x1 - update_rect.x0) * sizeof(uint32_t);
+                    for (int y = update_rect.y0; y < update_rect.y1; ++y) {
+                        std::memcpy(
+                            local_buffer.data() + static_cast<size_t>(y) * width
+                                + update_rect.x0,
+                            state->buffer.data() + static_cast<size_t>(y) * width
+                                + update_rect.x0,
+                            row_bytes);
+                    }
+                    update_valid = true;
+                }
+            }
             state->m_HasWork = false;
         }
         state->m_Cond.notify_all();
 
-        size_t pixel_count = 0;
-        if (!TryPixelCount(width, height, &pixel_count)
-            || local_buffer.size() != pixel_count
-            || !dirty_rect.valid() || state->m_Window == nullptr) {
+        if (!update_valid) {
             if (!BackOffSubmitFailure(state, &consecutive_failures))
                 break;
             continue;
@@ -1377,6 +1559,9 @@ struct CPUGraphics::FrameScratch {
 
     PreparedFrame frame;
     std::vector<CachedList> cached_lists;
+    std::vector<uint64_t> list_hashes;
+    std::vector<uint8_t> list_cache_hits;
+    std::vector<uint8_t> list_has_callbacks;
 
     PreparedFrame& Reset() {
         frame.primitives.clear();
@@ -1812,17 +1997,27 @@ void CPUGraphics::Render(ImDrawData* draw_data) {
             frame.primitives.reserve(
                 static_cast<size_t>(draw_data->TotalIdxCount) / 3u);
         }
-        m_FrameScratch->cached_lists.resize(
-            static_cast<size_t>(draw_data->CmdListsCount));
+        const size_t list_count = static_cast<size_t>(draw_data->CmdListsCount);
+        bool all_lists_unchanged =
+            m_FrameScratch->cached_lists.size() == list_count;
+        m_FrameScratch->cached_lists.resize(list_count);
+        m_FrameScratch->list_hashes.resize(list_count);
+        m_FrameScratch->list_cache_hits.resize(list_count);
+        m_FrameScratch->list_has_callbacks.resize(list_count);
         const uint64_t texture_revision =
             gCpuTextureRevision.load(std::memory_order_relaxed);
         for (int list_index = 0; list_index < draw_data->CmdListsCount;
              ++list_index) {
+            const size_t index = static_cast<size_t>(list_index);
             const ImDrawList* draw_list = draw_data->CmdLists[list_index];
             FrameScratch::CachedList& cached =
-                m_FrameScratch->cached_lists[static_cast<size_t>(list_index)];
+                m_FrameScratch->cached_lists[index];
             if (draw_list == nullptr) {
                 cached = {};
+                m_FrameScratch->list_hashes[index] = 0;
+                m_FrameScratch->list_cache_hits[index] = 0;
+                m_FrameScratch->list_has_callbacks[index] = 0;
+                all_lists_unchanged = false;
                 continue;
             }
             const uint64_t list_hash = HashDrawList(
@@ -1834,12 +2029,37 @@ void CPUGraphics::Render(ImDrawData* draw_data) {
                     return command.UserCallback != nullptr
                         && command.UserCallback != ImDrawCallback_ResetRenderState;
                 });
-            if (!has_user_callback && cached.valid && cached.hash == list_hash
+            const bool cache_hit = !has_user_callback && cached.valid
+                && cached.hash == list_hash
                 && cached.texture_revision == texture_revision
                 && cached.display_pos.x == display_pos.x
                 && cached.display_pos.y == display_pos.y
                 && cached.scale.x == scale.x && cached.scale.y == scale.y
-                && cached.width == m_BufWidth && cached.height == m_BufHeight) {
+                && cached.width == m_BufWidth && cached.height == m_BufHeight;
+            m_FrameScratch->list_hashes[index] = list_hash;
+            m_FrameScratch->list_cache_hits[index] = cache_hit ? 1 : 0;
+            m_FrameScratch->list_has_callbacks[index] =
+                has_user_callback ? 1 : 0;
+            all_lists_unchanged = all_lists_unchanged && cache_hit;
+        }
+        if (all_lists_unchanged && !m_ForceCanonicalFullSubmit
+            && !state->m_ForceFullDamage.load(std::memory_order_acquire)) {
+            return;
+        }
+        for (int list_index = 0; list_index < draw_data->CmdListsCount;
+             ++list_index) {
+            const size_t index = static_cast<size_t>(list_index);
+            const ImDrawList* draw_list = draw_data->CmdLists[list_index];
+            FrameScratch::CachedList& cached =
+                m_FrameScratch->cached_lists[index];
+            if (draw_list == nullptr) {
+                cached = {};
+                continue;
+            }
+            const uint64_t list_hash = m_FrameScratch->list_hashes[index];
+            const bool has_user_callback =
+                m_FrameScratch->list_has_callbacks[index] != 0;
+            if (m_FrameScratch->list_cache_hits[index] != 0) {
                 frame.primitives.insert(
                     frame.primitives.end(),
                     cached.primitives.begin(), cached.primitives.end());
@@ -2020,8 +2240,8 @@ void CPUGraphics::Render(ImDrawData* draw_data) {
             replacement.valid = !has_user_callback;
             cached = std::move(replacement);
         }
-        BuildPrimitiveTiles(&frame, m_BufHeight);
     } catch (...) {
+        m_ForceCanonicalFullSubmit = true;
         return;
     }
 
@@ -2054,6 +2274,8 @@ void CPUGraphics::Render(ImDrawData* draw_data) {
     render_dirty = ClampRect(render_dirty, m_BufWidth, m_BufHeight);
     const bool force_full_damage = m_ForceCanonicalFullSubmit
         || state->m_ForceFullDamage.load(std::memory_order_acquire);
+    if (!force_full_damage && !render_dirty.valid())
+        return;
     const PixelRect submit_dirty = force_full_damage
         ? surface_bounds
         : (render_dirty.valid()
@@ -2061,9 +2283,26 @@ void CPUGraphics::Render(ImDrawData* draw_data) {
                : ClampRect(UnionRect(m_LastSubmittedContentRect,
                                      frame.content_rect),
                            m_BufWidth, m_BufHeight));
+    const uint64_t dirty_pixels = render_dirty.valid()
+        ? static_cast<uint64_t>(render_dirty.x1 - render_dirty.x0)
+            * static_cast<uint64_t>(render_dirty.y1 - render_dirty.y0)
+        : 0;
+    const bool use_full_update = force_full_damage
+        || dirty_pixels * 2 >= static_cast<uint64_t>(pixel_count);
+    const PixelRect update_rect = use_full_update
+        ? surface_bounds
+        : render_dirty;
     if (!submit_dirty.valid())
         return;
     const PixelRect clear_rect = render_dirty;
+
+    try {
+        if (clear_rect.valid())
+            BuildPrimitiveTiles(&frame, m_BufHeight, clear_rect);
+    } catch (...) {
+        m_ForceCanonicalFullSubmit = true;
+        return;
+    }
 
     m_Abort.store(false, std::memory_order_release);
     const ImVec2 white_uv = ImGui::GetIO().Fonts->TexUvWhitePixel;
@@ -2100,6 +2339,7 @@ void CPUGraphics::Render(ImDrawData* draw_data) {
             tasks[worker] = make_task();
         m_Pool->run(std::move(tasks));
     } catch (...) {
+        m_ForceCanonicalFullSubmit = true;
         return;
     }
     if (!m_Pool->wait_for_ms(250)) {
@@ -2130,21 +2370,42 @@ void CPUGraphics::Render(ImDrawData* draw_data) {
     {
         std::lock_guard<std::mutex> lock(state->m_Mutex);
         if (!state->m_Running.load(std::memory_order_acquire)
-            || state->m_HasWork)
+            || state->m_HasWork) {
+            m_ForceCanonicalFullSubmit = true;
             return;
+        }
         try {
             if (state->buffer.size() != pixel_count)
                 state->buffer.assign(pixel_count, 0u);
         } catch (...) {
+            m_ForceCanonicalFullSubmit = true;
             return;
         }
-        std::memcpy(
-            state->buffer.data(), m_Buffer.data(),
-            pixel_count * sizeof(uint32_t));
+        const size_t row_bytes = static_cast<size_t>(
+            update_rect.x1 - update_rect.x0) * sizeof(uint32_t);
+        if (update_rect.x0 == 0 && update_rect.x1 == m_BufWidth) {
+            std::memcpy(
+                state->buffer.data()
+                    + static_cast<size_t>(update_rect.y0) * m_BufWidth,
+                m_Buffer.data()
+                    + static_cast<size_t>(update_rect.y0) * m_BufWidth,
+                row_bytes * static_cast<size_t>(
+                    update_rect.y1 - update_rect.y0));
+        } else {
+            for (int y = update_rect.y0; y < update_rect.y1; ++y) {
+                std::memcpy(
+                    state->buffer.data() + static_cast<size_t>(y) * m_BufWidth
+                        + update_rect.x0,
+                    m_Buffer.data() + static_cast<size_t>(y) * m_BufWidth
+                        + update_rect.x0,
+                    row_bytes);
+            }
+        }
         state->m_ContentRect = frame.content_rect;
         state->m_BufW = m_BufWidth;
         state->m_BufH = m_BufHeight;
         state->m_DirtyRect = submit_dirty;
+        state->m_UpdateRect = update_rect;
         state->m_HasWork = true;
     }
     m_ForceCanonicalFullSubmit = false;
