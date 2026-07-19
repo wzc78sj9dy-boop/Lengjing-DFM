@@ -6,6 +6,12 @@
 #include <utility>
 
 namespace lengjing::game {
+namespace {
+
+constexpr auto kDataFrameInterval = std::chrono::nanoseconds(
+    1'000'000'000LL / 120LL);
+
+}  // namespace
 
 GameRuntime::GameRuntime(std::unique_ptr<GameBackend> backend)
     : backend_(std::move(backend)),
@@ -26,9 +32,12 @@ bool GameRuntime::Start(const RuntimeOptions& options) {
     }
 
     stopRequested_.store(false, std::memory_order_release);
-    requestedScreenWidth_.store(options.screenWidth, std::memory_order_release);
-    requestedScreenHeight_.store(options.screenHeight, std::memory_order_release);
-    requestedOrientation_.store(options.orientation, std::memory_order_release);
+    requestedScreenWidth_.store(
+        options.screenWidth, std::memory_order_release);
+    requestedScreenHeight_.store(
+        options.screenHeight, std::memory_order_release);
+    requestedOrientation_.store(
+        options.orientation, std::memory_order_release);
     displayGeometryDirty_.store(false, std::memory_order_release);
     status_ = RuntimeStatus{RuntimePhase::Starting, 0, false, 0, {}};
     latestFrame_ = std::make_shared<GameFrame>();
@@ -53,9 +62,7 @@ void GameRuntime::WaitUntilStopped() {
     std::thread worker;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!worker_.joinable()) {
-            return;
-        }
+        if (!worker_.joinable()) return;
         worker = std::move(worker_);
     }
     worker.join();
@@ -68,9 +75,7 @@ void GameRuntime::UpdateSettings(const FeatureSettings& settings) {
 
 void GameRuntime::UpdateDisplayGeometry(
     int width, int height, int orientation) {
-    if (width <= 1 || height <= 1) {
-        return;
-    }
+    if (width <= 1 || height <= 1) return;
     requestedScreenWidth_.store(width, std::memory_order_release);
     requestedScreenHeight_.store(height, std::memory_order_release);
     requestedOrientation_.store(
@@ -102,16 +107,24 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
     std::string error;
     try {
         if (!backend_->Open(options, probe, error)) {
+            SetStatus(RuntimePhase::Stopping, probe, error);
+            CloseBackendUntilSafe();
             SetStatus(RuntimePhase::Faulted, probe, std::move(error));
             return;
         }
 
+        backend_->SetAimEnabled(
+            requestedAimEnabled_.load(std::memory_order_acquire));
+        aimStateDirty_.store(false, std::memory_order_release);
         SetStatus(RuntimePhase::Running, probe);
+
         std::uint64_t sequence = 0;
         bool hasReadyFrame = false;
         FrameClock::time_point lastReadyFrameAt{};
+        auto nextFrameAt = FrameClock::now();
         while (!stopRequested_.load(std::memory_order_acquire)) {
-            if (displayGeometryDirty_.exchange(false, std::memory_order_acq_rel)) {
+            if (displayGeometryDirty_.exchange(
+                    false, std::memory_order_acq_rel)) {
                 backend_->UpdateDisplayGeometry(
                     requestedScreenWidth_.load(std::memory_order_acquire),
                     requestedScreenHeight_.load(std::memory_order_acquire),
@@ -121,7 +134,8 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
                 backend_->SetAimEnabled(
                     requestedAimEnabled_.load(std::memory_order_acquire));
             }
-            if (reloadItemsRequested_.exchange(false, std::memory_order_acq_rel)) {
+            if (reloadItemsRequested_.exchange(
+                    false, std::memory_order_acq_rel)) {
                 backend_->ReloadCustomItems();
             }
 
@@ -135,12 +149,10 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
             frame->sequence = ++sequence;
             error.clear();
             if (!backend_->ReadFrame(settings, *frame, probe, error)) {
-                if (stopRequested_.load(std::memory_order_acquire)) {
-                    break;
-                }
+                if (stopRequested_.load(std::memory_order_acquire)) break;
+                SetStatus(RuntimePhase::Stopping, probe, error);
+                CloseBackendUntilSafe();
                 SetStatus(RuntimePhase::Faulted, probe, std::move(error));
-                backend_->SetAimEnabled(false);
-                backend_->Close();
                 return;
             }
 
@@ -163,27 +175,39 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
                 status_.message = std::move(error);
             }
 
+            const auto now = FrameClock::now();
+            do {
+                nextFrameAt += kDataFrameInterval;
+            } while (nextFrameAt <= now);
             std::unique_lock<std::mutex> lock(mutex_);
-            stopCondition_.wait_for(lock, std::chrono::milliseconds(4), [this] {
+            stopCondition_.wait_until(lock, nextFrameAt, [this] {
                 return stopRequested_.load(std::memory_order_acquire);
             });
         }
     } catch (const std::exception& exception) {
-        error = exception.what();
-        SetStatus(RuntimePhase::Faulted, probe, std::move(error));
-        backend_->SetAimEnabled(false);
-        backend_->Close();
+        const std::string message = exception.what();
+        SetStatus(RuntimePhase::Stopping, probe, message);
+        CloseBackendUntilSafe();
+        SetStatus(RuntimePhase::Faulted, probe, message);
         return;
     } catch (...) {
-        SetStatus(RuntimePhase::Faulted, probe, "运行模块发生未知错误");
-        backend_->SetAimEnabled(false);
-        backend_->Close();
+        const std::string message = "运行模块发生未知错误";
+        SetStatus(RuntimePhase::Stopping, probe, message);
+        CloseBackendUntilSafe();
+        SetStatus(RuntimePhase::Faulted, probe, message);
         return;
     }
 
     backend_->SetAimEnabled(false);
-    backend_->Close();
+    CloseBackendUntilSafe();
     SetStatus(RuntimePhase::Stopped, RuntimeProbe{});
+}
+
+void GameRuntime::CloseBackendUntilSafe() noexcept {
+    using namespace std::chrono_literals;
+    while (!backend_->Close()) {
+        std::this_thread::sleep_for(10ms);
+    }
 }
 
 void GameRuntime::SetStatus(RuntimePhase phase,

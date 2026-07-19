@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game/VisibilityState.h"
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -20,11 +22,7 @@ enum class GeometryBodyType : std::uint8_t {
     Dynamic,
 };
 
-enum class GeometryVisibility : std::uint8_t {
-    Unavailable,
-    Visible,
-    Occluded,
-};
+using GeometryVisibility = lengjing::game::VisibilityState;
 
 struct GeometryMesh {
     GeometryBodyType bodyType = GeometryBodyType::Static;
@@ -98,6 +96,9 @@ public:
     std::shared_ptr<const GeometrySnapshot> GetSnapshot() const noexcept;
     GeometryVisibility Trace(const GeometryPoint& origin,
                              const GeometryPoint& target) const noexcept;
+    GeometryVisibility TraceFullSegment(
+        const GeometryPoint& origin,
+        const GeometryPoint& target) const noexcept;
     GeometryRaycastHit Raycast(const GeometryPoint& origin,
                                const GeometryPoint& target) const noexcept;
 

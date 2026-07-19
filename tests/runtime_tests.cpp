@@ -21,6 +21,8 @@ struct BackendState {
     std::atomic_int screenWidth{0};
     std::atomic_int screenHeight{0};
     std::atomic_int orientation{0};
+    std::atomic_int closeFailuresRemaining{0};
+    std::atomic_uintptr_t algorithmDecryptRva{0};
     std::atomic_bool aimEnabled{false};
     std::atomic_bool frameReady{true};
 };
@@ -30,17 +32,27 @@ public:
     explicit FakeBackend(std::shared_ptr<BackendState> state)
         : state_(std::move(state)) {}
 
-    bool Open(const lengjing::game::RuntimeOptions&,
+    bool Open(const lengjing::game::RuntimeOptions& options,
               lengjing::game::RuntimeProbe& probe,
               std::string&) override {
         ++state_->opens;
+        state_->algorithmDecryptRva.store(
+            options.algorithmPosition.decryptRva);
         probe.processId = 42;
         probe.baseReady = true;
         return true;
     }
 
-    void Close() noexcept override {
+    bool Close() noexcept override {
         ++state_->closes;
+        int remaining = state_->closeFailuresRemaining.load();
+        while (remaining > 0) {
+            if (state_->closeFailuresRemaining.compare_exchange_weak(
+                    remaining, remaining - 1)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     bool ReadFrame(const lengjing::game::FeatureSettings& settings,
@@ -50,7 +62,7 @@ public:
         frame.ready = state_->frameReady.load();
         frame.playerCount =
             frame.ready && settings.visual.enabled ? 3 : 0;
-        error = frame.ready ? std::string{} : "数据链等待：测试帧未就绪";
+        error = frame.ready ? std::string{} : "waiting";
         ++state_->reads;
         return true;
     }
@@ -99,10 +111,12 @@ void RunRuntimeTests() {
     runtime.UpdateSettings(settings);
 
     lengjing::game::RuntimeOptions options;
+    options.algorithmPosition.decryptRva = 0x1234;
     REQUIRE(runtime.Start(options));
     REQUIRE(!runtime.Start(options));
     REQUIRE(WaitFor([&] {
-        return runtime.Status().phase == lengjing::game::RuntimePhase::Running;
+        return runtime.Status().phase ==
+            lengjing::game::RuntimePhase::Running;
     }));
     REQUIRE(WaitFor([&] {
         const auto frame = runtime.LatestFrame();
@@ -110,18 +124,19 @@ void RunRuntimeTests() {
     }));
     REQUIRE(runtime.Status().processId == 42);
     REQUIRE(runtime.Status().baseReady);
+    REQUIRE(state->algorithmDecryptRva.load() == 0x1234);
 
     state->frameReady.store(false);
     REQUIRE(WaitFor([&] {
-        return runtime.Status().message ==
-            "数据链等待：测试帧未就绪";
+        return runtime.Status().message == "waiting";
     }));
     const auto retainedFrame = runtime.LatestFrame();
     const std::uint64_t retainedSequence = retainedFrame->sequence;
     state->frameReady.store(true);
     REQUIRE(WaitFor([&] {
         const auto frame = runtime.LatestFrame();
-        return frame->sequence > retainedSequence && frame->playerCount == 3;
+        return frame->sequence > retainedSequence &&
+            frame->playerCount == 3;
     }));
 
     runtime.SetAimEnabled(true);
@@ -135,11 +150,13 @@ void RunRuntimeTests() {
     }));
     REQUIRE(WaitFor([&] { return state->reloads.load() == 1; }));
 
+    state->closeFailuresRemaining.store(2);
     runtime.Stop();
     runtime.WaitUntilStopped();
-    REQUIRE(runtime.Status().phase == lengjing::game::RuntimePhase::Stopped);
+    REQUIRE(runtime.Status().phase ==
+        lengjing::game::RuntimePhase::Stopped);
     REQUIRE(state->opens.load() == 1);
-    REQUIRE(state->closes.load() == 1);
+    REQUIRE(state->closes.load() == 3);
     REQUIRE(!state->aimEnabled.load());
     REQUIRE(state->reads.load() >= 2);
 }
