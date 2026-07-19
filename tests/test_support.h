@@ -13,16 +13,30 @@
     } while (false)
 
 void RunConfigTests();
+void RunActorFrameVisitSetTests();
 void RunActorRecordResolverTests();
-void RunCoordinateReaderTests();
+void RunAlgorithmPositionPolicyTests();
+void RunAimModePolicyTests();
+void RunAimPredictionTests();
+void RunAuthConfigTests();
+void RunAuthSessionTests();
+void RunAuthTransportTests();
+void RunCardInputPolicyTests();
+void RunCloudLayoutTests();
+void RunCpuMailboxPolicyTests();
+void RunFrameProjectionTests();
 void RunHudMapTests();
 void RunKernelModuleCatalogTests();
+void RunPlayerBoundsTests();
 void RunPlayerTrackingTests();
 void RunPositionResolverTests();
 void RunPresentationRateTests();
 void RunProjectileSpeedTests();
+void RunRenderBackendSelectionTests();
+void RunRemoteElfIdentityTests();
+void RunRuntimeLayoutOverrideTests();
 void RunRuntimeTests();
 void RunThreatCatalogTests();
-void RunTrackingBoneSelectorTests();
 void RunTrackingCalculatorTests();
 void RunTouchTransformTests();
+void RunWorldObjectRefreshPolicyTests();

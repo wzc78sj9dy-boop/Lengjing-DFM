@@ -26,7 +26,14 @@ enum class SettingsDomain : std::uint8_t {
     System,
 };
 
+enum class RenderBackend : std::uint8_t {
+    Cpu = 0,
+    Vulkan,
+    OpenGl,
+};
+
 enum class AimInputMode : std::uint8_t {
+    ReadOnly = 0,
     WriteTouch = 1,
     ProgramGyroscope,
     KernelTouch,
@@ -39,11 +46,20 @@ struct RuntimeModel {
     bool stopping = false;
     int processId = 0;
     bool baseReady = false;
+    bool coordinateRequested = false;
+    bool coordinateEntryReady = false;
+    bool coordinateContextReady = false;
+    int coordinateThreadId = 0;
+    std::uintptr_t coordinateGuestPc = 0;
+    std::uint64_t coordinateContextGeneration = 0;
+    std::uint64_t coordinateAttempts = 0;
+    std::uint64_t coordinateSuccesses = 0;
     float framesPerSecond = 0.0f;
     int screenWidth = 0;
     int screenHeight = 0;
     int gameVersionIndex = 0;
     int driverIndex = 0;
+    RenderBackend activeRenderBackend = RenderBackend::Cpu;
     std::vector<std::string> driverOptions;
     std::string logText;
     std::string buildVersion;
@@ -56,7 +72,6 @@ struct VisualSettings {
     bool modelGeometry = false;
     bool visibilityColor = false;
     bool coordinateDecrypt = false;
-    bool algorithmDecrypt = false;
 
     bool box = true;
     bool snapline = true;
@@ -183,11 +198,9 @@ struct RadarSettings {
 };
 
 struct AimTuning {
-    float rangePixels = 200.0f;
+    float rangePixels = 150.0f;
     float hipDistanceMeters = 50.0f;
-    float adsDistanceMeters = 100.0f;
-    float trackingProjectileSpeed = 500.0f;
-    float trackingGravity = 5.24f;
+    float adsDistanceMeters = 150.0f;
     float hipSpeed = 30.0f;
     float adsSpeed = 30.0f;
     float horizontalSpeed = 70.0f;
@@ -205,6 +218,7 @@ inline constexpr std::size_t kRandomBoneCount = 9;
 struct AimSettings {
     bool enabled = false;
     bool missMode = false;
+    int coverMode = 0;
     bool weaponProfilesEnabled = false;
     int weaponProfileIndex = 8;
     std::array<AimTuning, kWeaponProfileCount> weaponProfiles{};
@@ -215,8 +229,11 @@ struct AimSettings {
     bool persistentLock = false;
     bool curvedMotion = false;
     bool trajectoryTracking = false;
-    bool requireVisibility = false;
+    bool requireVisibility = true;
     bool rejectTargetState = false;
+    bool rejectDeadTarget = false;
+    bool playerDeadBox = true;
+    bool robotDeadBox = false;
     bool enforceFov = true;
     bool enforceDistance = true;
     int hitPercentage = 100;
@@ -227,7 +244,7 @@ struct AimSettings {
     std::array<float, kRandomBoneCount> randomBoneWeights{
         30.0f, 30.0f, 15.0f, 10.0f, 5.0f, 2.0f, 5.0f, 2.0f, 1.0f};
 
-    AimInputMode inputMode = AimInputMode::WriteTouch;
+    AimInputMode inputMode = AimInputMode::ReadOnly;
     bool showTouchArea = false;
     float touchRange = 300.0f;
     float touchX = 1450.0f;
@@ -236,6 +253,7 @@ struct AimSettings {
 
 struct SystemSettings {
     int frameLimitIndex = 3;
+    RenderBackend renderBackend = RenderBackend::Cpu;
     bool autoScrollLogs = true;
     bool toastNotifications = true;
 };

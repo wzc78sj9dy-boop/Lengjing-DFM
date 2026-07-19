@@ -29,6 +29,23 @@ void RunTrackingCalculatorTests()
     const TrackingPoint forward{1000.0f, 0.0f, 0.0f};
     const TrackingPoint stopped{};
 
+    const TrackingCommand directDisabled = TrackingCalculator::CalculateAngles(
+        false, origin, forward);
+    REQUIRE(directDisabled.flag == 0);
+
+    const TrackingCommand directDiagonal = TrackingCalculator::CalculateAngles(
+        true, origin, TrackingPoint{0.0f, 1000.0f, 1000.0f});
+    REQUIRE(NearlyEqual(directDiagonal.pitch, 45.0f));
+    REQUIRE(NearlyEqual(directDiagonal.yaw, 90.0f));
+    REQUIRE(directDiagonal.flag == 1);
+
+    const TrackingCommand directNonFinite = TrackingCalculator::CalculateAngles(
+        true,
+        origin,
+        TrackingPoint{
+            std::numeric_limits<float>::infinity(), 0.0f, 0.0f});
+    REQUIRE(directNonFinite.flag == 0);
+
     const TrackingCommand disabled = TrackingCalculator::Calculate(
         false, origin, forward, stopped, 500.0f, 5.24f);
     REQUIRE(disabled.pitch == 0.0f);
@@ -142,9 +159,12 @@ void RunTrackingCalculatorTests()
     const auto terminalIndex = cache.Evaluate(6, 5, 5, {});
     REQUIRE(terminalIndex.validInput);
     REQUIRE(terminalIndex.accepted);
-    const auto terminalBeforeRange = cache.Evaluate(0, 101, 101, {});
-    REQUIRE(terminalBeforeRange.validInput);
-    REQUIRE(terminalBeforeRange.accepted);
+    const auto zeroBufferedTerminal = cache.Evaluate(0, 0, 0, {});
+    REQUIRE(zeroBufferedTerminal.validInput);
+    REQUIRE(zeroBufferedTerminal.accepted);
+    const auto terminalOutsideRange = cache.Evaluate(0, 101, 101, {});
+    REQUIRE(!terminalOutsideRange.validInput);
+    REQUIRE(!terminalOutsideRange.accepted);
 
     const auto tooMany = cache.Evaluate(6, 1, 5, random);
     REQUIRE(tooMany.validInput);

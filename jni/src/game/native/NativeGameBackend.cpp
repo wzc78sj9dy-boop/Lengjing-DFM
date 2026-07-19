@@ -1,16 +1,29 @@
 #include "game/GameBackend.h"
 #include "game/aim/AimController.h"
+#include "game/aim/AimModePolicy.h"
+#include "game/aim/AimPrediction.h"
+#include "game/aim/CoverSelectionPolicy.h"
 #include "game/aim/TrackingCalculator.h"
 #include "game/data/CustomItemCatalog.h"
 #include "game/data/ItemCatalog.h"
 #include "game/data/ThreatCatalog.h"
 #include "game/native/ActorRecordResolver.h"
+#include "game/native/ActorFrameVisitSet.h"
+#include "game/native/BoneFrameSource.h"
 #include "game/native/CharacterPositionResolver.h"
+#include "game/native/CoordinatePoolRuntime.h"
+#include "game/native/FrameProjection.h"
 #include "game/native/GeometryRuntime.h"
 #include "game/native/HudMapProjection.h"
 #include "game/native/MemoryTransport.h"
+#include "game/native/PlayerBounds.h"
 #include "game/native/PlayerTrackingPolicy.h"
+#include "game/native/PositionReadModePolicy.h"
 #include "game/native/ProjectileSpeedReader.h"
+#include "game/native/RemoteElfIdentity.h"
+#include "game/native/RuntimeLayoutOverride.h"
+#include "game/native/TrajectoryHook.h"
+#include "game/native/WorldObjectRefreshPolicy.h"
 
 #include <algorithm>
 #include <array>
@@ -22,6 +35,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -32,6 +46,8 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 namespace lengjing::game {
 namespace {
@@ -78,19 +94,18 @@ struct Quaternion {
 struct Transform {
     Quaternion rotation{};
     Vec3 translation{};
-    float translationPadding = 0.0f;
     Vec3 scale{1.0f, 1.0f, 1.0f};
-    float scalePadding = 0.0f;
 };
-static_assert(sizeof(Transform) == 48, "Transform layout mismatch");
+static_assert(sizeof(Transform) == 40, "Transform payload layout mismatch");
+static_assert(offsetof(Transform, rotation) == 0,
+              "Transform rotation offset mismatch");
+static_assert(offsetof(Transform, translation) == 16,
+              "Transform translation offset mismatch");
+static_assert(offsetof(Transform, scale) == 28,
+              "Transform scale offset mismatch");
 
-struct PackedTransform {
-    Quaternion rotation{};
-    Vec3 translation{};
-    Vec3 scale{1.0f, 1.0f, 1.0f};
-    std::array<std::uint8_t, 8> trailing{};
-};
-static_assert(sizeof(PackedTransform) == 48, "Packed transform layout mismatch");
+constexpr std::uintptr_t kBoneTransformStride = 48;
+constexpr std::size_t kPlayerBoneTransformCount = 65;
 
 struct Matrix4 {
     float value[4][4]{};
@@ -109,6 +124,8 @@ struct VersionLayout {
     std::uintptr_t worldOffset = 0;
     std::array<std::uintptr_t, 2> geometryInstancePointerOffsets{};
     native::ActorRecordLayout actorRecordLayout{};
+    std::uintptr_t trackingMatrixRootOffset = 0;
+    std::uintptr_t componentPositionFlagOffset = 0;
 };
 
 constexpr std::array<VersionLayout, 3> kVersionLayouts{{
@@ -121,23 +138,42 @@ constexpr std::array<VersionLayout, 3> kVersionLayouts{{
       0x180,
       0x3D0,
       1000,
-      24,
-      10000,
-      3000}},
+       24,
+       10000,
+       3000},
+      0x1D0AD4C0ULL,
+      0x1DCFB4FULL},
     {"com.proxima.dfm",
      0x1D0F4800ULL,
      0x1D4115A8ULL,
      {0x1B1C0D68ULL, 0},
-     {0, 0, 0, 0, 0, 0, 0, 0}},
+     {0, 0, 0, 0, 0, 0, 0, 0},
+     0,
+     0},
     {"com.garena.game.df",
      0x1CF7A440ULL,
      0x1D2971F8ULL,
      {0x1B0669A8ULL, 0},
-     {0, 0, 0, 0, 0, 0, 0, 0}},
+     {0, 0, 0, 0, 0, 0, 0, 0},
+     0,
+     0},
 }};
 
 constexpr std::array<int, 15> kBoneIndices{
     31, 30, 1, 34, 6, 35, 7, 36, 8, 58, 62, 59, 63, 60, 64};
+
+constexpr std::array<std::uintptr_t, 4> kTrackingClassOffsets{
+    0x1A4E2548ULL,
+    0x191F50D0ULL,
+    0x1A4E6110ULL,
+    0x1A3D6A20ULL,
+};
+
+constexpr std::array<std::uintptr_t, 3> kTrackingPlayerClassOffsets{
+    0x191F50D0ULL,
+    0x1A4E6110ULL,
+    0x1A3D6A20ULL,
+};
 
 constexpr std::array<BoneLink, 14> kBoneLinks{{
     {0, 1},
@@ -176,6 +212,16 @@ bool IsFinite(const Vec3& value) {
            std::isfinite(value.z);
 }
 
+bool IsValidTransform(const Transform& transform) {
+    const Quaternion& rotation = transform.rotation;
+    const float normSquared =
+        rotation.x * rotation.x + rotation.y * rotation.y +
+        rotation.z * rotation.z + rotation.w * rotation.w;
+    return std::isfinite(normSquared) && normSquared > 0.25f &&
+        normSquared < 2.25f && IsFinite(transform.translation) &&
+        IsFinite(transform.scale);
+}
+
 native::GeometryPoint ToGeometryPoint(const Vec3& value) {
     return native::GeometryPoint{value.x, value.y, value.z};
 }
@@ -208,6 +254,41 @@ bool IsNonzero(const Vec3& value) {
     return value.x != 0.0f || value.y != 0.0f || value.z != 0.0f;
 }
 
+bool ReadElfBytes(void* context,
+                  std::uintptr_t address,
+                  void* destination,
+                  std::size_t size) {
+    auto* memory = static_cast<native::MemoryTransport*>(context);
+    return memory != nullptr && memory->Read(address, destination, size);
+}
+
+bool IsMappedExecutableAddress(pid_t processId, std::uintptr_t address) {
+    if (processId <= 0 || address == 0) return false;
+    char path[64]{};
+    std::snprintf(path, sizeof(path), "/proc/%d/maps", processId);
+    std::ifstream input(path);
+    if (!input) return false;
+
+    std::string line;
+    while (std::getline(input, line)) {
+        unsigned long long start = 0;
+        unsigned long long end = 0;
+        char permissions[5]{};
+        if (std::sscanf(
+                line.c_str(),
+                "%llx-%llx %4s",
+                &start,
+                &end,
+                permissions) != 3) {
+            continue;
+        }
+        if (address >= start && address < end) {
+            return permissions[2] == 'x';
+        }
+    }
+    return false;
+}
+
 bool IsValidPointer(std::uintptr_t address) {
     return address >= kMinimumRemoteAddress && address < kMaximumRemoteAddress &&
            (address & 0x3ULL) == 0;
@@ -231,26 +312,6 @@ float Length(const Vec3& value) {
 
 float HorizontalLength(const Vec3& value) {
     return std::hypot(value.x, value.y);
-}
-
-std::int32_t TrackingAcquisitionDistanceMeters(const Vec3& value) {
-    const double x = static_cast<double>(value.x);
-    const double y = static_cast<double>(value.y);
-    const double z = static_cast<double>(value.z);
-    double squared = x * x;
-    squared = std::fma(y, y, squared);
-    squared = std::fma(z, z, squared);
-    const double length = std::sqrt(squared);
-    constexpr std::uint64_t scaleBits = 0x3F847AE147AE147BULL;
-    double scale = 0.0;
-    std::memcpy(&scale, &scaleBits, sizeof(scale));
-    const double meters = length * scale;
-    if (!std::isfinite(meters) ||
-        meters < static_cast<double>(std::numeric_limits<std::int32_t>::min()) ||
-        meters > static_cast<double>(std::numeric_limits<std::int32_t>::max())) {
-        return std::numeric_limits<std::int32_t>::max();
-    }
-    return static_cast<std::int32_t>(meters);
 }
 
 bool IsAimingAtPosition(const Vec3& actorPosition,
@@ -399,14 +460,6 @@ Matrix4 TransformToMatrix(const Transform& transform) {
     return matrix;
 }
 
-Matrix4 TransformToMatrix(const PackedTransform& transform) {
-    Transform value{};
-    value.rotation = transform.rotation;
-    value.translation = transform.translation;
-    value.scale = transform.scale;
-    return TransformToMatrix(value);
-}
-
 Matrix4 Multiply(const Matrix4& left, const Matrix4& right) {
     Matrix4 result{};
     for (int row = 0; row < 4; ++row) {
@@ -463,12 +516,19 @@ struct CameraPoint {
 };
 
 CameraPoint ToCameraSpace(const Vec3& world, const CameraView& view) {
-    Vec3 forward{};
-    Vec3 right{};
-    Vec3 up{};
-    CameraAxes(view, forward, right, up);
-    const Vec3 delta = Subtract(world, view.location);
-    return CameraPoint{Dot(delta, right), Dot(delta, up), Dot(delta, forward)};
+    const native::CameraSpacePoint point = native::ToCameraSpace(
+        native::ProjectionPoint{world.x, world.y, world.z},
+        native::ProjectionView{
+            native::ProjectionPoint{
+                view.location.x, view.location.y, view.location.z},
+            native::ProjectionRotation{
+                view.rotation.pitch,
+                view.rotation.yaw,
+                view.rotation.roll,
+            },
+            view.fieldOfView,
+        });
+    return CameraPoint{point.side, point.vertical, point.forward};
 }
 
 bool ProjectToScreen(const Vec3& world,
@@ -477,23 +537,30 @@ bool ProjectToScreen(const Vec3& world,
                      int screenHeight,
                      Vec2& screen,
                      CameraPoint* cameraPoint = nullptr) {
-    if (!IsFinite(world) || !IsFinite(view) || screenWidth <= 1 || screenHeight <= 1) {
-        return false;
+    const native::ScreenProjection projected = native::ProjectWorldPoint(
+        native::ProjectionPoint{world.x, world.y, world.z},
+        native::ProjectionView{
+            native::ProjectionPoint{
+                view.location.x, view.location.y, view.location.z},
+            native::ProjectionRotation{
+                view.rotation.pitch,
+                view.rotation.yaw,
+                view.rotation.roll,
+            },
+            view.fieldOfView,
+        },
+        screenWidth,
+        screenHeight);
+    if (cameraPoint != nullptr) {
+        *cameraPoint = CameraPoint{
+            projected.camera.side,
+            projected.camera.vertical,
+            projected.camera.forward,
+        };
     }
-    const CameraPoint point = ToCameraSpace(world, view);
-    if (cameraPoint != nullptr) *cameraPoint = point;
-    if (!std::isfinite(point.side) || !std::isfinite(point.vertical) ||
-        !std::isfinite(point.forward) || point.forward <= 0.01f) {
-        return false;
-    }
-    const float tangent = std::tan(view.fieldOfView * kPi / 360.0f);
-    if (!std::isfinite(tangent) || tangent <= 0.001f) return false;
-    const float halfWidth = static_cast<float>(screenWidth) * 0.5f;
-    const float halfHeight = static_cast<float>(screenHeight) * 0.5f;
-    const float scale = halfWidth / tangent;
-    screen.x = halfWidth + point.side * scale / point.forward;
-    screen.y = halfHeight - point.vertical * scale / point.forward;
-    return IsFinite(screen);
+    if (!projected.valid) return false;
+    screen = Vec2{projected.x, projected.y};
+    return true;
 }
 
 bool IsInsideScreen(const Vec2& point, int width, int height, float margin = 0.0f) {
@@ -509,10 +576,15 @@ std::string FormatDistance(float distanceMeters) {
     return buffer;
 }
 
+bool IsRangeTargetClass(std::string_view name) {
+    return name.find("RangeTargetCharacter") != std::string_view::npos ||
+           name.find("RangeTargeCharacter") != std::string_view::npos;
+}
+
 bool IsCharacterClass(std::string_view name) {
     if (name == "NC_BP_DFMCharacter_C" ||
         name == "NC_BP_DFMCharacter_TutorialPlayerAi_C" ||
-        name == "BP_RangeTargetCharacter_C") {
+        IsRangeTargetClass(name)) {
         return true;
     }
     return name.rfind("NC_BP_DFMCharacter_AI", 0) == 0 ||
@@ -524,7 +596,7 @@ bool IsBotClass(std::string_view name) {
     return name == "NC_BP_DFMCharacter_TutorialPlayerAi_C" ||
            name.rfind("NC_BP_DFMCharacter_AI", 0) == 0 ||
            name.rfind("NC_BP_DFMAICharacter", 0) == 0 ||
-           name.find("RangeTargetCharacter") != std::string_view::npos;
+           IsRangeTargetClass(name);
 }
 
 bool IsPickupClass(std::string_view name) {
@@ -652,33 +724,42 @@ std::string Utf16ToUtf8(const std::u16string& value) {
 class NativeGameBackend final : public GameBackend {
 public:
     ~NativeGameBackend() override {
-        Close();
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            if (Close()) break;
+        }
     }
 
     bool Open(const RuntimeOptions& options,
               RuntimeProbe& probe,
-              std::string& error) override {
+        std::string& error) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        CloseLocked();
+        if (!CloseLocked()) {
+            probe = RuntimeProbe{};
+            error.clear();
+            return false;
+        }
         probe = RuntimeProbe{};
         error.clear();
 
         const int inputMode = static_cast<int>(options.inputMode);
         if (options.gameVersionIndex < 0 ||
             options.gameVersionIndex >= static_cast<int>(kVersionLayouts.size()) ||
-            options.driverIndex < 0 || options.driverIndex >= 2 ||
-            inputMode < static_cast<int>(ui::AimInputMode::WriteTouch) ||
+            !native::IsValidMemoryTransportMode(options.driverIndex) ||
+            inputMode < static_cast<int>(ui::AimInputMode::ReadOnly) ||
             inputMode > static_cast<int>(ui::AimInputMode::KernelGyroscope) ||
             options.screenWidth <= 1 || options.screenHeight <= 1) {
             error = "运行参数无效";
             return false;
         }
         options_ = options;
+        algorithmPositionConfig_ = options.algorithmPosition;
         customItemPath_ = options.programDirectory.empty()
             ? std::string("自定义物资.txt")
             : options.programDirectory + "/自定义物资.txt";
         customItems_.Load(customItemPath_);
         layout_ = kVersionLayouts[static_cast<std::size_t>(options.gameVersionIndex)];
+        const auto cloudLayout = native::BuildRuntimeLayoutOverride(
+            options.cloudLayout.get(), layout_.processName, "libUE4.so");
         processId_ = native::FindProcessId(layout_.processName);
         if (processId_ <= 0) {
             error = "未找到目标游戏进程";
@@ -711,6 +792,55 @@ public:
             return false;
         }
 
+        if (cloudLayout.has_value()) {
+            std::string runtimeBuildId;
+            if (!native::ReadRemoteElfBuildId(
+                    moduleBase_,
+                    &ReadElfBytes,
+                    memory_.get(),
+                    runtimeBuildId) ||
+                options.cloudLayout == nullptr ||
+                runtimeBuildId != options.cloudLayout->identity.buildId) {
+                error = "cloud layout build id mismatch";
+                CloseLocked();
+                return false;
+            }
+            layout_.namePoolOffset = cloudLayout->namePoolOffset;
+            layout_.worldOffset = cloudLayout->worldOffset;
+            layout_.geometryInstancePointerOffsets =
+                cloudLayout->geometryInstancePointerOffsets;
+            layout_.actorRecordLayout = cloudLayout->actorRecords;
+            layout_.trackingMatrixRootOffset =
+                cloudLayout->trackingMatrixRootOffset;
+            layout_.componentPositionFlagOffset =
+                cloudLayout->componentPositionFlagOffset;
+            if (!algorithmPositionConfig_.IsConfigured() &&
+                cloudLayout->coordinateReplayEntryOffset != 0) {
+                algorithmPositionConfig_ = {
+                    cloudLayout->coordinateReplayEntryOffset,
+                    0,
+                };
+            }
+        }
+
+        RefreshAlgorithmEntry(true);
+
+        algorithmExecutionContextReady_ =
+            (algorithmEntryReady_ || UsesCoordinatePoolRuntime()) &&
+            memory_->ReadProcessExecutionContext(algorithmExecutionContext_);
+        if (algorithmExecutionContextReady_ &&
+            !UsesCoordinatePoolRuntime() &&
+            !algorithmExecutionContext_.HasPacgaKey()) {
+            coordinatePoolFallback_ = true;
+            coordinatePoolRuntime_.Reset();
+            coordinatePoolReady_ = false;
+            coordinatePoolFrame_ = 0;
+        }
+        algorithmExecutionContextReady_ =
+            algorithmExecutionContextReady_ &&
+            (UsesCoordinatePoolRuntime() ||
+             algorithmExecutionContext_.HasPacgaKey());
+
         if (!aimController_.Start(options.inputMode)) {
             error = "输入通道初始化失败";
             CloseLocked();
@@ -721,12 +851,13 @@ public:
         probe.processId = processId_;
         probe.baseReady = true;
         probe.customItemCount = customItems_.Size();
+        UpdateCoordinateProbe(probe);
         return true;
     }
 
-    void Close() noexcept override {
+    bool Close() noexcept override {
         std::lock_guard<std::mutex> lock(mutex_);
-        CloseLocked();
+        return CloseLocked();
     }
 
     bool ReadFrame(const FeatureSettings& settings,
@@ -753,15 +884,20 @@ public:
         }
         UpdateGeometryRuntime(settings);
 
-        native::PositionReadMode positionMode =
-            native::PositionReadMode::Standard;
-        if (settings.visual.algorithmDecrypt) {
-            positionMode = native::PositionReadMode::Indexed;
-        } else if (settings.visual.coordinateDecrypt) {
-            positionMode = native::PositionReadMode::Direct;
-        }
+        algorithmPositionRequested_ = settings.visual.coordinateDecrypt;
+        algorithmRefreshPending_ = true;
+        algorithmFrameAttemptCount_ = 0;
+        algorithmFrameSuccessCount_ = 0;
+        RefreshAlgorithmEntry(false);
+        RefreshAlgorithmExecutionContext();
+        UpdateCoordinateProbe(probe);
+        const native::PositionReadMode positionMode =
+            native::ResolvePositionReadMode(
+                settings.visual.coordinateDecrypt);
         if (positionMode != positionReadMode_) {
             characterPositions_.Clear();
+            algorithmPositionRuntime_.Invalidate();
+            boneCache_.clear();
             positionReadMode_ = positionMode;
         }
 
@@ -770,9 +906,12 @@ public:
                 context,
                 settings.visual.battlefieldMode,
                 positionMode,
+                settings.aim.trajectoryTracking,
                 settings.visual.antiFlicker,
                 error)) {
             ResetWorldState();
+            ApplyCoordinateDiagnostic(error);
+            UpdateCoordinateProbe(probe);
             return true;
         }
 
@@ -781,6 +920,7 @@ public:
             world_ = context.world;
             RequestGeometryRefresh();
         }
+        RefreshWorldObjectCache(context, settings);
         if (settings.visual.debugInfo) {
             const std::shared_ptr<const native::GeometrySnapshot> snapshot =
                 geometryRuntime_.GetSnapshot();
@@ -809,7 +949,7 @@ public:
                 static_cast<float>(options_.screenWidth) * 0.5f,
                 static_cast<float>(options_.screenHeight) * 0.5f);
             crosshair.gap = std::max(2.0f, settings.visual.crosshairSize * 0.25f);
-            crosshair.armLength = std::max(3.0f, settings.visual.crosshairSize * 0.5f);
+            crosshair.armLength = settings.visual.crosshairSize;
             crosshair.thickness = settings.visual.crosshairThickness;
             crosshair.tone = SemanticTone::Accent;
             frame.crosshair = crosshair;
@@ -898,9 +1038,14 @@ public:
             hudMapCache_.Clear();
         }
 
-        const bool aimActive = settings.aim.enabled &&
-            aimEnabled_.load(std::memory_order_acquire) &&
-            WeaponAllowsAim(context.weaponId);
+        const aim::AimModeActivation aimModes =
+            aim::ResolveAimModeActivation(
+                aimEnabled_.load(std::memory_order_acquire),
+                WeaponAllowsAim(context.weaponId),
+                settings.aim.enabled,
+                settings.aim.trajectoryTracking);
+        const bool recoveredTrackingActive = aimModes.tracking;
+        const bool aimActive = aimModes.Any();
         const ui::AimTuning aimTuning = ResolveAimTuning(
             settings.aim, context.weaponId);
         std::vector<AimCandidate> aimCandidates;
@@ -909,18 +1054,14 @@ public:
             BuildModelGeometry(context.view, frame);
         }
 
-        const bool scanWorldObjects = settings.loot.enabled ||
-            settings.loot.playerBox || settings.loot.botBox ||
-            settings.loot.password || settings.loot.containers ||
-            (settings.visual.enabled && settings.visual.classNameDebug) ||
-            (settings.visual.enabled &&
-             (settings.visual.throwableWarning ||
-              settings.visual.throwableTrajectory));
         std::vector<RuntimeActorRecord> actorRecords =
-            CollectActorRecords(context, scanWorldObjects);
+            CollectActorRecords(context);
         std::unordered_set<std::uintptr_t> seenThreats;
+        std::unordered_set<std::uintptr_t> seenAimActors;
         if (actorRecords.empty()) {
             error = "数据链等待：人物列表暂不可读";
+            RefreshCameraView(context);
+            AppendWorldObjectCache(settings, context, frame);
             FinalizeThreatSignals(settings, frame);
             PublishAimFrame(settings.aim, aimTuning, context, aimCandidates, frame);
             PruneThreatState(seenThreats);
@@ -931,6 +1072,9 @@ public:
         }
 
         frame.players.reserve(std::min<std::size_t>(actorRecords.size(), 256));
+        std::vector<PlayerProjectionSource> playerProjectionSources;
+        playerProjectionSources.reserve(
+            std::min<std::size_t>(actorRecords.size(), 256));
         std::size_t validActorCount = 0;
         std::size_t decodedNameCount = 0;
         for (const RuntimeActorRecord& actorRecord : actorRecords) {
@@ -938,27 +1082,62 @@ public:
             if (!IsValidPointer(actor) || actor == context.localPawn) continue;
             ++validActorCount;
 
+            std::uintptr_t actorClass = 0;
+            std::uintptr_t trackingClassOffset = 0;
+            const bool trackingClassReadable = recoveredTrackingActive &&
+                actorRecord.resolverRecord &&
+                ReadValue(actor, actorClass) && actorClass >= moduleBase_;
+            if (trackingClassReadable) {
+                trackingClassOffset = actorClass - moduleBase_;
+            }
+            const bool trackingPlayerClass = trackingClassReadable &&
+                std::find(
+                    kTrackingPlayerClassOffsets.begin(),
+                    kTrackingPlayerClassOffsets.end(),
+                    trackingClassOffset) != kTrackingPlayerClassOffsets.end();
+            const bool trackingRangeTarget = trackingClassOffset ==
+                0x1A3D6A20ULL;
+
             std::int32_t nameIndex = -1;
-            if (!ReadValue(actor + 0x1C, nameIndex) || nameIndex < 0) continue;
-            const std::string className = DecodeName(nameIndex, context.namePool);
+            const bool nameIndexAvailable =
+                ReadValue(actor + 0x1C, nameIndex) && nameIndex >= 0;
+            if (!nameIndexAvailable && !trackingPlayerClass) continue;
+            const std::string className = nameIndexAvailable
+                ? DecodeName(nameIndex, context.namePool)
+                : std::string{};
             if (!className.empty()) {
                 ++decodedNameCount;
             }
-            bool character = IsCharacterClass(className);
+            bool character = IsCharacterClass(className) || trackingPlayerClass;
             if (!character) {
                 float compatibilityMarker = 0.0f;
                 character = ReadValue(actor + 0x47C, compatibilityMarker) &&
                             compatibilityMarker == 40.0f;
             }
             if (!character) {
-                ProcessWorldActor(
-                    actor, className, context, settings, frame, seenThreats);
+                if (settings.visual.enabled &&
+                    (settings.visual.throwableWarning ||
+                     settings.visual.throwableTrajectory) &&
+                    data::FindThreatObject(className) != nullptr) {
+                    ProcessWorldActor(
+                        actor,
+                        className,
+                        context,
+                        settings,
+                        frame,
+                        seenThreats,
+                        false,
+                        true);
+                }
                 continue;
             }
-
-            const bool botClass = IsBotClass(className);
+            const bool rangeTargetClass =
+                IsRangeTargetClass(className) || trackingRangeTarget;
+            const bool namedBotClass = IsBotClass(className);
             const std::uintptr_t playerState = ReadPointer(actor + 0x390);
             const bool playerStateAvailable = IsValidPointer(playerState);
+            const bool botClass = namedBotClass ||
+                (trackingPlayerClass && !playerStateAvailable);
             if (!native::HasUsablePlayerState(playerStateAvailable, botClass)) {
                 continue;
             }
@@ -973,7 +1152,9 @@ public:
             secondaryTeam = native::ResolvePlayerTeam(
                 secondaryTeamRead, secondaryTeam, botClass);
             const bool useSecondaryTeam = context.warfare || settings.visual.battlefieldMode;
-            const std::int32_t targetTeam = useSecondaryTeam ? secondaryTeam : primaryTeam;
+            const std::int32_t targetTeam = botClass
+                ? 0
+                : (useSecondaryTeam ? secondaryTeam : primaryTeam);
             const bool bot = botClass || targetTeam == 0;
             const bool threatTeamsValid =
                 native::HasComparablePlayerTeams(
@@ -986,31 +1167,41 @@ public:
                 context.localTeam, targetTeam, bot);
 
             Vec3 position{};
+            const native::PositionReadMode actorPositionMode =
+                trackingPlayerClass && actorRecord.resolverRecord
+                ? native::PositionReadMode::Direct
+                : positionMode;
             const bool coordinateAvailable = ReadCharacterPosition(
                 actor,
                 actorRecord.root,
                 className,
-                positionMode,
+                actorPositionMode,
                 settings.visual.antiFlicker,
                 position);
             HealthState health{};
-            const bool healthAvailable =
-                ReadHealth(actor, playerState, health);
-            if (!native::IsPlayerTrackable(
-                    native::PlayerTrackingData{
-                        coordinateAvailable,
-                        healthAvailable,
-                        healthAvailable &&
-                            (health.health > 0.0f || health.downed),
-                    },
-                    native::PlayerDirectionData{false})) {
+            bool healthAvailable = ReadHealth(actor, playerState, health);
+            if (!healthAvailable && botClass && coordinateAvailable) {
+                health.health = 100.0f;
+                health.maxHealth = 100.0f;
+                healthAvailable = true;
+            }
+            const bool standardTrackable = rangeTargetClass
+                ? coordinateAvailable
+                : native::IsPlayerTrackable(
+                      native::PlayerTrackingData{
+                          coordinateAvailable,
+                          healthAvailable,
+                          healthAvailable &&
+                              (health.health > 0.0f || health.downed),
+                      },
+                      native::PlayerDirectionData{false});
+            if (!coordinateAvailable ||
+                (!standardTrackable && !trackingPlayerClass)) {
                 continue;
             }
             const Vec3 delta = Subtract(position, context.localPosition);
             const float distanceMeters = Length(delta) * 0.01f;
             const float horizontalDistanceMeters = HorizontalLength(delta) * 0.01f;
-            const std::int32_t trackingAcquisitionDistance =
-                TrackingAcquisitionDistanceMeters(delta);
             if (!std::isfinite(distanceMeters) || distanceMeters < 0.0f) continue;
             if (!std::isfinite(horizontalDistanceMeters) ||
                 horizontalDistanceMeters < 0.0f) {
@@ -1019,22 +1210,54 @@ public:
 
             const bool combatModeActive = settings.visual.combatMode &&
                 (context.firing || context.zooming);
-            std::uint8_t targetState = 0;
-            if (settings.aim.rejectTargetState) {
-                const std::uintptr_t targetStateRoot =
-                    ReadPointer(actor + 0x1030);
-                if (IsValidPointer(targetStateRoot)) {
-                    ReadValue(targetStateRoot + 0x2A1, targetState);
+            const bool commonAimEligible =
+                enemyEligible &&
+                standardTrackable;
+            const bool selfAimActorEligible = aimModes.selfAim &&
+                commonAimEligible &&
+                !(!rangeTargetClass && bot && settings.aim.ignoreBots) &&
+                !(health.downed && settings.aim.ignoreDowned);
+            const bool aimEligible = selfAimActorEligible;
+            bool trackingActorEligible = recoveredTrackingActive &&
+                trackingPlayerClass && actorRecord.resolverRecord &&
+                (rangeTargetClass || enemyEligible);
+            std::uint8_t trackingTargetState = rangeTargetClass ? 1 : 0;
+            if (trackingActorEligible) {
+                std::uint8_t excludedState = 0;
+                ReadValue(actor + 0xDD8, excludedState);
+                if (trackingTargetState == 0) {
+                    const std::uintptr_t targetStateRoot =
+                        ReadPointer(actor + 0x1030);
+                    if (IsValidPointer(targetStateRoot)) {
+                        ReadValue(
+                            targetStateRoot + 0x2A1,
+                            trackingTargetState);
+                    }
                 }
+                std::uint8_t playerStateGate = 0;
+                if (playerStateAvailable) {
+                    ReadValue(playerState + 0x4C0, playerStateGate);
+                }
+                std::int32_t meshType = 0;
+                const bool healthAlive =
+                    healthAvailable && health.health > 0.0f;
+                trackingActorEligible = excludedState == 0 &&
+                    (playerStateGate == 0 || trackingTargetState != 0) &&
+                    ReadTrackingMeshType(actorRecord.mesh, meshType) &&
+                    (rangeTargetClass ||
+                     PassTrackingCategory(actor, settings.aim)) &&
+                    (rangeTargetClass ||
+                     PassTrackingAcquisitionHealth(
+                         actor, trackingTargetState != 0)) &&
+                    (!settings.aim.rejectTargetState ||
+                     trackingTargetState == 0) &&
+                    (!settings.aim.rejectDeadTarget || healthAlive);
             }
-            const bool aimEligible = aimActive && enemyEligible &&
-                !(bot && settings.aim.ignoreBots) &&
-                !(health.downed && settings.aim.ignoreDowned) &&
-                (!settings.aim.rejectTargetState || targetState == 0) &&
-                (!settings.aim.trajectoryTracking ||
-                 trackingAcquisitionDistance <= 100);
-            const bool visualEligible = !health.downed || settings.visual.downedPlayer;
-            if (!visualEligible && !aimEligible) continue;
+            const bool visualEligible = standardTrackable &&
+                (!health.downed || settings.visual.downedPlayer);
+            if (!visualEligible && !aimEligible && !trackingActorEligible) {
+                continue;
+            }
             if (bot) ++frame.botCount;
             else ++frame.playerCount;
             if (settings.visual.enabled && settings.visual.nearbyEnemy &&
@@ -1142,7 +1365,8 @@ public:
                 settings.visual.offscreenWarning &&
                 settings.visual.warningSize > 0.0f &&
                 horizontalDistanceMeters <= settings.visual.warningDistanceMeters;
-            if (!drawingInRange && !warningInRange && !radarInRange && !aimEligible) {
+            if (!drawingInRange && !warningInRange && !radarInRange &&
+                !aimEligible && !trackingActorEligible) {
                 continue;
             }
 
@@ -1162,7 +1386,7 @@ public:
                 options_.screenWidth,
                 options_.screenHeight,
                 bodyTop);
-            const bool onScreen = bottomProjected && topProjected &&
+            bool onScreen = bottomProjected && topProjected &&
                 (IsInsideScreen(bodyBottom, options_.screenWidth, options_.screenHeight) ||
                  IsInsideScreen(bodyTop, options_.screenWidth, options_.screenHeight));
 
@@ -1211,29 +1435,48 @@ public:
 
             BoneFrame boneFrame{};
             bool boneFrameReady = false;
-            if (aimEligible ||
+            ScreenRect boneBounds{};
+            bool boneBoundsReady = false;
+            if (aimEligible || trackingActorEligible ||
                 (settings.visual.enabled &&
-                  (settings.visual.skeleton ||
+                  (settings.visual.box ||
+                   settings.visual.skeleton ||
                    settings.visual.visibilityColor ||
                    settings.visual.playerViewRay) &&
-                  visualEligible && drawingInRange && onScreen)) {
+                  visualEligible && drawingInRange)) {
                 boneFrameReady = ReadBoneFrame(
-                    actor,
-                    actorRecord.root,
-                    actorRecord.mesh,
-                    actorRecord.decoded,
+                    actorRecord,
                     context.view,
                     settings.visual.antiFlicker,
+                    &position,
                     boneFrame);
+                boneBoundsReady = boneFrameReady &&
+                    TryBuildBoneBounds(boneFrame, boneBounds);
+                onScreen = onScreen || boneFrameReady;
             }
             native::GeometryVisibility playerVisibility = actorVisibility;
             if (boneFrameReady &&
-                (settings.visual.visibilityColor ||
-                 (aimEligible &&
-                  (settings.aim.missMode ||
-                   settings.aim.requireVisibility)))) {
+                (settings.visual.visibilityColor || settings.aim.missMode ||
+                 ((aimEligible || trackingActorEligible) &&
+                  settings.aim.requireVisibility))) {
                 playerVisibility = EvaluateBoneVisibility(
                     context.view.location, boneFrame);
+            }
+            if (trackingActorEligible) {
+                CollectTrackingCandidateFromSample(
+                    actorRecord,
+                    context,
+                    settings.aim,
+                    aimTuning,
+                    rangeTargetClass,
+                    playerState,
+                    position,
+                    distanceMeters,
+                    boneFrame,
+                    boneFrameReady,
+                    frame.sequence,
+                    seenAimActors,
+                    aimCandidates);
             }
             if (settings.visual.enabled && settings.visual.playerViewRay &&
                 threatTeamsValid && !bot && health.health > 0.0f &&
@@ -1298,7 +1541,7 @@ public:
                     }
                 }
             }
-            if (aimEligible && boneFrameReady) {
+            if (aimEligible) {
                 const std::uint64_t identity =
                     native::ResolvePlayerIdentity(actor, playerState);
                 Vec3 aimWorld{};
@@ -1311,126 +1554,66 @@ public:
                 const int aimMode = context.zooming
                     ? aimTuning.adsBone
                     : aimTuning.hipBone;
-                if (SelectAimPoint(
-                        boneFrame,
-                        aimMode,
-                        settings.aim,
-                        context.view.location,
-                        identity,
-                        frame.sequence,
-                        preferredBone,
-                        aimWorld,
-                        aimScreen,
-                        aimBone)) {
-                    if (settings.aim.trajectoryTracking) {
-                        std::int32_t meshType = 0;
-                        if (!IsValidPointer(actorRecord.mesh) ||
-                            !ReadValue(actorRecord.mesh + 0x738, meshType) ||
-                            meshType < 1 || meshType > 100) {
-                            meshType = 0;
-                            if (IsValidPointer(actorRecord.mesh)) {
-                                ReadValue(actorRecord.mesh + 0x748, meshType);
-                            }
-                        }
-                        const int selectedBone =
-                            aimBone >= 0 &&
-                                aimBone < static_cast<int>(kBoneIndices.size())
-                            ? kBoneIndices[static_cast<std::size_t>(aimBone)]
-                            : -1;
-                        const int endpointBone = meshType == 66 ? 11 : 32;
-                        aimWorld.z -= selectedBone == endpointBone
-                            ? 15.0f
-                            : 10.0f;
-                    }
+                const bool aimPointReady = rangeTargetClass
+                    ? SelectRangeTargetAimPoint(
+                          position,
+                          aimMode,
+                          settings.aim,
+                          context.view.location,
+                          context.view,
+                          aimWorld,
+                          aimScreen)
+                    : boneFrameReady && SelectAimPoint(
+                          boneFrame,
+                          aimMode,
+                          settings.aim,
+                          context.view.location,
+                          identity,
+                          frame.sequence,
+                          preferredBone,
+                          aimWorld,
+                          aimScreen,
+                          aimBone);
+                if (aimPointReady) {
                     Vec3 velocity{};
-                    if (settings.aim.trajectoryTracking) {
-                        ReadValue(actor + 0x1CB4, velocity);
-                        if (!IsFinite(velocity)) velocity = Vec3{};
-                    } else {
-                        const std::uintptr_t movement =
-                            ReadPointer(actor + 0x3D8);
-                        if (IsValidPointer(movement)) {
-                            ReadValue(movement + 0x2B0, velocity);
-                        }
-                        if (!IsFinite(velocity)) velocity = Vec3{};
+                    const std::uintptr_t movement =
+                        ReadPointer(actor + 0x3D8);
+                    if (IsValidPointer(movement)) {
+                        ReadValue(movement + 0x2B0, velocity);
                     }
-                    float candidateDistanceMeters = distanceMeters;
-                    bool trackingProjectionReady = true;
-                    if (settings.aim.trajectoryTracking) {
-                        const aim::TrackingPrediction prediction =
-                            aim::TrackingCalculator::Predict(
-                                aim::TrackingPoint{
-                                    context.firingOrigin.x,
-                                    context.firingOrigin.y,
-                                    context.firingOrigin.z,
-                                },
-                                aim::TrackingPoint{
-                                    aimWorld.x,
-                                    aimWorld.y,
-                                    aimWorld.z,
-                                },
-                                aim::TrackingPoint{
-                                    velocity.x,
-                                    velocity.y,
-                                    velocity.z,
-                                },
-                                aimTuning.trackingProjectileSpeed,
-                                aimTuning.trackingGravity);
-                        candidateDistanceMeters = static_cast<float>(
-                            prediction.distanceMeters);
-                        trackingProjectionReady = prediction.valid &&
-                            ProjectToScreen(
-                                Vec3{
-                                    prediction.point.x,
-                                    prediction.point.y,
-                                    prediction.point.z,
-                                },
-                                context.view,
-                                options_.screenWidth,
-                                options_.screenHeight,
-                                aimScreen);
-                    }
+                    if (!IsFinite(velocity)) velocity = Vec3{};
                     const float centerX = static_cast<float>(options_.screenWidth) * 0.5f;
                     const float centerY = static_cast<float>(options_.screenHeight) * 0.5f;
                     const float screenDistance = std::hypot(
                         aimScreen.x - centerX, aimScreen.y - centerY);
-                    float selectionDistance = screenDistance;
-                    if (settings.aim.trajectoryTracking) {
-                        Vec2 rootScreen{};
-                        trackingProjectionReady = trackingProjectionReady &&
-                            ProjectToScreen(
-                                position,
-                                context.view,
-                                options_.screenWidth,
-                                options_.screenHeight,
-                                rootScreen);
-                        if (trackingProjectionReady) {
-                            selectionDistance = std::hypot(
-                                rootScreen.x - centerX,
-                                rootScreen.y - centerY);
-                        }
-                    }
                     const float distanceLimit = context.zooming
                         ? aimTuning.adsDistanceMeters
                         : aimTuning.hipDistanceMeters;
                     const bool distanceAllowed =
                         !settings.aim.enforceDistance ||
-                        candidateDistanceMeters <= distanceLimit;
+                        distanceMeters <= distanceLimit;
                     const bool rangeAllowed =
                         !settings.aim.enforceFov ||
                         screenDistance <= aimTuning.rangePixels;
-                    if (trackingProjectionReady &&
-                        std::isfinite(screenDistance) &&
+                    if (std::isfinite(screenDistance) &&
                         rangeAllowed && distanceAllowed) {
                         aimCandidates.push_back(AimCandidate{
                             identity,
+                            actor,
+                            actorRecord.root,
+                            actorRecord.mesh,
                             aimWorld,
                             velocity,
                             aimScreen,
                             screenDistance,
-                            candidateDistanceMeters,
-                            selectionDistance,
+                            distanceMeters,
+                            screenDistance,
                             aimBone,
+                            actorRecord.encryptedRecord,
+                            false,
+                            rangeTargetClass,
+                            selfAimActorEligible,
+                            false,
                         });
                     }
                 }
@@ -1442,22 +1625,64 @@ public:
                 continue;
             }
 
-            const float height = bodyBottom.y - bodyTop.y;
+            native::PlayerScreenBounds anchorBounds{};
+            const bool anchorBoundsReady =
+                native::CalculatePlayerAnchorBounds(
+                    native::PlayerBoneScreenPoint{
+                        bodyBottom.x, bodyBottom.y, bottomProjected},
+                    native::PlayerBoneScreenPoint{
+                        bodyTop.x, bodyTop.y, topProjected},
+                    anchorBounds);
+            const native::PlayerScreenBounds resolvedBoneBounds{
+                boneBounds.left,
+                boneBounds.top,
+                boneBounds.right,
+                boneBounds.bottom,
+            };
+            native::PlayerScreenBounds resolvedBounds{};
+            if (!native::SelectPlayerScreenBounds(
+                    boneBoundsReady,
+                    resolvedBoneBounds,
+                    anchorBoundsReady,
+                    anchorBounds,
+                    static_cast<float>(options_.screenWidth),
+                    static_cast<float>(options_.screenHeight),
+                    resolvedBounds)) {
+                continue;
+            }
+            const ScreenRect playerBounds{
+                resolvedBounds.left,
+                resolvedBounds.top,
+                resolvedBounds.right,
+                resolvedBounds.bottom,
+            };
+            const float height = playerBounds.bottom - playerBounds.top;
             if (!std::isfinite(height) || height < 8.0f ||
                 height > static_cast<float>(options_.screenHeight) * 2.0f) {
                 continue;
             }
-            const float width = height * 0.45f;
             PlayerVisual visual{};
-            visual.bounds = ScreenRect{
-                bodyBottom.x - width * 0.5f,
-                bodyTop.y,
-                bodyBottom.x + width * 0.5f,
-                bodyBottom.y,
-            };
+            visual.identity = native::ResolvePlayerIdentity(actor, playerState);
+            visual.bounds = playerBounds;
             visual.tone = ToneForVisibility(
                 bot, settings.visual.visibilityColor, playerVisibility);
-            visual.visible = true;
+            visual.visible =
+                playerVisibility != native::GeometryVisibility::Occluded;
+            if (settings.aim.missMode && settings.aim.coverMode == 1 &&
+                boneFrameReady) {
+                const int coverAimMode = context.zooming
+                    ? aimTuning.adsBone
+                    : aimTuning.hipBone;
+                if (coverAimMode == 0 || coverAimMode == 1) {
+                    const aim::CoverPointSelection coverSelection =
+                        aim::SelectCoverPoint(
+                            settings.aim.coverMode,
+                            coverAimMode,
+                            boneFrame.valid,
+                            boneFrame.visibility);
+                    visual.coverHighlighted = coverSelection.selected;
+                }
+            }
             visual.drawCornerBox = settings.visual.box;
             visual.drawTracer = settings.visual.snapline;
             visual.drawVitals = settings.visual.health;
@@ -1466,7 +1691,8 @@ public:
                 settings.visual.armorLevel || settings.visual.armorDurability ||
                 settings.visual.health;
             visual.drawSkeleton = settings.visual.skeleton &&
-                distanceMeters <= settings.visual.skeletonDistanceMeters;
+                horizontalDistanceMeters <=
+                    settings.visual.skeletonDistanceMeters;
             visual.tracerOrigin = ImVec2(
                 static_cast<float>(options_.screenWidth) * 0.5f,
                 static_cast<float>(options_.screenHeight) - 10.0f);
@@ -1535,28 +1761,48 @@ public:
             if (visual.drawSkeleton) {
                 if (!boneFrameReady) {
                     boneFrameReady = ReadBoneFrame(
-                        actor,
-                        actorRecord.root,
-                        actorRecord.mesh,
-                        actorRecord.decoded,
+                        actorRecord,
                         context.view,
                         settings.visual.antiFlicker,
+                        &position,
                         boneFrame);
                 }
-                if (boneFrameReady) BuildSkeletonVisual(boneFrame, visual.skeleton);
+                if (boneFrameReady) {
+                    BuildSkeletonVisual(
+                        boneFrame,
+                        !visual.coverHighlighted &&
+                            (settings.visual.visibilityColor ||
+                             settings.aim.missMode),
+                        visual.skeleton);
+                }
                 if (visual.skeleton.joints.empty()) visual.drawSkeleton = false;
             }
+            playerProjectionSources.push_back(PlayerProjectionSource{
+                frame.players.size(),
+                Vec3{position.x, position.y, position.z - 5.0f},
+                Vec3{position.x, position.y, position.z + 205.0f},
+                boneFrame,
+                boneFrameReady,
+            });
             frame.players.push_back(std::move(visual));
         }
 
-        if (validActorCount > 0 && decodedNameCount == 0) {
+        if (!recoveredTrackingActive &&
+            validActorCount > 0 && decodedNameCount == 0) {
             error = "数据链等待：名称池暂不可读";
             aimController_.ClearTarget();
             lockedAimIdentity_ = 0;
             lockedAimBone_ = -1;
+            lockedTrackingIdentity_ = 0;
+            lockedTrackingBone_ = -1;
             return true;
         }
 
+        RefreshCameraView(context);
+        ReprojectPlayers(context.view, playerProjectionSources, frame);
+        ReprojectAimCandidates(
+            context.view, settings.aim, aimTuning, aimCandidates);
+        AppendWorldObjectCache(settings, context, frame);
         FinalizeThreatSignals(settings, frame);
         PublishAimFrame(settings.aim, aimTuning, context, aimCandidates, frame);
 
@@ -1576,6 +1822,9 @@ public:
                 entries.resize(static_cast<std::size_t>(frame.highValueList->maxRows));
             }
         }
+        EvaluateAlgorithmExecutionHealth();
+        ApplyCoordinateDiagnostic(error);
+        UpdateCoordinateProbe(probe);
         frame.ready = true;
         return true;
     }
@@ -1599,6 +1848,8 @@ public:
     void ReloadCustomItems() override {
         std::lock_guard<std::mutex> lock(mutex_);
         customItems_.Load(customItemPath_);
+        worldObjectDiscoveryPolicy_.Invalidate();
+        worldObjectContentPolicy_.Invalidate();
     }
 
 private:
@@ -1606,7 +1857,8 @@ private:
         std::uintptr_t actor = 0;
         std::uintptr_t root = 0;
         std::uintptr_t mesh = 0;
-        bool decoded = false;
+        bool resolverRecord = false;
+        bool encryptedRecord = false;
     };
 
     struct FrameContext {
@@ -1626,6 +1878,9 @@ private:
         bool warfare = false;
         bool firing = false;
         bool zooming = false;
+        bool firingOriginValid = false;
+        bool decodedRecordsEncrypted = false;
+        bool decodedRecordSourceReady = false;
         std::uint64_t weaponId = 0;
         std::uintptr_t weaponRoot = 0;
         std::vector<RuntimeActorRecord> decodedActors;
@@ -1646,8 +1901,39 @@ private:
     struct BoneFrame {
         std::array<Vec3, kBoneIndices.size()> world{};
         std::array<Vec2, kBoneIndices.size()> screen{};
+        std::array<bool, kBoneIndices.size()> worldValid{};
         std::array<bool, kBoneIndices.size()> valid{};
         std::array<native::GeometryVisibility, kBoneIndices.size()> visibility{};
+    };
+
+    struct PlayerProjectionSource {
+        std::size_t playerIndex = 0;
+        Vec3 bottom{};
+        Vec3 top{};
+        BoneFrame bones{};
+        bool bonesReady = false;
+    };
+
+    struct WorldLabelProjectionSource {
+        std::size_t labelIndex = 0;
+        Vec3 world{};
+    };
+
+    struct WorldObjectFrameCache {
+        std::vector<WorldLabel> labels;
+        std::vector<WorldLabelProjectionSource> labelSources;
+        std::optional<HighValueList> highValueList;
+
+        void Clear() {
+            labels.clear();
+            labelSources.clear();
+            highValueList.reset();
+        }
+    };
+
+    struct CachedWorldActor {
+        std::uintptr_t actor = 0;
+        std::string className;
     };
 
     struct PositionCacheEntry {
@@ -1656,18 +1942,20 @@ private:
     };
 
     struct BoneCacheEntry {
+        std::uintptr_t root = 0;
         std::uintptr_t mesh = 0;
         std::uintptr_t boneArray = 0;
+        bool encryptedRecord = false;
+        bool resolvedTranslation = false;
         std::array<Vec3, kBoneIndices.size()> world{};
-        std::array<bool, kBoneIndices.size()> valid{};
-        std::array<
-            std::chrono::steady_clock::time_point,
-            kBoneIndices.size()> boneUpdatedAt{};
         std::chrono::steady_clock::time_point lastUpdatedAt{};
     };
 
     struct AimCandidate {
         std::uint64_t identity = 0;
+        std::uintptr_t actor = 0;
+        std::uintptr_t root = 0;
+        std::uintptr_t mesh = 0;
         Vec3 world{};
         Vec3 velocity{};
         Vec2 screen{};
@@ -1675,6 +1963,11 @@ private:
         float worldDistanceMeters = 0.0f;
         float selectionDistancePixels = 0.0f;
         int boneIndex = -1;
+        bool encryptedRecord = false;
+        bool alignBones = false;
+        bool rangeTarget = false;
+        bool selfAimEligible = false;
+        bool trackingEligible = false;
     };
 
     struct AimWarningState {
@@ -1688,8 +1981,9 @@ private:
         const bool needed =
             (settings.visual.enabled &&
              (settings.visual.modelGeometry ||
-              settings.visual.visibilityColor)) ||
-            (settings.aim.enabled &&
+              settings.visual.visibilityColor ||
+              (settings.visual.skeleton && settings.aim.missMode))) ||
+            ((settings.aim.enabled || settings.aim.trajectoryTracking) &&
              aimEnabled_.load(std::memory_order_acquire) &&
              (settings.aim.missMode ||
               settings.aim.requireVisibility));
@@ -1781,8 +2075,12 @@ private:
         return ReadValue(address, value) && IsValidPointer(value) ? value : 0;
     }
 
-    std::vector<RuntimeActorRecord> CollectDecodedActorRecords() {
+    std::vector<RuntimeActorRecord> CollectDecodedActorRecords(
+        bool& sourceReady,
+        bool& encrypted) {
         std::vector<RuntimeActorRecord> result;
+        sourceReady = false;
+        encrypted = false;
         if (layout_.actorRecordLayout.taggedContainerOffset == 0 ||
             layout_.actorRecordLayout.plainArrayOffset == 0 ||
             memory_ == nullptr) {
@@ -1804,10 +2102,10 @@ private:
         const std::optional<native::ActorArrayDescriptor> array =
             resolver.Locate(moduleBase_, readBytes, validatePointer);
         if (!array.has_value()) return result;
+        sourceReady = true;
+        encrypted = array->encrypted;
 
         result.reserve(std::min<std::uint32_t>(array->count, 10000));
-        std::unordered_set<std::uintptr_t> seen;
-        seen.reserve(result.capacity());
         for (std::uint32_t index = 0;
              index < array->count && result.size() < 10000;
              ++index) {
@@ -1816,8 +2114,7 @@ private:
             if (!record.has_value() ||
                 !IsValidPointer(record->actor) ||
                 !IsValidPointer(record->root) ||
-                !IsValidPointer(record->mesh) ||
-                !seen.insert(record->actor).second) {
+                !IsValidPointer(record->mesh)) {
                 continue;
             }
             result.push_back(RuntimeActorRecord{
@@ -1825,34 +2122,42 @@ private:
                 record->root,
                 record->mesh,
                 true,
+                array->encrypted,
             });
         }
         return result;
     }
 
     std::vector<RuntimeActorRecord> CollectActorRecords(
-        const FrameContext& context,
-        bool includeStreamingLevels) {
-        std::vector<RuntimeActorRecord> result = context.decodedActors;
-        std::unordered_set<std::uintptr_t> seen;
-        seen.reserve(result.size() +
-            static_cast<std::size_t>(std::max(context.actorCount, 0)));
-        for (const RuntimeActorRecord& record : result) {
-            seen.insert(record.actor);
+        const FrameContext& context) {
+        std::vector<RuntimeActorRecord> result;
+        native::ActorFrameVisitSet seen;
+        result.reserve(context.decodedActors.size());
+        seen.Reserve(context.decodedActors.size());
+        for (const RuntimeActorRecord& record : context.decodedActors) {
+            if (IsValidPointer(record.actor) &&
+                seen.TryVisit(record.actor)) {
+                result.push_back(record);
+            }
         }
         const std::vector<std::uintptr_t> ordinary =
-            CollectActorAddresses(context, includeStreamingLevels);
+            CollectActorAddresses(context);
         result.reserve(result.size() + ordinary.size());
         for (const std::uintptr_t actor : ordinary) {
-            if (!seen.insert(actor).second) continue;
-            result.push_back(RuntimeActorRecord{actor, 0, 0, false});
+            if (!seen.TryVisit(actor)) continue;
+            result.push_back(RuntimeActorRecord{
+                actor,
+                0,
+                0,
+                false,
+                false,
+            });
         }
         return result;
     }
 
     std::vector<std::uintptr_t> CollectActorAddresses(
-        const FrameContext& context,
-        bool includeStreamingLevels) {
+        const FrameContext& context) {
         constexpr std::size_t kMaximumCollectedActors = 100000;
         std::vector<std::uintptr_t> result;
         std::unordered_set<std::uintptr_t> seen;
@@ -1896,42 +2201,89 @@ private:
                 context.actorCount,
             },
             kMaximumActorCount);
-        if (!includeStreamingLevels || result.size() >= kMaximumCollectedActors) {
+        if (result.size() >= kMaximumCollectedActors) {
             return result;
         }
 
+        return result;
+    }
+
+    std::vector<std::uintptr_t> CollectWorldObjectAddresses(
+        const FrameContext& context) {
+        constexpr std::size_t kMaximumCollectedActors = 100000;
+        std::vector<std::uintptr_t> result;
+        std::unordered_set<std::uintptr_t> seen;
+        result.reserve(4096);
+        seen.reserve(4096);
+
+        const auto appendArray = [&](const ActorArrayHeader& header,
+                                     std::int32_t maximumCount) {
+            if (!IsValidPointer(header.data) || header.count <= 0 ||
+                header.count > maximumCount || header.capacity < header.count ||
+                result.size() >= kMaximumCollectedActors) {
+                return;
+            }
+            std::vector<std::uintptr_t> addresses(
+                static_cast<std::size_t>(header.count));
+            if (!memory_->Read(
+                    header.data,
+                    addresses.data(),
+                    addresses.size() * sizeof(std::uintptr_t))) {
+                for (std::size_t index = 0; index < addresses.size(); ++index) {
+                    const std::uintptr_t offset =
+                        index * sizeof(std::uintptr_t);
+                    if (offset > kMaximumRemoteAddress - header.data) break;
+                    ReadValue(header.data + offset, addresses[index]);
+                }
+            }
+            for (const std::uintptr_t address : addresses) {
+                if (IsValidPointer(address) && seen.insert(address).second) {
+                    result.push_back(address);
+                    if (result.size() >= kMaximumCollectedActors) break;
+                }
+            }
+        };
+
+        appendArray(
+            ActorArrayHeader{
+                context.actorArray,
+                context.actorCount,
+                context.actorCount,
+            },
+            kMaximumActorCount);
         ActorArrayHeader persistentObjects{};
         if (ReadValue(context.level + 0x98, persistentObjects)) {
             appendArray(persistentObjects, kMaximumWorldObjectCount);
         }
+        if (result.size() >= kMaximumCollectedActors) return result;
 
         const std::uintptr_t levels = ReadPointer(context.world + 0x158);
         std::int32_t levelCount = 0;
-        if (!IsValidPointer(levels) || !ReadValue(context.world + 0x160, levelCount) ||
+        if (!IsValidPointer(levels) ||
+            !ReadValue(context.world + 0x160, levelCount) ||
             levelCount <= 0 || levelCount > 1024) {
             return result;
         }
-        std::vector<std::uintptr_t> levelAddresses(static_cast<std::size_t>(levelCount));
+        std::vector<std::uintptr_t> levelAddresses(
+            static_cast<std::size_t>(levelCount));
         if (!memory_->Read(
                 levels,
                 levelAddresses.data(),
                 levelAddresses.size() * sizeof(std::uintptr_t))) {
-            for (std::size_t index = 0; index < levelAddresses.size(); ++index) {
+            for (std::size_t index = 0;
+                 index < levelAddresses.size();
+                 ++index) {
                 const std::uintptr_t offset =
                     index * sizeof(std::uintptr_t);
-                if (offset > kMaximumRemoteAddress - levels) {
-                    break;
-                }
+                if (offset > kMaximumRemoteAddress - levels) break;
                 ReadValue(levels + offset, levelAddresses[index]);
             }
         }
         for (const std::uintptr_t level : levelAddresses) {
             if (!IsValidPointer(level)) continue;
-            if (level != context.level) {
-                ActorArrayHeader actors{};
-                if (ReadValue(level + 0x1F0, actors)) {
-                    appendArray(actors, kMaximumWorldObjectCount);
-                }
+            ActorArrayHeader actors{};
+            if (ReadValue(level + 0x1F0, actors)) {
+                appendArray(actors, kMaximumWorldObjectCount);
             }
             ActorArrayHeader objects{};
             if (ReadValue(level + 0x98, objects)) {
@@ -2120,7 +2472,11 @@ private:
         const FrameContext& context,
         const FeatureSettings& settings,
         GameFrame& frame,
-        std::unordered_set<std::uintptr_t>& seenThreats) {
+        std::unordered_set<std::uintptr_t>& seenThreats,
+        bool processStaticObjects,
+        bool processThreats,
+        bool deferStaticProjection = false,
+        std::vector<WorldLabelProjectionSource>* labelSources = nullptr) {
         Vec3 position{};
         if (!ReadActorPosition(actor, position, settings.visual.antiFlicker)) return;
         const float distanceMeters = Length(Subtract(position, context.localPosition)) * 0.01f;
@@ -2137,11 +2493,23 @@ private:
             &cameraPoint);
         const bool suppressLoot = settings.visual.combatMode &&
             (context.firing || context.zooming);
+        const bool staticProjectionAccepted = deferStaticProjection ||
+            (projected && IsInsideScreen(
+                screen, options_.screenWidth, options_.screenHeight, 40.0f));
+        const auto appendWorldLabel = [&](WorldLabel label) {
+            if (labelSources != nullptr) {
+                labelSources->push_back(WorldLabelProjectionSource{
+                    frame.worldLabels.size(),
+                    position,
+                });
+            }
+            frame.worldLabels.push_back(std::move(label));
+        };
 
-        if (settings.visual.enabled && settings.visual.classNameDebug &&
-            !className.empty() && projected &&
+        if (processStaticObjects && settings.visual.enabled &&
+            settings.visual.classNameDebug && !className.empty() &&
             distanceMeters <= static_cast<float>(settings.visual.drawDistanceMeters) &&
-            IsInsideScreen(screen, options_.screenWidth, options_.screenHeight, 40.0f) &&
+            staticProjectionAccepted &&
             frame.worldLabels.size() < 2048) {
             WorldLabel label{};
             label.anchor = ImVec2(screen.x, screen.y);
@@ -2149,12 +2517,12 @@ private:
             label.detail = FormatDistance(distanceMeters);
             label.kind = WorldLabelKind::Container;
             label.tone = SemanticTone::Muted;
-            frame.worldLabels.push_back(std::move(label));
+            appendWorldLabel(std::move(label));
         }
 
-        if (!suppressLoot && settings.loot.password && projected &&
+        if (processStaticObjects && !suppressLoot && settings.loot.password &&
             distanceMeters <= static_cast<float>(settings.loot.containerDistanceMeters) &&
-            IsInsideScreen(screen, options_.screenWidth, options_.screenHeight, 40.0f)) {
+            staticProjectionAccepted) {
             std::int32_t password = 0;
             if (className.find("Computer") != std::string::npos) {
                 ReadValue(actor + 0xFEC, password);
@@ -2163,7 +2531,7 @@ private:
                 ReadValue(actor + 0x1048, password);
             }
             if (password > 0 && password <= 10000) {
-                frame.worldLabels.push_back(WorldLabel{
+                appendWorldLabel(WorldLabel{
                     ImVec2(screen.x, screen.y),
                     "密码 " + std::to_string(password),
                     FormatDistance(distanceMeters),
@@ -2175,8 +2543,11 @@ private:
         }
 
         const std::optional<data::CustomItemEntry> customItem =
-            customItems_.Match(className);
-        if (!suppressLoot && (IsPickupClass(className) || customItem.has_value()) &&
+            processStaticObjects && settings.loot.enabled
+            ? customItems_.Match(className)
+            : std::optional<data::CustomItemEntry>{};
+        if (processStaticObjects && !suppressLoot &&
+            (IsPickupClass(className) || customItem.has_value()) &&
             settings.loot.enabled &&
             distanceMeters <= static_cast<float>(settings.loot.itemDistanceMeters)) {
             ItemInfo item = ReadPickupItem(actor);
@@ -2185,8 +2556,8 @@ private:
                 item.rarity = std::max(item.rarity, 1);
             }
             if (!item.name.empty() && item.value >= settings.loot.minimumItemValue &&
-                item.rarity >= settings.loot.minimumItemRarity && projected &&
-                IsInsideScreen(screen, options_.screenWidth, options_.screenHeight, 40.0f)) {
+                item.rarity >= settings.loot.minimumItemRarity &&
+                staticProjectionAccepted) {
                 WorldLabel label{};
                 label.anchor = ImVec2(screen.x, screen.y);
                 label.title = item.name;
@@ -2199,7 +2570,7 @@ private:
                     label.colorOverride = customItem->color;
                     label.titleSizeOverride = customItem->fontSize;
                 }
-                frame.worldLabels.push_back(std::move(label));
+                appendWorldLabel(std::move(label));
             }
             if (settings.loot.highValueList && !item.name.empty() &&
                 item.value >= settings.loot.minimumListValue &&
@@ -2223,10 +2594,10 @@ private:
             }
         }
 
-        if (!suppressLoot && IsDeadBodyClass(className) &&
+        if (processStaticObjects && !suppressLoot && IsDeadBodyClass(className) &&
             (settings.loot.playerBox || settings.loot.botBox) &&
             distanceMeters <= static_cast<float>(settings.loot.containerDistanceMeters) &&
-            projected && IsInsideScreen(screen, options_.screenWidth, options_.screenHeight, 40.0f)) {
+            staticProjectionAccepted) {
             std::uint8_t looted = 0;
             ReadValue(actor + 0x2678, looted);
             if (looted == 0) {
@@ -2247,24 +2618,19 @@ private:
                     label.detail = ContainerDetail(distanceMeters, items);
                     label.kind = WorldLabelKind::Container;
                     label.tone = bot ? SemanticTone::Muted : SemanticTone::Ally;
-                    frame.worldLabels.push_back(std::move(label));
+                    appendWorldLabel(std::move(label));
                 }
             }
         }
 
-        if (!suppressLoot && settings.loot.containers) {
+        if (processStaticObjects && !suppressLoot && settings.loot.containers) {
             if (IsExtractionClass(className)) {
                 const auto kind = ui::ContainerKind::ExtractionPoint;
                 if (IsContainerKindEnabled(settings.loot, kind) &&
                     distanceMeters <=
                         static_cast<float>(settings.loot.containerDistanceMeters) &&
-                    projected &&
-                    IsInsideScreen(
-                        screen,
-                        options_.screenWidth,
-                        options_.screenHeight,
-                        40.0f)) {
-                    frame.worldLabels.push_back(WorldLabel{
+                    staticProjectionAccepted) {
+                    appendWorldLabel(WorldLabel{
                         ImVec2(screen.x, screen.y),
                         "撤离点",
                         FormatDistance(distanceMeters),
@@ -2286,7 +2652,7 @@ private:
             const bool preciseContainer = knownContainer && containerClass;
             if (legacyCandidate &&
                 distanceMeters <= static_cast<float>(settings.loot.containerDistanceMeters) &&
-                projected && IsInsideScreen(screen, options_.screenWidth, options_.screenHeight, 40.0f)) {
+                staticProjectionAccepted) {
                 std::uint8_t opened = 0;
                 if (preciseContainer) {
                     ReadValue(actor + 0x2384, opened);
@@ -2316,13 +2682,13 @@ private:
                     label.detail = ContainerDetail(distanceMeters, items);
                     label.kind = WorldLabelKind::Container;
                     label.tone = SemanticTone::Accent;
-                    frame.worldLabels.push_back(std::move(label));
+                    appendWorldLabel(std::move(label));
                 }
             }
         }
 
         const data::ThreatObjectInfo* threat = data::FindThreatObject(className);
-        if (settings.visual.enabled &&
+        if (processThreats && settings.visual.enabled &&
             (settings.visual.throwableWarning ||
              settings.visual.throwableTrajectory) &&
             threat != nullptr &&
@@ -2393,9 +2759,214 @@ private:
         }
     }
 
+    static bool StaticWorldFeaturesEnabled(
+        const FeatureSettings& settings) {
+        return settings.loot.enabled || settings.loot.playerBox ||
+            settings.loot.botBox || settings.loot.password ||
+            settings.loot.containers || settings.loot.highValueList ||
+            (settings.visual.enabled && settings.visual.classNameDebug);
+    }
+
+    static std::uint64_t WorldObjectSettingsSignature(
+        const FeatureSettings& settings) {
+        std::uint64_t signature = 1469598103934665603ULL;
+        const auto mix = [&signature](std::uint64_t value) {
+            signature ^= value;
+            signature *= 1099511628211ULL;
+        };
+        mix(settings.loot.enabled);
+        mix(settings.loot.playerBox);
+        mix(settings.loot.botBox);
+        mix(settings.loot.password);
+        mix(settings.loot.containers);
+        mix(settings.loot.boxContents);
+        mix(settings.loot.containerContents);
+        mix(settings.loot.highValueList);
+        mix(static_cast<std::uint64_t>(settings.loot.itemDistanceMeters));
+        mix(static_cast<std::uint64_t>(settings.loot.minimumItemValue));
+        mix(static_cast<std::uint64_t>(settings.loot.minimumItemRarity));
+        mix(static_cast<std::uint64_t>(settings.loot.containerDistanceMeters));
+        mix(static_cast<std::uint64_t>(settings.loot.minimumContainerValue));
+        mix(static_cast<std::uint64_t>(settings.loot.minimumContainerRarity));
+        mix(static_cast<std::uint64_t>(settings.loot.listLimit));
+        mix(static_cast<std::uint64_t>(settings.loot.minimumListValue));
+        mix(static_cast<std::uint64_t>(settings.loot.minimumListRarity));
+        mix(settings.visual.enabled);
+        mix(settings.visual.classNameDebug);
+        mix(static_cast<std::uint64_t>(settings.visual.drawDistanceMeters));
+        for (const bool enabled : settings.loot.containerKinds) {
+            mix(enabled);
+        }
+        return signature;
+    }
+
+    bool IsStaticWorldObjectCandidate(
+        std::uintptr_t actor,
+        const std::string& className,
+        const FeatureSettings& settings) {
+        if (className.empty() || IsCharacterClass(className)) return false;
+        if (settings.visual.enabled && settings.visual.classNameDebug) {
+            return true;
+        }
+        if (settings.loot.password &&
+            (className.find("Computer") != std::string::npos ||
+             className.find("Password") != std::string::npos ||
+             className.find("Combination") != std::string::npos)) {
+            return true;
+        }
+        if (settings.loot.enabled &&
+            (IsPickupClass(className) ||
+             customItems_.Match(className).has_value())) {
+            return true;
+        }
+        if ((settings.loot.playerBox || settings.loot.botBox) &&
+            IsDeadBodyClass(className)) {
+            return true;
+        }
+        if (!settings.loot.containers) return false;
+        if (IsExtractionClass(className) ||
+            className.find("B_neat") != std::string::npos) {
+            return true;
+        }
+        std::int32_t containerId = 0;
+        float detectRatio = 0.0f;
+        ReadValue(actor + 0x2378, containerId);
+        ReadValue(actor + 0x720, detectRatio);
+        return IsKnownContainerId(containerId) || detectRatio == 200.0f ||
+            detectRatio == 360.0f || detectRatio == 20.0f;
+    }
+
+    void RefreshWorldObjectCache(
+        const FrameContext& context,
+        const FeatureSettings& settings) {
+        if (!StaticWorldFeaturesEnabled(settings)) {
+            worldObjectFrameCache_.Clear();
+            worldObjectActors_.clear();
+            worldObjectDiscoveryPolicy_.Invalidate();
+            worldObjectContentPolicy_.Invalidate();
+            return;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const std::uint64_t signature =
+            WorldObjectSettingsSignature(settings);
+        FeatureSettings staticSettings = settings;
+        staticSettings.visual.combatMode = false;
+        if (worldObjectDiscoveryPolicy_.ShouldRefresh(
+                context.world, signature, now)) {
+            std::vector<CachedWorldActor> discovered;
+            const std::vector<std::uintptr_t> actors =
+                CollectWorldObjectAddresses(context);
+            discovered.reserve(std::min<std::size_t>(actors.size(), 2048));
+            for (const std::uintptr_t actor : actors) {
+                std::int32_t nameIndex = -1;
+                if (!ReadValue(actor + 0x1C, nameIndex) || nameIndex < 0) {
+                    continue;
+                }
+                std::string className =
+                    DecodeName(nameIndex, context.namePool);
+                if (!IsStaticWorldObjectCandidate(
+                        actor, className, staticSettings)) {
+                    continue;
+                }
+                discovered.push_back(CachedWorldActor{
+                    actor,
+                    std::move(className),
+                });
+            }
+            worldObjectActors_ = std::move(discovered);
+            worldObjectDiscoveryPolicy_.MarkRefreshed(
+                context.world, signature, now);
+            worldObjectContentPolicy_.Invalidate();
+        }
+        if (!worldObjectContentPolicy_.ShouldRefresh(
+                context.world, signature, now)) {
+            return;
+        }
+
+        GameFrame refreshed{};
+        std::vector<WorldLabelProjectionSource> labelSources;
+        std::unordered_set<std::uintptr_t> ignoredThreats;
+        labelSources.reserve(
+            std::min<std::size_t>(worldObjectActors_.size(), 2048));
+        for (const CachedWorldActor& actor : worldObjectActors_) {
+            ProcessWorldActor(
+                actor.actor,
+                actor.className,
+                context,
+                staticSettings,
+                refreshed,
+                ignoredThreats,
+                true,
+                false,
+                true,
+                &labelSources);
+        }
+        if (refreshed.highValueList.has_value()) {
+            auto& entries = refreshed.highValueList->entries;
+            std::stable_sort(
+                entries.begin(), entries.end(),
+                [](const HighValueEntry& left,
+                   const HighValueEntry& right) {
+                    return left.value != right.value
+                        ? left.value > right.value
+                        : left.distanceMeters < right.distanceMeters;
+                });
+            if (entries.size() >
+                static_cast<std::size_t>(refreshed.highValueList->maxRows)) {
+                entries.resize(static_cast<std::size_t>(
+                    refreshed.highValueList->maxRows));
+            }
+        }
+        worldObjectFrameCache_.labels = std::move(refreshed.worldLabels);
+        worldObjectFrameCache_.labelSources = std::move(labelSources);
+        worldObjectFrameCache_.highValueList =
+            std::move(refreshed.highValueList);
+        worldObjectContentPolicy_.MarkRefreshed(
+            context.world, signature, now);
+    }
+
+    void AppendWorldObjectCache(
+        const FeatureSettings& settings,
+        const FrameContext& context,
+        GameFrame& frame) const {
+        if (settings.visual.combatMode &&
+            (context.firing || context.zooming)) {
+            return;
+        }
+        for (const WorldLabelProjectionSource& source :
+             worldObjectFrameCache_.labelSources) {
+            if (source.labelIndex >= worldObjectFrameCache_.labels.size() ||
+                frame.worldLabels.size() >= 2048) {
+                continue;
+            }
+            Vec2 screen{};
+            if (!ProjectToScreen(
+                    source.world,
+                    context.view,
+                    options_.screenWidth,
+                    options_.screenHeight,
+                    screen) ||
+                !IsInsideScreen(
+                    screen,
+                    options_.screenWidth,
+                    options_.screenHeight,
+                    40.0f)) {
+                continue;
+            }
+            WorldLabel label =
+                worldObjectFrameCache_.labels[source.labelIndex];
+            label.anchor = ImVec2(screen.x, screen.y);
+            frame.worldLabels.push_back(std::move(label));
+        }
+        if (worldObjectFrameCache_.highValueList.has_value()) {
+            frame.highValueList = worldObjectFrameCache_.highValueList;
+        }
+    }
+
     bool BuildFrameContext(FrameContext& context,
                            bool battlefieldMode,
                            native::PositionReadMode positionMode,
+                           bool trajectoryTracking,
                            bool antiFlicker,
                            std::string& diagnostic) {
         if (!IsValidPointer(moduleBase_)) {
@@ -2430,10 +3001,21 @@ private:
             context.actorArray = actors.data;
             context.actorCount = actors.count;
         }
-        if (positionMode == native::PositionReadMode::Direct) {
-            context.decodedActors = CollectDecodedActorRecords();
+        if (positionMode == native::PositionReadMode::Direct ||
+            trajectoryTracking) {
+            context.decodedActors = CollectDecodedActorRecords(
+                context.decodedRecordSourceReady,
+                context.decodedRecordsEncrypted);
+            if (positionMode == native::PositionReadMode::Direct &&
+                !context.decodedRecordSourceReady &&
+                !ordinaryActorsAvailable) {
+                diagnostic = "数据链等待：人物列表暂不可读";
+                return false;
+            }
         }
-        if (!ordinaryActorsAvailable && context.decodedActors.empty()) {
+        if (!ordinaryActorsAvailable &&
+            !context.decodedRecordSourceReady &&
+            context.decodedActors.empty()) {
             diagnostic = "数据链等待：人物数组暂不可读";
             return false;
         }
@@ -2499,23 +3081,24 @@ private:
         }
         lastView_ = context.view;
         lastViewValid_ = true;
-        context.firingOrigin = ResolveTrackingOrigin(context);
+        context.firingOriginValid = ResolveTrackingOrigin(
+            context, context.firingOrigin);
+
+        const auto localRecord = std::find_if(
+            context.decodedActors.begin(),
+            context.decodedActors.end(),
+            [&context](const RuntimeActorRecord& record) {
+                return record.actor == context.localPawn;
+            });
 
         std::int32_t localNameIndex = -1;
         ReadValue(context.localPawn + 0x1C, localNameIndex);
         const std::string localClassName =
             DecodeName(localNameIndex, context.namePool);
         std::uintptr_t localRoot = 0;
-        if (positionMode == native::PositionReadMode::Direct) {
-            const auto localRecord = std::find_if(
-                context.decodedActors.begin(),
-                context.decodedActors.end(),
-                [&context](const RuntimeActorRecord& record) {
-                    return record.actor == context.localPawn;
-                });
-            if (localRecord != context.decodedActors.end()) {
-                localRoot = localRecord->root;
-            }
+        if (positionMode == native::PositionReadMode::Direct &&
+            localRecord != context.decodedActors.end()) {
+            localRoot = localRecord->root;
         }
         if (!ReadCharacterPosition(
                 context.localPawn,
@@ -2523,7 +3106,8 @@ private:
                 localClassName,
                 positionMode,
                 antiFlicker,
-                context.localPosition)) {
+                context.localPosition,
+                true)) {
             context.localPosition = context.view.location;
         }
         const std::uintptr_t verifiedWorld = ReadPointer(worldAddress);
@@ -2568,7 +3152,97 @@ private:
         std::string_view className,
         native::PositionReadMode mode,
         bool antiFlicker,
-        Vec3& position) {
+        Vec3& position,
+        bool localActor = false) {
+        const bool coordinateDecryptRequested =
+            algorithmPositionRequested_ &&
+            mode == native::PositionReadMode::Direct;
+        if (native::ShouldRequireAlgorithmPosition(
+                localActor, coordinateDecryptRequested)) {
+            constexpr auto kCacheLifetime = std::chrono::milliseconds(300);
+            const auto now = std::chrono::steady_clock::now();
+            const auto storeDecoded = [&](const Vec3& decoded) {
+                if (antiFlicker) {
+                    positionCache_[actor] = PositionCacheEntry{decoded, now};
+                }
+                position = decoded;
+            };
+            const auto readCached = [&]() {
+                if (!antiFlicker) return false;
+                const auto found = positionCache_.find(actor);
+                if (found == positionCache_.end()) return false;
+                if (now - found->second.updatedAt > kCacheLifetime) {
+                    positionCache_.erase(found);
+                    return false;
+                }
+                position = found->second.position;
+                ++algorithmFrameSuccessCount_;
+                return true;
+            };
+            if (UsesCoordinatePoolRuntime()) {
+                ++algorithmAttemptCount_;
+                ++algorithmFrameAttemptCount_;
+                native::CoordinatePoolPosition candidate{};
+                const std::uintptr_t component =
+                    IsValidPointer(decodedRoot)
+                    ? decodedRoot
+                    : ReadPointer(actor + 0x180);
+                if (coordinatePoolReady_ && memory_ != nullptr &&
+                    IsValidPointer(component) &&
+                    coordinatePoolRuntime_.ReadPosition(
+                        component, candidate)) {
+                    const Vec3 decoded{
+                        candidate.x,
+                        candidate.y,
+                        candidate.z,
+                    };
+                    if (IsFinite(decoded) && IsNonzero(decoded)) {
+                        ++algorithmSuccessCount_;
+                        ++algorithmFrameSuccessCount_;
+                        storeDecoded(decoded);
+                        return true;
+                    }
+                }
+                return readCached();
+            }
+            if (native::ShouldAttemptAlgorithmPosition(
+                    localActor,
+                    coordinateDecryptRequested,
+                    algorithmExecutionContextReady_,
+                    algorithmPositionConfig_)) {
+                native::AlgorithmPosition candidate{};
+                const bool refreshCachedPages = algorithmRefreshPending_;
+                algorithmRefreshPending_ = false;
+                ++algorithmAttemptCount_;
+                ++algorithmFrameAttemptCount_;
+                if (memory_ != nullptr &&
+                    algorithmPositionRuntime_.ExecuteAtGuestPc(
+                        *memory_,
+                        algorithmGuestPc_,
+                        actor,
+                        algorithmExecutionContext_.tpidrEl0,
+                        native::AlgorithmPacgaKey{
+                            algorithmExecutionContext_.pacgaLow,
+                            algorithmExecutionContext_.pacgaHigh,
+                        },
+                        candidate,
+                        refreshCachedPages)) {
+                    const Vec3 decoded{
+                        candidate.x,
+                        candidate.y,
+                        candidate.z,
+                    };
+                    if (IsFinite(decoded) && IsNonzero(decoded)) {
+                        ++algorithmSuccessCount_;
+                        ++algorithmFrameSuccessCount_;
+                        storeDecoded(decoded);
+                        return true;
+                    }
+                }
+            }
+            return readCached();
+        }
+
         auto readBytes = [this](std::uintptr_t address,
                                 void* destination,
                                 std::size_t size) {
@@ -2577,14 +3251,24 @@ private:
                 memory_->Read(address, destination, size);
         };
         native::CharacterPositionResolver::Coordinate coordinate{};
-        if (!characterPositions_.ReadWithRoot(
+        const bool resolved = localActor
+            ? characterPositions_.ReadLocalWithRoot(
                 actor,
                 decodedRoot,
                 className,
                 mode,
                 antiFlicker,
                 coordinate,
-                readBytes)) {
+                readBytes)
+            : characterPositions_.ReadWithRoot(
+                actor,
+                decodedRoot,
+                className,
+                mode,
+                antiFlicker,
+                coordinate,
+                readBytes);
+        if (!resolved) {
             return false;
         }
         position = Vec3{coordinate[0], coordinate[1], coordinate[2]};
@@ -2892,18 +3576,30 @@ private:
             (value.z == 0.0f || value.z == -90.0f);
     }
 
-    bool RebuildDecodedComponentTransform(
+    bool RebuildResolvedComponentTransform(
         std::uintptr_t root,
         std::uintptr_t mesh,
-        PackedTransform& transform) {
-        transform = PackedTransform{};
+        const Vec3* resolvedPosition,
+        Transform& transform) {
+        transform = Transform{};
         if (!IsValidPointer(root) || !IsValidPointer(mesh) ||
             !ReadValue(mesh + 0x210, transform)) {
             return false;
         }
 
         Vec3 position{};
-        ReadValue(root + 0x168, position);
+        std::uint8_t useAlternatePosition = 0;
+        if (layout_.componentPositionFlagOffset != 0) {
+            ReadValue(
+                moduleBase_ + layout_.componentPositionFlagOffset,
+                useAlternatePosition);
+        }
+        if (useAlternatePosition != 0) {
+            ReadValue(root + 0x138, position);
+        }
+        if (useAlternatePosition == 0 || IsZeroOrMinusNinety(position)) {
+            ReadValue(root + 0x168, position);
+        }
         bool finalFallback = false;
         if (IsZeroOrMinusNinety(position)) {
             ReadValue(root + 0x220, position);
@@ -2920,7 +3616,13 @@ private:
         constexpr float kQuarterTurn = 0.7853981633974483f;
         const float angle = yaw * kHalfDegreesToRadians -
             (finalFallback ? 0.0f : kQuarterTurn);
-        transform.translation = position;
+        if (resolvedPosition != nullptr && IsFinite(*resolvedPosition) &&
+            IsNonzero(*resolvedPosition)) {
+            transform.translation = *resolvedPosition;
+            transform.translation.z -= verticalAdjustment;
+        } else {
+            transform.translation = position;
+        }
         transform.rotation = Quaternion{
             0.0f,
             0.0f,
@@ -2933,107 +3635,222 @@ private:
             std::isfinite(transform.rotation.w);
     }
 
-    bool ReadBoneFrame(std::uintptr_t actor,
-                       std::uintptr_t decodedRoot,
-                       std::uintptr_t decodedMesh,
-                       bool decoded,
+    bool ReadBoneFrame(const RuntimeActorRecord& actorRecord,
                        const CameraView& view,
                        bool antiFlicker,
+                       const Vec3* resolvedPosition,
                        BoneFrame& frame) {
         constexpr auto kCacheLifetime = std::chrono::milliseconds(300);
         frame = BoneFrame{};
+        const std::uintptr_t actor = actorRecord.actor;
+        if (!IsValidPointer(actor)) return false;
         const auto now = std::chrono::steady_clock::now();
+        const bool useCache = antiFlicker;
         auto cached = boneCache_.find(actor);
-        bool cacheFresh = antiFlicker && cached != boneCache_.end() &&
-            now - cached->second.lastUpdatedAt <= kCacheLifetime;
-
-        std::uintptr_t mesh = IsValidPointer(decodedMesh)
-            ? decodedMesh
-            : ReadPointer(actor + 0x3D0);
-        if (!IsValidPointer(mesh) && cacheFresh) mesh = cached->second.mesh;
-        std::uintptr_t boneArray = IsValidPointer(mesh)
-            ? ReadPointer(mesh + 0x730)
-            : 0;
-        if (!IsValidPointer(boneArray) && IsValidPointer(mesh)) {
-            boneArray = ReadPointer(mesh + 0x740);
-        }
-        if (!IsValidPointer(boneArray) && cacheFresh) {
-            boneArray = cached->second.boneArray;
-        }
 
         std::array<Vec3, kBoneIndices.size()> currentWorld{};
         std::array<bool, kBoneIndices.size()> currentValid{};
-        bool anyCurrent = false;
+        std::uintptr_t mesh = 0;
+        std::uintptr_t boneArray = 0;
         Matrix4 componentMatrix{};
-        bool componentReady = false;
-        if (decoded && IsValidPointer(decodedRoot) && IsValidPointer(mesh)) {
-            PackedTransform componentTransform{};
-            componentReady = RebuildDecodedComponentTransform(
-                decodedRoot, mesh, componentTransform);
-            if (componentReady) {
+        const native::BoneFrameRecordSource recordSource{
+            actorRecord.root,
+            actorRecord.mesh,
+            actorRecord.encryptedRecord,
+        };
+        const std::uintptr_t ordinaryMesh = actorRecord.encryptedRecord
+            ? 0
+            : ReadPointer(actor + 0x3D0);
+        const std::uintptr_t preferredMesh =
+            native::SelectBoneFrameMesh(recordSource, ordinaryMesh);
+        const bool useResolvedTranslation = actorRecord.encryptedRecord &&
+            resolvedPosition != nullptr && IsFinite(*resolvedPosition) &&
+            IsNonzero(*resolvedPosition);
+        const auto cacheSource = [&cached]() {
+            return native::BoneFrameCacheSource{
+                cached->second.root,
+                cached->second.mesh,
+                cached->second.encryptedRecord,
+            };
+        };
+        bool cacheFresh = useCache && cached != boneCache_.end() &&
+            now - cached->second.lastUpdatedAt <= kCacheLifetime &&
+            cached->second.resolvedTranslation == useResolvedTranslation &&
+            native::IsBoneFrameCacheSourceCompatible(
+                recordSource, preferredMesh, cacheSource());
+
+        const auto readBoneSource =
+            [this, &mesh, &boneArray, &componentMatrix, resolvedPosition](
+                std::uintptr_t candidate,
+                std::uintptr_t root,
+                bool rebuildResolvedTransform) {
+                if (!IsValidPointer(candidate)) return false;
+                const std::uintptr_t meshClass = ReadPointer(candidate);
+                if (!IsValidPointer(meshClass)) return false;
+
+                const std::uintptr_t candidateBoneArray =
+                    ReadPointer(candidate + 0x730);
+                if (!IsValidPointer(candidateBoneArray)) return false;
+
+                Transform componentTransform{};
+                const bool componentReady = rebuildResolvedTransform
+                    ? RebuildResolvedComponentTransform(
+                          root,
+                          candidate,
+                          resolvedPosition,
+                          componentTransform)
+                    : ReadValue(candidate + 0x210, componentTransform) &&
+                          IsValidTransform(componentTransform);
+                if (!componentReady) {
+                    return false;
+                }
+
+                Transform pelvisTransform{};
+                Transform headTransform{};
+                if (!ReadValue(
+                        candidateBoneArray + kBoneTransformStride,
+                        pelvisTransform) ||
+                    !ReadValue(
+                        candidateBoneArray + 31 * kBoneTransformStride,
+                        headTransform) ||
+                    !IsValidTransform(pelvisTransform) ||
+                    !IsValidTransform(headTransform)) {
+                    return false;
+                }
+                mesh = candidate;
+                boneArray = candidateBoneArray;
                 componentMatrix = TransformToMatrix(componentTransform);
-            }
-        } else if (IsValidPointer(mesh)) {
+                return true;
+            };
+        bool componentReady = readBoneSource(
+            preferredMesh,
+            actorRecord.root,
+            actorRecord.encryptedRecord);
+        if (!componentReady && !actorRecord.encryptedRecord &&
+            actorRecord.mesh != preferredMesh) {
+            componentReady = readBoneSource(
+                actorRecord.mesh, actorRecord.root, false);
+        }
+        if (!componentReady && cacheFresh &&
+            cached->second.mesh != preferredMesh &&
+            cached->second.mesh != actorRecord.mesh) {
+            componentReady = readBoneSource(
+                cached->second.mesh,
+                cached->second.root,
+                cached->second.encryptedRecord);
+        }
+        if (!componentReady && cacheFresh &&
+            IsValidPointer(cached->second.mesh) &&
+            IsValidPointer(cached->second.boneArray)) {
             Transform componentTransform{};
-            componentReady = ReadValue(mesh + 0x210, componentTransform);
-            if (componentReady) {
+            Transform pelvisTransform{};
+            Transform headTransform{};
+            if (IsValidPointer(ReadPointer(cached->second.mesh)) &&
+                (cached->second.encryptedRecord
+                     ? RebuildResolvedComponentTransform(
+                           cached->second.root,
+                           cached->second.mesh,
+                           resolvedPosition,
+                           componentTransform)
+                     : ReadValue(
+                           cached->second.mesh + 0x210,
+                           componentTransform) &&
+                           IsValidTransform(componentTransform)) &&
+                ReadValue(
+                    cached->second.boneArray + kBoneTransformStride,
+                    pelvisTransform) &&
+                ReadValue(
+                    cached->second.boneArray + 31 * kBoneTransformStride,
+                    headTransform) &&
+                IsValidTransform(pelvisTransform) &&
+                IsValidTransform(headTransform)) {
+                mesh = cached->second.mesh;
+                boneArray = cached->second.boneArray;
                 componentMatrix = TransformToMatrix(componentTransform);
+                componentReady = true;
             }
         }
+
         if (IsValidPointer(mesh) && IsValidPointer(boneArray) &&
             componentReady) {
-            for (std::size_t index = 0; index < kBoneIndices.size(); ++index) {
-                const std::uintptr_t address = boneArray +
-                    static_cast<std::uintptr_t>(kBoneIndices[index]) * sizeof(Transform);
-                Matrix4 boneMatrix{};
-                if (decoded) {
-                    PackedTransform boneTransform{};
-                    if (!ReadValue(address, boneTransform)) continue;
-                    boneMatrix = TransformToMatrix(boneTransform);
-                } else {
-                    Transform boneTransform{};
-                    if (!ReadValue(address, boneTransform)) continue;
-                    boneMatrix = TransformToMatrix(boneTransform);
+            std::array<Transform, kPlayerBoneTransformCount> transformFrame{};
+            std::array<
+                std::byte,
+                kPlayerBoneTransformCount * kBoneTransformStride> rawFrame{};
+            bool transformFrameValid = false;
+            if (memory_ != nullptr &&
+                rawFrame.size() <= kMaximumRemoteAddress - boneArray &&
+                memory_->Read(
+                    boneArray,
+                    rawFrame.data(),
+                    rawFrame.size())) {
+                for (std::size_t index = 0;
+                     index < transformFrame.size();
+                     ++index) {
+                    std::memcpy(
+                        &transformFrame[index],
+                        rawFrame.data() + index * kBoneTransformStride,
+                        sizeof(Transform));
                 }
+                transformFrameValid =
+                    IsValidTransform(transformFrame[1]) &&
+                    IsValidTransform(transformFrame[31]);
+            }
+
+            for (std::size_t index = 0; index < kBoneIndices.size(); ++index) {
+                Transform boneTransform{};
+                const std::size_t boneIndex =
+                    static_cast<std::size_t>(kBoneIndices[index]);
+                if (transformFrameValid &&
+                    boneIndex < transformFrame.size()) {
+                    boneTransform = transformFrame[boneIndex];
+                } else {
+                    const std::uintptr_t address = boneArray +
+                        static_cast<std::uintptr_t>(boneIndex) *
+                            kBoneTransformStride;
+                    if (!ReadValue(address, boneTransform)) continue;
+                }
+                if (!IsValidTransform(boneTransform)) continue;
+                const Matrix4 boneMatrix = TransformToMatrix(boneTransform);
                 Vec3 world = MatrixTranslation(Multiply(
                     boneMatrix, componentMatrix));
                 if (index == 0) world.z += 7.0f;
                 if (!IsFinite(world)) continue;
                 currentWorld[index] = world;
                 currentValid[index] = true;
-                anyCurrent = true;
             }
         }
 
-        if (antiFlicker && anyCurrent) {
+        const bool currentComplete = std::all_of(
+            currentValid.begin(),
+            currentValid.end(),
+            [](bool valid) { return valid; });
+        if (useCache && currentComplete) {
             BoneCacheEntry& entry = boneCache_[actor];
-            if (IsValidPointer(mesh)) entry.mesh = mesh;
-            if (IsValidPointer(boneArray)) entry.boneArray = boneArray;
-            for (std::size_t index = 0; index < currentValid.size(); ++index) {
-                if (!currentValid[index]) continue;
-                entry.world[index] = currentWorld[index];
-                entry.valid[index] = true;
-                entry.boneUpdatedAt[index] = now;
-            }
+            entry.root = actorRecord.root;
+            entry.mesh = mesh;
+            entry.boneArray = boneArray;
+            entry.encryptedRecord = actorRecord.encryptedRecord;
+            entry.resolvedTranslation = useResolvedTranslation;
+            entry.world = currentWorld;
             entry.lastUpdatedAt = now;
             cached = boneCache_.find(actor);
+            cacheFresh = true;
         }
 
-        std::array<Vec3, kBoneIndices.size()> world = currentWorld;
-        std::array<bool, kBoneIndices.size()> worldValid = currentValid;
-        if (antiFlicker && cached != boneCache_.end()) {
-            for (std::size_t index = 0; index < worldValid.size(); ++index) {
-                if (worldValid[index] || !cached->second.valid[index] ||
-                    now - cached->second.boneUpdatedAt[index] > kCacheLifetime) {
-                    continue;
-                }
-                world[index] = cached->second.world[index];
-                worldValid[index] = true;
-            }
+        std::array<Vec3, kBoneIndices.size()> world{};
+        if (currentComplete) {
+            world = currentWorld;
+        } else if (cacheFresh && cached != boneCache_.end()) {
+            world = cached->second.world;
+        } else {
+            return false;
         }
         bool anyProjected = false;
-        for (std::size_t index = 0; index < worldValid.size(); ++index) {
-            if (!worldValid[index]) continue;
+        for (std::size_t index = 0; index < world.size(); ++index) {
+            frame.world[index] = world[index];
+            frame.worldValid[index] = IsFinite(world[index]);
+            if (!frame.worldValid[index]) continue;
             Vec2 screen{};
             if (!ProjectToScreen(world[index],
                                  view,
@@ -3046,7 +3863,6 @@ private:
                                 80.0f)) {
                 continue;
             }
-            frame.world[index] = world[index];
             frame.screen[index] = screen;
             frame.valid[index] = true;
             anyProjected = true;
@@ -3054,15 +3870,221 @@ private:
         return anyProjected;
     }
 
+    static bool TryBuildBoneBounds(const BoneFrame& frame,
+                                   ScreenRect& bounds) {
+        bounds = ScreenRect{};
+        std::array<
+            native::PlayerBoneScreenPoint,
+            native::kPlayerBoundsBoneCount> points{};
+        for (std::size_t index = 0; index < frame.valid.size(); ++index) {
+            points[index] = native::PlayerBoneScreenPoint{
+                frame.screen[index].x,
+                frame.screen[index].y,
+                frame.valid[index],
+            };
+        }
+        native::PlayerScreenBounds resolved{};
+        if (!native::CalculatePlayerScreenBounds(points, resolved)) {
+            return false;
+        }
+        bounds = ScreenRect{
+            resolved.left,
+            resolved.top,
+            resolved.right,
+            resolved.bottom,
+        };
+        return true;
+    }
+
     static void BuildSkeletonVisual(const BoneFrame& frame,
+                                    bool colorByVisibility,
                                     SkeletonVisual& skeleton) {
         skeleton.joints.resize(kBoneIndices.size());
         for (std::size_t index = 0; index < frame.valid.size(); ++index) {
             if (!frame.valid[index]) continue;
             skeleton.joints[index] = BoneJoint{
-                ImVec2(frame.screen[index].x, frame.screen[index].y), true};
+                ImVec2(frame.screen[index].x, frame.screen[index].y),
+                true,
+                frame.visibility[index]};
         }
         skeleton.links.assign(kBoneLinks.begin(), kBoneLinks.end());
+        skeleton.colorByVisibility = colorByVisibility;
+    }
+
+    void RefreshCameraView(FrameContext& context) {
+        CameraView first{};
+        CameraView second{};
+        const bool firstValid =
+            ReadValue(context.cameraManager + 0x3590, first) &&
+            IsFinite(first);
+        const bool secondValid =
+            ReadValue(context.cameraManager + 0x3590, second) &&
+            IsFinite(second);
+        if (secondValid) {
+            context.view = second;
+        } else if (firstValid) {
+            context.view = first;
+        }
+        if (firstValid || secondValid) {
+            lastView_ = context.view;
+            lastViewValid_ = true;
+        }
+    }
+
+    bool ReprojectBoneFrame(const BoneFrame& source,
+                            const CameraView& view,
+                            BoneFrame& projected) const {
+        projected = source;
+        projected.valid.fill(false);
+        projected.screen.fill(Vec2{});
+        bool anyProjected = false;
+        for (std::size_t index = 0;
+             index < projected.world.size();
+             ++index) {
+            if (!source.worldValid[index]) continue;
+            Vec2 screen{};
+            if (!ProjectToScreen(
+                    source.world[index],
+                    view,
+                    options_.screenWidth,
+                    options_.screenHeight,
+                    screen) ||
+                !IsInsideScreen(
+                    screen,
+                    options_.screenWidth,
+                    options_.screenHeight,
+                    80.0f)) {
+                continue;
+            }
+            projected.screen[index] = screen;
+            projected.valid[index] = true;
+            anyProjected = true;
+        }
+        return anyProjected;
+    }
+
+    void ReprojectPlayers(
+        const CameraView& view,
+        const std::vector<PlayerProjectionSource>& sources,
+        GameFrame& frame) const {
+        std::vector<PlayerVisual> projectedPlayers;
+        projectedPlayers.reserve(sources.size());
+        for (const PlayerProjectionSource& source : sources) {
+            if (source.playerIndex >= frame.players.size()) continue;
+            Vec2 bottom{};
+            Vec2 top{};
+            const bool bottomProjected = ProjectToScreen(
+                source.bottom,
+                view,
+                options_.screenWidth,
+                options_.screenHeight,
+                bottom);
+            const bool topProjected = ProjectToScreen(
+                source.top,
+                view,
+                options_.screenWidth,
+                options_.screenHeight,
+                top);
+
+            BoneFrame bones{};
+            const bool bonesReady = source.bonesReady &&
+                ReprojectBoneFrame(source.bones, view, bones);
+            ScreenRect boneBounds{};
+            const bool boneBoundsReady = bonesReady &&
+                TryBuildBoneBounds(bones, boneBounds);
+            native::PlayerScreenBounds anchorBounds{};
+            const bool anchorBoundsReady =
+                native::CalculatePlayerAnchorBounds(
+                    native::PlayerBoneScreenPoint{
+                        bottom.x, bottom.y, bottomProjected},
+                    native::PlayerBoneScreenPoint{
+                        top.x, top.y, topProjected},
+                    anchorBounds);
+            const native::PlayerScreenBounds resolvedBoneBounds{
+                boneBounds.left,
+                boneBounds.top,
+                boneBounds.right,
+                boneBounds.bottom,
+            };
+            native::PlayerScreenBounds resolved{};
+            if (!native::SelectPlayerScreenBounds(
+                    boneBoundsReady,
+                    resolvedBoneBounds,
+                    anchorBoundsReady,
+                    anchorBounds,
+                    static_cast<float>(options_.screenWidth),
+                    static_cast<float>(options_.screenHeight),
+                    resolved)) {
+                continue;
+            }
+            const float height = resolved.bottom - resolved.top;
+            if (!std::isfinite(height) || height < 8.0f ||
+                height > static_cast<float>(options_.screenHeight) * 2.0f) {
+                continue;
+            }
+
+            PlayerVisual visual = frame.players[source.playerIndex];
+            visual.bounds = ScreenRect{
+                resolved.left,
+                resolved.top,
+                resolved.right,
+                resolved.bottom,
+            };
+            if (visual.drawSkeleton) {
+                const bool colorByVisibility =
+                    visual.skeleton.colorByVisibility;
+                const int selectedJoint = visual.skeleton.selectedJoint;
+                visual.skeleton = SkeletonVisual{};
+                if (bonesReady) {
+                    BuildSkeletonVisual(
+                        bones, colorByVisibility, visual.skeleton);
+                    visual.skeleton.selectedJoint = selectedJoint;
+                }
+                if (visual.skeleton.joints.empty()) {
+                    visual.drawSkeleton = false;
+                }
+            }
+            projectedPlayers.push_back(std::move(visual));
+        }
+        frame.players = std::move(projectedPlayers);
+    }
+
+    void ReprojectAimCandidates(
+        const CameraView& view,
+        const ui::AimSettings& settings,
+        const ui::AimTuning& tuning,
+        std::vector<AimCandidate>& candidates) const {
+        const float centerX =
+            static_cast<float>(options_.screenWidth) * 0.5f;
+        const float centerY =
+            static_cast<float>(options_.screenHeight) * 0.5f;
+        candidates.erase(
+            std::remove_if(
+                candidates.begin(),
+                candidates.end(),
+                [&](AimCandidate& candidate) {
+                    Vec2 screen{};
+                    if (!ProjectToScreen(
+                            candidate.world,
+                            view,
+                            options_.screenWidth,
+                            options_.screenHeight,
+                            screen)) {
+                        return true;
+                    }
+                    candidate.screen = screen;
+                    candidate.screenDistancePixels = std::hypot(
+                        screen.x - centerX,
+                        screen.y - centerY);
+                    candidate.selectionDistancePixels =
+                        candidate.screenDistancePixels;
+                    return !std::isfinite(
+                               candidate.screenDistancePixels) ||
+                        (settings.enforceFov &&
+                         candidate.screenDistancePixels >
+                             tuning.rangePixels);
+                }),
+            candidates.end());
     }
 
     void BuildModelGeometry(const CameraView& view,
@@ -3189,15 +4211,11 @@ private:
         const auto finiteOr = [](float value, float fallback) {
             return std::isfinite(value) ? value : fallback;
         };
-        tuning.rangePixels = std::clamp(finiteOr(tuning.rangePixels, 200.0f), 0.0f, 4000.0f);
+        tuning.rangePixels = std::clamp(finiteOr(tuning.rangePixels, 150.0f), 0.0f, 4000.0f);
         tuning.hipDistanceMeters = std::clamp(
             finiteOr(tuning.hipDistanceMeters, 50.0f), 0.0f, 1000.0f);
         tuning.adsDistanceMeters = std::clamp(
-            finiteOr(tuning.adsDistanceMeters, 100.0f), 0.0f, 1000.0f);
-        tuning.trackingProjectileSpeed = std::clamp(
-            finiteOr(tuning.trackingProjectileSpeed, 500.0f), 1.0f, 5000.0f);
-        tuning.trackingGravity = std::clamp(
-            finiteOr(tuning.trackingGravity, 5.24f), 0.0f, 100.0f);
+            finiteOr(tuning.adsDistanceMeters, 150.0f), 0.0f, 1000.0f);
         tuning.hipSpeed = std::clamp(finiteOr(tuning.hipSpeed, 30.0f), 1.0f, 100.0f);
         tuning.adsSpeed = std::clamp(finiteOr(tuning.adsSpeed, 30.0f), 1.0f, 100.0f);
         tuning.horizontalSpeed = std::clamp(
@@ -3220,6 +4238,52 @@ private:
             case 2: return context.firing || context.zooming;
             default: return false;
         }
+    }
+
+    static float RangeTargetAimHeight(int mode) noexcept {
+        constexpr std::array<float, 8> heights{
+            75.0f,
+            55.0f,
+            5.0f,
+            40.0f,
+            -20.0f,
+            -70.0f,
+            30.0f,
+            30.0f,
+        };
+        return mode >= 0 && mode < static_cast<int>(heights.size())
+            ? heights[static_cast<std::size_t>(mode)]
+            : heights[6];
+    }
+
+    bool SelectRangeTargetAimPoint(
+        const Vec3& root,
+        int mode,
+        const ui::AimSettings& settings,
+        const Vec3& traceOrigin,
+        const CameraView& view,
+        Vec3& world,
+        Vec2& screen) const {
+        if (!IsFinite(root)) return false;
+        world = root;
+        world.z += RangeTargetAimHeight(mode);
+        if (!IsFinite(world)) return false;
+        const native::GeometryVisibility visibility =
+            TraceGeometry(traceOrigin, world);
+        if (settings.missMode &&
+            visibility != native::GeometryVisibility::Visible) {
+            return false;
+        }
+        if (settings.requireVisibility &&
+            visibility == native::GeometryVisibility::Occluded) {
+            return false;
+        }
+        return ProjectToScreen(
+            world,
+            view,
+            options_.screenWidth,
+            options_.screenHeight,
+            screen);
     }
 
     bool SelectAimPoint(const BoneFrame& frame,
@@ -3279,6 +4343,17 @@ private:
             }
             return select(first) || select(second);
         };
+
+        if (settings.missMode && settings.coverMode == 0) {
+            const aim::CoverPointSelection selection =
+                aim::SelectCoverPoint(
+                    settings.coverMode,
+                    mode,
+                    frame.valid,
+                    frame.visibility);
+            return selection.selected &&
+                select(static_cast<int>(selection.pointIndex));
+        }
 
         switch (mode) {
             case 0: if (select(0)) return true; break;
@@ -3345,6 +4420,358 @@ private:
         return false;
     }
 
+    bool ReadTrackingMeshType(
+        std::uintptr_t mesh,
+        std::int32_t& meshType) {
+        meshType = 0;
+        if (!IsValidPointer(mesh)) return false;
+        if (ReadValue(mesh + 0x738, meshType) &&
+            meshType >= 1 && meshType <= 100) {
+            return true;
+        }
+        meshType = 0;
+        return ReadValue(mesh + 0x748, meshType) &&
+            meshType >= 1 && meshType <= 100;
+    }
+
+    bool PassTrackingAcquisitionHealth(
+        std::uintptr_t actor,
+        bool classifiedState) {
+        std::uintptr_t health = ReadPointer(actor + 0x10C8);
+        health = ReadPointer(health + 0x280);
+        health = ReadPointer(health + 0x40);
+        float current = 0.0f;
+        float maximum = 0.0f;
+        if (IsValidPointer(health)) {
+            ReadValue(health + 0x38, current);
+            ReadValue(health + 0x50, maximum);
+        }
+        std::int32_t percent = 0;
+        const float ratio = maximum != 0.0f
+            ? (current * 100.0f) / maximum
+            : 0.0f;
+        if (std::isfinite(ratio) &&
+            ratio >= static_cast<float>(std::numeric_limits<std::int32_t>::min()) &&
+            ratio <= static_cast<float>(std::numeric_limits<std::int32_t>::max())) {
+            percent = static_cast<std::int32_t>(ratio);
+        }
+        return percent > 0 || !classifiedState;
+    }
+
+    bool PassTrackingCategory(
+        std::uintptr_t actor,
+        const ui::AimSettings& settings) {
+        std::uintptr_t extra = 0;
+        ReadValue(actor + 0x2788, extra);
+        if (extra != 0) {
+            std::uintptr_t stateRoot = 0;
+            if (extra <=
+                std::numeric_limits<std::uintptr_t>::max() - 0x1030) {
+                ReadValue(extra + 0x1030, stateRoot);
+            }
+            std::uint8_t state = 0;
+            if (stateRoot != 0 &&
+                stateRoot <=
+                    std::numeric_limits<std::uintptr_t>::max() - 0x2A1) {
+                ReadValue(stateRoot + 0x2A1, state);
+            }
+            if (state == 0) return settings.playerDeadBox;
+        }
+        return settings.robotDeadBox;
+    }
+
+    void CollectTrackingCandidateFromSample(
+        const RuntimeActorRecord& record,
+        const FrameContext& context,
+        const ui::AimSettings& settings,
+        const ui::AimTuning& tuning,
+        bool rangeTargetClass,
+        std::uintptr_t playerState,
+        const Vec3& position,
+        float distanceMeters,
+        const BoneFrame& boneFrame,
+        bool boneFrameReady,
+        std::uint64_t sequence,
+        std::unordered_set<std::uintptr_t>& seenActors,
+        std::vector<AimCandidate>& candidates) {
+        const std::uint64_t identity =
+            native::ResolvePlayerIdentity(record.actor, playerState);
+        const int aimMode = context.zooming
+            ? tuning.adsBone
+            : tuning.hipBone;
+        const int preferredBone = settings.persistentLock &&
+                identity == lockedTrackingIdentity_
+            ? lockedTrackingBone_
+            : -1;
+        Vec3 targetPoint{};
+        Vec2 targetScreen{};
+        int selectedBone = -1;
+        const bool aimPointReady = rangeTargetClass
+            ? SelectRangeTargetAimPoint(
+                  position,
+                  aimMode,
+                  settings,
+                  context.view.location,
+                  context.view,
+                  targetPoint,
+                  targetScreen)
+            : boneFrameReady && SelectAimPoint(
+                  boneFrame,
+                  aimMode,
+                  settings,
+                  context.view.location,
+                  identity,
+                  sequence,
+                  preferredBone,
+                  targetPoint,
+                  targetScreen,
+                  selectedBone);
+        if (!aimPointReady) return;
+
+        const float centerX =
+            static_cast<float>(options_.screenWidth) * 0.5f;
+        const float centerY =
+            static_cast<float>(options_.screenHeight) * 0.5f;
+        const float selectionDistance = std::hypot(
+            targetScreen.x - centerX,
+            targetScreen.y - centerY);
+        const float distanceLimit = context.zooming
+            ? tuning.adsDistanceMeters
+            : tuning.hipDistanceMeters;
+        if (!std::isfinite(selectionDistance) ||
+            (settings.enforceFov &&
+             selectionDistance > tuning.rangePixels) ||
+            (settings.enforceDistance && distanceMeters > distanceLimit) ||
+            !seenActors.insert(record.actor).second) {
+            return;
+        }
+
+        Vec3 velocity{};
+        const std::uintptr_t movement = ReadPointer(record.actor + 0x3D8);
+        if (IsValidPointer(movement)) {
+            ReadValue(movement + 0x2B0, velocity);
+        }
+        if (!IsFinite(velocity)) velocity = Vec3{};
+        candidates.push_back(AimCandidate{
+            identity,
+            record.actor,
+            record.root,
+            record.mesh,
+            targetPoint,
+            velocity,
+            targetScreen,
+            selectionDistance,
+            distanceMeters,
+            selectionDistance,
+            selectedBone,
+            record.encryptedRecord,
+            false,
+            rangeTargetClass,
+            false,
+            true,
+        });
+    }
+
+    void CollectTrackingAcquisitionCandidate(
+        const RuntimeActorRecord& record,
+        const FrameContext& context,
+        const ui::AimSettings& settings,
+        const ui::AimTuning& tuning,
+        bool antiFlicker,
+        bool battlefieldMode,
+        std::uint64_t sequence,
+        std::unordered_set<std::uintptr_t>& seenActors,
+        std::vector<AimCandidate>& candidates) {
+        if (!record.resolverRecord ||
+            !IsValidPointer(record.actor) ||
+            !IsValidPointer(record.root) ||
+            !IsValidPointer(record.mesh)) {
+            return;
+        }
+
+        std::uintptr_t actorClass = 0;
+        if (!ReadValue(record.actor, actorClass) ||
+            actorClass < moduleBase_) {
+            return;
+        }
+        const std::uintptr_t classOffset = actorClass - moduleBase_;
+        const bool rangeTargetClass = classOffset == 0x1A3D6A20ULL;
+        const bool broadClass = std::find(
+            kTrackingClassOffsets.begin(),
+            kTrackingClassOffsets.end(),
+            classOffset) != kTrackingClassOffsets.end();
+        if (!broadClass) return;
+
+        std::uint8_t excludedState = 0;
+        ReadValue(record.actor + 0xDD8, excludedState);
+        if (excludedState != 0) {
+            return;
+        }
+        std::uint8_t targetState = classOffset == 0x1A3D6A20ULL
+            ? 1
+            : 0;
+        if (targetState == 0) {
+            const std::uintptr_t targetStateRoot =
+                ReadPointer(record.actor + 0x1030);
+            if (IsValidPointer(targetStateRoot)) {
+                ReadValue(targetStateRoot + 0x2A1, targetState);
+            }
+        }
+        const std::uintptr_t playerState =
+            ReadPointer(record.actor + 0x390);
+        if (!rangeTargetClass) {
+            const bool botClass = !IsValidPointer(playerState);
+            std::int32_t primaryTeam = native::kUnknownPlayerTeam;
+            std::int32_t secondaryTeam = native::kUnknownPlayerTeam;
+            const bool primaryTeamRead = !botClass &&
+                ReadValue(playerState + 0x658, primaryTeam);
+            const bool secondaryTeamRead = !botClass &&
+                ReadValue(playerState + 0x65C, secondaryTeam);
+            primaryTeam = native::ResolvePlayerTeam(
+                primaryTeamRead, primaryTeam, botClass);
+            secondaryTeam = native::ResolvePlayerTeam(
+                secondaryTeamRead, secondaryTeam, botClass);
+            const std::int32_t targetTeam = botClass
+                ? 0
+                : ((context.warfare || battlefieldMode)
+                       ? secondaryTeam
+                       : primaryTeam);
+            const bool bot = botClass || targetTeam == 0;
+            if (native::IsSamePlayerTeam(
+                    context.localTeam, targetTeam) ||
+                !native::IsEnemyEligible(
+                    context.localTeam, targetTeam, bot)) {
+                return;
+            }
+        }
+        std::uint8_t playerStateGate = 0;
+        if (IsValidPointer(playerState)) {
+            ReadValue(playerState + 0x4C0, playerStateGate);
+        }
+        if (playerStateGate != 0 && targetState == 0) return;
+
+        std::int32_t meshType = 0;
+        if (!ReadTrackingMeshType(record.mesh, meshType)) return;
+
+        Vec3 position{};
+        if (!ReadCharacterPosition(
+                record.actor,
+                record.root,
+                std::string_view{},
+                native::PositionReadMode::Direct,
+                antiFlicker,
+                position)) {
+            return;
+        }
+        const bool playerClass = std::find(
+            kTrackingPlayerClassOffsets.begin(),
+            kTrackingPlayerClassOffsets.end(),
+            classOffset) != kTrackingPlayerClassOffsets.end();
+        if (!playerClass) return;
+        const Vec3 delta = Subtract(position, context.localPosition);
+        const float distanceMeters = Length(delta) * 0.01f;
+        if (!std::isfinite(distanceMeters) || distanceMeters < 0.0f) {
+            return;
+        }
+        if (!rangeTargetClass &&
+            !PassTrackingCategory(record.actor, settings)) {
+            return;
+        }
+        if (!rangeTargetClass &&
+            !PassTrackingAcquisitionHealth(
+                record.actor, targetState != 0)) {
+            return;
+        }
+
+        const std::uint64_t identity =
+            native::ResolvePlayerIdentity(record.actor, playerState);
+        const int aimMode = context.zooming
+            ? tuning.adsBone
+            : tuning.hipBone;
+        const int preferredBone = settings.persistentLock &&
+                identity == lockedTrackingIdentity_
+            ? lockedTrackingBone_
+            : -1;
+        BoneFrame boneFrame{};
+        bool boneFrameReady = false;
+        if (!rangeTargetClass) {
+            boneFrameReady = ReadBoneFrame(
+                record, context.view, antiFlicker, &position, boneFrame);
+            if (boneFrameReady &&
+                (settings.missMode || settings.requireVisibility)) {
+                static_cast<void>(EvaluateBoneVisibility(
+                    context.view.location, boneFrame));
+            }
+        }
+        Vec3 targetPoint{};
+        Vec2 targetScreen{};
+        int selectedBone = -1;
+        const bool aimPointReady = rangeTargetClass
+            ? SelectRangeTargetAimPoint(
+                  position,
+                  aimMode,
+                  settings,
+                  context.view.location,
+                  context.view,
+                  targetPoint,
+                  targetScreen)
+            : boneFrameReady && SelectAimPoint(
+                  boneFrame,
+                  aimMode,
+                  settings,
+                  context.view.location,
+                  identity,
+                  sequence,
+                  preferredBone,
+                  targetPoint,
+                  targetScreen,
+                  selectedBone);
+        if (!aimPointReady) return;
+
+        Vec3 velocity{};
+        const std::uintptr_t movement = ReadPointer(record.actor + 0x3D8);
+        if (IsValidPointer(movement)) {
+            ReadValue(movement + 0x2B0, velocity);
+        }
+        if (!IsFinite(velocity)) velocity = Vec3{};
+
+        const float centerX =
+            static_cast<float>(options_.screenWidth) * 0.5f;
+        const float centerY =
+            static_cast<float>(options_.screenHeight) * 0.5f;
+        const float selectionDistance = std::hypot(
+            targetScreen.x - centerX, targetScreen.y - centerY);
+        const float distanceLimit = context.zooming
+            ? tuning.adsDistanceMeters
+            : tuning.hipDistanceMeters;
+        if (!std::isfinite(selectionDistance) ||
+            (settings.enforceFov &&
+             selectionDistance > tuning.rangePixels) ||
+            (settings.enforceDistance &&
+             distanceMeters > distanceLimit) ||
+            !seenActors.insert(record.actor).second) {
+            return;
+        }
+        candidates.push_back(AimCandidate{
+            identity,
+            record.actor,
+            record.root,
+            record.mesh,
+            targetPoint,
+            velocity,
+            targetScreen,
+            selectionDistance,
+            distanceMeters,
+            selectionDistance,
+            selectedBone,
+            record.encryptedRecord,
+            false,
+            rangeTargetClass,
+            false,
+            true,
+        });
+    }
+
     static std::optional<std::int32_t> TruncateTrackingCounter(float value) {
         if (!std::isfinite(value) ||
             value < static_cast<float>(std::numeric_limits<std::int32_t>::min()) ||
@@ -3356,17 +4783,27 @@ private:
 
     bool PassTrackingHitPercentage(const ui::AimSettings& settings,
                                    const FrameContext& context) {
-        std::uintptr_t state = ReadPointer(context.localPawn + 0x1030);
-        if (!IsValidPointer(state)) return false;
-        state = ReadPointer(state + 0x4D8);
-        if (!IsValidPointer(state)) return false;
-        state = ReadPointer(state + 0x1220);
-        if (!IsValidPointer(state)) return false;
+        const int percentage = std::clamp(settings.hitPercentage, 0, 100);
+        if (percentage <= 0) return false;
+        if (percentage >= 100) return true;
+        std::uintptr_t first = 0;
+        ReadValue(context.localPawn + 0x1030, first);
+        std::uintptr_t second = 0;
+        if (first <=
+            std::numeric_limits<std::uintptr_t>::max() - 0x4D8) {
+            ReadValue(first + 0x4D8, second);
+        }
+        std::uintptr_t state = 0;
+        if (second <=
+            std::numeric_limits<std::uintptr_t>::max() - 0x1220) {
+            ReadValue(second + 0x1220, state);
+        }
         float totalValue = 0.0f;
         float currentValue = 0.0f;
-        if (!ReadValue(state + 0x58, totalValue) ||
-            !ReadValue(state + 0x48, currentValue)) {
-            return false;
+        if (state <=
+            std::numeric_limits<std::uintptr_t>::max() - 0x58) {
+            ReadValue(state + 0x58, totalValue);
+            ReadValue(state + 0x48, currentValue);
         }
         const std::optional<std::int32_t> total =
             TruncateTrackingCounter(totalValue);
@@ -3375,7 +4812,7 @@ private:
         if (!total.has_value() || !current.has_value()) return false;
         const std::int32_t selected =
             aim::HitSelectionCache::SelectedCountForPercentage(
-                std::clamp(settings.hitPercentage, 0, 100), *total);
+                percentage, *total);
         const aim::HitSelectionDecision decision =
             trackingHitSelection_.Evaluate(
                 selected,
@@ -3388,17 +4825,17 @@ private:
         return decision.accepted;
     }
 
-    Vec3 ResolveTrackingOrigin(const FrameContext& context) {
+    bool ResolveTrackingOrigin(
+        const FrameContext& context,
+        Vec3& origin) {
+        origin = Vec3{};
         std::uintptr_t state = ReadPointer(context.localPawn + 0x1030);
+        if (!IsValidPointer(state)) return false;
         state = ReadPointer(state + 0x4D8);
+        if (!IsValidPointer(state)) return false;
         state = ReadPointer(state + 0x180);
-        Vec3 origin{};
-        if (IsValidPointer(state) &&
-            ReadValue(state + 0x220, origin) &&
-            IsFinite(origin)) {
-            return origin;
-        }
-        return context.view.location;
+        return IsValidPointer(state) &&
+            ReadValue(state + 0x220, origin) && IsFinite(origin);
     }
 
     void PublishAimFrame(const ui::AimSettings& settings,
@@ -3406,19 +4843,41 @@ private:
                          const FrameContext& context,
                          const std::vector<AimCandidate>& candidates,
                          GameFrame& frame) {
-        const bool enabled = settings.enabled &&
-            aimEnabled_.load(std::memory_order_acquire) &&
-            WeaponAllowsAim(context.weaponId);
-        if (!enabled) {
+        const aim::AimModeActivation aimModes =
+            aim::ResolveAimModeActivation(
+                aimEnabled_.load(std::memory_order_acquire),
+                WeaponAllowsAim(context.weaponId),
+                settings.enabled,
+                settings.trajectoryTracking);
+        const bool selfAimEnabled = aimModes.selfAim;
+        const bool trackingEnabled = aimModes.tracking;
+        bool trajectoryHookReady = false;
+        if (trackingEnabled && memory_ != nullptr) {
+            trajectoryHookReady = trajectoryHook_.EnsureInstalled(
+                *memory_, processId_, moduleBase_);
+        } else {
+            static_cast<void>(trajectoryHook_.Disable());
+        }
+        if (!selfAimEnabled && !trackingEnabled) {
             aimController_.ClearTarget();
             lockedAimIdentity_ = 0;
             lockedAimBone_ = -1;
+            lockedTrackingIdentity_ = 0;
+            lockedTrackingBone_ = -1;
             return;
+        }
+        if (!selfAimEnabled) {
+            lockedAimIdentity_ = 0;
+            lockedAimBone_ = -1;
+        }
+        if (!trackingEnabled) {
+            lockedTrackingIdentity_ = 0;
+            lockedTrackingBone_ = -1;
         }
         const bool touchInput =
             options_.inputMode == ui::AimInputMode::WriteTouch ||
             options_.inputMode == ui::AimInputMode::KernelTouch;
-        if (settings.showTouchArea && touchInput) {
+        if (selfAimEnabled && settings.showTouchArea && touchInput) {
             frame.touchRegion = TouchRegionVisual{
                 ImVec2(settings.touchX, settings.touchY),
                 settings.touchRange,
@@ -3426,29 +4885,54 @@ private:
         }
 
         const bool triggered = AimTriggered(settings, context);
-        const AimCandidate* selected = nullptr;
-        bool lockedTargetMissing = false;
-        if (triggered && settings.persistentLock && lockedAimIdentity_ != 0) {
-            const auto found = std::find_if(
-                candidates.begin(), candidates.end(), [this](const AimCandidate& candidate) {
-                    return candidate.identity == lockedAimIdentity_;
-                });
-            if (found != candidates.end()) selected = &*found;
-            else lockedTargetMissing = true;
-        }
-        if (selected == nullptr && !lockedTargetMissing && !candidates.empty()) {
-            selected = &*std::min_element(
-                candidates.begin(), candidates.end(), [&settings](
-                    const AimCandidate& left, const AimCandidate& right) {
-                    if (settings.trajectoryTracking) {
-                        return left.selectionDistancePixels <
-                            right.selectionDistancePixels;
-                    }
-                    return settings.targetAlgorithm == 0
-                        ? left.screenDistancePixels < right.screenDistancePixels
-                        : left.worldDistanceMeters < right.worldDistanceMeters;
-                });
-        }
+        const auto betterCandidate = [&settings](
+            const AimCandidate& left,
+            const AimCandidate& right) {
+            return settings.targetAlgorithm == 0
+                ? left.screenDistancePixels < right.screenDistancePixels
+                : left.worldDistanceMeters < right.worldDistanceMeters;
+        };
+        const auto selectCandidate = [this,
+                                      &candidates,
+                                      &settings,
+                                      &betterCandidate,
+                                      triggered](
+            bool trackingCandidate,
+            std::uint64_t lockedIdentity) -> const AimCandidate* {
+            const bool lockedTargetRequested = triggered &&
+                settings.persistentLock && lockedIdentity != 0;
+            const AimCandidate* selectedCandidate = nullptr;
+            for (const AimCandidate& candidate : candidates) {
+                if (lockedTargetRequested &&
+                    candidate.identity != lockedIdentity) {
+                    continue;
+                }
+                if (trackingCandidate) {
+                    if (!candidate.trackingEligible) continue;
+                } else if (!candidate.selfAimEligible) {
+                    continue;
+                }
+                if (selectedCandidate == nullptr ||
+                    betterCandidate(candidate, *selectedCandidate)) {
+                    selectedCandidate = &candidate;
+                }
+            }
+            return selectedCandidate;
+        };
+        const AimCandidate* selfAimTarget = selfAimEnabled
+            ? selectCandidate(false, lockedAimIdentity_)
+            : nullptr;
+        const AimCandidate* trackingTarget = trackingEnabled
+            ? selectCandidate(true, lockedTrackingIdentity_)
+            : nullptr;
+        const aim::AimOutputAvailability outputs =
+            aim::ResolveAimOutputAvailability(
+                aimModes,
+                selfAimTarget != nullptr,
+                trackingTarget != nullptr);
+        const AimCandidate* selected = selfAimTarget != nullptr
+            ? selfAimTarget
+            : trackingTarget;
 
         AimGuide guide{};
         guide.center = ImVec2(
@@ -3460,32 +4944,44 @@ private:
         if (selected != nullptr) {
             guide.target = ImVec2(selected->screen.x, selected->screen.y);
             guide.targetValid = true;
+            guide.selectedBone = selected->boneIndex;
+            if (selected->boneIndex >= 0) {
+                for (PlayerVisual& player : frame.players) {
+                    if (player.identity != selected->identity) continue;
+                    player.skeleton.selectedJoint = selected->boneIndex;
+                    break;
+                }
+            }
         }
 
-        if (!triggered || selected == nullptr) {
+        if (!triggered || !outputs.Any()) {
+            static_cast<void>(trajectoryHook_.Disable());
             aimController_.ClearTarget();
             if (!triggered || !settings.persistentLock) {
                 lockedAimIdentity_ = 0;
                 lockedAimBone_ = -1;
+                lockedTrackingIdentity_ = 0;
+                lockedTrackingBone_ = -1;
             }
             if (guide.drawCircle || guide.drawTargetRay) frame.aimGuide = guide;
             return;
         }
 
         if (settings.persistentLock) {
-            lockedAimIdentity_ = selected->identity;
-            lockedAimBone_ = selected->boneIndex;
+            if (selfAimTarget != nullptr) {
+                lockedAimIdentity_ = selfAimTarget->identity;
+                lockedAimBone_ = selfAimTarget->boneIndex;
+            }
+            if (trackingTarget != nullptr) {
+                lockedTrackingIdentity_ = trackingTarget->identity;
+                lockedTrackingBone_ = trackingTarget->boneIndex;
+            }
             guide.locked = true;
         } else {
             lockedAimIdentity_ = 0;
             lockedAimBone_ = -1;
-        }
-
-        if (settings.trajectoryTracking &&
-            !PassTrackingHitPercentage(settings, context)) {
-            aimController_.ClearTarget();
-            if (guide.drawCircle || guide.drawTargetRay) frame.aimGuide = guide;
-            return;
+            lockedTrackingIdentity_ = 0;
+            lockedTrackingBone_ = -1;
         }
 
         aim::TargetSnapshot snapshot{};
@@ -3500,7 +4996,6 @@ private:
         snapshot.firing = context.firing;
         snapshot.zooming = context.zooming;
         snapshot.curvedMotion = settings.curvedMotion;
-        snapshot.trajectoryTracking = settings.trajectoryTracking;
         snapshot.enforceFov = settings.enforceFov;
         snapshot.enforceDistance = settings.enforceDistance;
         snapshot.triggerMode = settings.triggerMode;
@@ -3509,18 +5004,76 @@ private:
         snapshot.touchCenterX = settings.touchX;
         snapshot.touchCenterY = settings.touchY;
         snapshot.tuning = tuning;
-        const Vec3 aimOrigin = settings.trajectoryTracking
-            ? context.firingOrigin
-            : context.view.location;
         snapshot.view.location = aim::Vec3{
-            aimOrigin.x, aimOrigin.y, aimOrigin.z};
+            context.view.location.x,
+            context.view.location.y,
+            context.view.location.z};
         snapshot.view.pitch = context.view.rotation.pitch;
         snapshot.view.yaw = context.view.rotation.yaw;
         snapshot.view.roll = context.view.rotation.roll;
         snapshot.view.fieldOfView = context.view.fieldOfView;
         snapshot.view.halfWidth = static_cast<float>(options_.screenWidth) * 0.5f;
         snapshot.view.halfHeight = static_cast<float>(options_.screenHeight) * 0.5f;
-        aimController_.Publish(snapshot);
+
+        const auto applyCandidate = [](aim::TargetSnapshot& targetSnapshot,
+                                       const AimCandidate& candidate) {
+            targetSnapshot.identity = candidate.identity;
+            targetSnapshot.world = aim::Vec3{
+                candidate.world.x,
+                candidate.world.y,
+                candidate.world.z,
+            };
+            targetSnapshot.velocity = aim::Vec3{
+                candidate.velocity.x,
+                candidate.velocity.y,
+                candidate.velocity.z,
+            };
+            targetSnapshot.screenDistancePixels =
+                candidate.screenDistancePixels;
+            targetSnapshot.worldDistanceMeters =
+                candidate.worldDistanceMeters;
+        };
+
+        if (outputs.tracking) {
+            const bool trackingAllowed =
+                PassTrackingHitPercentage(settings, context);
+            if (trackingAllowed && trajectoryHookReady &&
+                context.firingOriginValid) {
+                aim::TargetSnapshot trackingSnapshot = snapshot;
+                applyCandidate(trackingSnapshot, *trackingTarget);
+                const aim::Vec3 predicted =
+                    aim::PredictInterceptPoint(trackingSnapshot);
+                const aim::TrackingCommand command =
+                    aim::TrackingCalculator::CalculateAngles(
+                        true,
+                        aim::TrackingPoint{
+                            context.firingOrigin.x,
+                            context.firingOrigin.y,
+                            context.firingOrigin.z,
+                        },
+                        aim::TrackingPoint{
+                            predicted.x,
+                            predicted.y,
+                            predicted.z,
+                        });
+                if (command.flag == 0 ||
+                    !trajectoryHook_.Publish(command)) {
+                    static_cast<void>(trajectoryHook_.Disable());
+                }
+            } else {
+                static_cast<void>(trajectoryHook_.Disable());
+            }
+        } else if (trackingEnabled) {
+            static_cast<void>(trajectoryHook_.Disable());
+        }
+
+        if (outputs.selfAim) {
+            aim::TargetSnapshot selfAimSnapshot = snapshot;
+            applyCandidate(selfAimSnapshot, *selfAimTarget);
+            aimController_.Publish(selfAimSnapshot);
+        } else {
+            aimController_.ClearTarget();
+        }
         if (guide.drawCircle || guide.drawTargetRay) frame.aimGuide = guide;
     }
 
@@ -3620,30 +5173,255 @@ private:
         boneCache_.clear();
         nameCache_.clear();
         itemMetadata_.clear();
+        worldObjectFrameCache_.Clear();
+        worldObjectActors_.clear();
+        worldObjectDiscoveryPolicy_.Invalidate();
+        worldObjectContentPolicy_.Invalidate();
         projectileTrails_.clear();
         threatFirstSeen_.clear();
         aimWarningStates_.clear();
         hudMapCache_.Clear();
         characterPositions_.Clear();
+        algorithmPositionRuntime_.Invalidate();
         positionReadMode_ = native::PositionReadMode::Standard;
         projectileSpeedReader_.Invalidate();
         trackingHitSelection_.Reset();
         lockedAimIdentity_ = 0;
         lockedAimBone_ = -1;
+        lockedTrackingIdentity_ = 0;
+        lockedTrackingBone_ = -1;
         aimController_.ClearTarget();
         lastViewValid_ = false;
         lastView_ = CameraView{};
     }
 
-    void CloseLocked() noexcept {
+    void RefreshAlgorithmExecutionContext() {
+        bool coordinatePoolSelected = UsesCoordinatePoolRuntime();
+        if (!algorithmPositionRequested_ || memory_ == nullptr ||
+            (!coordinatePoolSelected && !algorithmEntryReady_)) {
+            if (!algorithmPositionRequested_ ||
+                (!coordinatePoolSelected && !algorithmEntryReady_)) {
+                algorithmExecutionContext_ = {};
+                algorithmExecutionContextReady_ = false;
+            }
+            coordinatePoolReady_ = false;
+            if (!algorithmPositionRequested_ && coordinatePoolSelected) {
+                coordinatePoolRuntime_.Reset();
+                coordinatePoolFrame_ = 0;
+            }
+            return;
+        }
+
+        native::ProcessExecutionContext refreshed{};
+        if (!memory_->ReadProcessExecutionContext(refreshed)) {
+            if (algorithmExecutionContextReady_) {
+                algorithmPositionRuntime_.Invalidate();
+            }
+            algorithmExecutionContext_ = {};
+            algorithmExecutionContextReady_ = false;
+        } else {
+            if (!coordinatePoolSelected && !refreshed.HasPacgaKey()) {
+                coordinatePoolFallback_ = true;
+                coordinatePoolRuntime_.Reset();
+                coordinatePoolReady_ = false;
+                coordinatePoolFrame_ = 0;
+                coordinatePoolSelected = true;
+            }
+            if (!algorithmExecutionContextReady_ ||
+                algorithmExecutionContext_.generation !=
+                    refreshed.generation ||
+                algorithmExecutionContext_.threadId != refreshed.threadId ||
+                algorithmExecutionContext_.threadStartTimeTicks !=
+                    refreshed.threadStartTimeTicks) {
+                algorithmPositionRuntime_.Invalidate();
+            }
+            algorithmExecutionContext_ = refreshed;
+            algorithmExecutionContextReady_ = true;
+        }
+
+        if (coordinatePoolSelected) {
+            coordinatePoolFrame_ =
+                coordinatePoolFrame_ ==
+                        std::numeric_limits<std::uint64_t>::max()
+                    ? 1
+                    : coordinatePoolFrame_ + 1;
+            coordinatePoolReady_ = coordinatePoolRuntime_.Refresh(
+                *memory_,
+                processId_,
+                moduleBase_,
+                algorithmExecutionContext_,
+                coordinatePoolFrame_);
+        } else {
+            coordinatePoolReady_ = false;
+        }
+    }
+
+    void RefreshAlgorithmEntry(bool force) {
+        const auto now = std::chrono::steady_clock::now();
+        if (!force &&
+            algorithmEntryValidationAt_.time_since_epoch().count() != 0 &&
+            now - algorithmEntryValidationAt_ < std::chrono::seconds(1)) {
+            return;
+        }
+        algorithmEntryValidationAt_ = now;
+
+        std::uintptr_t candidatePc = 0;
+        std::uint32_t candidateInstruction = 0;
+        const bool candidateReady = memory_ != nullptr &&
+            native::ResolveAlgorithmPositionGuestPc(
+                algorithmPositionConfig_, moduleBase_, candidatePc) &&
+            IsMappedExecutableAddress(processId_, candidatePc) &&
+            memory_->Read(
+                candidatePc,
+                &candidateInstruction,
+                sizeof(candidateInstruction)) &&
+            candidateInstruction != 0 && candidateInstruction != UINT32_MAX;
+        const bool wasCoordinatePoolSelected = UsesCoordinatePoolRuntime();
+        const bool changed = candidateReady != algorithmEntryReady_ ||
+            candidatePc != algorithmGuestPc_ ||
+            (candidateReady &&
+             candidateInstruction != algorithmEntryInstruction_);
+        if (changed && candidateReady) {
+            coordinatePoolFallback_ = false;
+        }
+        if (changed) {
+            algorithmPositionRuntime_.Invalidate();
+            algorithmExecutionContext_ = {};
+            algorithmExecutionContextReady_ = false;
+        }
+        algorithmGuestPc_ = candidatePc;
+        algorithmEntryInstruction_ = candidateReady
+            ? candidateInstruction
+            : 0;
+        algorithmEntryReady_ = candidateReady;
+        if (wasCoordinatePoolSelected != UsesCoordinatePoolRuntime()) {
+            coordinatePoolRuntime_.Reset();
+            coordinatePoolReady_ = false;
+            coordinatePoolFrame_ = 0;
+        }
+    }
+
+    void EvaluateAlgorithmExecutionHealth() {
+        if (!algorithmPositionRequested_ || !CoordinateEntryReady() ||
+            !algorithmExecutionContextReady_ ||
+            algorithmFrameAttemptCount_ == 0) {
+            if (!algorithmPositionRequested_ ||
+                !algorithmExecutionContextReady_) {
+                algorithmFailureSince_ = {};
+            }
+            return;
+        }
+        if (algorithmFrameSuccessCount_ != 0) {
+            algorithmFailureSince_ = {};
+            return;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (algorithmFailureSince_.time_since_epoch().count() == 0) {
+            algorithmFailureSince_ = now;
+            return;
+        }
+        if (now - algorithmFailureSince_ < std::chrono::seconds(2) ||
+            memory_ == nullptr) {
+            return;
+        }
+        if (!UsesCoordinatePoolRuntime()) {
+            coordinatePoolFallback_ = true;
+            coordinatePoolRuntime_.Reset();
+            coordinatePoolReady_ = false;
+            coordinatePoolFrame_ = 0;
+        } else if (!memory_->RejectProcessExecutionContext()) {
+            return;
+        }
+        algorithmFailureSince_ = {};
+        algorithmExecutionContext_ = {};
+        algorithmExecutionContextReady_ = false;
+        coordinatePoolReady_ = false;
+        algorithmPositionRuntime_.Invalidate();
+    }
+
+    bool UsesCoordinatePoolRuntime() const noexcept {
+        return !algorithmEntryReady_ || coordinatePoolFallback_;
+    }
+
+    bool CoordinateEntryReady() const {
+        if (!UsesCoordinatePoolRuntime()) return algorithmEntryReady_;
+        const native::CoordinatePoolRuntimeProbe runtimeProbe =
+            coordinatePoolRuntime_.Probe();
+        return runtimeProbe.guestEntry != 0 && runtimeProbe.codeBase != 0 &&
+            runtimeProbe.codeSize != 0;
+    }
+
+    void ApplyCoordinateDiagnostic(std::string& diagnostic) const {
+        if (!algorithmPositionRequested_) return;
+        if (!CoordinateEntryReady()) {
+            diagnostic = "coordinate replay entry missing";
+        } else if (!algorithmExecutionContextReady_) {
+            diagnostic = "coordinate thread context missing";
+        } else if (algorithmFrameAttemptCount_ != 0 &&
+                   algorithmFrameSuccessCount_ == 0) {
+            diagnostic = "coordinate replay produced no position";
+        }
+    }
+
+    void UpdateCoordinateProbe(RuntimeProbe& probe) const {
+        const bool coordinatePoolSelected = UsesCoordinatePoolRuntime();
+        const native::CoordinatePoolRuntimeProbe poolProbe =
+            coordinatePoolSelected
+            ? coordinatePoolRuntime_.Probe()
+            : native::CoordinatePoolRuntimeProbe{};
+        probe.coordinateRequested = algorithmPositionRequested_;
+        probe.coordinateEntryReady = coordinatePoolSelected
+            ? poolProbe.guestEntry != 0 && poolProbe.codeBase != 0 &&
+                poolProbe.codeSize != 0
+            : algorithmEntryReady_;
+        probe.coordinateContextReady = algorithmExecutionContextReady_;
+        probe.coordinateThreadId = algorithmExecutionContext_.threadId;
+        probe.coordinateGuestPc = coordinatePoolSelected
+            ? poolProbe.guestEntry
+            : algorithmGuestPc_;
+        probe.coordinateContextGeneration =
+            algorithmExecutionContext_.generation;
+        probe.coordinateAttempts = algorithmAttemptCount_;
+        probe.coordinateSuccesses = algorithmSuccessCount_;
+    }
+
+    bool CloseLocked() noexcept {
         opened_ = false;
         aimController_.Stop();
         geometryRuntime_.Stop();
+        bool hookStopped = false;
+        for (int attempt = 0; attempt < 3 && !hookStopped; ++attempt) {
+            hookStopped = trajectoryHook_.Shutdown();
+        }
+        if (!hookStopped) {
+            aimEnabled_.store(false, std::memory_order_release);
+            return false;
+        }
         geometrySnapshotReady_ = false;
         geometryRefreshEpoch_ = 0;
         geometryRetryAfter_ = {};
+        algorithmPositionRuntime_.Reset();
+        coordinatePoolRuntime_.Reset();
         if (memory_ != nullptr) memory_->Close();
         memory_.reset();
+        algorithmExecutionContext_ = {};
+        algorithmExecutionContextReady_ = false;
+        algorithmGuestPc_ = 0;
+        algorithmEntryInstruction_ = 0;
+        algorithmEntryReady_ = false;
+        algorithmEntryValidationAt_ = {};
+        algorithmFailureSince_ = {};
+        algorithmRefreshPending_ = true;
+        algorithmAttemptCount_ = 0;
+        algorithmSuccessCount_ = 0;
+        algorithmFrameAttemptCount_ = 0;
+        algorithmFrameSuccessCount_ = 0;
+        algorithmPositionRequested_ = false;
+        algorithmPositionConfig_ = {};
+        coordinatePoolFallback_ = false;
+        coordinatePoolReady_ = false;
+        coordinatePoolFrame_ = 0;
         processId_ = -1;
         moduleBase_ = 0;
         layout_ = VersionLayout{};
@@ -3652,12 +5430,33 @@ private:
         customItems_.Clear();
         ResetWorldState();
         aimEnabled_.store(false, std::memory_order_release);
+        return true;
     }
 
     std::mutex mutex_;
     RuntimeOptions options_{};
     VersionLayout layout_{};
     std::unique_ptr<native::MemoryTransport> memory_;
+    native::AlgorithmPositionRuntime algorithmPositionRuntime_{};
+    native::CoordinatePoolRuntime coordinatePoolRuntime_{};
+    native::AlgorithmPositionRuntimeConfig algorithmPositionConfig_{};
+    native::ProcessExecutionContext algorithmExecutionContext_{};
+    std::uintptr_t algorithmGuestPc_ = 0;
+    std::uint32_t algorithmEntryInstruction_ = 0;
+    bool algorithmExecutionContextReady_ = false;
+    bool algorithmEntryReady_ = false;
+    bool algorithmRefreshPending_ = true;
+    bool algorithmPositionRequested_ = false;
+    bool coordinatePoolReady_ = false;
+    bool coordinatePoolFallback_ = false;
+    std::uint64_t algorithmAttemptCount_ = 0;
+    std::uint64_t algorithmSuccessCount_ = 0;
+    std::uint64_t algorithmFrameAttemptCount_ = 0;
+    std::uint64_t algorithmFrameSuccessCount_ = 0;
+    std::uint64_t coordinatePoolFrame_ = 0;
+    std::chrono::steady_clock::time_point algorithmEntryValidationAt_{};
+    std::chrono::steady_clock::time_point algorithmFailureSince_{};
+    native::TrajectoryHook trajectoryHook_{};
     pid_t processId_ = -1;
     std::uintptr_t moduleBase_ = 0;
     std::uintptr_t world_ = 0;
@@ -3669,6 +5468,12 @@ private:
     std::unordered_map<std::uintptr_t, BoneCacheEntry> boneCache_;
     std::unordered_map<std::int32_t, std::string> nameCache_;
     std::unordered_map<std::uint64_t, std::pair<int, int>> itemMetadata_;
+    WorldObjectFrameCache worldObjectFrameCache_{};
+    std::vector<CachedWorldActor> worldObjectActors_;
+    native::WorldObjectRefreshPolicy worldObjectDiscoveryPolicy_{
+        std::chrono::seconds(10)};
+    native::WorldObjectRefreshPolicy worldObjectContentPolicy_{
+        std::chrono::milliseconds(500)};
     std::unordered_map<std::uintptr_t, std::vector<Vec3>> projectileTrails_;
     std::unordered_map<
         std::uintptr_t,
@@ -3685,6 +5490,8 @@ private:
     std::chrono::steady_clock::time_point geometryRetryAfter_{};
     std::uint64_t lockedAimIdentity_ = 0;
     int lockedAimBone_ = -1;
+    std::uint64_t lockedTrackingIdentity_ = 0;
+    int lockedTrackingBone_ = -1;
     aim::AimController aimController_;
     data::CustomItemCatalog customItems_;
     std::string customItemPath_;

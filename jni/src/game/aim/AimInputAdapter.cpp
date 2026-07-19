@@ -41,7 +41,7 @@ void ApplyOrientation(int orientation, float& pitch, float& yaw) {
 }  // namespace
 
 struct AimInputAdapter::Impl {
-    ui::AimInputMode mode = ui::AimInputMode::WriteTouch;
+    ui::AimInputMode mode = ui::AimInputMode::ReadOnly;
     bool started = false;
     int width = 0;
     int height = 0;
@@ -115,6 +115,8 @@ bool AimInputAdapter::Start(ui::AimInputMode mode) {
     impl_->mode = mode;
 
     switch (mode) {
+        case ui::AimInputMode::ReadOnly:
+            break;
         case ui::AimInputMode::WriteTouch:
             StopTouchScreen();
             if (!TouchScreenHandle(1)) {
@@ -168,7 +170,7 @@ void AimInputAdapter::Stop() noexcept {
     impl_->width = 0;
     impl_->height = 0;
     impl_->orientation = 0;
-    impl_->mode = ui::AimInputMode::WriteTouch;
+    impl_->mode = ui::AimInputMode::ReadOnly;
     impl_->started = false;
 }
 

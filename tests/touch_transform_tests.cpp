@@ -32,6 +32,20 @@ void RunTouchTransformTests() {
     RequirePoint(DisplayToNatural(display, 2), 0.8f, 0.7f);
     RequirePoint(DisplayToNatural(display, 3), 0.3f, 0.8f);
 
+    const NormalizedPoint natural{0.2f, 0.3f};
+    RequirePoint(NaturalToDisplay(natural, 0), 0.2f, 0.3f);
+    RequirePoint(NaturalToDisplay(natural, 1), 0.3f, 0.8f);
+    RequirePoint(NaturalToDisplay(natural, 2), 0.8f, 0.7f);
+    RequirePoint(NaturalToDisplay(natural, 3), 0.7f, 0.2f);
+
+    const NormalizedPoint devicePoint{
+        10112.0f / 20224.0f,
+        33360.0f / 44480.0f,
+    };
+    const NormalizedPoint landscape =
+        NaturalToDisplay(devicePoint, 1);
+    RequirePoint(landscape, 0.75f, 0.5f);
+
     constexpr std::array<NormalizedPoint, 5> points{{
         {0.0f, 0.0f},
         {0.2f, 0.3f},

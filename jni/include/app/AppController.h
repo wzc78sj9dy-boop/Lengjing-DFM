@@ -21,7 +21,9 @@ struct AppOptions {
     std::vector<std::string> driverOptions;
     std::string buildVersion;
     void* menuLogoTexture = nullptr;
-    ui::AimInputMode inputMode = ui::AimInputMode::WriteTouch;
+    ui::AimInputMode inputMode = ui::AimInputMode::ReadOnly;
+    std::shared_ptr<const auth::CloudLayoutDocument> cloudLayout;
+    game::native::AlgorithmPositionRuntimeConfig algorithmPosition;
 };
 
 class AppController final : public ui::UiActions {
@@ -41,6 +43,10 @@ public:
     const ui::UiModel& Model() const noexcept;
     bool ExitRequested() const noexcept;
     int TargetFrameRate() const noexcept;
+    ui::RenderBackend DesiredRenderBackend() const noexcept;
+    void ReportRenderBackend(
+        ui::RenderBackend activeBackend,
+        bool fallbackApplied = false) noexcept;
     void SetMenuVisible(bool visible) noexcept;
     void SetMenuLogoTexture(void* texture) noexcept;
     void SetDisplayGeometry(int width, int height, int orientation) noexcept;
