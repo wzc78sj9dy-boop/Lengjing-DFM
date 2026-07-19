@@ -1,0 +1,7 @@
+Unicorn Engine 2.1.4
+Source: https://github.com/unicorn-engine/unicorn/tree/8028ec436f2d9376525352dd38ed9ed6b9f6be10
+Target: Android arm64-v8a, API 21
+Toolchain: Android NDK r27d
+Architectures: aarch64
+Build type: Release, static legacy archive, debug sections removed
+Archive SHA256: 26117c970e5676ef1adc5c022450c99f1bcb651fc9cde9a1dd1c1dd58dcb26e9

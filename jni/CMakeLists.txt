@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.18)
 project(lengjing VERSION 1.0.0 LANGUAGES C CXX)
 
+option(LENGJING_ENABLE_RUNTIME_AUTH "Enable runtime T3 authentication" OFF)
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
@@ -23,6 +25,9 @@ file(GLOB_RECURSE LENGJING_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cc"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
+list(APPEND LENGJING_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/lib/t3/t3sdk.cpp"
+)
 list(FILTER LENGJING_SOURCES EXCLUDE REGEX "/imgui_demo\\.cpp$")
 
 set_source_files_properties(
@@ -40,6 +45,9 @@ set_target_properties(lengjing PROPERTIES
 
 target_compile_definitions(lengjing PRIVATE
     LENGJING_VERSION="${PROJECT_VERSION}"
+    LENGJING_ENABLE_RUNTIME_AUTH=$<BOOL:${LENGJING_ENABLE_RUNTIME_AUTH}>
+    VK_USE_PLATFORM_ANDROID_KHR
+    IMGUI_IMPL_VULKAN_NO_PROTOTYPES
 )
 
 target_include_directories(lengjing PRIVATE
@@ -55,6 +63,7 @@ target_include_directories(lengjing PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/lib
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/embree4
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/paradise
+    ${CMAKE_CURRENT_SOURCE_DIR}/lib/unicorn/include
 )
 
 target_compile_options(lengjing PRIVATE
@@ -87,6 +96,7 @@ set(LENGJING_STATIC_LIBRARIES
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/libsimd.a
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/libsys.a
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/libtasking.a
+    ${CMAKE_CURRENT_SOURCE_DIR}/lib/unicorn/arm64-v8a/libunicorn.a
 )
 
 foreach(LENGJING_LIBRARY IN LISTS LENGJING_STATIC_LIBRARIES)
@@ -98,7 +108,10 @@ endforeach()
 target_link_libraries(lengjing PRIVATE
     log
     android
+    EGL
+    GLESv3
     dl
+    m
     z
     ${LENGJING_STATIC_LIBRARIES}
 )

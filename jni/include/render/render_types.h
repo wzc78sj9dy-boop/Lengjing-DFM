@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "ImGui/imgui.h"
+#include "game/VisibilityState.h"
 
 namespace lengjing {
 
@@ -79,6 +80,7 @@ struct ScreenRect {
 struct BoneJoint {
     ImVec2 position{};
     bool valid = false;
+    game::VisibilityState visibility = game::VisibilityState::Unavailable;
 };
 
 struct BoneLink {
@@ -89,6 +91,8 @@ struct BoneLink {
 struct SkeletonVisual {
     std::vector<BoneJoint> joints;
     std::vector<BoneLink> links;
+    bool colorByVisibility = false;
+    int selectedJoint = -1;
 };
 
 struct VitalState {
@@ -100,6 +104,7 @@ struct VitalState {
 };
 
 struct PlayerVisual {
+    std::uint64_t identity = 0;
     ScreenRect bounds{};
     SkeletonVisual skeleton{};
     VitalState vitals{};
@@ -113,6 +118,7 @@ struct PlayerVisual {
     bool drawVitals = true;
     bool drawTracer = false;
     bool visible = true;
+    bool coverHighlighted = false;
 };
 
 struct OffscreenMarker {
@@ -173,6 +179,7 @@ struct AimGuide {
     bool drawTargetRay = false;
     bool targetValid = false;
     bool locked = false;
+    int selectedBone = -1;
 };
 
 struct TouchRegionVisual {

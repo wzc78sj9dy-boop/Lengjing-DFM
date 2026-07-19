@@ -1,6 +1,6 @@
 #pragma once
 
-#include "game\GameBackend.h"
+#include "game/GameBackend.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -50,6 +50,7 @@ public:
 
 private:
     void WorkerMain(RuntimeOptions options);
+    void CloseBackendUntilSafe() noexcept;
     void SetStatus(RuntimePhase phase,
                    const RuntimeProbe& probe,
                    std::string message = {});

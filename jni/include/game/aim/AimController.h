@@ -39,7 +39,6 @@ struct TargetSnapshot {
     bool firing = false;
     bool zooming = false;
     bool curvedMotion = false;
-    bool trajectoryTracking = false;
     bool enforceFov = true;
     bool enforceDistance = true;
     int triggerMode = 0;
@@ -73,7 +72,7 @@ private:
 
     mutable std::mutex mutex_;
     TargetSnapshot target_{};
-    ui::AimInputMode mode_ = ui::AimInputMode::WriteTouch;
+    ui::AimInputMode mode_ = ui::AimInputMode::ReadOnly;
     std::atomic_bool stopRequested_{true};
     std::atomic_bool enabled_{false};
     std::atomic_bool running_{false};
