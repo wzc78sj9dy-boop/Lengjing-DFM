@@ -1022,11 +1022,8 @@ void RasterPreparedTriangle(const PreparedTriangleState& state,
                         * state.inverse_area;
                     const float wc = static_cast<float>(edge2)
                         * state.inverse_area;
-                    const float alpha = static_cast<float>(a.color >> 24) * wa
-                        + static_cast<float>(b.color >> 24) * wb
-                        + static_cast<float>(c.color >> 24) * wc;
-                    const uint32_t source_alpha = static_cast<uint32_t>(
-                        std::clamp(static_cast<int>(alpha), 0, 255));
+                    const uint32_t source_alpha =
+                        InterpolateColor(a, b, c, wa, wb, wc) >> 24;
                     if (source_alpha != 0)
                         *dst = BlendPixel(*dst, rgb | (source_alpha << 24));
                 }
