@@ -10,7 +10,6 @@ set "BIN="
 set "ROOT_BIN="
 set "USE_UPX=0"
 set "READELF="
-set "STRIP="
 set "SYMBOL_REPORT=%BUILD_DIR%\lengjing_symbol_check_%RANDOM%_%RANDOM%.txt"
 set "RELEASE_REPORT=%BUILD_DIR%\lengjing_release_check_%RANDOM%_%RANDOM%.txt"
 
@@ -67,16 +66,6 @@ for %%I in (llvm-readelf.exe) do set "READELF=%%~$PATH:I"
         echo [ERROR] llvm-readelf.exe not found. Cannot verify the symbol table.
         exit /b 1
     )
-    for %%I in (llvm-strip.exe) do set "STRIP=%%~$PATH:I"
-    if not defined STRIP if exist "%BUILD_DIR%\CMakeCache.txt" (
-        for /f "tokens=2 delims==" %%S in ('findstr /B /C:"CMAKE_STRIP:FILEPATH=" "%BUILD_DIR%\CMakeCache.txt"') do (
-            if exist "%%S" set "STRIP=%%S"
-        )
-    )
-    if not defined STRIP (
-        echo [ERROR] llvm-strip.exe not found. Cannot prepare the release product.
-        exit /b 1
-    )
     "!READELF!" --sections --wide "!BIN!" >"!SYMBOL_REPORT!" 2>nul
     if errorlevel 1 (
         del /q "!SYMBOL_REPORT!" >nul 2>&1
@@ -130,12 +119,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-"!STRIP!" --strip-all "!ROOT_BIN!"
-if errorlevel 1 (
-    del /q "!ROOT_BIN!" >nul 2>&1
-    echo [ERROR] Unable to strip the release product.
-    exit /b 1
-)
 if "!USE_UPX!"=="1" (
     for %%I in ("!ROOT_BIN!") do echo [UPX] before: %%~zI bytes
     "!UPX_EXE!" -t "!ROOT_BIN!" >nul 2>&1
@@ -157,7 +140,7 @@ if "!USE_UPX!"=="1" (
     )
     for %%I in ("!ROOT_BIN!") do echo [UPX] after: %%~zI bytes
 ) else (
-    echo [SYMBOLS] Stripped release copied without compression.
+    echo [SYMBOLS] Unstripped CMake product copied without compression.
 )
 
 "!READELF!" --sections --wide "!ROOT_BIN!" >"!RELEASE_REPORT!" 2>nul
@@ -166,14 +149,14 @@ if errorlevel 1 (
     echo [ERROR] Unable to inspect the release product.
     exit /b 1
 )
-findstr /R /C:"\.symtab" /C:"\.strtab" /C:"\.debug_" "!RELEASE_REPORT!" >nul 2>&1
-if not errorlevel 1 (
+findstr /C:".symtab" "!RELEASE_REPORT!" >nul 2>&1
+if errorlevel 1 (
     del /q "!RELEASE_REPORT!" "!ROOT_BIN!" >nul 2>&1
-    echo [ERROR] The release product still contains debug or static symbol sections.
+    echo [ERROR] The release product lost its ELF symbol table.
     exit /b 1
 )
 del /q "!RELEASE_REPORT!" >nul 2>&1
-echo [SYMBOLS] Release debug and static symbol sections removed.
+echo [SYMBOLS] Release ELF symbol table preserved.
 
 for /f "usebackq delims=" %%H in (`powershell.exe -NoProfile -NonInteractive -Command "(Get-FileHash -LiteralPath $env:BIN -Algorithm SHA256).Hash.ToLowerInvariant()"`) do set "BUILD_SHA_AFTER=%%H"
 for /f "usebackq delims=" %%H in (`powershell.exe -NoProfile -NonInteractive -Command "(Get-FileHash -LiteralPath $env:ROOT_BIN -Algorithm SHA256).Hash.ToLowerInvariant()"`) do set "ROOT_SHA=%%H"
@@ -187,6 +170,10 @@ if not defined ROOT_SHA (
 )
 if /i not "!BUILD_SHA_BEFORE!"=="!BUILD_SHA_AFTER!" (
     echo [ERROR] The build product changed during packing.
+    exit /b 1
+)
+if "!USE_UPX!"=="0" if /i not "!BUILD_SHA_BEFORE!"=="!ROOT_SHA!" (
+    echo [ERROR] The copied release product differs from the CMake product.
     exit /b 1
 )
 echo [DONE] !ROOT_BIN!
