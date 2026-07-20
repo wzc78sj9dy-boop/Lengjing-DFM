@@ -119,6 +119,7 @@ struct PlayerVisual {
     bool drawTracer = false;
     bool visible = true;
     bool coverHighlighted = false;
+    bool isBot = false;
 };
 
 struct OffscreenMarker {

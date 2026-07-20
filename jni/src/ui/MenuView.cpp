@@ -681,12 +681,14 @@ bool AllContainersEnabled(const LootSettings& loot) {
 }
 
 bool AimQuickOptionsEnabled(const AimSettings& aim) {
-    return aim.ignoreBots && aim.persistentLock && aim.drawRange && aim.drawTargetRay;
+    return aim.ignoreBots && aim.persistentLock && aim.enforceFov &&
+        aim.drawRange && aim.drawTargetRay;
 }
 
 void SetAimQuickOptions(AimSettings& aim, bool value) {
     aim.ignoreBots = value;
     aim.persistentLock = value;
+    aim.enforceFov = value;
     aim.drawRange = value;
     aim.drawTargetRay = value;
 }

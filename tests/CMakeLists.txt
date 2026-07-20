@@ -13,6 +13,7 @@ add_executable(lengjing_tests
     actor_record_source_tests.cpp
     actor_record_resolver_tests.cpp
     algorithm_position_policy_tests.cpp
+    aim_guide_policy_tests.cpp
     aim_mode_policy_tests.cpp
     aim_prediction_tests.cpp
     auth_config_tests.cpp

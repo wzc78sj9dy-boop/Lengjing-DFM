@@ -322,6 +322,12 @@ void OverlayRenderer::DrawPlayerPlate(ImDrawList* drawList,
                  viewport.bottom - margin - textHeight));
     const float centerX = player.bounds.Center().x;
     const ImU32 textShadow = WithAlpha(style_.colors.shadow, 0.62f);
+    const ImU32 titleColor = player.isBot
+        ? style_.colors.text
+        : (player.visible ? style_.colors.text : style_.colors.textMuted);
+    const ImU32 detailColor = player.isBot
+        ? style_.colors.text
+        : style_.colors.textMuted;
 
     float cursorY = textTop;
     if (!title.empty()) {
@@ -331,7 +337,7 @@ void OverlayRenderer::DrawPlayerPlate(ImDrawList* drawList,
             viewport.right - margin - titleExtent.x);
         DrawText(drawList,
                  ImVec2(titleX, cursorY),
-                 player.visible ? style_.colors.text : style_.colors.textMuted,
+                 titleColor,
                  textShadow,
                  titleSize,
                  title);
@@ -344,7 +350,7 @@ void OverlayRenderer::DrawPlayerPlate(ImDrawList* drawList,
             viewport.right - margin - detailExtent.x);
         DrawText(drawList,
                  ImVec2(detailX, cursorY),
-                 style_.colors.textMuted,
+                 detailColor,
                  textShadow,
                  detailSize,
                  detail);

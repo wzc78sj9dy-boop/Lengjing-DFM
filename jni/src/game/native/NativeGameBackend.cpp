@@ -1,5 +1,6 @@
 #include "game/GameBackend.h"
 #include "game/aim/AimController.h"
+#include "game/aim/AimGuidePolicy.h"
 #include "game/aim/AimModePolicy.h"
 #include "game/aim/AimPrediction.h"
 #include "game/aim/CoverSelectionPolicy.h"
@@ -244,8 +245,11 @@ native::GeometryPoint ToGeometryPoint(const Vec3& value) {
 SemanticTone ToneForVisibility(bool bot,
                                bool visibilityColor,
                                native::GeometryVisibility visibility) {
+    if (bot) {
+        return SemanticTone::Neutral;
+    }
     if (!visibilityColor) {
-        return bot ? SemanticTone::Caution : SemanticTone::Danger;
+        return SemanticTone::Danger;
     }
     switch (visibility) {
         case native::GeometryVisibility::Visible:
@@ -1568,7 +1572,7 @@ public:
                 marker.markerScale = std::clamp(
                     settings.visual.warningSize / 300.0f, 0.35f, 2.5f);
                 marker.distanceMeters = distanceMeters;
-                marker.tone = bot ? SemanticTone::Caution : SemanticTone::Danger;
+                marker.tone = bot ? SemanticTone::Neutral : SemanticTone::Danger;
                 frame.offscreenMarkers.push_back(std::move(marker));
             }
 
@@ -1805,12 +1809,13 @@ public:
             }
             PlayerVisual visual{};
             visual.identity = native::ResolvePlayerIdentity(actor, playerState);
+            visual.isBot = bot;
             visual.bounds = playerBounds;
             visual.tone = ToneForVisibility(
                 bot, settings.visual.visibilityColor, playerVisibility);
-            visual.visible =
+            visual.visible = bot ||
                 playerVisibility != native::GeometryVisibility::Occluded;
-            if (settings.aim.missMode && settings.aim.coverMode == 1 &&
+            if (!bot && settings.aim.missMode && settings.aim.coverMode == 1 &&
                 boneFrameReady) {
                 const int coverAimMode = context.zooming
                     ? aimTuning.adsBone
@@ -1837,7 +1842,7 @@ public:
                     settings.visual.skeletonDistanceMeters;
             visual.tracerOrigin = ImVec2(
                 static_cast<float>(options_.screenWidth) * 0.5f,
-                static_cast<float>(options_.screenHeight) - 10.0f);
+                10.0f);
             visual.vitals.health = health.health;
             visual.vitals.maxHealth = health.maxHealth;
             visual.vitals.armor = health.armor;
@@ -1910,7 +1915,7 @@ public:
                         boneFrame);
                 }
                 visual.skeleton.colorByVisibility =
-                    !visual.coverHighlighted &&
+                    !bot && !visual.coverHighlighted &&
                     (settings.visual.visibilityColor ||
                      settings.aim.missMode);
                 if (!boneFrameReady) visual.drawSkeleton = false;
@@ -2828,7 +2833,7 @@ private:
                     label.title = bot ? "人机盒子" : "玩家盒子";
                     label.detail = ContainerDetail(distanceMeters, items);
                     label.kind = WorldLabelKind::Container;
-                    label.tone = bot ? SemanticTone::Muted : SemanticTone::Ally;
+                    label.tone = bot ? SemanticTone::Neutral : SemanticTone::Ally;
                     appendWorldLabel(std::move(label));
                 }
             }
@@ -5281,7 +5286,14 @@ private:
             static_cast<float>(options_.screenHeight) * 0.5f);
         guide.radius = tuning.rangePixels;
         guide.drawCircle = settings.drawRange;
-        guide.drawTargetRay = settings.drawTargetRay && selected != nullptr;
+        guide.drawTargetRay = aim::ShouldDrawTargetRay(
+            settings.drawTargetRay,
+            selected != nullptr,
+            settings.drawRange,
+            selected != nullptr
+                ? selected->screenDistancePixels
+                : 0.0f,
+            tuning.rangePixels);
         if (selected != nullptr) {
             guide.target = ImVec2(selected->screen.x, selected->screen.y);
             guide.targetValid = true;
@@ -5471,7 +5483,14 @@ private:
             static_cast<float>(options_.screenHeight) * 0.5f);
         guide.radius = tuning.rangePixels;
         guide.drawCircle = settings.drawRange;
-        guide.drawTargetRay = settings.drawTargetRay && selected != nullptr;
+        guide.drawTargetRay = aim::ShouldDrawTargetRay(
+            settings.drawTargetRay,
+            selected != nullptr,
+            settings.drawRange,
+            selected != nullptr
+                ? selected->screenDistancePixels
+                : 0.0f,
+            tuning.rangePixels);
         if (selected != nullptr) {
             guide.target = ImVec2(selected->screen.x, selected->screen.y);
             guide.targetValid = true;
@@ -5569,7 +5588,7 @@ private:
         blip.headingValid = headingValid;
         blip.kind = bot ? RadarBlipKind::Bot : RadarBlipKind::Player;
         blip.tone = tone;
-        if (className.find("Boss") != std::string_view::npos &&
+        if (!bot && className.find("Boss") != std::string_view::npos &&
             tone != SemanticTone::Accent &&
             tone != SemanticTone::Muted) {
             blip.tone = SemanticTone::Danger;
