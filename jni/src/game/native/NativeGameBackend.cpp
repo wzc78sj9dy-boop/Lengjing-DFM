@@ -13,6 +13,7 @@
 #include "game/native/ActorRecordResolver.h"
 #include "game/native/ActorRecordSource.h"
 #include "game/native/AlgorithmReplayPolicy.h"
+#include "game/native/BoneFrameSource.h"
 #include "game/native/CharacterPositionResolver.h"
 #include "game/native/CoordinatePoolRuntime.h"
 #include "game/native/FrameProjection.h"
@@ -2102,6 +2103,10 @@ private:
         bool encryptedRecord = false;
         bool resolvedTranslation = false;
         std::array<Vec3, kBoneIndices.size()> world{};
+        std::array<bool, kBoneIndices.size()> valid{};
+        std::array<
+            std::chrono::steady_clock::time_point,
+            kBoneIndices.size()> boneUpdatedAt{};
         std::chrono::steady_clock::time_point lastUpdatedAt{};
     };
 
@@ -3378,10 +3383,12 @@ private:
             constexpr auto kCacheLifetime = std::chrono::milliseconds(300);
             const auto now = std::chrono::steady_clock::now();
             const auto storeDecoded = [&](const Vec3& decoded) {
+                Vec3 adjusted = decoded;
+                adjusted.z = native::ResolveDecodedCharacterZ(adjusted.z);
                 if (antiFlicker) {
-                    positionCache_[actor] = PositionCacheEntry{decoded, now};
+                    positionCache_[actor] = PositionCacheEntry{adjusted, now};
                 }
-                position = decoded;
+                position = adjusted;
             };
             const auto readCached = [&]() {
                 if (!antiFlicker) return false;
@@ -3499,7 +3506,6 @@ private:
             return false;
         }
         position = Vec3{coordinate[0], coordinate[1], coordinate[2]};
-        if (mode == native::PositionReadMode::Direct) return true;
         return IsFinite(position) && IsNonzero(position);
     }
 
@@ -3897,7 +3903,6 @@ private:
         if (resolvedPosition != nullptr && IsFinite(*resolvedPosition) &&
             IsNonzero(*resolvedPosition)) {
             transform.translation = *resolvedPosition;
-            transform.translation.z -= verticalAdjustment;
         } else {
             transform.translation = position;
         }
@@ -3925,233 +3930,286 @@ private:
         const auto now = std::chrono::steady_clock::now();
         const bool useCache = antiFlicker;
         auto cached = boneCache_.find(actor);
-
-        std::array<Vec3, kBoneIndices.size()> currentWorld{};
-        std::array<bool, kBoneIndices.size()> currentValid{};
-        std::uintptr_t mesh = 0;
-        std::uintptr_t boneArray = 0;
-        std::uintptr_t sourceRoot = 0;
-        bool sourceEncrypted = false;
-        bool sourceResolvedTranslation = false;
-        Matrix4 componentMatrix{};
-        const bool preferredResolvedTranslation =
-            actorRecord.encryptedRecord &&
-            resolvedPosition != nullptr && IsFinite(*resolvedPosition) &&
-            IsNonzero(*resolvedPosition);
+        std::uintptr_t ordinaryMesh = actorRecord.ordinaryMesh;
+        if (!IsValidPointer(ordinaryMesh) && actorRecord.resolverRecord) {
+            ordinaryMesh = ReadPointer(
+                actor + native::kOrdinaryActorMeshOffset);
+        }
+        const native::BoneFrameRecordSource boneRecord{
+            actorRecord.root,
+            actorRecord.mesh,
+            actorRecord.encryptedRecord,
+            actorRecord.resolverRecord,
+        };
+        const native::BoneFrameSourceSelection preferredSource =
+            native::SelectPreferredBoneFrameSource(
+                boneRecord,
+                actorRecord.ordinaryRoot,
+                ordinaryMesh);
+        const native::BoneFrameSourceSelection fallbackSource =
+            native::SelectFallbackBoneFrameSource(
+                boneRecord,
+                actorRecord.ordinaryRoot,
+                ordinaryMesh);
         bool cacheFresh = useCache && cached != boneCache_.end() &&
             now - cached->second.lastUpdatedAt <= kCacheLifetime &&
-            ((actorRecord.resolverRecord &&
-              cached->second.root == actorRecord.root &&
-              cached->second.mesh == actorRecord.mesh &&
-              cached->second.encryptedRecord ==
-                  actorRecord.encryptedRecord &&
-              cached->second.resolvedTranslation ==
-                  preferredResolvedTranslation) ||
-             (actorRecord.ordinarySource &&
-              cached->second.root == actorRecord.ordinaryRoot &&
-              cached->second.mesh == actorRecord.ordinaryMesh &&
-              !cached->second.encryptedRecord &&
-              !cached->second.resolvedTranslation));
+            native::IsBoneFrameCacheSourceCompatible(
+                boneRecord,
+                actorRecord.ordinaryRoot,
+                ordinaryMesh,
+                native::BoneFrameCacheSource{
+                    cached->second.root,
+                    cached->second.mesh,
+                    cached->second.encryptedRecord,
+                });
+
+        struct BoneSourceFrame {
+            native::BoneFrameSourceSelection source{};
+            std::uintptr_t boneArray = 0;
+            bool resolvedTranslation = false;
+            std::array<Vec3, kBoneIndices.size()> world{};
+            std::array<bool, kBoneIndices.size()> valid{};
+            std::size_t validCount = 0;
+            bool usable = false;
+        };
+
+        const auto hasUsableLink = [](const auto& valid) {
+            for (const BoneLink& link : kBoneLinks) {
+                if (link.first < valid.size() && link.second < valid.size() &&
+                    valid[link.first] && valid[link.second]) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        const auto readBoneArray =
+            [this, &hasUsableLink](
+                std::uintptr_t candidateBoneArray,
+                const Matrix4& componentMatrix,
+                const Vec3& alignment,
+                bool alignmentReady) {
+                BoneSourceFrame result{};
+                result.boneArray = candidateBoneArray;
+                if (!IsValidPointer(candidateBoneArray)) return result;
+
+                std::array<Transform, kPlayerBoneTransformCount> transforms{};
+                std::array<
+                    std::byte,
+                    kPlayerBoneTransformCount * kBoneTransformStride> raw{};
+                const bool bulkReady = memory_ != nullptr &&
+                    raw.size() <=
+                        kMaximumRemoteAddress - candidateBoneArray &&
+                    memory_->Read(
+                        candidateBoneArray, raw.data(), raw.size());
+                if (bulkReady) {
+                    for (std::size_t index = 0;
+                         index < transforms.size();
+                         ++index) {
+                        std::memcpy(
+                            &transforms[index],
+                            raw.data() + index * kBoneTransformStride,
+                            sizeof(Transform));
+                    }
+                }
+
+                for (std::size_t index = 0;
+                     index < kBoneIndices.size();
+                     ++index) {
+                    const std::size_t boneIndex =
+                        static_cast<std::size_t>(kBoneIndices[index]);
+                    Transform transform{};
+                    bool transformReady = bulkReady &&
+                        boneIndex < transforms.size() &&
+                        IsValidTransform(transforms[boneIndex]);
+                    if (transformReady) {
+                        transform = transforms[boneIndex];
+                    } else {
+                        const std::uintptr_t address = candidateBoneArray +
+                            static_cast<std::uintptr_t>(boneIndex) *
+                                kBoneTransformStride;
+                        transformReady = ReadValue(address, transform) &&
+                            IsValidTransform(transform);
+                    }
+                    if (!transformReady) continue;
+
+                    Vec3 world = MatrixTranslation(Multiply(
+                        TransformToMatrix(transform), componentMatrix));
+                    if (alignmentReady) {
+                        world.x += alignment.x;
+                        world.y += alignment.y;
+                        world.z += alignment.z;
+                    }
+                    if (index == 0) world.z += 7.0f;
+                    if (!IsFinite(world)) continue;
+                    result.world[index] = world;
+                    result.valid[index] = true;
+                    ++result.validCount;
+                }
+                result.usable = hasUsableLink(result.valid);
+                return result;
+            };
 
         const auto readBoneSource =
             [this,
-             &mesh,
-             &boneArray,
-             &sourceRoot,
-             &sourceEncrypted,
-             &sourceResolvedTranslation,
-             &componentMatrix,
+             &readBoneArray,
              resolvedPosition](
-                std::uintptr_t candidate,
-                std::uintptr_t root,
-                bool rebuildResolvedTransform) {
-                if (!IsValidPointer(candidate)) return false;
-                const std::uintptr_t meshClass = ReadPointer(candidate);
-                if (!IsValidPointer(meshClass)) return false;
-
-                const std::uintptr_t candidateBoneArray =
-                    ReadPointer(candidate + 0x730);
-                if (!IsValidPointer(candidateBoneArray)) return false;
+                const native::BoneFrameSourceSelection& source) {
+                BoneSourceFrame result{};
+                result.source = source;
+                if (!source || !IsValidPointer(source.mesh) ||
+                    !IsValidPointer(ReadPointer(source.mesh))) {
+                    return result;
+                }
 
                 Transform componentTransform{};
-                const bool componentReady = rebuildResolvedTransform
+                const Vec3* standardizedPosition =
+                    algorithmPositionRequested_ ? resolvedPosition : nullptr;
+                const bool componentReady = source.rebuildResolvedTransform
                     ? RebuildResolvedComponentTransform(
-                          root,
-                          candidate,
-                          resolvedPosition,
+                          source.root,
+                          source.mesh,
+                          standardizedPosition,
                           componentTransform)
-                    : ReadValue(candidate + 0x210, componentTransform) &&
+                    : ReadValue(source.mesh + 0x210, componentTransform) &&
                           IsValidTransform(componentTransform);
-                if (!componentReady) {
-                    return false;
+                if (!componentReady) return result;
+
+                const Matrix4 componentMatrix =
+                    TransformToMatrix(componentTransform);
+                Vec3 alignment{};
+                bool alignmentReady = false;
+                if (!source.rebuildResolvedTransform &&
+                    algorithmPositionRequested_ &&
+                    standardizedPosition != nullptr &&
+                    IsFinite(*standardizedPosition)) {
+                    alignment = Subtract(
+                        *standardizedPosition,
+                        MatrixTranslation(componentMatrix));
+                    alignmentReady = IsFinite(alignment);
                 }
 
-                Transform pelvisTransform{};
-                Transform headTransform{};
-                if (!ReadValue(
-                        candidateBoneArray + kBoneTransformStride,
-                        pelvisTransform) ||
-                    !ReadValue(
-                        candidateBoneArray + 31 * kBoneTransformStride,
-                        headTransform) ||
-                    !IsValidTransform(pelvisTransform) ||
-                    !IsValidTransform(headTransform)) {
-                    return false;
+                const std::uintptr_t primaryBoneArray =
+                    ReadPointer(source.mesh + 0x730);
+                result = readBoneArray(
+                    primaryBoneArray,
+                    componentMatrix,
+                    alignment,
+                    alignmentReady);
+                result.source = source;
+                result.resolvedTranslation =
+                    source.rebuildResolvedTransform || alignmentReady;
+
+                if (result.validCount < kBoneIndices.size()) {
+                    const std::uintptr_t secondaryBoneArray =
+                        ReadPointer(source.mesh + 0x740);
+                    if (IsValidPointer(secondaryBoneArray) &&
+                        secondaryBoneArray != primaryBoneArray) {
+                        BoneSourceFrame secondary = readBoneArray(
+                            secondaryBoneArray,
+                            componentMatrix,
+                            alignment,
+                            alignmentReady);
+                        secondary.source = source;
+                        secondary.resolvedTranslation =
+                            source.rebuildResolvedTransform || alignmentReady;
+                        if (native::PreferBoneFrameCandidate(
+                                result.validCount,
+                                result.usable,
+                                secondary.validCount,
+                                secondary.usable)) {
+                            result = std::move(secondary);
+                        }
+                    }
                 }
-                mesh = candidate;
-                boneArray = candidateBoneArray;
-                sourceRoot = root;
-                sourceEncrypted = rebuildResolvedTransform;
-                sourceResolvedTranslation = rebuildResolvedTransform;
-                componentMatrix = TransformToMatrix(componentTransform);
-                return true;
+                return result;
             };
-        bool componentReady = native::ReadActorRecordSourceWithFallback(
-            actorRecord,
-            [&] {
-                return readBoneSource(
-                    actorRecord.mesh,
-                    actorRecord.root,
-                    actorRecord.encryptedRecord);
-            },
-            [&] {
-                return readBoneSource(
-                    actorRecord.ordinaryMesh,
-                    actorRecord.ordinaryRoot,
-                    false);
-            });
-        if (!componentReady && cacheFresh) {
-            componentReady = readBoneSource(
-                cached->second.mesh,
-                cached->second.root,
-                cached->second.encryptedRecord);
-        }
-        if (!componentReady && cacheFresh &&
-            IsValidPointer(cached->second.mesh) &&
-            IsValidPointer(cached->second.boneArray)) {
-            Transform componentTransform{};
-            Transform pelvisTransform{};
-            Transform headTransform{};
-            if (IsValidPointer(ReadPointer(cached->second.mesh)) &&
-                (cached->second.encryptedRecord
-                     ? RebuildResolvedComponentTransform(
-                           cached->second.root,
-                           cached->second.mesh,
-                           resolvedPosition,
-                           componentTransform)
-                     : ReadValue(
-                           cached->second.mesh + 0x210,
-                           componentTransform) &&
-                           IsValidTransform(componentTransform)) &&
-                ReadValue(
-                    cached->second.boneArray + kBoneTransformStride,
-                    pelvisTransform) &&
-                ReadValue(
-                    cached->second.boneArray + 31 * kBoneTransformStride,
-                    headTransform) &&
-                IsValidTransform(pelvisTransform) &&
-                IsValidTransform(headTransform)) {
-                mesh = cached->second.mesh;
-                boneArray = cached->second.boneArray;
-                sourceRoot = cached->second.root;
-                sourceEncrypted = cached->second.encryptedRecord;
-                sourceResolvedTranslation =
-                    cached->second.resolvedTranslation;
-                componentMatrix = TransformToMatrix(componentTransform);
-                componentReady = true;
+
+        BoneSourceFrame current = readBoneSource(preferredSource);
+        if (current.validCount < kBoneIndices.size() && fallbackSource) {
+            BoneSourceFrame fallback = readBoneSource(fallbackSource);
+            if (native::PreferBoneFrameCandidate(
+                    current.validCount,
+                    current.usable,
+                    fallback.validCount,
+                    fallback.usable)) {
+                current = std::move(fallback);
             }
         }
 
-        if (IsValidPointer(mesh) && IsValidPointer(boneArray) &&
-            componentReady) {
-            std::array<Transform, kPlayerBoneTransformCount> transformFrame{};
-            std::array<
-                std::byte,
-                kPlayerBoneTransformCount * kBoneTransformStride> rawFrame{};
-            bool transformFrameValid = false;
-            if (memory_ != nullptr &&
-                rawFrame.size() <= kMaximumRemoteAddress - boneArray &&
-                memory_->Read(
-                    boneArray,
-                    rawFrame.data(),
-                    rawFrame.size())) {
-                for (std::size_t index = 0;
-                     index < transformFrame.size();
-                     ++index) {
-                    std::memcpy(
-                        &transformFrame[index],
-                        rawFrame.data() + index * kBoneTransformStride,
-                        sizeof(Transform));
-                }
-                transformFrameValid =
-                    IsValidTransform(transformFrame[1]) &&
-                    IsValidTransform(transformFrame[31]);
-            }
-
-            for (std::size_t index = 0; index < kBoneIndices.size(); ++index) {
-                Transform boneTransform{};
-                const std::size_t boneIndex =
-                    static_cast<std::size_t>(kBoneIndices[index]);
-                if (transformFrameValid &&
-                    boneIndex < transformFrame.size()) {
-                    boneTransform = transformFrame[boneIndex];
-                } else {
-                    const std::uintptr_t address = boneArray +
-                        static_cast<std::uintptr_t>(boneIndex) *
-                            kBoneTransformStride;
-                    if (!ReadValue(address, boneTransform)) continue;
-                }
-                if (!IsValidTransform(boneTransform)) continue;
-                const Matrix4 boneMatrix = TransformToMatrix(boneTransform);
-                Vec3 world = MatrixTranslation(Multiply(
-                    boneMatrix, componentMatrix));
-                if (index == 0) world.z += 7.0f;
-                if (!IsFinite(world)) continue;
-                currentWorld[index] = world;
-                currentValid[index] = true;
-            }
-        }
-
-        const bool currentComplete = std::all_of(
-            currentValid.begin(),
-            currentValid.end(),
-            [](bool valid) { return valid; });
-        if (useCache && currentComplete) {
+        if (useCache && current.validCount != 0) {
             BoneCacheEntry& entry = boneCache_[actor];
-            entry.root = sourceRoot;
-            entry.mesh = mesh;
-            entry.boneArray = boneArray;
-            entry.encryptedRecord = sourceEncrypted;
-            entry.resolvedTranslation = sourceResolvedTranslation;
-            entry.world = currentWorld;
+            const native::BoneFrameCacheSource entrySource{
+                entry.root,
+                entry.mesh,
+                entry.encryptedRecord,
+            };
+            if (native::ShouldResetBoneFrameCache(
+                    current.source,
+                    current.boneArray,
+                    current.resolvedTranslation,
+                    entrySource,
+                    entry.boneArray,
+                    entry.resolvedTranslation)) {
+                entry = BoneCacheEntry{};
+            }
+            entry.root = current.source.root;
+            entry.mesh = current.source.mesh;
+            entry.boneArray = current.boneArray;
+            entry.encryptedRecord =
+                current.source.rebuildResolvedTransform;
+            entry.resolvedTranslation = current.resolvedTranslation;
+            for (std::size_t index = 0;
+                 index < current.valid.size();
+                 ++index) {
+                if (!current.valid[index]) continue;
+                entry.world[index] = current.world[index];
+                entry.valid[index] = true;
+                entry.boneUpdatedAt[index] = now;
+            }
             entry.lastUpdatedAt = now;
             cached = boneCache_.find(actor);
             cacheFresh = true;
         }
 
-        std::array<Vec3, kBoneIndices.size()> world{};
-        if (currentComplete) {
-            world = currentWorld;
-        } else if (cacheFresh && cached != boneCache_.end()) {
-            world = cached->second.world;
-        } else {
-            return false;
+        std::array<Vec3, kBoneIndices.size()> world = current.world;
+        std::array<bool, kBoneIndices.size()> worldValid = current.valid;
+        if (cacheFresh && cached != boneCache_.end()) {
+            for (std::size_t index = 0;
+                 index < worldValid.size();
+                 ++index) {
+                if (worldValid[index] || !cached->second.valid[index] ||
+                    now - cached->second.boneUpdatedAt[index] >
+                        kCacheLifetime) {
+                    continue;
+                }
+                world[index] = cached->second.world[index];
+                worldValid[index] = true;
+            }
         }
+        const bool anyWorld = std::any_of(
+            worldValid.begin(),
+            worldValid.end(),
+            [](bool valid) { return valid; });
+        if (!anyWorld) return false;
+
         bool anyProjected = false;
         for (std::size_t index = 0; index < world.size(); ++index) {
+            if (!worldValid[index] || !IsFinite(world[index])) continue;
             frame.world[index] = world[index];
-            frame.worldValid[index] = IsFinite(world[index]);
-            if (!frame.worldValid[index]) continue;
+            frame.worldValid[index] = true;
             Vec2 screen{};
-            if (!ProjectToScreen(world[index],
-                                 view,
-                                 options_.screenWidth,
-                                 options_.screenHeight,
-                                 screen) ||
-                !IsInsideScreen(screen,
-                                options_.screenWidth,
-                                options_.screenHeight,
-                                80.0f)) {
+            if (!ProjectToScreen(
+                    world[index],
+                    view,
+                    options_.screenWidth,
+                    options_.screenHeight,
+                    screen) ||
+                !IsInsideScreen(
+                    screen,
+                    options_.screenWidth,
+                    options_.screenHeight,
+                    80.0f)) {
                 continue;
             }
             frame.screen[index] = screen;
@@ -4273,6 +4331,8 @@ private:
              index < projected.world.size();
              ++index) {
             if (!source.worldValid[index]) continue;
+            projected.world[index] = source.world[index];
+            projected.worldValid[index] = true;
             Vec2 screen{};
             if (!ProjectToScreen(
                     source.world[index],

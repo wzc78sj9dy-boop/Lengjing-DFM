@@ -40,11 +40,15 @@ private:
 void RunPositionResolverTests() {
     using lengjing::game::native::CharacterPositionResolver;
     using lengjing::game::native::PositionReadMode;
+    using lengjing::game::native::ResolveDecodedCharacterZ;
     using lengjing::game::native::ResolvePositionReadMode;
     using Coordinate = CharacterPositionResolver::Coordinate;
 
     REQUIRE(ResolvePositionReadMode(false) == PositionReadMode::Standard);
     REQUIRE(ResolvePositionReadMode(true) == PositionReadMode::Direct);
+    REQUIRE(ResolveDecodedCharacterZ(1000.0f) == 910.0f);
+    REQUIRE(ResolveDecodedCharacterZ(90.0f) == 0.0f);
+    REQUIRE(ResolveDecodedCharacterZ(-10.0f) == -100.0f);
 
     REQUIRE(CharacterPositionResolver::IsPrimaryCharacter("NC_BP_DFMCharacter_C"));
     REQUIRE(CharacterPositionResolver::IsPrimaryCharacter(
@@ -202,7 +206,7 @@ void RunPositionResolverTests() {
     REQUIRE(coordinate == Coordinate({70.0f, 80.0f, 90.0f}));
 
     memory.Put(decodedRoot + 0x240, Coordinate{});
-    REQUIRE(resolver.ReadWithRoot(
+    REQUIRE(!resolver.ReadWithRoot(
         actor,
         decodedRoot,
         "NC_BP_DFMCharacter_C",
@@ -214,7 +218,7 @@ void RunPositionResolverTests() {
 
     memory.Erase(decodedRoot + 0x240);
     memory.Erase(decodedRoot + 0x220);
-    REQUIRE(resolver.ReadWithRoot(
+    REQUIRE(!resolver.ReadWithRoot(
         actor,
         decodedRoot,
         "NC_BP_DFMCharacter_C",
@@ -259,7 +263,7 @@ void RunPositionResolverTests() {
         read));
     REQUIRE(coordinate == Coordinate({4.0f, 5.0f, 6.0f}));
 
-    REQUIRE(resolver.ReadLocalWithRoot(
+    REQUIRE(!resolver.ReadLocalWithRoot(
         actor,
         decodedRoot,
         "NC_BP_DFMCharacter_C",
@@ -270,9 +274,10 @@ void RunPositionResolverTests() {
     REQUIRE(coordinate == Coordinate{});
 
     memory.Put(decodedRoot + 0x148, Coordinate{});
+    memory.Erase(decodedRoot + 0x240);
     memory.Put(decodedRoot + 0x220, Coordinate{
         std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f});
-    REQUIRE(resolver.ReadWithRoot(
+    REQUIRE(!resolver.ReadWithRoot(
         actor,
         decodedRoot,
         "NC_BP_DFMCharacter_C",
@@ -280,11 +285,11 @@ void RunPositionResolverTests() {
         false,
         coordinate,
         read));
-    REQUIRE(std::isnan(coordinate[0]));
+    REQUIRE(coordinate == Coordinate{});
 
     memory.Put(decodedRoot + 0x220, Coordinate{
         std::numeric_limits<float>::infinity(), 0.0f, 0.0f});
-    REQUIRE(resolver.ReadWithRoot(
+    REQUIRE(!resolver.ReadWithRoot(
         actor,
         decodedRoot,
         "NC_BP_DFMCharacter_C",
@@ -292,7 +297,7 @@ void RunPositionResolverTests() {
         false,
         coordinate,
         read));
-    REQUIRE(std::isinf(coordinate[0]));
+    REQUIRE(coordinate == Coordinate{});
 
     REQUIRE(!resolver.Read(
         actor, "Pickup_C", PositionReadMode::Direct,

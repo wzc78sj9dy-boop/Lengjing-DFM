@@ -189,20 +189,22 @@ private:
             0x168, 0x148, 0x220};
         for (const std::uintptr_t offset : fallbackOffsets) {
             coordinate = Coordinate{};
+            bool read = false;
             if (root <=
                 std::numeric_limits<std::uintptr_t>::max() - offset) {
-                static_cast<void>(
-                    ReadValue(readBytes, root + offset, coordinate));
+                read = ReadValue(readBytes, root + offset, coordinate);
             }
-            if (!IsZero(coordinate)) return true;
+            if (read && IsValid(coordinate)) return true;
         }
         coordinate = Coordinate{};
+        bool read = false;
         if (root <=
             std::numeric_limits<std::uintptr_t>::max() - 0x240) {
-            static_cast<void>(
-                ReadValue(readBytes, root + 0x240, coordinate));
+            read = ReadValue(readBytes, root + 0x240, coordinate);
         }
-        return true;
+        if (read && IsValid(coordinate)) return true;
+        coordinate = Coordinate{};
+        return false;
     }
 
     template <typename ReadBytes>
@@ -210,12 +212,12 @@ private:
                                      Coordinate& coordinate,
                                      ReadBytes& readBytes) {
         coordinate = Coordinate{};
-        if (root <=
-            std::numeric_limits<std::uintptr_t>::max() - 0x168) {
-            static_cast<void>(
-                ReadValue(readBytes, root + 0x168, coordinate));
-        }
-        return true;
+        const bool read = root <=
+                std::numeric_limits<std::uintptr_t>::max() - 0x168 &&
+            ReadValue(readBytes, root + 0x168, coordinate);
+        if (read && IsValid(coordinate)) return true;
+        coordinate = Coordinate{};
+        return false;
     }
 
     template <typename ReadBytes>
@@ -225,11 +227,6 @@ private:
         return root <=
                 std::numeric_limits<std::uintptr_t>::max() - 0x220 &&
             ReadValue(readBytes, root + 0x220, coordinate);
-    }
-
-    static bool IsZero(const Coordinate& coordinate) noexcept {
-        return coordinate[0] == 0.0f && coordinate[1] == 0.0f &&
-            coordinate[2] == 0.0f;
     }
 
     template <typename ReadBytes>

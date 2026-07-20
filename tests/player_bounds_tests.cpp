@@ -15,8 +15,12 @@ void RunPlayerBoundsTests() {
     using lengjing::game::native::kPlayerBoundsBoneCount;
     using lengjing::game::native::BoneFrameCacheSource;
     using lengjing::game::native::BoneFrameRecordSource;
+    using lengjing::game::native::SelectFallbackBoneFrameSource;
+    using lengjing::game::native::ShouldResetBoneFrameCache;
     using lengjing::game::native::PlayerBoneScreenPoint;
     using lengjing::game::native::PlayerScreenBounds;
+    using lengjing::game::native::PreferBoneFrameCandidate;
+    using lengjing::game::native::SelectPreferredBoneFrameSource;
     using lengjing::game::native::SelectBoneFrameMesh;
     using lengjing::game::native::SelectPlayerScreenBounds;
 
@@ -193,27 +197,86 @@ void RunPlayerBoundsTests() {
     const BoneFrameRecordSource ordinaryRecord{0x1000, 0x2000, false};
     REQUIRE(SelectBoneFrameMesh(ordinaryRecord, 0x3000) == 0x3000);
     REQUIRE(SelectBoneFrameMesh(ordinaryRecord, 0) == 0x2000);
-    const BoneFrameRecordSource encryptedRecord{0x4000, 0x5000, true};
-    REQUIRE(SelectBoneFrameMesh(encryptedRecord, 0x6000) == 0x5000);
+    const BoneFrameRecordSource encryptedRecord{
+        0x4000, 0x5000, true, true};
+    REQUIRE(SelectBoneFrameMesh(encryptedRecord, 0x6000) == 0x6000);
+
+    const auto ordinaryPreferred = SelectPreferredBoneFrameSource(
+        encryptedRecord, 0x7000, 0x6000);
+    REQUIRE(ordinaryPreferred.root == 0x7000);
+    REQUIRE(ordinaryPreferred.mesh == 0x6000);
+    REQUIRE(!ordinaryPreferred.rebuildResolvedTransform);
+    const auto encryptedFallback = SelectFallbackBoneFrameSource(
+        encryptedRecord, 0x7000, 0x6000);
+    REQUIRE(encryptedFallback.root == 0x4000);
+    REQUIRE(encryptedFallback.mesh == 0x5000);
+    REQUIRE(encryptedFallback.rebuildResolvedTransform);
+    REQUIRE(!SelectFallbackBoneFrameSource(
+        encryptedRecord, 0, 0));
+    const BoneFrameRecordSource plainResolver{
+        0x8000, 0x9000, false, true};
+    const auto plainFallback = SelectFallbackBoneFrameSource(
+        plainResolver, 0xA000, 0xB000);
+    REQUIRE(plainFallback.root == 0x8000);
+    REQUIRE(plainFallback.mesh == 0x9000);
+    REQUIRE(!plainFallback.rebuildResolvedTransform);
+
+    REQUIRE(PreferBoneFrameCandidate(0, false, 2, true));
+    REQUIRE(PreferBoneFrameCandidate(10, false, 2, true));
+    REQUIRE(PreferBoneFrameCandidate(8, true, 15, true));
+    REQUIRE(!PreferBoneFrameCandidate(15, true, 8, true));
+    REQUIRE(!PreferBoneFrameCandidate(8, true, 8, true));
+
+    REQUIRE(!ShouldResetBoneFrameCache(
+        ordinaryPreferred,
+        0xC000,
+        true,
+        BoneFrameCacheSource{0x7000, 0x6000, false},
+        0xC000,
+        true));
+    REQUIRE(ShouldResetBoneFrameCache(
+        ordinaryPreferred,
+        0xC000,
+        true,
+        BoneFrameCacheSource{0x7000, 0x6000, false},
+        0xD000,
+        true));
+    REQUIRE(ShouldResetBoneFrameCache(
+        ordinaryPreferred,
+        0xC000,
+        true,
+        BoneFrameCacheSource{0x7000, 0x6000, false},
+        0xC000,
+        false));
 
     REQUIRE(IsBoneFrameCacheSourceCompatible(
         ordinaryRecord,
+        0,
         0x3000,
         BoneFrameCacheSource{0, 0x3000, false}));
     REQUIRE(!IsBoneFrameCacheSourceCompatible(
         ordinaryRecord,
+        0,
         0x3000,
         BoneFrameCacheSource{0, 0x2000, false}));
     REQUIRE(IsBoneFrameCacheSourceCompatible(
         encryptedRecord,
-        0x5000,
+        0x7000,
+        0x6000,
+        BoneFrameCacheSource{0x7000, 0x6000, false}));
+    REQUIRE(IsBoneFrameCacheSourceCompatible(
+        encryptedRecord,
+        0x7000,
+        0x6000,
         BoneFrameCacheSource{0x4000, 0x5000, true}));
     REQUIRE(!IsBoneFrameCacheSourceCompatible(
         encryptedRecord,
-        0x5000,
+        0x7000,
+        0x6000,
         BoneFrameCacheSource{0x4001, 0x5000, true}));
     REQUIRE(!IsBoneFrameCacheSourceCompatible(
         encryptedRecord,
-        0x5000,
+        0x7000,
+        0x6000,
         BoneFrameCacheSource{0x4000, 0x5000, false}));
 }
