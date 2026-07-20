@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
-#include <cerrno>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -27,7 +26,6 @@
 #if defined(_WIN32)
 #include <io.h>
 #else
-#include <termios.h>
 #include <unistd.h>
 #endif
 
@@ -217,45 +215,6 @@ bool InputIsTerminal() noexcept {
     return isatty(STDIN_FILENO) == 1;
 #endif
 }
-
-#if !defined(_WIN32)
-struct TerminalEchoState {
-    int descriptor = STDIN_FILENO;
-    termios original{};
-    bool captured = false;
-};
-
-bool DisableTerminalEcho(void* opaque) noexcept {
-    auto& state = *static_cast<TerminalEchoState*>(opaque);
-    int result = 0;
-    do {
-        result = tcgetattr(state.descriptor, &state.original);
-    } while (result != 0 && errno == EINTR);
-    if (result != 0) return false;
-
-    termios hidden = state.original;
-    hidden.c_lflag &= static_cast<tcflag_t>(
-        ~(ECHO | ECHONL | ECHOE | ECHOK));
-    do {
-        result = tcsetattr(state.descriptor, TCSAFLUSH, &hidden);
-    } while (result != 0 && errno == EINTR);
-    if (result != 0) return false;
-    state.captured = true;
-    return true;
-}
-
-bool RestoreTerminalEcho(void* opaque) noexcept {
-    auto& state = *static_cast<TerminalEchoState*>(opaque);
-    if (!state.captured) return true;
-    int result = 0;
-    do {
-        result = tcsetattr(state.descriptor, TCSAFLUSH, &state.original);
-    } while (result != 0 && errno == EINTR);
-    if (result != 0) return false;
-    state.captured = false;
-    return true;
-}
-#endif
 
 enum class RemainingEntityStatus {
     None,
@@ -814,14 +773,8 @@ bool LoginInteractive(AuthSession& session,
     }
 
     const bool inputIsTerminal = InputIsTerminal();
-    input::TerminalEchoControl terminalEcho;
-#if !defined(_WIN32)
-    TerminalEchoState terminalEchoState;
-    terminalEcho = {
-        &terminalEchoState, &DisableTerminalEcho, &RestoreTerminalEcho};
-#endif
     input::CardInputResult card = input::ReadCardKeyFromStream(
-        std::cin, std::cout, inputIsTerminal, terminalEcho);
+        std::cin, std::cout, inputIsTerminal);
     if (!card) {
         std::fprintf(stderr, "[验证] card input status=%u\n",
                      static_cast<unsigned int>(card.status));
