@@ -73,6 +73,16 @@ void RunActorRecordSourceTests() {
         ordinaryFirst,
         MakeOrdinaryActorRecord(0x6000)));
 
+    ActorRecordSource incompleteResolved =
+        MakeResolvedActorRecord(actor, 0, 0x3000, true);
+    REQUIRE(MergeActorRecordSource(
+        incompleteResolved,
+        MakeResolvedActorRecord(actor, 0x2000, 0, true)));
+    REQUIRE(incompleteResolved.root == 0x2000);
+    REQUIRE(incompleteResolved.mesh == 0x3000);
+    REQUIRE(incompleteResolved.resolverRecord);
+    REQUIRE(incompleteResolved.encryptedRecord);
+
     int preferredAttempts = 0;
     int ordinaryAttempts = 0;
     REQUIRE(ReadActorRecordSourceWithFallback(

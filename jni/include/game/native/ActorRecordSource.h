@@ -71,6 +71,12 @@ inline bool MergeActorRecordSource(
         destination.mesh = incoming.mesh;
         destination.resolverRecord = true;
         destination.encryptedRecord = incoming.encryptedRecord;
+    } else if (incoming.resolverRecord) {
+        if (destination.root == 0) destination.root = incoming.root;
+        if (destination.mesh == 0) destination.mesh = incoming.mesh;
+        destination.resolverRecord = true;
+        destination.encryptedRecord =
+            destination.encryptedRecord || incoming.encryptedRecord;
     }
     destination.ordinaryRoot = ordinaryRoot;
     destination.ordinaryMesh = ordinaryMesh;

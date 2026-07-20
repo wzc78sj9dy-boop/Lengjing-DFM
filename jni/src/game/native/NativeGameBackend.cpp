@@ -1236,9 +1236,6 @@ public:
                 || (trackingPlayerClass && !playerStateAvailable)
 #endif
                 ;
-            if (!native::HasUsablePlayerState(playerStateAvailable, botClass)) {
-                continue;
-            }
             std::int32_t primaryTeam = native::kUnknownPlayerTeam;
             std::int32_t secondaryTeam = native::kUnknownPlayerTeam;
             const bool primaryTeamRead = playerStateAvailable &&
@@ -2279,15 +2276,19 @@ private:
             const std::optional<native::ActorAddressRecord> record =
                 resolver.ReadRecord(*array, index, readBytes);
             if (!record.has_value() ||
-                !IsValidPointer(record->actor) ||
-                !IsValidPointer(record->root) ||
-                !IsValidPointer(record->mesh)) {
+                !IsValidPointer(record->actor)) {
                 continue;
             }
+            const std::uintptr_t root = IsValidPointer(record->root)
+                ? record->root
+                : 0;
+            const std::uintptr_t mesh = IsValidPointer(record->mesh)
+                ? record->mesh
+                : 0;
             result.push_back(native::MakeResolvedActorRecord(
                 record->actor,
-                record->root,
-                record->mesh,
+                root,
+                mesh,
                 array->encrypted));
         }
         return result;
@@ -3516,7 +3517,7 @@ private:
         bool antiFlicker,
         Vec3& position) {
         position = Vec3{};
-        return native::ReadActorRecordSourceWithFallback(
+        const bool resolved = native::ReadActorRecordSourceWithFallback(
             record,
             [&] {
                 Vec3 candidate{};
@@ -3548,6 +3549,22 @@ private:
                 position = candidate;
                 return true;
             });
+        if (resolved) return true;
+        if (preferredMode != native::PositionReadMode::Direct) return false;
+
+        Vec3 candidate{};
+        if (!ReadCharacterPosition(
+                record.actor,
+                0,
+                className,
+                native::PositionReadMode::Standard,
+                antiFlicker,
+                candidate) ||
+            !IsFinite(candidate) || !IsNonzero(candidate)) {
+            return false;
+        }
+        position = candidate;
+        return true;
     }
 
     bool ReadActorFacingFromMesh(std::uintptr_t mesh,

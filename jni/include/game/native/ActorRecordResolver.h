@@ -254,7 +254,6 @@ public:
             ReadAt(
                 readBytes, record.actor, layout_.plainMeshOffset, record.mesh);
         }
-        if (record.root == 0 || record.mesh == 0) return std::nullopt;
         return record;
     }
 
