@@ -113,11 +113,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-add_compile_options(
-    "SHELL:-mllvm -irobf"
-    "SHELL:-mllvm -irobf-strenc"
-)
-
 file(GLOB_RECURSE LENGJING_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cc"
@@ -173,17 +168,14 @@ target_include_directories(lengjing PRIVATE
 )
 
 target_compile_options(lengjing PRIVATE
-    -fvisibility=hidden
     -fdata-sections
     -ffunction-sections
-    $<$<COMPILE_LANGUAGE:CXX>:-fvisibility-inlines-hidden>
     $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>
     $<$<CONFIG:Release>:-O3>
     $<$<CONFIG:Release>:-ffp-contract=fast>
     $<$<CONFIG:Release>:-fmerge-all-constants>
     $<$<CONFIG:Release>:-funroll-loops>
     $<$<CONFIG:Release>:-fomit-frame-pointer>
-    $<$<CONFIG:Release>:-g0>
     $<$<CONFIG:Release>:-flto=thin>
 )
 

@@ -5,7 +5,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 set "ROOT=%~dp0"
 set "SOURCE_DIR=%ROOT%jni"
 set "BUILD_DIR=%SOURCE_DIR%\build"
-set "NDK="
+set "NDK=D:\AAA\android-ndk-r27d"
 set "NINJA="
 set "TARGET="
 set "PRODUCT="
@@ -22,14 +22,6 @@ if defined LENGJING_AUTH_CONFIG (
 if not defined AUTH_CONFIG if exist "%SOURCE_DIR%\cmake\AuthConfigPrivate.cmake" (
     set "AUTH_CONFIG=%SOURCE_DIR%\cmake\AuthConfigPrivate.cmake"
 )
-
-if exist "D:\AAA\android-ndk-r27d\build\cmake\android.toolchain.cmake" set "NDK=D:\AAA\android-ndk-r27d"
-if not defined NDK if defined ANDROID_NDK_HOME if exist "%ANDROID_NDK_HOME%\build\cmake\android.toolchain.cmake" set "NDK=%ANDROID_NDK_HOME%"
-if not defined NDK if defined ANDROID_NDK_ROOT if exist "%ANDROID_NDK_ROOT%\build\cmake\android.toolchain.cmake" set "NDK=%ANDROID_NDK_ROOT%"
-if not defined NDK if defined NDK_HOME if exist "%NDK_HOME%\build\cmake\android.toolchain.cmake" set "NDK=%NDK_HOME%"
-if not defined NDK if exist "D:\AAA\android-ndk-r28\build\cmake\android.toolchain.cmake" set "NDK=D:\AAA\android-ndk-r28"
-if not defined NDK if exist "D:\AAA\android-ndk-r29\build\cmake\android.toolchain.cmake" set "NDK=D:\AAA\android-ndk-r29"
-if not defined NDK call :probe_sdk_ndk
 
 if not exist "%NDK%\build\cmake\android.toolchain.cmake" (
     echo [ERROR] Required Android NDK not found.
@@ -128,16 +120,4 @@ if not exist "!BIN!" (
 )
 
 for %%I in ("!BIN!") do echo [DONE] %%~fI ^(%%~zI bytes^)
-exit /b 0
-
-:probe_sdk_ndk
-set "_NDK_BASE=%LOCALAPPDATA%\Android\Sdk\ndk"
-if not exist "%_NDK_BASE%" exit /b 0
-for /f "delims=" %%D in ('dir /B /AD /O-N "%_NDK_BASE%" 2^>nul') do (
-    if not defined NDK (
-        if exist "%_NDK_BASE%\%%D\build\cmake\android.toolchain.cmake" (
-            set "NDK=%_NDK_BASE%\%%D"
-        )
-    )
-)
 exit /b 0
