@@ -6,6 +6,7 @@
 int main() {
     try {
         RunActorFrameVisitSetTests();
+        RunActorRecordRefreshPolicyTests();
         RunActorRecordSourceTests();
         RunActorRecordResolverTests();
         RunAlgorithmPositionPolicyTests();

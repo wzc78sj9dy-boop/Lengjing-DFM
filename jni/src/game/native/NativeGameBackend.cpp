@@ -9,8 +9,10 @@
 #include "game/data/CustomItemCatalog.h"
 #include "game/data/ItemCatalog.h"
 #include "game/data/ThreatCatalog.h"
+#include "game/native/ActorRecordRefreshPolicy.h"
 #include "game/native/ActorRecordResolver.h"
 #include "game/native/ActorRecordSource.h"
+#include "game/native/AlgorithmReplayPolicy.h"
 #include "game/native/CharacterPositionResolver.h"
 #include "game/native/CoordinatePoolRuntime.h"
 #include "game/native/FrameProjection.h"
@@ -852,6 +854,8 @@ public:
 
         RefreshAlgorithmEntry(true);
 
+        const auto algorithmContextReadAt =
+            std::chrono::steady_clock::now();
         algorithmExecutionContextReady_ =
             (algorithmEntryReady_ || UsesCoordinatePoolRuntime()) &&
             memory_->ReadProcessExecutionContext(algorithmExecutionContext_);
@@ -867,6 +871,14 @@ public:
             algorithmExecutionContextReady_ &&
             (UsesCoordinatePoolRuntime() ||
              algorithmExecutionContext_.HasPacgaKey());
+        if (algorithmExecutionContextReady_) {
+            algorithmExecutionContextRefreshPolicy_.MarkSucceeded(
+                CurrentAlgorithmExecutionContextRefreshKey(
+                    UsesCoordinatePoolRuntime()),
+                algorithmContextReadAt);
+        } else {
+            algorithmExecutionContextRefreshPolicy_.MarkFailed();
+        }
 
         if (!aimController_.Start(options.inputMode)) {
             error = "输入通道初始化失败";
@@ -911,12 +923,38 @@ public:
         }
         UpdateGeometryRuntime(settings);
 
+        const bool coordinateRequestChanged =
+            algorithmPositionRequested_ != settings.visual.coordinateDecrypt;
         algorithmPositionRequested_ = settings.visual.coordinateDecrypt;
-        algorithmRefreshPending_ = true;
+        if (coordinateRequestChanged) {
+            algorithmReplayBackoffPolicy_.Reset();
+            algorithmReplayPagePolicy_.Invalidate();
+            algorithmFailureSince_ = {};
+        }
         algorithmFrameAttemptCount_ = 0;
         algorithmFrameSuccessCount_ = 0;
         RefreshAlgorithmEntry(false);
-        RefreshAlgorithmExecutionContext();
+        const auto algorithmFrameNow = std::chrono::steady_clock::now();
+        algorithmReplayAllowedThisFrame_ =
+            !algorithmPositionRequested_ ||
+            algorithmReplayBackoffPolicy_.BeginFrame(algorithmFrameNow);
+        if (algorithmPositionRequested_ &&
+            algorithmReplayAllowedThisFrame_) {
+            algorithmReplayPagePolicy_.BeginFrame();
+        }
+        if (!algorithmPositionRequested_ ||
+            algorithmReplayAllowedThisFrame_) {
+            RefreshAlgorithmExecutionContext();
+        }
+        const bool infrastructureProbeFailed =
+            algorithmPositionRequested_ &&
+            algorithmReplayAllowedThisFrame_ &&
+            (!algorithmExecutionContextReady_ ||
+             (UsesCoordinatePoolRuntime() && !coordinatePoolReady_));
+        if (infrastructureProbeFailed) {
+            algorithmReplayBackoffPolicy_.ObserveFrame(
+                1, 0, algorithmFrameNow);
+        }
         UpdateCoordinateProbe(probe);
         const native::PositionReadMode positionMode =
             native::ResolvePositionReadMode(
@@ -924,6 +962,8 @@ public:
         if (positionMode != positionReadMode_) {
             characterPositions_.Clear();
             algorithmPositionRuntime_.Invalidate();
+            algorithmReplayPagePolicy_.Invalidate();
+            algorithmExecutionContextRefreshPolicy_.Invalidate();
             boneCache_.clear();
             positionReadMode_ = positionMode;
         }
@@ -940,6 +980,7 @@ public:
 #endif
                 settings.visual.antiFlicker,
                 error)) {
+            InvalidateActorRecordSnapshot();
             ResetWorldState();
             ApplyCoordinateDiagnostic(error);
             UpdateCoordinateProbe(probe);
@@ -1091,8 +1132,8 @@ public:
             BuildModelGeometry(context.view, frame);
         }
 
-        std::vector<RuntimeActorRecord> actorRecords =
-            CollectActorRecords(context);
+        std::vector<RuntimeActorRecord>& actorRecords =
+            actorRecordSnapshot_.records;
         std::unordered_set<std::uintptr_t> seenThreats;
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
         std::unordered_set<std::uintptr_t> seenAimActors;
@@ -1116,7 +1157,7 @@ public:
             std::min<std::size_t>(actorRecords.size(), 256));
         std::size_t validActorCount = 0;
         std::size_t decodedNameCount = 0;
-        for (RuntimeActorRecord actorRecord : actorRecords) {
+        for (RuntimeActorRecord& actorRecord : actorRecords) {
             const std::uintptr_t actor = actorRecord.actor;
             if (!IsValidPointer(actor) || actor == context.localPawn) continue;
             ++validActorCount;
@@ -1927,6 +1968,12 @@ public:
             }
         }
         EvaluateAlgorithmExecutionHealth();
+        if (!infrastructureProbeFailed) {
+            algorithmReplayBackoffPolicy_.ObserveFrame(
+                static_cast<std::size_t>(algorithmFrameAttemptCount_),
+                static_cast<std::size_t>(algorithmFrameSuccessCount_),
+                std::chrono::steady_clock::now());
+        }
         ApplyCoordinateDiagnostic(error);
         UpdateCoordinateProbe(probe);
         frame.ready = true;
@@ -1985,7 +2032,12 @@ private:
         bool decodedRecordSourceReady = false;
         std::uint64_t weaponId = 0;
         std::uintptr_t weaponRoot = 0;
-        std::vector<RuntimeActorRecord> decodedActors;
+    };
+
+    struct ActorRecordSnapshot {
+        std::vector<RuntimeActorRecord> records;
+        bool decodedRecordsEncrypted = false;
+        bool decodedRecordSourceReady = false;
     };
 
     struct HealthState {
@@ -2237,13 +2289,14 @@ private:
     }
 
     std::vector<RuntimeActorRecord> CollectActorRecords(
-        const FrameContext& context) {
+        const FrameContext& context,
+        const std::vector<RuntimeActorRecord>& decodedActors) {
         std::vector<RuntimeActorRecord> result;
         const std::vector<std::uintptr_t> ordinary =
             CollectActorAddresses(context);
-        result.reserve(context.decodedActors.size() + ordinary.size());
+        result.reserve(decodedActors.size() + ordinary.size());
         std::unordered_map<std::uintptr_t, std::size_t> indices;
-        indices.reserve(context.decodedActors.size() + ordinary.size());
+        indices.reserve(decodedActors.size() + ordinary.size());
         const auto appendOrMerge = [&](const RuntimeActorRecord& record) {
             if (!IsValidPointer(record.actor)) return;
             const auto inserted = indices.emplace(record.actor, result.size());
@@ -2254,13 +2307,64 @@ private:
             native::MergeActorRecordSource(
                 result[inserted.first->second], record);
         };
-        for (const RuntimeActorRecord& record : context.decodedActors) {
+        for (const RuntimeActorRecord& record : decodedActors) {
             appendOrMerge(record);
         }
         for (const std::uintptr_t actor : ordinary) {
             appendOrMerge(native::MakeOrdinaryActorRecord(actor));
         }
         return result;
+    }
+
+    void RefreshActorRecordSnapshot(FrameContext& context,
+                                    bool decodedRequired) {
+        const native::ActorRecordSnapshotKey key{
+            moduleBase_,
+            context.world,
+            context.level,
+            context.actorArray,
+            context.actorCount,
+            context.localPawn,
+            decodedRequired,
+        };
+        const auto now = std::chrono::steady_clock::now();
+        if (!actorRecordRefreshPolicy_.ShouldRefresh(key, now)) {
+            context.decodedRecordsEncrypted =
+                actorRecordSnapshot_.decodedRecordsEncrypted;
+            context.decodedRecordSourceReady =
+                actorRecordSnapshot_.decodedRecordSourceReady;
+            return;
+        }
+
+        ActorRecordSnapshot candidate{};
+        std::vector<RuntimeActorRecord> decodedActors;
+        if (decodedRequired) {
+            decodedActors = CollectDecodedActorRecords(
+                candidate.decodedRecordSourceReady,
+                candidate.decodedRecordsEncrypted);
+        }
+        candidate.records = CollectActorRecords(context, decodedActors);
+        actorRecordSnapshot_ = std::move(candidate);
+        context.decodedRecordsEncrypted =
+            actorRecordSnapshot_.decodedRecordsEncrypted;
+        context.decodedRecordSourceReady =
+            actorRecordSnapshot_.decodedRecordSourceReady;
+
+        const bool ordinarySourceReady =
+            IsValidPointer(context.actorArray) && context.actorCount > 0;
+        const bool cacheable = !actorRecordSnapshot_.records.empty() &&
+            (ordinarySourceReady || context.decodedRecordSourceReady) &&
+            (!decodedRequired || context.decodedRecordSourceReady);
+        if (cacheable) {
+            actorRecordRefreshPolicy_.MarkRefreshed(key, now);
+        } else {
+            actorRecordRefreshPolicy_.Invalidate();
+        }
+    }
+
+    void InvalidateActorRecordSnapshot() {
+        actorRecordRefreshPolicy_.Invalidate();
+        actorRecordSnapshot_ = ActorRecordSnapshot{};
     }
 
     std::vector<std::uintptr_t> CollectActorAddresses(
@@ -3111,35 +3215,31 @@ private:
             context.actorArray = actors.data;
             context.actorCount = actors.count;
         }
-        if (positionMode == native::PositionReadMode::Direct
-#if LENGJING_ENABLE_PROJECTILE_TRACKING
-            ||
-            trajectoryTracking) {
-#else
-            ) {
-#endif
-            context.decodedActors = CollectDecodedActorRecords(
-                context.decodedRecordSourceReady,
-                context.decodedRecordsEncrypted);
-            if (positionMode == native::PositionReadMode::Direct &&
-                !context.decodedRecordSourceReady &&
-                !ordinaryActorsAvailable) {
-                diagnostic = "数据链等待：人物列表暂不可读";
-                return false;
-            }
-        }
-        if (!ordinaryActorsAvailable &&
-            !context.decodedRecordSourceReady &&
-            context.decodedActors.empty()) {
-            diagnostic = "数据链等待：人物数组暂不可读";
-            return false;
-        }
         const std::uintptr_t gameInstance = ReadPointer(context.world + 0x190);
         const std::uintptr_t localPlayers = ReadPointer(gameInstance + 0x38);
         const std::uintptr_t localPlayer = ReadPointer(localPlayers);
         context.localController = ReadPointer(localPlayer + 0x30);
         context.localPawn = ReadPointer(context.localController + 0x3F0);
         context.cameraManager = ReadPointer(context.localController + 0x408);
+        const bool decodedRequired =
+            positionMode == native::PositionReadMode::Direct
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+            || trajectoryTracking
+#endif
+            ;
+        RefreshActorRecordSnapshot(context, decodedRequired);
+        if (positionMode == native::PositionReadMode::Direct &&
+            !context.decodedRecordSourceReady &&
+            !ordinaryActorsAvailable) {
+                diagnostic = "数据链等待：人物列表暂不可读";
+            return false;
+        }
+        if (!ordinaryActorsAvailable &&
+            !context.decodedRecordSourceReady &&
+            actorRecordSnapshot_.records.empty()) {
+            diagnostic = "数据链等待：人物数组暂不可读";
+            return false;
+        }
         if (!IsValidPointer(context.localController) || !IsValidPointer(context.localPawn) ||
             !IsValidPointer(context.cameraManager)) {
             diagnostic = "数据链等待：本地角色或相机暂不可读";
@@ -3200,10 +3300,11 @@ private:
 #endif
 
         const auto localRecord = std::find_if(
-            context.decodedActors.begin(),
-            context.decodedActors.end(),
+            actorRecordSnapshot_.records.begin(),
+            actorRecordSnapshot_.records.end(),
             [&context](const RuntimeActorRecord& record) {
-                return record.actor == context.localPawn;
+                return record.actor == context.localPawn &&
+                    record.resolverRecord;
             });
 
         std::int32_t localNameIndex = -1;
@@ -3212,7 +3313,7 @@ private:
             DecodeName(localNameIndex, context.namePool);
         std::uintptr_t localRoot = 0;
         if (positionMode == native::PositionReadMode::Direct &&
-            localRecord != context.decodedActors.end()) {
+            localRecord != actorRecordSnapshot_.records.end()) {
             localRoot = localRecord->root;
         }
         if (!ReadCharacterPosition(
@@ -3291,9 +3392,11 @@ private:
                     return false;
                 }
                 position = found->second.position;
-                ++algorithmFrameSuccessCount_;
                 return true;
             };
+            if (!algorithmReplayAllowedThisFrame_) {
+                return readCached();
+            }
             if (UsesCoordinatePoolRuntime()) {
                 ++algorithmAttemptCount_;
                 ++algorithmFrameAttemptCount_;
@@ -3314,6 +3417,7 @@ private:
                     if (IsFinite(decoded) && IsNonzero(decoded)) {
                         ++algorithmSuccessCount_;
                         ++algorithmFrameSuccessCount_;
+                        algorithmReplayBackoffPolicy_.MarkSucceeded();
                         storeDecoded(decoded);
                         return true;
                     }
@@ -3326,8 +3430,15 @@ private:
                     algorithmExecutionContextReady_,
                     algorithmPositionConfig_)) {
                 native::AlgorithmPosition candidate{};
-                const bool refreshCachedPages = algorithmRefreshPending_;
-                algorithmRefreshPending_ = false;
+                const bool refreshCachedPages =
+                    algorithmReplayPagePolicy_.ConsumeRefresh(
+                        native::AlgorithmReplayPageKey{
+                            algorithmGuestPc_,
+                            algorithmExecutionContext_.tpidrEl0,
+                            algorithmExecutionContext_.threadId,
+                            algorithmExecutionContext_.threadStartTimeTicks,
+                            algorithmExecutionContext_.generation,
+                        });
                 ++algorithmAttemptCount_;
                 ++algorithmFrameAttemptCount_;
                 if (memory_ != nullptr &&
@@ -3350,6 +3461,7 @@ private:
                     if (IsFinite(decoded) && IsNonzero(decoded)) {
                         ++algorithmSuccessCount_;
                         ++algorithmFrameSuccessCount_;
+                        algorithmReplayBackoffPolicy_.MarkSucceeded();
                         storeDecoded(decoded);
                         return true;
                     }
@@ -5540,6 +5652,8 @@ private:
         hudMapCache_.Clear();
         characterPositions_.Clear();
         algorithmPositionRuntime_.Invalidate();
+        algorithmReplayPagePolicy_.Invalidate();
+        algorithmExecutionContextRefreshPolicy_.Invalidate();
         positionReadMode_ = native::PositionReadMode::Standard;
         projectileSpeedReader_.Invalidate();
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
@@ -5559,6 +5673,22 @@ private:
         viewFovState_ = native::ProjectionFovStabilityState{};
     }
 
+    native::AlgorithmExecutionContextRefreshKey
+    CurrentAlgorithmExecutionContextRefreshKey(
+        bool coordinatePoolSelected) const noexcept {
+        const native::CoordinatePoolRuntimeProbe poolProbe =
+            coordinatePoolSelected
+            ? coordinatePoolRuntime_.Probe()
+            : native::CoordinatePoolRuntimeProbe{};
+        return native::AlgorithmExecutionContextRefreshKey{
+            static_cast<std::int32_t>(processId_),
+            moduleBase_,
+            coordinatePoolSelected ? poolProbe.guestEntry : algorithmGuestPc_,
+            coordinatePoolSelected ? 0U : algorithmEntryInstruction_,
+            coordinatePoolSelected,
+        };
+    }
+
     void RefreshAlgorithmExecutionContext() {
         bool coordinatePoolSelected = UsesCoordinatePoolRuntime();
         if (!algorithmPositionRequested_ || memory_ == nullptr ||
@@ -5567,6 +5697,7 @@ private:
                 (!coordinatePoolSelected && !algorithmEntryReady_)) {
                 algorithmExecutionContext_ = {};
                 algorithmExecutionContextReady_ = false;
+                algorithmExecutionContextRefreshPolicy_.Invalidate();
             }
             coordinatePoolReady_ = false;
             if (!algorithmPositionRequested_ && coordinatePoolSelected) {
@@ -5576,31 +5707,47 @@ private:
             return;
         }
 
-        native::ProcessExecutionContext refreshed{};
-        if (!memory_->ReadProcessExecutionContext(refreshed)) {
-            if (algorithmExecutionContextReady_) {
-                algorithmPositionRuntime_.Invalidate();
+        const auto now = std::chrono::steady_clock::now();
+        const native::AlgorithmExecutionContextRefreshKey refreshKey =
+            CurrentAlgorithmExecutionContextRefreshKey(
+                coordinatePoolSelected);
+        if (!algorithmExecutionContextReady_ ||
+            algorithmExecutionContextRefreshPolicy_.ShouldRefresh(
+                refreshKey, now)) {
+            native::ProcessExecutionContext refreshed{};
+            if (!memory_->ReadProcessExecutionContext(refreshed)) {
+                if (algorithmExecutionContextReady_) {
+                    algorithmPositionRuntime_.Invalidate();
+                    algorithmReplayPagePolicy_.Invalidate();
+                }
+                algorithmExecutionContext_ = {};
+                algorithmExecutionContextReady_ = false;
+                algorithmExecutionContextRefreshPolicy_.MarkFailed();
+            } else {
+                if (!coordinatePoolSelected && !refreshed.HasPacgaKey()) {
+                    coordinatePoolFallback_ = true;
+                    coordinatePoolRuntime_.Reset();
+                    coordinatePoolReady_ = false;
+                    coordinatePoolFrame_ = 0;
+                    coordinatePoolSelected = true;
+                }
+                if (!algorithmExecutionContextReady_ ||
+                    algorithmExecutionContext_.generation !=
+                        refreshed.generation ||
+                    algorithmExecutionContext_.threadId !=
+                        refreshed.threadId ||
+                    algorithmExecutionContext_.threadStartTimeTicks !=
+                        refreshed.threadStartTimeTicks) {
+                    algorithmPositionRuntime_.Invalidate();
+                    algorithmReplayPagePolicy_.Invalidate();
+                }
+                algorithmExecutionContext_ = refreshed;
+                algorithmExecutionContextReady_ = true;
+                algorithmExecutionContextRefreshPolicy_.MarkSucceeded(
+                    CurrentAlgorithmExecutionContextRefreshKey(
+                        coordinatePoolSelected),
+                    now);
             }
-            algorithmExecutionContext_ = {};
-            algorithmExecutionContextReady_ = false;
-        } else {
-            if (!coordinatePoolSelected && !refreshed.HasPacgaKey()) {
-                coordinatePoolFallback_ = true;
-                coordinatePoolRuntime_.Reset();
-                coordinatePoolReady_ = false;
-                coordinatePoolFrame_ = 0;
-                coordinatePoolSelected = true;
-            }
-            if (!algorithmExecutionContextReady_ ||
-                algorithmExecutionContext_.generation !=
-                    refreshed.generation ||
-                algorithmExecutionContext_.threadId != refreshed.threadId ||
-                algorithmExecutionContext_.threadStartTimeTicks !=
-                    refreshed.threadStartTimeTicks) {
-                algorithmPositionRuntime_.Invalidate();
-            }
-            algorithmExecutionContext_ = refreshed;
-            algorithmExecutionContextReady_ = true;
         }
 
         if (coordinatePoolSelected) {
@@ -5650,6 +5797,8 @@ private:
         }
         if (changed) {
             algorithmPositionRuntime_.Invalidate();
+            algorithmReplayPagePolicy_.Invalidate();
+            algorithmExecutionContextRefreshPolicy_.Invalidate();
             algorithmExecutionContext_ = {};
             algorithmExecutionContextReady_ = false;
         }
@@ -5700,8 +5849,10 @@ private:
         algorithmFailureSince_ = {};
         algorithmExecutionContext_ = {};
         algorithmExecutionContextReady_ = false;
+        algorithmExecutionContextRefreshPolicy_.Invalidate();
         coordinatePoolReady_ = false;
         algorithmPositionRuntime_.Invalidate();
+        algorithmReplayPagePolicy_.Invalidate();
     }
 
     bool UsesCoordinatePoolRuntime() const noexcept {
@@ -5778,7 +5929,9 @@ private:
         algorithmEntryReady_ = false;
         algorithmEntryValidationAt_ = {};
         algorithmFailureSince_ = {};
-        algorithmRefreshPending_ = true;
+        algorithmReplayBackoffPolicy_.Reset();
+        algorithmReplayPagePolicy_.Invalidate();
+        algorithmExecutionContextRefreshPolicy_.Invalidate();
         algorithmAttemptCount_ = 0;
         algorithmSuccessCount_ = 0;
         algorithmFrameAttemptCount_ = 0;
@@ -5794,6 +5947,7 @@ private:
         options_ = RuntimeOptions{};
         customItemPath_.clear();
         customItems_.Clear();
+        InvalidateActorRecordSnapshot();
         ResetWorldState();
         aimEnabled_.store(false, std::memory_order_release);
         return true;
@@ -5805,13 +5959,17 @@ private:
     std::unique_ptr<native::MemoryTransport> memory_;
     native::AlgorithmPositionRuntime algorithmPositionRuntime_{};
     native::CoordinatePoolRuntime coordinatePoolRuntime_{};
+    native::AlgorithmExecutionContextRefreshPolicy
+        algorithmExecutionContextRefreshPolicy_{};
+    native::AlgorithmReplayBackoffPolicy algorithmReplayBackoffPolicy_{};
+    native::AlgorithmReplayPagePolicy algorithmReplayPagePolicy_{};
     native::AlgorithmPositionRuntimeConfig algorithmPositionConfig_{};
     native::ProcessExecutionContext algorithmExecutionContext_{};
     std::uintptr_t algorithmGuestPc_ = 0;
     std::uint32_t algorithmEntryInstruction_ = 0;
     bool algorithmExecutionContextReady_ = false;
     bool algorithmEntryReady_ = false;
-    bool algorithmRefreshPending_ = true;
+    bool algorithmReplayAllowedThisFrame_ = true;
     bool algorithmPositionRequested_ = false;
     bool coordinatePoolReady_ = false;
     bool coordinatePoolFallback_ = false;
@@ -5835,6 +5993,9 @@ private:
     native::ProjectionFovStabilityState viewFovState_{};
     bool opened_ = false;
     std::atomic_bool aimEnabled_{false};
+    ActorRecordSnapshot actorRecordSnapshot_{};
+    native::ActorRecordRefreshPolicy actorRecordRefreshPolicy_{
+        std::chrono::milliseconds(100)};
     std::unordered_map<std::uintptr_t, PositionCacheEntry> positionCache_;
     std::unordered_map<std::uintptr_t, BoneCacheEntry> boneCache_;
     std::unordered_map<std::int32_t, std::string> nameCache_;

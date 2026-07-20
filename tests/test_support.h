@@ -14,6 +14,7 @@
 
 void RunConfigTests();
 void RunActorFrameVisitSetTests();
+void RunActorRecordRefreshPolicyTests();
 void RunActorRecordSourceTests();
 void RunActorRecordResolverTests();
 void RunAlgorithmPositionPolicyTests();

@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_executable(lengjing_tests
     actor_frame_visit_set_tests.cpp
+    actor_record_refresh_policy_tests.cpp
     actor_record_source_tests.cpp
     actor_record_resolver_tests.cpp
     algorithm_position_policy_tests.cpp
