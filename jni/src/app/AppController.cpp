@@ -145,7 +145,6 @@ void AppController::RenderFrame(float presentedFramesPerSecond) {
     model_.runtime.screenWidth = std::max(0, static_cast<int>(io.DisplaySize.x));
     model_.runtime.screenHeight = std::max(0, static_cast<int>(io.DisplaySize.y));
 
-    SyncToastSetting();
     SyncRuntimeStatus();
     FlushConfig(false);
 

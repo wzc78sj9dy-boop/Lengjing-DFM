@@ -536,16 +536,11 @@ void OverlayRenderer::DrawTracer(ImDrawList* drawList,
     if (Length(Subtract(target, origin)) <= 1.0f) return;
     const float width = render::PlayerStrokeWidth(
         style_.metrics.lineWidth, scale);
-    const float outline = render::PlayerOutlineWidth(
-        width, style_.metrics.outlineWidth, scale);
-    DrawOutlinedLine(
-        drawList,
+    drawList->AddLine(
         origin,
         target,
-        color,
-        render::WithExactAlpha(style_.colors.shadow, 140),
-        width,
-        outline);
+        render::WithExactAlpha(color, render::kSolidAlpha),
+        width);
 }
 
 void OverlayRenderer::DrawPlayerSignal(ImDrawList* drawList,
@@ -568,16 +563,11 @@ void OverlayRenderer::DrawPlayerSignal(ImDrawList* drawList,
         : ToneColor(signal.tone);
     const float width = render::PlayerStrokeWidth(
         style_.metrics.lineWidth, scale);
-    const float outline = render::PlayerOutlineWidth(
-        width, style_.metrics.outlineWidth, scale);
-    DrawOutlinedLine(
-        drawList,
+    drawList->AddLine(
         start,
         end,
         render::WithExactAlpha(base, render::kSolidAlpha),
-        render::WithExactAlpha(style_.colors.shadow, 140),
-        width,
-        outline);
+        width);
 }
 
 void OverlayRenderer::DrawModelGeometry(

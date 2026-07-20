@@ -97,6 +97,10 @@ AndroidImgui::GetPresentationRateTracker() const {
     return m_PresentationRate;
 }
 
+void AndroidImgui::RecordPresentedFrame() {
+    m_PresentationRate->Record();
+}
+
 float AndroidImgui::PresentedFrameRate() const {
     return m_PresentationRate->Read();
 }

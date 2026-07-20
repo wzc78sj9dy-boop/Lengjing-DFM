@@ -680,8 +680,6 @@ int main() {
         graphics->NewFrame();
         controller.RenderFrame(graphics->PresentedFrameRate());
         graphics->EndFrame();
-        runtimeExitCode = controller.RuntimeExitCode();
-        if (runtimeExitCode != 0) break;
     }
 
     if (kRuntimeAuthEnabled && authSession.ExitRequested()) {

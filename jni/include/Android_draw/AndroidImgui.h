@@ -35,6 +35,8 @@ protected:
 
     std::shared_ptr<lengjing::render::PresentationRateTracker>
     GetPresentationRateTracker() const;
+
+    void RecordPresentedFrame();
 public:
     char RenderName[16];
 
