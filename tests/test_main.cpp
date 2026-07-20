@@ -6,6 +6,7 @@
 int main() {
     try {
         RunActorFrameVisitSetTests();
+        RunActorRecordRefreshPolicyTests();
         RunActorRecordSourceTests();
         RunActorRecordResolverTests();
         RunAlgorithmPositionPolicyTests();
@@ -20,6 +21,7 @@ int main() {
         RunConfigTests();
         RunCpuMailboxPolicyTests();
         RunFrameProjectionTests();
+        RunGeometrySceneBuildPolicyTests();
         RunHudMapTests();
         RunKernelModuleCatalogTests();
         RunOverlayContrastPolicyTests();
@@ -32,6 +34,7 @@ int main() {
         RunRemoteElfIdentityTests();
         RunRuntimeLayoutOverrideTests();
         RunRuntimeExitPolicyTests();
+        RunRuntimePresentationPolicyTests();
         RunRuntimeTests();
         RunThreatCatalogTests();
         RunTrackingCalculatorTests();

@@ -38,6 +38,17 @@ void RunPlayerBoundsTests() {
     REQUIRE(std::abs(bounds.top - 200.0f) < 0.001f);
     REQUIRE(std::abs(bounds.right - 350.0f) < 0.001f);
     REQUIRE(std::abs(bounds.bottom - 400.0f) < 0.001f);
+
+    REQUIRE(CalculatePlayerAnchorBounds(
+        PlayerBoneScreenPoint{1980.0f, 400.0f, true},
+        PlayerBoneScreenPoint{1880.0f, 200.0f, true},
+        bounds));
+    REQUIRE(std::abs(bounds.left - 1830.0f) < 0.001f);
+    REQUIRE(std::abs(bounds.right - 2030.0f) < 0.001f);
+    REQUIRE(DoesPlayerScreenBoundsIntersectViewport(
+        bounds, 1920.0f, 1080.0f));
+    REQUIRE(IsReliablePlayerScreenBounds(bounds, 1920.0f, 1080.0f));
+
     REQUIRE(!CalculatePlayerAnchorBounds(
         PlayerBoneScreenPoint{300.0f, 200.0f, true},
         PlayerBoneScreenPoint{300.0f, 400.0f, true},

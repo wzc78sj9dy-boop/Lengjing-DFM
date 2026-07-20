@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_executable(lengjing_tests
     actor_frame_visit_set_tests.cpp
+    actor_record_refresh_policy_tests.cpp
     actor_record_source_tests.cpp
     actor_record_resolver_tests.cpp
     algorithm_position_policy_tests.cpp
@@ -23,6 +24,7 @@ add_executable(lengjing_tests
     config_tests.cpp
     cpu_mailbox_policy_tests.cpp
     frame_projection_tests.cpp
+    geometry_scene_build_policy_tests.cpp
     hud_map_tests.cpp
     kernel_module_catalog_tests.cpp
     overlay_contrast_policy_tests.cpp
@@ -35,6 +37,7 @@ add_executable(lengjing_tests
     remote_elf_identity_tests.cpp
     runtime_layout_override_tests.cpp
     runtime_exit_policy_tests.cpp
+    runtime_presentation_policy_tests.cpp
     runtime_tests.cpp
     threat_catalog_tests.cpp
     tracking_calculator_tests.cpp
@@ -137,4 +140,26 @@ endif()
 add_test(
     NAME ptrace_execution_context_provider_tests
     COMMAND ptrace_execution_context_provider_tests
+)
+
+add_executable(pacga_operand_resolver_tests
+    pacga_operand_resolver_tests.cpp
+    ../jni/src/game/native/PacgaOperandResolver.cpp
+)
+
+target_include_directories(pacga_operand_resolver_tests PRIVATE
+    ../jni/include
+)
+
+if(MSVC)
+    target_compile_options(pacga_operand_resolver_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(pacga_operand_resolver_tests PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+endif()
+
+add_test(
+    NAME pacga_operand_resolver_tests
+    COMMAND pacga_operand_resolver_tests
 )

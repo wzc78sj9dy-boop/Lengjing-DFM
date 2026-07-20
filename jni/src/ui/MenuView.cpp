@@ -706,22 +706,15 @@ void RenderRuntime(UiModel& model, UiActions& actions) {
     SectionTitle("运行状态");
     const float metricsWidth = ImGui::GetContentRegionAvail().x;
     const int metricColumns =
-        metricsWidth >= 740.0f
-            ? 5
-            : (metricsWidth >= 420.0f
-                ? 3
-                : (metricsWidth >= 280.0f ? 2 : 1));
+        metricsWidth >= 420.0f
+            ? 3
+            : (metricsWidth >= 280.0f ? 2 : 1);
     if (ImGui::BeginTable(
             "##runtime_metrics", metricColumns,
             ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoSavedSettings)) {
         const char* state = runtime.stopping ? "停止中" : (runtime.active ? "运行中" : "未运行");
         const ImVec4 stateColor = runtime.stopping ? kAmber : (runtime.active ? kGreen : kMuted);
         StatusMetric("状态", state, stateColor);
-        StatusMetric(
-            "进程",
-            runtime.processId > 0 ? std::to_string(runtime.processId) : "未获取",
-            runtime.processId > 0 ? kText : kMuted);
-        StatusMetric("基址", runtime.baseReady ? "已获取" : "未获取", runtime.baseReady ? kGreen : kMuted);
         char fps[32]{};
         std::snprintf(fps, sizeof(fps), "%.1f", runtime.framesPerSecond);
         StatusMetric("帧率", fps, kAmber);
@@ -830,12 +823,6 @@ void RenderVisual(UiModel& model, UiActions& actions) {
     Mark(actions, SettingsDomain::Visual, SliderFloatRow(
         "字体大小", &visual.fontScale, 0.3f, 3.0f, "%.1f"));
 
-    SectionTitle("调试");
-    if (BeginToggleGrid("##visual_debug")) {
-        Mark(actions, SettingsDomain::Visual, GridToggle("调试信息", visual.debugInfo));
-        Mark(actions, SettingsDomain::Visual, GridToggle("类名调试", visual.classNameDebug));
-        ImGui::EndTable();
-    }
 }
 
 void RenderLoot(UiModel& model, UiActions& actions) {

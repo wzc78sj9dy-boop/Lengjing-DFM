@@ -21,11 +21,23 @@
 #define COLOR_RESET   "\033[0m"
 
 // 分级日志宏
+#ifndef LENGJING_ENABLE_INTERNAL_LOGGING
+#define LENGJING_ENABLE_INTERNAL_LOGGING 0
+#endif
+
+#if LENGJING_ENABLE_INTERNAL_LOGGING
 #define LOG_DEBUG(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
 #define LOG_INFO(...)  __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOG_WARN(...)  __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 #define LOG_ERROR(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 #define LOG_FATAL(...) __android_log_print(ANDROID_LOG_FATAL, TAG, __VA_ARGS__)
+#else
+#define LOG_DEBUG(...) ((void)0)
+#define LOG_INFO(...)  ((void)0)
+#define LOG_WARN(...)  ((void)0)
+#define LOG_ERROR(...) ((void)0)
+#define LOG_FATAL(...) ((void)0)
+#endif
 
 #define SCENE_LOG(fmt, ...)       LOG_INFO(COLOR_BLUE "[Scene] " fmt COLOR_RESET, ##__VA_ARGS__)
 #define SCENE_DEBUG(fmt, ...)     LOG_DEBUG(COLOR_CYAN "[Scene] " fmt COLOR_RESET, ##__VA_ARGS__)

@@ -14,6 +14,7 @@ enum class CardInputStatus {
     EndOfInput,
     Empty,
     Invalid,
+    TerminalError,
 };
 
 struct CardInputResult {
@@ -23,6 +24,49 @@ struct CardInputResult {
     explicit operator bool() const noexcept {
         return status == CardInputStatus::Accepted;
     }
+};
+
+struct TerminalEchoControl {
+    using Callback = bool (*)(void*) noexcept;
+
+    void* context = nullptr;
+    Callback disable = nullptr;
+    Callback restore = nullptr;
+
+    constexpr bool IsConfigured() const noexcept {
+        return disable != nullptr && restore != nullptr;
+    }
+};
+
+class TerminalEchoScope final {
+public:
+    TerminalEchoScope(const TerminalEchoControl& control,
+                      bool requested) noexcept
+        : control_(control), attempted_(requested && control.IsConfigured()) {
+        if (attempted_) restorePending_ = control_.disable(control_.context);
+    }
+
+    ~TerminalEchoScope() {
+        if (restorePending_) control_.restore(control_.context);
+    }
+
+    TerminalEchoScope(const TerminalEchoScope&) = delete;
+    TerminalEchoScope& operator=(const TerminalEchoScope&) = delete;
+
+    bool Attempted() const noexcept { return attempted_; }
+    bool Disabled() const noexcept { return restorePending_; }
+
+    bool Restore() noexcept {
+        if (!restorePending_) return true;
+        if (!control_.restore(control_.context)) return false;
+        restorePending_ = false;
+        return true;
+    }
+
+private:
+    TerminalEchoControl control_{};
+    bool attempted_ = false;
+    bool restorePending_ = false;
 };
 
 inline void TrimCardKey(std::string& value) {
@@ -44,13 +88,32 @@ inline void TrimCardKey(std::string& value) {
 inline CardInputResult ReadCardKeyFromStream(
     std::istream& input,
     std::ostream& output,
-    bool inputIsTerminal) {
+    bool inputIsTerminal,
+    const TerminalEchoControl& terminalEcho = {}) {
     if (inputIsTerminal) {
         output << "请输入卡密: " << std::flush;
     }
 
     std::string value;
-    if (!std::getline(input, value)) {
+    bool readSucceeded = false;
+    bool echoWasDisabled = false;
+    bool restoreSucceeded = true;
+    {
+        TerminalEchoScope echoScope(terminalEcho, inputIsTerminal);
+        if (echoScope.Attempted() && !echoScope.Disabled()) {
+            return {CardInputStatus::TerminalError, {}};
+        }
+        echoWasDisabled = echoScope.Disabled();
+        readSucceeded = static_cast<bool>(std::getline(input, value));
+        restoreSucceeded = echoScope.Restore();
+    }
+    if (echoWasDisabled) output << '\n' << std::flush;
+    if (!restoreSucceeded) {
+        std::fill(value.begin(), value.end(), '\0');
+        value.clear();
+        return {CardInputStatus::TerminalError, {}};
+    }
+    if (!readSucceeded) {
         return {CardInputStatus::EndOfInput, {}};
     }
     TrimCardKey(value);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 
@@ -9,6 +10,19 @@ namespace lengjing::render {
 inline constexpr std::uint8_t kSolidAlpha = 255;
 inline constexpr std::uint8_t kTextMinimumAlpha = 235;
 inline constexpr std::uint8_t kTextOutlineMinimumAlpha = 210;
+
+struct TextOutlineDirection {
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
+inline constexpr std::array<TextOutlineDirection, 4>
+    kTextOutlineDirections{{
+        {-1.0f, 0.0f},
+        {1.0f, 0.0f},
+        {0.0f, -1.0f},
+        {0.0f, 1.0f},
+    }};
 
 inline std::uint32_t WithMinimumAlpha(
     std::uint32_t color,
@@ -23,6 +37,13 @@ inline std::uint32_t WithExactAlpha(
     std::uint8_t alpha) noexcept {
     return (color & 0x00ffffffU) |
         (static_cast<std::uint32_t>(alpha) << 24U);
+}
+
+inline float TextOutlineOffset(float fontSize) noexcept {
+    const float safeFontSize = std::isfinite(fontSize)
+        ? std::max(0.0f, fontSize)
+        : 0.0f;
+    return std::clamp(safeFontSize * 0.045f, 0.75f, 1.5f);
 }
 
 inline float PlayerStrokeWidth(float configuredWidth, float scale) noexcept {

@@ -518,7 +518,7 @@ void VulkanGraphics::Render(ImDrawData *drawData) {
             DisableRendering("vkQueuePresentKHR", err);
             return;
         }
-        GetPresentationRateTracker()->Record();
+        RecordPresentedFrame();
         wd->SemaphoreIndex = (wd->SemaphoreIndex + 1) % wd->SemaphoreCount; // Now we can use the next set of semaphores
         if (rebuild_after_present)
             m_SwapChainRebuild = true;
@@ -536,6 +536,8 @@ void VulkanGraphics::DisableRendering(const char *operation, VkResult error) {
 }
 
 bool VulkanGraphics::ConsumeSurfaceRecoveryRequest() {
+    if (!m_SurfaceRecoveryRequested.load(std::memory_order_acquire))
+        return false;
     return m_SurfaceRecoveryRequested.exchange(
         false, std::memory_order_acq_rel);
 }

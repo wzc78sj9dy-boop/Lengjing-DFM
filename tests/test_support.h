@@ -14,6 +14,7 @@
 
 void RunConfigTests();
 void RunActorFrameVisitSetTests();
+void RunActorRecordRefreshPolicyTests();
 void RunActorRecordSourceTests();
 void RunActorRecordResolverTests();
 void RunAlgorithmPositionPolicyTests();
@@ -27,6 +28,7 @@ void RunCloudLayoutStartupPolicyTests();
 void RunCloudLayoutTests();
 void RunCpuMailboxPolicyTests();
 void RunFrameProjectionTests();
+void RunGeometrySceneBuildPolicyTests();
 void RunHudMapTests();
 void RunKernelModuleCatalogTests();
 void RunOverlayContrastPolicyTests();
@@ -39,6 +41,7 @@ void RunRenderBackendSelectionTests();
 void RunRemoteElfIdentityTests();
 void RunRuntimeLayoutOverrideTests();
 void RunRuntimeExitPolicyTests();
+void RunRuntimePresentationPolicyTests();
 void RunRuntimeTests();
 void RunThreatCatalogTests();
 void RunTrackingCalculatorTests();

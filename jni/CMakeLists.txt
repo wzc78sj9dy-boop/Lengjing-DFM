@@ -194,8 +194,35 @@ target_link_options(lengjing PRIVATE
     $<$<CONFIG:Release>:-flto=thin>
 )
 
+set(LENGJING_DRIVER_ARCHIVE
+    "${CMAKE_CURRENT_SOURCE_DIR}/lib/paradise/libparadise_api.a")
+set(LENGJING_SILENT_DRIVER_ARCHIVE
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/lib/libdriver_api_silent.a")
+if(NOT CMAKE_OBJCOPY)
+    message(FATAL_ERROR "CMAKE_OBJCOPY is required for the driver archive")
+endif()
+if(NOT EXISTS "${LENGJING_DRIVER_ARCHIVE}")
+    message(FATAL_ERROR
+        "Required static library is missing: ${LENGJING_DRIVER_ARCHIVE}")
+endif()
+add_custom_command(
+    OUTPUT "${LENGJING_SILENT_DRIVER_ARCHIVE}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/lib"
+    COMMAND "${CMAKE_OBJCOPY}"
+        --redefine-sym printf=lengjing_silent_printf
+        --redefine-sym puts=lengjing_silent_puts
+        "${LENGJING_DRIVER_ARCHIVE}"
+        "${LENGJING_SILENT_DRIVER_ARCHIVE}"
+    DEPENDS "${LENGJING_DRIVER_ARCHIVE}"
+    VERBATIM
+)
+add_custom_target(lengjing_silent_driver_archive
+    DEPENDS "${LENGJING_SILENT_DRIVER_ARCHIVE}")
+add_dependencies(lengjing lengjing_silent_driver_archive)
+
 set(LENGJING_STATIC_LIBRARIES
-    ${CMAKE_CURRENT_SOURCE_DIR}/lib/paradise/libparadise_api.a
+    ${LENGJING_SILENT_DRIVER_ARCHIVE}
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/kernel/libkernel_scripts.a
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/libembree4.a
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/liblexers.a
@@ -208,7 +235,9 @@ set(LENGJING_STATIC_LIBRARIES
 )
 
 foreach(LENGJING_LIBRARY IN LISTS LENGJING_STATIC_LIBRARIES)
-    if(NOT EXISTS "${LENGJING_LIBRARY}")
+    if(NOT "${LENGJING_LIBRARY}" STREQUAL
+           "${LENGJING_SILENT_DRIVER_ARCHIVE}" AND
+       NOT EXISTS "${LENGJING_LIBRARY}")
         message(FATAL_ERROR "Required static library is missing: ${LENGJING_LIBRARY}")
     endif()
 endforeach()

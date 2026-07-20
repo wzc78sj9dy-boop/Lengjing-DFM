@@ -11,7 +11,7 @@
 namespace lengjing::auth {
 
 inline constexpr std::size_t kMaximumEncodedCloudVariablePayloadBytes =
-    kMaximumCloudLayoutPayloadBytes * 6U;
+    kMaximumCloudLayoutPayloadBytes * 10U;
 
 enum class CloudVariablePayloadDecodeStatus {
     Success,

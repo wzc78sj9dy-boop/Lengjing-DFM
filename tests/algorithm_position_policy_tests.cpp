@@ -1,4 +1,5 @@
 #include "game/native/AlgorithmPositionPolicy.h"
+#include "game/native/AlgorithmReplayPolicy.h"
 #include "game/native/MemoryTransport.h"
 #include "test_support.h"
 
@@ -12,6 +13,11 @@ void RunAlgorithmPositionPolicyTests() {
     using lengjing::game::native::AlgorithmPositionResultCache;
     using lengjing::game::native::AlgorithmPositionRuntimeConfig;
     using lengjing::game::native::AlgorithmPositionSecondDecision;
+    using lengjing::game::native::AlgorithmExecutionContextRefreshKey;
+    using lengjing::game::native::AlgorithmExecutionContextRefreshPolicy;
+    using lengjing::game::native::AlgorithmReplayBackoffPolicy;
+    using lengjing::game::native::AlgorithmReplayPageKey;
+    using lengjing::game::native::AlgorithmReplayPagePolicy;
     using lengjing::game::native::EvaluateAlgorithmPositionFirst;
     using lengjing::game::native::EvaluateAlgorithmPositionSecond;
     using lengjing::game::native::FormatAlgorithmPacgaResult;
@@ -120,4 +126,120 @@ void RunAlgorithmPositionPolicyTests() {
     REQUIRE((!ProcessExecutionContext{1, 1, 0, 0}.IsUsable()));
     REQUIRE((ProcessExecutionContext{1, 1, 0, 7}.IsUsable()));
     REQUIRE((ProcessExecutionContext{1, 0, 1, 7}.IsUsable()));
+
+    const AlgorithmExecutionContextRefreshPolicy::TimePoint contextStart{};
+    const AlgorithmExecutionContextRefreshKey contextKey{
+        123,
+        0x100000,
+        0x101000,
+        0xD503201F,
+        false,
+    };
+    AlgorithmExecutionContextRefreshPolicy contextRefresh(100ms);
+    REQUIRE(contextRefresh.ShouldRefresh(contextKey, contextStart));
+    contextRefresh.MarkSucceeded(contextKey, contextStart);
+    REQUIRE(!contextRefresh.ShouldRefresh(contextKey, contextStart));
+    REQUIRE(!contextRefresh.ShouldRefresh(
+        contextKey, contextStart + 99ms));
+    REQUIRE(contextRefresh.ShouldRefresh(
+        contextKey, contextStart + 100ms));
+
+    const auto requireContextRefresh =
+        [contextKey, contextStart](
+            AlgorithmExecutionContextRefreshKey changed) {
+        AlgorithmExecutionContextRefreshPolicy policy(100ms);
+        policy.MarkSucceeded(contextKey, contextStart);
+        REQUIRE(policy.ShouldRefresh(changed, contextStart + 1ms));
+        policy.MarkSucceeded(changed, contextStart + 1ms);
+        REQUIRE(!policy.ShouldRefresh(changed, contextStart + 2ms));
+    };
+    AlgorithmExecutionContextRefreshKey changedContextKey = contextKey;
+    ++changedContextKey.processId;
+    requireContextRefresh(changedContextKey);
+    changedContextKey = contextKey;
+    ++changedContextKey.moduleBase;
+    requireContextRefresh(changedContextKey);
+    changedContextKey = contextKey;
+    changedContextKey.guestPc += 4;
+    requireContextRefresh(changedContextKey);
+    changedContextKey = contextKey;
+    ++changedContextKey.entryInstruction;
+    requireContextRefresh(changedContextKey);
+    changedContextKey = contextKey;
+    changedContextKey.coordinatePoolSelected = true;
+    requireContextRefresh(changedContextKey);
+
+    contextRefresh.MarkSucceeded(contextKey, contextStart + 101ms);
+    contextRefresh.MarkFailed();
+    REQUIRE(contextRefresh.ShouldRefresh(contextKey, contextStart + 102ms));
+    contextRefresh.MarkSucceeded(contextKey, contextStart + 103ms);
+    contextRefresh.Invalidate();
+    REQUIRE(contextRefresh.ShouldRefresh(contextKey, contextStart + 104ms));
+
+    AlgorithmExecutionContextRefreshPolicy noContextCache(0ms);
+    noContextCache.MarkSucceeded(contextKey, contextStart);
+    REQUIRE(noContextCache.ShouldRefresh(contextKey, contextStart));
+
+    const AlgorithmReplayBackoffPolicy::TimePoint replayStart{};
+    AlgorithmReplayBackoffPolicy replayBackoff(100ms, 2);
+    REQUIRE(replayBackoff.BeginFrame(replayStart));
+    replayBackoff.ObserveFrame(15, 0, replayStart);
+    REQUIRE(!replayBackoff.IsBackingOff());
+    REQUIRE(replayBackoff.BeginFrame(replayStart + 1ms));
+    replayBackoff.ObserveFrame(15, 0, replayStart + 1ms);
+    REQUIRE(replayBackoff.IsBackingOff());
+    REQUIRE(!replayBackoff.BeginFrame(replayStart + 100ms));
+    REQUIRE(replayBackoff.BeginFrame(replayStart + 101ms));
+    REQUIRE(!replayBackoff.BeginFrame(replayStart + 200ms));
+    REQUIRE(replayBackoff.BeginFrame(replayStart + 201ms));
+    replayBackoff.MarkSucceeded();
+    REQUIRE(!replayBackoff.IsBackingOff());
+    REQUIRE(replayBackoff.BeginFrame(replayStart + 202ms));
+
+    replayBackoff.ObserveFrame(0, 0, replayStart + 203ms);
+    REQUIRE(!replayBackoff.IsBackingOff());
+    replayBackoff.ObserveFrame(10, 1, replayStart + 204ms);
+    REQUIRE(!replayBackoff.IsBackingOff());
+
+    AlgorithmReplayBackoffPolicy immediateBackoff(100ms, 0);
+    immediateBackoff.ObserveFrame(1, 0, replayStart);
+    REQUIRE(immediateBackoff.IsBackingOff());
+    immediateBackoff.Reset();
+    REQUIRE(!immediateBackoff.IsBackingOff());
+
+    const AlgorithmReplayPageKey pageKey{
+        0x1000,
+        0x2000,
+        10,
+        300,
+        4,
+    };
+    AlgorithmReplayPagePolicy pagePolicy;
+    REQUIRE(pagePolicy.ConsumeRefresh(pageKey));
+    REQUIRE(!pagePolicy.ConsumeRefresh(pageKey));
+    pagePolicy.BeginFrame();
+    REQUIRE(pagePolicy.ConsumeRefresh(pageKey));
+    REQUIRE(!pagePolicy.ConsumeRefresh(pageKey));
+
+    const auto requirePageRefresh = [&](AlgorithmReplayPageKey changed) {
+        pagePolicy.Invalidate();
+        REQUIRE(pagePolicy.ConsumeRefresh(pageKey));
+        REQUIRE(pagePolicy.ConsumeRefresh(changed));
+        REQUIRE(!pagePolicy.ConsumeRefresh(changed));
+    };
+    AlgorithmReplayPageKey changedPageKey = pageKey;
+    changedPageKey.guestPc += 4;
+    requirePageRefresh(changedPageKey);
+    changedPageKey = pageKey;
+    ++changedPageKey.tpidrEl0;
+    requirePageRefresh(changedPageKey);
+    changedPageKey = pageKey;
+    ++changedPageKey.threadId;
+    requirePageRefresh(changedPageKey);
+    changedPageKey = pageKey;
+    ++changedPageKey.threadStartTimeTicks;
+    requirePageRefresh(changedPageKey);
+    changedPageKey = pageKey;
+    ++changedPageKey.generation;
+    requirePageRefresh(changedPageKey);
 }

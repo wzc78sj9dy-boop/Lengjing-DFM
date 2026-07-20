@@ -1,11 +1,13 @@
 #include "auth/RemoteAuth.h"
 
+#include "app/RuntimePresentationPolicy.h"
 #include "auth/CardInputPolicy.h"
 #include "t3/t3sdk.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -21,10 +23,11 @@
 
 #if defined(__ANDROID__)
 #include <sys/system_properties.h>
-#include <unistd.h>
-#elif defined(_WIN32)
+#endif
+#if defined(_WIN32)
 #include <io.h>
 #else
+#include <termios.h>
 #include <unistd.h>
 #endif
 
@@ -207,6 +210,144 @@ bool InputIsTerminal() noexcept {
 #endif
 }
 
+#if !defined(_WIN32)
+struct TerminalEchoState {
+    int descriptor = STDIN_FILENO;
+    termios original{};
+    bool captured = false;
+};
+
+bool DisableTerminalEcho(void* opaque) noexcept {
+    auto& state = *static_cast<TerminalEchoState*>(opaque);
+    int result = 0;
+    do {
+        result = tcgetattr(state.descriptor, &state.original);
+    } while (result != 0 && errno == EINTR);
+    if (result != 0) return false;
+
+    termios hidden = state.original;
+    hidden.c_lflag &= static_cast<tcflag_t>(
+        ~(ECHO | ECHONL | ECHOE | ECHOK));
+    do {
+        result = tcsetattr(state.descriptor, TCSAFLUSH, &hidden);
+    } while (result != 0 && errno == EINTR);
+    if (result != 0) return false;
+    state.captured = true;
+    return true;
+}
+
+bool RestoreTerminalEcho(void* opaque) noexcept {
+    auto& state = *static_cast<TerminalEchoState*>(opaque);
+    if (!state.captured) return true;
+    int result = 0;
+    do {
+        result = tcsetattr(state.descriptor, TCSAFLUSH, &state.original);
+    } while (result != 0 && errno == EINTR);
+    if (result != 0) return false;
+    state.captured = false;
+    return true;
+}
+#endif
+
+enum class RemainingEntityStatus {
+    None,
+    Supported,
+    Unsupported,
+};
+
+bool DecodeSupportedEntity(std::string_view payload,
+                           std::size_t offset,
+                           char& decoded,
+                           std::size_t& consumed) noexcept {
+    if (payload.compare(offset, 6, "&quot;") == 0) {
+        decoded = '"';
+        consumed = 6;
+        return true;
+    }
+    if (payload.compare(offset, 5, "&amp;") == 0) {
+        decoded = '&';
+        consumed = 5;
+        return true;
+    }
+    if (payload.compare(offset, 5, "&#34;") == 0) {
+        decoded = '"';
+        consumed = 5;
+        return true;
+    }
+    if (payload.compare(offset, 6, "&#x22;") == 0) {
+        decoded = '"';
+        consumed = 6;
+        return true;
+    }
+    return false;
+}
+
+bool LooksLikeEntity(std::string_view payload,
+                     std::size_t offset) noexcept {
+    constexpr std::size_t kMaximumEntityBytes = 16;
+    const std::size_t end = payload.find(';', offset + 1U);
+    if (end == std::string_view::npos || end == offset + 1U ||
+        end - offset + 1U > kMaximumEntityBytes) {
+        return false;
+    }
+    for (std::size_t index = offset + 1U; index < end; ++index) {
+        const char character = payload[index];
+        const bool allowed =
+            (character >= 'a' && character <= 'z') ||
+            (character >= 'A' && character <= 'Z') ||
+            (character >= '0' && character <= '9') ||
+            character == '#';
+        if (!allowed) return false;
+    }
+    return true;
+}
+
+CloudVariablePayloadDecodeStatus DecodeEntityPass(
+    std::string& payload,
+    bool allowLiteralAmpersands,
+    std::size_t maximumOutputBytes) noexcept {
+    std::size_t readOffset = 0;
+    std::size_t writeOffset = 0;
+    while (readOffset < payload.size()) {
+        char decoded = payload[readOffset];
+        std::size_t consumed = 1;
+        if (decoded == '&' &&
+            !DecodeSupportedEntity(payload, readOffset,
+                                   decoded, consumed)) {
+            if (!allowLiteralAmpersands ||
+                LooksLikeEntity(payload, readOffset)) {
+                payload.clear();
+                return CloudVariablePayloadDecodeStatus::UnsupportedEntity;
+            }
+        }
+
+        if (writeOffset == maximumOutputBytes) {
+            payload.clear();
+            return CloudVariablePayloadDecodeStatus::OutputTooLarge;
+        }
+        payload[writeOffset++] = decoded;
+        readOffset += consumed;
+    }
+    payload.resize(writeOffset);
+    return CloudVariablePayloadDecodeStatus::Success;
+}
+
+RemainingEntityStatus FindRemainingEntity(
+    std::string_view payload) noexcept {
+    for (std::size_t offset = 0; offset < payload.size(); ++offset) {
+        if (payload[offset] != '&') continue;
+        char decoded = 0;
+        std::size_t consumed = 0;
+        if (DecodeSupportedEntity(payload, offset, decoded, consumed)) {
+            return RemainingEntityStatus::Supported;
+        }
+        if (LooksLikeEntity(payload, offset)) {
+            return RemainingEntityStatus::Unsupported;
+        }
+    }
+    return RemainingEntityStatus::None;
+}
+
 }  // namespace
 
 CloudVariablePayloadDecodeStatus DecodeCloudVariablePayload(
@@ -216,39 +357,33 @@ CloudVariablePayloadDecodeStatus DecodeCloudVariablePayload(
         return CloudVariablePayloadDecodeStatus::InputTooLarge;
     }
 
-    std::size_t readOffset = 0;
-    std::size_t writeOffset = 0;
-    while (readOffset < payload.size()) {
-        char decoded = payload[readOffset];
-        std::size_t consumed = 1;
-        if (decoded == '&') {
-            if (payload.compare(readOffset, 6, "&quot;") == 0) {
-                decoded = '"';
-                consumed = 6;
-            } else if (payload.compare(readOffset, 5, "&amp;") == 0) {
-                decoded = '&';
-                consumed = 5;
-            } else if (payload.compare(readOffset, 5, "&#34;") == 0) {
-                decoded = '"';
-                consumed = 5;
-            } else if (payload.compare(readOffset, 6, "&#x22;") == 0) {
-                decoded = '"';
-                consumed = 6;
-            } else {
-                payload.clear();
-                return CloudVariablePayloadDecodeStatus::UnsupportedEntity;
-            }
-        }
+    CloudVariablePayloadDecodeStatus status =
+        DecodeEntityPass(payload, false,
+                         kMaximumCloudLayoutPayloadBytes * 6U);
+    if (status != CloudVariablePayloadDecodeStatus::Success) return status;
 
-        if (writeOffset == kMaximumCloudLayoutPayloadBytes) {
+    RemainingEntityStatus remaining = FindRemainingEntity(payload);
+    if (remaining == RemainingEntityStatus::Unsupported) {
+        payload.clear();
+        return CloudVariablePayloadDecodeStatus::UnsupportedEntity;
+    }
+    if (remaining == RemainingEntityStatus::None) {
+        if (payload.size() > kMaximumCloudLayoutPayloadBytes) {
             payload.clear();
             return CloudVariablePayloadDecodeStatus::OutputTooLarge;
         }
-        payload[writeOffset++] = decoded;
-        readOffset += consumed;
+        return CloudVariablePayloadDecodeStatus::Success;
     }
 
-    payload.resize(writeOffset);
+    status = DecodeEntityPass(payload, true,
+                              kMaximumCloudLayoutPayloadBytes);
+    if (status != CloudVariablePayloadDecodeStatus::Success) return status;
+
+    remaining = FindRemainingEntity(payload);
+    if (remaining != RemainingEntityStatus::None) {
+        payload.clear();
+        return CloudVariablePayloadDecodeStatus::UnsupportedEntity;
+    }
     return CloudVariablePayloadDecodeStatus::Success;
 }
 
@@ -630,14 +765,23 @@ bool LoginInteractive(AuthSession& session,
     std::string error;
     std::shared_ptr<AuthGateway> gateway = CreateT3Gateway(config, error);
     if (gateway == nullptr) {
-        std::fprintf(stderr, "[验证] 初始化失败: %s\n", error.c_str());
+        std::fprintf(
+            stderr, "%s\n", app::VerificationFailureText());
         return false;
     }
 
+    const bool inputIsTerminal = InputIsTerminal();
+    input::TerminalEchoControl terminalEcho;
+#if !defined(_WIN32)
+    TerminalEchoState terminalEchoState;
+    terminalEcho = {
+        &terminalEchoState, &DisableTerminalEcho, &RestoreTerminalEcho};
+#endif
     input::CardInputResult card = input::ReadCardKeyFromStream(
-        std::cin, std::cout, InputIsTerminal());
+        std::cin, std::cout, inputIsTerminal, terminalEcho);
     if (!card) {
-        std::fprintf(stderr, "[验证] 卡密为空或无效\n");
+        std::fprintf(
+            stderr, "%s\n", app::VerificationFailureText());
         return false;
     }
     std::string resolvedDeviceCode = deviceCode.empty()
@@ -645,7 +789,8 @@ bool LoginInteractive(AuthSession& session,
         : std::string(deviceCode);
     if (resolvedDeviceCode.empty()) {
         SecureClear(card.value);
-        std::fprintf(stderr, "[验证] 设备码获取失败\n");
+        std::fprintf(
+            stderr, "%s\n", app::VerificationFailureText());
         return false;
     }
 
@@ -653,15 +798,10 @@ bool LoginInteractive(AuthSession& session,
     options.cloudVariable = config.cloudVariable;
     if (!session.Login(std::move(gateway), std::move(card.value),
                        std::move(resolvedDeviceCode), options)) {
-        std::fprintf(stderr, "[验证] 登录失败: %s\n",
-                     session.LastError().c_str());
+        std::fprintf(
+            stderr, "%s\n", app::VerificationFailureText());
         return false;
     }
-
-    const std::string expiresAt = session.ExpiresAt();
-    std::cout << "登录成功";
-    if (!expiresAt.empty()) std::cout << ", 有效期: " << expiresAt;
-    std::cout << '\n';
     return true;
 }
 

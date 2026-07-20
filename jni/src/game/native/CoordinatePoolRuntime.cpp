@@ -10,7 +10,6 @@
 #include <array>
 #include <chrono>
 #include <cmath>
-#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -714,15 +713,19 @@ private:
         const uc_err error = uc_emu_start(
             engine, entryStart, end, timeout, instructionBudget);
         std::uint64_t pc = 0;
+        const uc_err readError = uc_reg_read(
+            engine, UC_ARM64_REG_PC, &pc);
         return error == UC_ERR_OK && !hookFailed &&
-            uc_reg_read(engine, UC_ARM64_REG_PC, &pc) == UC_ERR_OK &&
-            pc == end;
+            readError == UC_ERR_OK && pc == end;
     }
 
     bool PrepareParametersUnlocked(std::uint64_t component) {
         if (!EnsureEngineUnlocked() || computedContext == 0) {
-            if (!PrepareRegistersUnlocked(decryptContext, 0, false) ||
-                !RunStageUnlocked(
+            if (!PrepareRegistersUnlocked(decryptContext, 0, false)) {
+                SetError(CoordinatePoolRuntimeError::ParameterExecutionFailed);
+                return false;
+            }
+            if (!RunStageUnlocked(
                     v87End, kV87InstructionBudget, kV87Timeout)) {
                 SetError(CoordinatePoolRuntimeError::ParameterExecutionFailed);
                 return false;

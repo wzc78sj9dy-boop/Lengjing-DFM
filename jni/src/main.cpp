@@ -1,6 +1,7 @@
 #include "app/AppController.h"
 #include "app/RenderBackendSelection.h"
 #include "app/RuntimeExitPolicy.h"
+#include "app/RuntimePresentationPolicy.h"
 #include "auth/CloudLayoutStartupPolicy.h"
 #include "auth/RemoteAuth.h"
 #include "game/native/MemoryTransport.h"
@@ -126,41 +127,22 @@ int RunCoordinateProbe(
         std::chrono::seconds(seconds);
     while (std::chrono::steady_clock::now() < deadline) {
         const lengjing::game::RuntimeStatus status = runtime.Status();
-        if (status.phase != last.phase ||
-            status.coordinateEntryReady != last.coordinateEntryReady ||
-            status.coordinateContextReady != last.coordinateContextReady ||
-            status.coordinateThreadId != last.coordinateThreadId ||
-            status.coordinateAttempts != last.coordinateAttempts ||
-            status.coordinateSuccesses != last.coordinateSuccesses ||
-            status.message != last.message) {
-            std::fprintf(
-                stderr,
-                "[coordinate-probe] phase=%u pid=%d base=%d req=%d "
-                "entry=%d ctx=%d tid=%d pc=0x%llx gen=%llu "
-                "run=%llu/%llu status=%s\n",
-                static_cast<unsigned int>(status.phase),
-                status.processId,
-                status.baseReady ? 1 : 0,
-                status.coordinateRequested ? 1 : 0,
-                status.coordinateEntryReady ? 1 : 0,
-                status.coordinateContextReady ? 1 : 0,
-                status.coordinateThreadId,
-                static_cast<unsigned long long>(
-                    status.coordinateGuestPc),
-                static_cast<unsigned long long>(
-                    status.coordinateContextGeneration),
-                static_cast<unsigned long long>(
-                    status.coordinateSuccesses),
-                static_cast<unsigned long long>(
-                    status.coordinateAttempts),
-                status.message.c_str());
-            last = status;
-        }
+        last = status;
         if (status.phase == lengjing::game::RuntimePhase::Faulted) break;
         std::this_thread::sleep_for(100ms);
     }
     runtime.Stop();
     runtime.WaitUntilStopped();
+    const auto decryptPresentation =
+        lengjing::app::ResolveCoordinateDecryptPresentation(
+            last.coordinateRequested,
+            last.coordinateEntryReady,
+            last.coordinateContextReady,
+            last.coordinateSuccesses);
+    std::fprintf(
+        stderr, "%s\n",
+        lengjing::app::CoordinateDecryptPresentationText(
+            decryptPresentation));
     const int runtimeExitCode = lengjing::app::ResolveRuntimeExitCode(
         cloudLayoutActive, last.phase, last.failureKind);
     if (runtimeExitCode != 0) return runtimeExitCode;
@@ -200,7 +182,8 @@ CloudLayoutFetchResult FetchAuthenticatedCloudLayout(
     }
     if (initialAction !=
         lengjing::auth::CloudLayoutStartupAction::FetchCloudLayout) {
-        std::fprintf(stderr, "[验证] 云偏移配置不完整\n");
+        std::fprintf(
+            stderr, "%s\n", lengjing::app::VerificationFailureText());
         return {};
     }
 
@@ -217,10 +200,7 @@ CloudLayoutFetchResult FetchAuthenticatedCloudLayout(
     if (refreshAction !=
         lengjing::auth::CloudLayoutStartupAction::UseCloudLayout) {
         std::fprintf(
-            stderr,
-            "[auth] cloud layout failed: status=%u detail=%s\n",
-            static_cast<unsigned int>(result.status),
-            result.detail.c_str());
+            stderr, "%s\n", lengjing::app::VerificationFailureText());
         return {};
     }
     return {result.snapshot, true};
@@ -680,13 +660,12 @@ int main() {
         graphics->NewFrame();
         controller.RenderFrame(graphics->PresentedFrameRate());
         graphics->EndFrame();
-        runtimeExitCode = controller.RuntimeExitCode();
-        if (runtimeExitCode != 0) break;
     }
 
     if (kRuntimeAuthEnabled && authSession.ExitRequested()) {
         controller.StopRuntime();
-        std::fprintf(stderr, "[验证] 会话已失效\n");
+        std::fprintf(
+            stderr, "%s\n", lengjing::app::VerificationFailureText());
     }
 
     menuKeys.Stop();

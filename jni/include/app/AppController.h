@@ -78,7 +78,6 @@ private:
     void RefreshRenderStyle();
     void DrawGameFrame(const game::GameFrame& frame, ImDrawList* drawList);
     void DrawPopulation(const game::GameFrame& frame, ImDrawList* drawList);
-    void DrawDebugInfo(const game::GameFrame& frame, ImDrawList* drawList) const;
     void ScheduleConfigSave();
     bool FlushConfig(bool force);
 
@@ -90,6 +89,7 @@ private:
     ui::MenuView menuView_;
     ui::UiModel model_{};
     game::RuntimeStatus lastStatus_{};
+    bool coordinateDecryptSuccessNotified_ = false;
     std::chrono::steady_clock::time_point configSaveDeadline_{};
     std::deque<ToastNotification> toastNotifications_;
     std::mutex toastNotificationsMutex_;

@@ -84,6 +84,6 @@ if not defined SERIAL (
 >"%SERIAL_CACHE%" echo !SERIAL!
 del /q "%DEVLIST%" >nul 2>&1
 
-echo [ADB] target: !SERIAL!
+echo [ADB] device selected
 "%ADB%" -s "!SERIAL!" logcat -s "!TARGET!"
 exit /b !errorlevel!

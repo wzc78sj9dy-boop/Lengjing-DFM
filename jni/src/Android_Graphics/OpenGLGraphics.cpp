@@ -75,8 +75,6 @@ void OpenGLGraphics::PrepareFrame(bool resize) {
     (void)resize;
     if (m_RenderingDisabled || !m_ImGuiBackendInitialized)
         return;
-    if (!EnsureCurrentContext())
-        return;
     ImGui_ImplOpenGL3_NewFrame();
 }
 
@@ -84,13 +82,11 @@ void OpenGLGraphics::Render(ImDrawData *drawData) {
     if (m_RenderingDisabled || !m_ImGuiBackendInitialized ||
         drawData == nullptr)
         return;
-    if (!EnsureCurrentContext())
-        return;
 
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(drawData);
     if (eglSwapBuffers(m_EglDisplay, m_EglSurface) == EGL_TRUE) {
-        GetPresentationRateTracker()->Record();
+        RecordPresentedFrame();
         return;
     }
 
@@ -147,6 +143,8 @@ void OpenGLGraphics::RequestSurfaceRecovery(
 }
 
 bool OpenGLGraphics::ConsumeSurfaceRecoveryRequest() {
+    if (!m_SurfaceRecoveryRequested.load(std::memory_order_acquire))
+        return false;
     return m_SurfaceRecoveryRequested.exchange(
         false, std::memory_order_acq_rel);
 }

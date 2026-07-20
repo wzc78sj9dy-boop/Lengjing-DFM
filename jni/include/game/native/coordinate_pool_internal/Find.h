@@ -6,7 +6,6 @@
 #include "capstone/capstone.h"
 #include <functional>
 #include <string>
-#include <iostream>
 #include "DecFormat.h"
 
 namespace lengjing::game::native::coordinate_pool_internal {
@@ -836,12 +835,6 @@ namespace lengjing::game::native::coordinate_pool_internal {
             points[name] = { insn[index].address };
         }
 
-        void print_all_points() {
-            for (const auto& point : points) {
-                std::cout << point.first << ": " << coordinate_pool_format::Format("{:x}", point.second.address)
-                    << " reg: " << point.second.reg << std::endl;
-            }
-        }
     };
 
     class shellcode {
@@ -909,7 +902,6 @@ namespace lengjing::game::native::coordinate_pool_internal {
 
             csh handle;
             if (cs_open(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN, &handle) != CS_ERR_OK) {
-                std::cerr << "Failed to open capstone\n";
                 return -1;
             }
 
@@ -974,16 +966,6 @@ namespace lengjing::game::native::coordinate_pool_internal {
             return &methods.insert({ name, method(start_i, end_i, insn) }).first->second;
         }
 
-        void print_all_methods() {
-            std::cout << "========================" << std::endl;
-            for (auto& o : methods) {
-                std::cout << "method: " << o.first << std::endl
-                    << "start: " << coordinate_pool_format::Format("{:x}", o.second.start_address()) << std::endl
-                    << "end: " << coordinate_pool_format::Format("{:x}", o.second.end_address()) << std::endl;
-                o.second.print_all_points();
-                std::cout << "========================" << std::endl;
-            }
-        }
     };
 
     class Find {
@@ -1001,12 +983,6 @@ namespace lengjing::game::native::coordinate_pool_internal {
         shellcode* get_shellcode() {
             return &binary_;
         }
-        void print_asm(const uint32_t index) {
-            const cs_insn* insn = binary_.get_insn(index);
-            std::cout << "0x" << coordinate_pool_format::Format("{:x}", insn->address) << ": "
-                << insn->mnemonic << " " << insn->op_str << std::endl;
-        }
-
         static bool isW(arm64_reg reg) {
             return reg >= ARM64_REG_W0 && reg <= ARM64_REG_W30;
         }

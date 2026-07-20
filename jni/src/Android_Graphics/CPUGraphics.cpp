@@ -23,7 +23,6 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 using lengjing::render::cpu::ClampRect;
-using lengjing::render::cpu::EdgeCovers;
 using lengjing::render::cpu::EdgeValue;
 using lengjing::render::cpu::EndPixelAtOrBefore;
 using lengjing::render::cpu::EndPixelBefore;
@@ -984,89 +983,42 @@ bool TryRasterConstantRgbaQuad(const RasterVertex& a, const RasterVertex& b,
     return true;
 }
 
-bool CoversAtOffset(const PreparedTriangleState& state,
-                    const int64_t row_edges[3], int offset) {
-    return EdgeCovers(
-               row_edges[0] + state.step_x[0] * offset, state.top_left[0])
-        && EdgeCovers(
-               row_edges[1] + state.step_x[1] * offset, state.top_left[1])
-        && EdgeCovers(
-               row_edges[2] + state.step_x[2] * offset, state.top_left[2]);
+int64_t FloorDivide(int64_t numerator, int64_t denominator) {
+    int64_t quotient = numerator / denominator;
+    if (numerator % denominator < 0)
+        --quotient;
+    return quotient;
 }
 
-int CoverageSearchDirection(const PreparedTriangleState& state,
-                            const int64_t row_edges[3], int offset) {
-    bool search_left = false;
-    bool search_right = false;
+bool ResolveCoveredSpan(const PreparedTriangleState& state,
+                        const int64_t row_edges[3], int width,
+                        int* begin, int* end) {
+    if (width <= 0 || begin == nullptr || end == nullptr)
+        return false;
+
+    int64_t first = 0;
+    int64_t last = static_cast<int64_t>(width) - 1;
     for (int edge = 0; edge < 3; ++edge) {
-        const int64_t value =
-            row_edges[edge] + state.step_x[edge] * offset;
         const int64_t threshold = state.top_left[edge] ? 0 : 1;
-        if (value >= threshold)
-            continue;
-        if (state.step_x[edge] > 0)
-            search_right = true;
-        else if (state.step_x[edge] < 0)
-            search_left = true;
-        else
-            return 0;
-    }
-    if (search_left == search_right)
-        return 0;
-    return search_right ? 1 : -1;
-}
-
-bool LocateCoveredOffset(const PreparedTriangleState& state,
-                         const int64_t row_edges[3], int width, int guess,
-                         int* result) {
-    if (width <= 0 || result == nullptr)
-        return false;
-    int offset = std::clamp(guess, 0, width - 1);
-    for (int attempts = 0; attempts < width; ++attempts) {
-        if (CoversAtOffset(state, row_edges, offset)) {
-            *result = offset;
-            return true;
+        const int64_t step = state.step_x[edge];
+        if (step > 0) {
+            first = std::max(
+                first, CeilDivide(threshold - row_edges[edge], step));
+        } else if (step < 0) {
+            last = std::min(
+                last, FloorDivide(row_edges[edge] - threshold, -step));
+        } else if (row_edges[edge] < threshold) {
+            return false;
         }
-        const int direction = CoverageSearchDirection(
-            state, row_edges, offset);
-        if (direction == 0)
-            return false;
-        offset += direction;
-        if (offset < 0 || offset >= width)
+        if (first > last)
             return false;
     }
-    return false;
-}
 
-bool ResolveGuessedCoveredSpan(const PreparedTriangleState& state,
-                               const int64_t row_edges[3], int width,
-                               int guessed_begin, int guessed_end,
-                               int* begin, int* end) {
-    int first = 0;
-    if (!LocateCoveredOffset(
-            state, row_edges, width, guessed_begin, &first))
+    if (last < 0 || first >= width)
         return false;
-    while (first > 0 && CoversAtOffset(state, row_edges, first - 1))
-        --first;
-
-    int last = 0;
-    if (!LocateCoveredOffset(
-            state, row_edges, width, guessed_end - 1, &last))
-        return false;
-    while (last + 1 < width
-           && CoversAtOffset(state, row_edges, last + 1))
-        ++last;
-
-    *begin = first;
-    *end = last + 1;
-    return true;
-}
-
-float EdgeXAtY(const RasterVertex& a, const RasterVertex& b, float y) {
-    const float dy = b.y - a.y;
-    if (std::fabs(dy) <= 0.000001f)
-        return a.x;
-    return a.x + (y - a.y) * (b.x - a.x) / dy;
+    *begin = static_cast<int>(std::max<int64_t>(first, 0));
+    *end = static_cast<int>(std::min<int64_t>(last + 1, width));
+    return *begin < *end;
 }
 
 void RasterPreparedTriangle(const PreparedTriangleState& state,
@@ -1109,16 +1061,6 @@ void RasterPreparedTriangle(const PreparedTriangleState& state,
         && (a.color & 0x00FFFFFFu) == (c.color & 0x00FFFFFFu);
     const bool alpha_only = !single_rgba && flat_texture
         && same_rgb && !same_color;
-    const RasterVertex* top = &a;
-    const RasterVertex* middle = &b;
-    const RasterVertex* bottom = &c;
-    if (middle->y < top->y)
-        std::swap(top, middle);
-    if (bottom->y < middle->y)
-        std::swap(middle, bottom);
-    if (middle->y < top->y)
-        std::swap(top, middle);
-
     for (int y = y0; y < y1; ++y) {
         if ((y & 15) == 0 && abort.load(std::memory_order_relaxed))
             return;
@@ -1127,76 +1069,64 @@ void RasterPreparedTriangle(const PreparedTriangleState& state,
         int64_t edge2 = edge2_row;
 
         const int64_t row_edges[3] = {edge0, edge1, edge2};
-        const float py = static_cast<float>(y) + 0.5f;
-        const float long_x = EdgeXAtY(*top, *bottom, py);
-        const float short_x = py < middle->y
-            ? EdgeXAtY(*top, *middle, py)
-            : EdgeXAtY(*middle, *bottom, py);
-        const float approximate_left = std::min(long_x, short_x);
-        const float approximate_right = std::max(long_x, short_x);
-        const int guessed_begin = std::clamp(
-            FirstPixelAtOrAfter(approximate_left) - x0, 0, x1 - x0 - 1);
-        const int guessed_end = std::clamp(
-            EndPixelAtOrBefore(approximate_right) - x0, 1, x1 - x0);
         int begin_offset = 0;
         int end_offset = 0;
-        ResolveGuessedCoveredSpan(
-            state, row_edges, x1 - x0, guessed_begin, guessed_end,
-            &begin_offset, &end_offset);
-        const int run_start = x0 + begin_offset;
-        const int run_end = x0 + end_offset;
-        int64_t left_edge0 = edge0 + state.step_x[0] * begin_offset;
-        int64_t left_edge1 = edge1 + state.step_x[1] * begin_offset;
-        int64_t left_edge2 = edge2 + state.step_x[2] * begin_offset;
+        const bool has_span = ResolveCoveredSpan(
+            state, row_edges, x1 - x0, &begin_offset, &end_offset);
+        if (has_span) {
+            const int run_start = x0 + begin_offset;
+            const int run_end = x0 + end_offset;
+            int64_t left_edge0 = edge0 + state.step_x[0] * begin_offset;
+            int64_t left_edge1 = edge1 + state.step_x[1] * begin_offset;
+            int64_t left_edge2 = edge2 + state.step_x[2] * begin_offset;
 
-        if (solid) {
-            if (run_start < run_end) {
+            if (solid) {
                 BlendSpan(buffer + y * stride + run_start,
                           run_end - run_start, solid_color);
-            }
-        } else if (alpha_only) {
-            const uint32_t rgb = a.color & 0x00FFFFFFu;
-            uint32_t* dst = buffer + y * stride + run_start;
-            for (int x = run_start; x < run_end; ++x, ++dst) {
-                const float wa = static_cast<float>(left_edge0)
-                    * state.inverse_area;
-                const float wb = static_cast<float>(left_edge1)
-                    * state.inverse_area;
-                const float wc = static_cast<float>(left_edge2)
-                    * state.inverse_area;
-                const uint32_t source_alpha =
-                    InterpolateColor(a, b, c, wa, wb, wc) >> 24;
-                if (source_alpha != 0)
-                    *dst = BlendPixel(*dst, rgb | (source_alpha << 24));
-                left_edge0 += state.step_x[0];
-                left_edge1 += state.step_x[1];
-                left_edge2 += state.step_x[2];
-            }
-        } else {
-            uint32_t* dst = buffer + y * stride + run_start;
-            for (int x = run_start; x < run_end; ++x, ++dst) {
-                const float wa = static_cast<float>(left_edge0)
-                    * state.inverse_area;
-                const float wb = static_cast<float>(left_edge1)
-                    * state.inverse_area;
-                const float wc = static_cast<float>(left_edge2)
-                    * state.inverse_area;
-                const uint32_t color = same_color
-                    ? a.color
-                    : InterpolateColor(a, b, c, wa, wb, wc);
-                uint32_t src = color;
-                if (single_rgba) {
-                    src = ModulateColor(texture.rgba[0], color);
-                } else if (!flat_texture) {
-                    const float u = a.u * wa + b.u * wb + c.u * wc;
-                    const float v = a.v * wa + b.v * wb + c.v * wc;
-                    src = ShadePixel(texture, u, v, color);
+            } else if (alpha_only) {
+                const uint32_t rgb = a.color & 0x00FFFFFFu;
+                uint32_t* dst = buffer + y * stride + run_start;
+                for (int x = run_start; x < run_end; ++x, ++dst) {
+                    const float wa = static_cast<float>(left_edge0)
+                        * state.inverse_area;
+                    const float wb = static_cast<float>(left_edge1)
+                        * state.inverse_area;
+                    const float wc = static_cast<float>(left_edge2)
+                        * state.inverse_area;
+                    const uint32_t source_alpha =
+                        InterpolateColor(a, b, c, wa, wb, wc) >> 24;
+                    if (source_alpha != 0)
+                        *dst = BlendPixel(*dst, rgb | (source_alpha << 24));
+                    left_edge0 += state.step_x[0];
+                    left_edge1 += state.step_x[1];
+                    left_edge2 += state.step_x[2];
                 }
-                if ((src >> 24) != 0)
-                    *dst = BlendPixel(*dst, src);
-                left_edge0 += state.step_x[0];
-                left_edge1 += state.step_x[1];
-                left_edge2 += state.step_x[2];
+            } else {
+                uint32_t* dst = buffer + y * stride + run_start;
+                for (int x = run_start; x < run_end; ++x, ++dst) {
+                    const float wa = static_cast<float>(left_edge0)
+                        * state.inverse_area;
+                    const float wb = static_cast<float>(left_edge1)
+                        * state.inverse_area;
+                    const float wc = static_cast<float>(left_edge2)
+                        * state.inverse_area;
+                    const uint32_t color = same_color
+                        ? a.color
+                        : InterpolateColor(a, b, c, wa, wb, wc);
+                    uint32_t src = color;
+                    if (single_rgba) {
+                        src = ModulateColor(texture.rgba[0], color);
+                    } else if (!flat_texture) {
+                        const float u = a.u * wa + b.u * wb + c.u * wc;
+                        const float v = a.v * wa + b.v * wb + c.v * wc;
+                        src = ShadePixel(texture, u, v, color);
+                    }
+                    if ((src >> 24) != 0)
+                        *dst = BlendPixel(*dst, src);
+                    left_edge0 += state.step_x[0];
+                    left_edge1 += state.step_x[1];
+                    left_edge2 += state.step_x[2];
+                }
             }
         }
         edge0_row += state.step_y[0];
@@ -2307,37 +2237,36 @@ void CPUGraphics::Render(ImDrawData* draw_data) {
     m_Abort.store(false, std::memory_order_release);
     const ImVec2 white_uv = ImGui::GetIO().Fonts->TexUvWhitePixel;
     std::atomic<int> next_tile{0};
-    auto make_task = [&, this] {
-        return [&, this] {
-            for (;;) {
-                const int tile = next_tile.fetch_add(1, std::memory_order_relaxed);
-                if (tile >= kRasterTiles)
-                    break;
-                const int tile_y0 = m_BufHeight * tile / kRasterTiles;
-                const int tile_y1 = m_BufHeight * (tile + 1) / kRasterTiles;
-                const int clear_y0 = std::max(tile_y0, clear_rect.y0);
-                const int clear_y1 = std::min(tile_y1, clear_rect.y1);
-                if (clear_rect.valid()) {
-                    for (int y = clear_y0; y < clear_y1; ++y) {
-                        std::memset(
-                            m_Buffer.data() + static_cast<size_t>(y) * m_BufWidth
-                                + clear_rect.x0,
-                            0,
-                            static_cast<size_t>(clear_rect.x1 - clear_rect.x0)
-                                * sizeof(uint32_t));
-                    }
+    auto render_tiles = [&, this] {
+        for (;;) {
+            const int tile = next_tile.fetch_add(1, std::memory_order_relaxed);
+            if (tile >= kRasterTiles)
+                break;
+            const int tile_y0 = m_BufHeight * tile / kRasterTiles;
+            const int tile_y1 = m_BufHeight * (tile + 1) / kRasterTiles;
+            const int clear_y0 = std::max(tile_y0, clear_rect.y0);
+            const int clear_y1 = std::min(tile_y1, clear_rect.y1);
+            if (clear_rect.valid()) {
+                for (int y = clear_y0; y < clear_y1; ++y) {
+                    std::memset(
+                        m_Buffer.data() + static_cast<size_t>(y) * m_BufWidth
+                            + clear_rect.x0,
+                        0,
+                        static_cast<size_t>(clear_rect.x1 - clear_rect.x0)
+                            * sizeof(uint32_t));
                 }
-                RasterPreparedTile(frame, tile, m_Buffer.data(), m_BufWidth,
-                                   m_BufHeight, clear_rect,
-                                   white_uv.x, white_uv.y, m_Abort);
             }
-        };
+            RasterPreparedTile(frame, tile, m_Buffer.data(), m_BufWidth,
+                               m_BufHeight, clear_rect,
+                               white_uv.x, white_uv.y, m_Abort);
+        }
     };
     try {
         std::array<std::function<void()>, RenderPool::kWorkers> tasks;
         for (int worker = 0; worker < RenderPool::kWorkers; ++worker)
-            tasks[worker] = make_task();
+            tasks[worker] = render_tiles;
         m_Pool->run(std::move(tasks));
+        render_tiles();
     } catch (...) {
         m_ForceCanonicalFullSubmit = true;
         return;

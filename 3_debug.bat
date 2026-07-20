@@ -11,6 +11,7 @@ set "DEVLIST=%STATE_DIR%\adb_devices_%RANDOM%_%RANDOM%.txt"
 set "CHECK_FILE=%STATE_DIR%\adb_push_%RANDOM%_%RANDOM%.txt"
 set "TARGET="
 set "PRODUCT="
+set "REMOTE_PRODUCT=.lj_app"
 set "BIN="
 
 if not exist "%STATE_DIR%" mkdir "%STATE_DIR%"
@@ -50,6 +51,12 @@ if not defined BIN (
     echo [ERROR] Product not found. Run 1_build.bat first.
     exit /b 1
 )
+call "%~dp02_pack.bat"
+if errorlevel 1 (
+    echo [ERROR] Unable to prepare the release product.
+    exit /b 1
+)
+set "BIN=%~dp0!PRODUCT!"
 for %%I in ("!BIN!") do set "LOCAL_SIZE=%%~zI"
 
 set "ADB="
@@ -117,7 +124,7 @@ if not defined SERIAL (
 >"%SERIAL_CACHE%" echo !SERIAL!
 del /q "%DEVLIST%" >nul 2>&1
 
-echo [ADB] target: !SERIAL!
+echo [ADB] device selected
 "%ADB%" -s "!SERIAL!" root >nul 2>&1
 "%ADB%" -s "!SERIAL!" wait-for-device
 if errorlevel 1 (
@@ -125,13 +132,13 @@ if errorlevel 1 (
     exit /b 1
 )
 
-"%ADB%" -s "!SERIAL!" shell "su -c 'pkill -TERM -x !PRODUCT! 2>/dev/null || true; n=0; while pidof !PRODUCT! >/dev/null 2>&1 && [ $n -lt 20 ]; do sleep 0.1; n=$((n+1)); done; pkill -KILL -x !PRODUCT! 2>/dev/null || true; rm -f %REMOTE_DIR%/!PRODUCT!'" >nul 2>&1
+"%ADB%" -s "!SERIAL!" shell "su -c 'pkill -TERM -x !REMOTE_PRODUCT! 2>/dev/null || true; pkill -TERM -x !PRODUCT! 2>/dev/null || true; pkill -TERM -x !PRODUCT!.perf 2>/dev/null || true; n=0; while { pidof !REMOTE_PRODUCT! >/dev/null 2>&1 || pidof !PRODUCT! >/dev/null 2>&1 || pidof !PRODUCT!.perf >/dev/null 2>&1; } && [ $n -lt 20 ]; do sleep 0.1; n=$((n+1)); done; pkill -KILL -x !REMOTE_PRODUCT! 2>/dev/null || true; pkill -KILL -x !PRODUCT! 2>/dev/null || true; pkill -KILL -x !PRODUCT!.perf 2>/dev/null || true; rm -f %REMOTE_DIR%/!REMOTE_PRODUCT! %REMOTE_DIR%/!PRODUCT! %REMOTE_DIR%/!PRODUCT!.perf'" >nul 2>&1
 set "PUSH_TRY=0"
 :push_retry
 set /a PUSH_TRY+=1
-"%ADB%" -s "!SERIAL!" push "!BIN!" "%REMOTE_DIR%/!PRODUCT!"
+"%ADB%" -s "!SERIAL!" push "!BIN!" "%REMOTE_DIR%/!REMOTE_PRODUCT!"
 set "PUSH_RESULT=!errorlevel!"
-"%ADB%" -s "!SERIAL!" shell "su -c 'if [ -f %REMOTE_DIR%/!PRODUCT! ]; then wc -c < %REMOTE_DIR%/!PRODUCT!; else echo MISS; fi'" >"%CHECK_FILE%" 2>nul
+"%ADB%" -s "!SERIAL!" shell "su -c 'if [ -f %REMOTE_DIR%/!REMOTE_PRODUCT! ]; then wc -c < %REMOTE_DIR%/!REMOTE_PRODUCT!; else echo MISS; fi'" >"%CHECK_FILE%" 2>nul
 if "!PUSH_RESULT!"=="0" (
     findstr /R /X /C:" *!LOCAL_SIZE! *" "%CHECK_FILE%" >nul 2>&1
     if not errorlevel 1 goto pushed
@@ -147,16 +154,16 @@ exit /b 1
 
 :pushed
 del /q "%CHECK_FILE%" >nul 2>&1
-"%ADB%" -s "!SERIAL!" shell "su -c 'chmod 700 %REMOTE_DIR%/!PRODUCT!'"
+"%ADB%" -s "!SERIAL!" shell "su -c 'chmod 700 %REMOTE_DIR%/!REMOTE_PRODUCT!'"
 if errorlevel 1 (
     echo [ERROR] Unable to make the remote product executable.
     exit /b 1
 )
 
 set "RUN_SERIAL=!SERIAL!"
-set "RUN_PRODUCT=!PRODUCT!"
+set "RUN_PRODUCT=!REMOTE_PRODUCT!"
 setlocal DisableDelayedExpansion
-echo [RUN] %RUN_PRODUCT% on %RUN_SERIAL%
-"%ADB%" -s "%RUN_SERIAL%" shell -T "su -c 'cd %REMOTE_DIR% && exec ./%RUN_PRODUCT%'"
+echo [RUN] helper
+"%ADB%" -s "%RUN_SERIAL%" shell -tt "su -c 'cd %REMOTE_DIR% && exec ./%RUN_PRODUCT%'"
 set "RUN_RESULT=%errorlevel%"
 endlocal & exit /b %RUN_RESULT%

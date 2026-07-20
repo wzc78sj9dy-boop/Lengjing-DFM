@@ -223,7 +223,17 @@ void RunAuthSessionTests() {
         payload = "&amp;quot;";
         REQUIRE(DecodeCloudVariablePayload(payload) ==
                 CloudVariablePayloadDecodeStatus::Success);
-        REQUIRE(payload == "&quot;");
+        REQUIRE(payload == "\"");
+
+        payload = "&amp;amp;quot;";
+        REQUIRE(DecodeCloudVariablePayload(payload) ==
+                CloudVariablePayloadDecodeStatus::UnsupportedEntity);
+        REQUIRE(payload.empty());
+
+        payload = "&amp;lt;";
+        REQUIRE(DecodeCloudVariablePayload(payload) ==
+                CloudVariablePayloadDecodeStatus::UnsupportedEntity);
+        REQUIRE(payload.empty());
 
         payload = "&lt;";
         REQUIRE(DecodeCloudVariablePayload(payload) ==
@@ -248,10 +258,22 @@ void RunAuthSessionTests() {
         REQUIRE(payload.empty());
 
         payload.clear();
-        payload.reserve(kMaximumEncodedCloudVariablePayloadBytes);
+        payload.reserve(kMaximumCloudLayoutPayloadBytes * 6U);
         for (std::size_t index = 0;
              index < kMaximumCloudLayoutPayloadBytes; ++index) {
             payload.append("&quot;");
+        }
+        REQUIRE(payload.size() ==
+                kMaximumCloudLayoutPayloadBytes * 6U);
+        REQUIRE(DecodeCloudVariablePayload(payload) ==
+                CloudVariablePayloadDecodeStatus::Success);
+        REQUIRE(payload.size() == kMaximumCloudLayoutPayloadBytes);
+
+        payload.clear();
+        payload.reserve(kMaximumEncodedCloudVariablePayloadBytes);
+        for (std::size_t index = 0;
+             index < kMaximumCloudLayoutPayloadBytes; ++index) {
+            payload.append("&amp;quot;");
         }
         REQUIRE(payload.size() ==
                 kMaximumEncodedCloudVariablePayloadBytes);
@@ -342,6 +364,24 @@ void RunAuthSessionTests() {
         auto gateway = std::make_shared<FakeAuthGateway>();
         gateway->variableResult = {
             true, {}, EncodeCloudPayloadQuotes("&amp;quot;")};
+        AuthSessionOptions options;
+        options.cloudVariable = {"CALL_CODE", "VALUE_ID", "VALUE_NAME"};
+
+        AuthSession session;
+        REQUIRE(session.Login(
+            gateway, "CARD_FOR_TEST", "DEVICE_FOR_TEST", options));
+        CloudLayoutStore store(RuntimeIdentity());
+        const CloudLayoutUpdateResult update =
+            session.RefreshCloudLayout(store);
+        REQUIRE(update.status == CloudLayoutStatus::Published);
+        REQUIRE(store.Snapshot() != nullptr);
+        REQUIRE(store.Snapshot()->revision == 1);
+    }
+
+    {
+        auto gateway = std::make_shared<FakeAuthGateway>();
+        gateway->variableResult = {
+            true, {}, EncodeCloudPayloadQuotes("&amp;amp;quot;")};
         AuthSessionOptions options;
         options.cloudVariable = {"CALL_CODE", "VALUE_ID", "VALUE_NAME"};
 

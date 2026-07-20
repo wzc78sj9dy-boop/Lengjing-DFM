@@ -2,6 +2,7 @@
 
 #include "game/native/KernelModuleLoader.h"
 #include "game/native/KernelRpcTransport.h"
+#include "game/native/PacgaOperandResolver.h"
 #include "game/native/PtraceExecutionContextProvider.h"
 #include "game/native/ThreadContextDeviceTransport.h"
 #include "game/native/ThreadExecutionContextProvider.h"
@@ -42,6 +43,7 @@ constexpr std::uint64_t kPointerPayloadMask =
 constexpr std::uint32_t kPacgaX8X8X9 = UINT32_C(0x9AC93108);
 constexpr std::size_t kMaximumOracleMappingSize = 2U * 1024U * 1024U;
 constexpr std::size_t kOracleScanChunkSize = 4096;
+constexpr std::size_t kOracleImmediateWindowInstructions = 16;
 
 bool IsNumericName(const char* name) {
     if (name == nullptr || *name == '\0') return false;
@@ -421,10 +423,41 @@ struct MemoryTransport::Impl {
             ptraceOracleInstruction = {};
             return false;
         }
-        ptraceOracleInstruction = {
-            found,
+        PacgaOperands operands{
             coordinateReplayLayout.pacgaData,
             coordinateReplayLayout.pacgaModifier,
+        };
+        const std::uintptr_t operandWindowStart = std::max(
+            mappingStart,
+            found >= kOracleImmediateWindowInstructions *
+                    sizeof(std::uint32_t)
+                ? found - kOracleImmediateWindowInstructions *
+                    sizeof(std::uint32_t)
+                : mappingStart);
+        const std::size_t operandInstructionCount =
+            static_cast<std::size_t>(
+                (found - operandWindowStart) / sizeof(std::uint32_t)) + 1U;
+        std::array<std::uint32_t,
+                   kOracleImmediateWindowInstructions + 1U>
+            operandInstructions{};
+        const bool operandsRead =
+            operandInstructionCount <= operandInstructions.size() &&
+            ReadUnlocked(
+                operandWindowStart,
+                operandInstructions.data(),
+                operandInstructionCount * sizeof(std::uint32_t));
+        PacgaOperands resolvedOperands{};
+        const bool operandsResolved = operandsRead &&
+            ResolvePacgaOperandsFromImmediateBlock(
+                operandInstructions.data(),
+                operandInstructionCount,
+                operandInstructionCount - 1U,
+                resolvedOperands);
+        if (operandsResolved) operands = resolvedOperands;
+        ptraceOracleInstruction = {
+            found,
+            operands.data,
+            operands.modifier,
         };
         instruction = ptraceOracleInstruction;
         return true;

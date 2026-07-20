@@ -60,10 +60,12 @@ inline bool CalculatePlayerAnchorBounds(
     }
 
     const float halfWidth = projectedSpan * 0.25f;
+    const float minimumAnchorX = std::min(lowerAnchor.x, upperAnchor.x);
+    const float maximumAnchorX = std::max(lowerAnchor.x, upperAnchor.x);
     bounds = PlayerScreenBounds{
-        lowerAnchor.x - halfWidth,
+        minimumAnchorX - halfWidth,
         upperAnchor.y,
-        lowerAnchor.x + halfWidth,
+        maximumAnchorX + halfWidth,
         lowerAnchor.y,
     };
     return std::isfinite(bounds.left) && std::isfinite(bounds.top) &&
