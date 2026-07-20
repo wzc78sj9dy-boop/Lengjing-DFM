@@ -33,12 +33,29 @@ bool IsSuccessfulWrite(
     return false;
 }
 
+bool IsNegotiationFailure(int result) {
+    return result == -EINVAL || result == -EPROTO ||
+        result == -EMSGSIZE || result == -E2BIG ||
+        result == -ENOTTY;
+}
+
+std::size_t AlternateRequestCount(std::size_t requestCount) {
+    using namespace thread_context_device_abi;
+    return requestCount == kLargeRequestCount
+        ? kSmallRequestCount
+        : kLargeRequestCount;
+}
+
 }  // namespace
 
 ThreadContextDeviceTransport::ThreadContextDeviceTransport(
     thread_context_device_abi::Profile profile,
     WriteInvoker invoker) noexcept
     : profile_(profile),
+      preferredRequestCount_(profile.requestCount),
+      negotiationComplete_(
+          profile.requestCountMode ==
+          thread_context_device_abi::RequestCountMode::Fixed),
       invoker_(invoker != nullptr ? invoker : &InvokeWrite) {}
 
 ThreadContextReaderCapabilities
@@ -93,6 +110,11 @@ void ThreadContextDeviceTransport::UpdateFileDescriptor(
     int fileDescriptor) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     profile_.fileDescriptor = fileDescriptor;
+    if (profile_.requestCountMode ==
+        thread_context_device_abi::RequestCountMode::Negotiate) {
+        profile_.requestCount = preferredRequestCount_;
+        negotiationComplete_ = false;
+    }
 }
 
 thread_context_device_abi::Profile
@@ -116,6 +138,20 @@ std::int64_t ThreadContextDeviceTransport::InvokeWrite(
 #endif
 }
 
+int ThreadContextDeviceTransport::SubmitWithRequestCount(
+    const thread_context_device_abi::Envelope& envelope,
+    std::size_t requestCount) {
+    auto attempt = profile_;
+    attempt.requestCount = requestCount;
+    errno = 0;
+    const std::int64_t result = invoker_(
+        profile_.fileDescriptor,
+        &envelope,
+        requestCount);
+    if (result < 0) return errno != 0 ? -errno : -EIO;
+    return IsSuccessfulWrite(result, attempt) ? 0 : -EPROTO;
+}
+
 int ThreadContextDeviceTransport::Submit(
     std::uint32_t operation,
     void* payload) {
@@ -128,13 +164,29 @@ int ThreadContextDeviceTransport::Submit(
         0,
         payload,
     };
-    errno = 0;
-    const std::int64_t result = invoker_(
-        profile_.fileDescriptor,
-        &envelope,
+    const int primaryResult = SubmitWithRequestCount(
+        envelope,
         profile_.requestCount);
-    if (result < 0) return errno != 0 ? -errno : -EIO;
-    return IsSuccessfulWrite(result, profile_) ? 0 : -EPROTO;
+    if (primaryResult == 0) {
+        negotiationComplete_ = true;
+        return 0;
+    }
+    if (profile_.requestCountMode !=
+            thread_context_device_abi::RequestCountMode::Negotiate ||
+        negotiationComplete_ || !IsNegotiationFailure(primaryResult)) {
+        return primaryResult;
+    }
+
+    const std::size_t alternateRequestCount =
+        AlternateRequestCount(profile_.requestCount);
+    const int alternateResult = SubmitWithRequestCount(
+        envelope,
+        alternateRequestCount);
+    if (alternateResult == 0) {
+        profile_.requestCount = alternateRequestCount;
+        negotiationComplete_ = true;
+    }
+    return alternateResult;
 }
 
 }  // namespace lengjing::game::native

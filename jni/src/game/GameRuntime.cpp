@@ -185,6 +185,9 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
                     probe.coordinateContextGeneration;
                 status_.coordinateAttempts = probe.coordinateAttempts;
                 status_.coordinateSuccesses = probe.coordinateSuccesses;
+                status_.coordinateError = probe.coordinateError;
+                status_.coordinateSystemError =
+                    probe.coordinateSystemError;
                 status_.failureKind = probe.failureKind;
                 status_.message = std::move(error);
             }
@@ -240,6 +243,8 @@ void GameRuntime::SetStatus(RuntimePhase phase,
     status_.coordinateContextGeneration = probe.coordinateContextGeneration;
     status_.coordinateAttempts = probe.coordinateAttempts;
     status_.coordinateSuccesses = probe.coordinateSuccesses;
+    status_.coordinateError = probe.coordinateError;
+    status_.coordinateSystemError = probe.coordinateSystemError;
     status_.failureKind = probe.failureKind;
     status_.message = std::move(message);
 }

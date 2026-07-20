@@ -394,11 +394,14 @@ struct CoordinatePoolRuntime::Impl {
                 break;
             }
         }
-        if (!stable || !IsFinitePosition(candidate)) {
-            SetError(CoordinatePoolRuntimeError::PositionReadFailed);
+        if (!stable) {
+            SetError(CoordinatePoolRuntimeError::PositionUnstable);
             return false;
         }
-
+        if (!IsFinitePosition(candidate)) {
+            SetError(CoordinatePoolRuntimeError::PositionNotFinite);
+            return false;
+        }
         position = candidate;
         ++probe.successes;
         probe.error = CoordinatePoolRuntimeError::None;

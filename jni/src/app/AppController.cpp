@@ -531,6 +531,9 @@ void AppController::SyncRuntimeStatus() {
         status.coordinateContextGeneration;
     model_.runtime.coordinateAttempts = status.coordinateAttempts;
     model_.runtime.coordinateSuccesses = status.coordinateSuccesses;
+    model_.runtime.coordinateErrorCode =
+        game::CoordinateDecryptErrorCode(status.coordinateError);
+    model_.runtime.coordinateSystemError = status.coordinateSystemError;
     model_.loot.customItemCount = status.customItemCount;
 
     if (status.phase != lastStatus_.phase) {
@@ -562,6 +565,23 @@ void AppController::SyncRuntimeStatus() {
     } else if (status.phase == game::RuntimePhase::Running &&
                status.message.empty() && !lastStatus_.message.empty()) {
         AppendLog("数据链已恢复");
+    }
+
+    const bool statusMessageLogged =
+        status.phase == lastStatus_.phase &&
+        !status.message.empty() && status.message != lastStatus_.message;
+    if (status.coordinateError != lastStatus_.coordinateError &&
+        status.coordinateError != game::CoordinateDecryptError::None &&
+        !statusMessageLogged) {
+        char error[64]{};
+        std::snprintf(
+            error,
+            sizeof(error),
+            "COORD CD-%04u SYS=%d",
+            static_cast<unsigned int>(
+                game::CoordinateDecryptErrorCode(status.coordinateError)),
+            status.coordinateSystemError);
+        AppendLog(error);
     }
 
     lastStatus_ = status;
@@ -979,11 +999,13 @@ void AppController::DrawDebugInfo(const game::GameFrame& frame,
         static_cast<unsigned long long>(frame.geometryGeneration));
     std::snprintf(
         buffers[6].data(), buffers[6].size(),
-        "COORD REQ %s  ENTRY %s  CTX %s  TID %d",
+        "COORD REQ %s  ENTRY %s  CTX %s  TID %d  ERR %04u  SYS %d",
         model_.runtime.coordinateRequested ? "YES" : "NO",
         model_.runtime.coordinateEntryReady ? "OK" : "--",
         model_.runtime.coordinateContextReady ? "OK" : "--",
-        model_.runtime.coordinateThreadId);
+        model_.runtime.coordinateThreadId,
+        static_cast<unsigned int>(model_.runtime.coordinateErrorCode),
+        model_.runtime.coordinateSystemError);
     std::snprintf(
         buffers[7].data(), buffers[7].size(),
         "COORD PC %llX  GEN %llu  RUN %llu/%llu",

@@ -54,16 +54,37 @@ enum class WriteSuccessPolicy : std::uint8_t {
     AnyNonNegative,
 };
 
+enum class RequestCountMode : std::uint8_t {
+    Fixed,
+    Negotiate,
+};
+
 struct Profile {
     int fileDescriptor = -1;
     std::size_t requestCount = 0;
     WriteSuccessPolicy successPolicy = WriteSuccessPolicy::Unspecified;
+    RequestCountMode requestCountMode = RequestCountMode::Fixed;
+
+    static constexpr Profile Negotiated(
+        int fileDescriptor,
+        std::size_t preferredRequestCount = kLargeRequestCount) noexcept {
+        return {
+            fileDescriptor,
+            preferredRequestCount,
+            WriteSuccessPolicy::ZeroOrRequestCount,
+            RequestCountMode::Negotiate,
+        };
+    }
 
     constexpr bool IsConfigured() const noexcept {
-        return fileDescriptor >= 0 &&
+        const bool baseConfigured = fileDescriptor >= 0 &&
             (requestCount == kLargeRequestCount ||
              requestCount == kSmallRequestCount) &&
             successPolicy != WriteSuccessPolicy::Unspecified;
+        if (!baseConfigured) return false;
+        return requestCountMode == RequestCountMode::Fixed ||
+            (requestCountMode == RequestCountMode::Negotiate &&
+             successPolicy == WriteSuccessPolicy::ZeroOrRequestCount);
     }
 };
 
@@ -93,10 +114,15 @@ private:
     static std::int64_t InvokeWrite(int fileDescriptor,
                                     const void* buffer,
                                     std::size_t count);
+    int SubmitWithRequestCount(
+        const thread_context_device_abi::Envelope& envelope,
+        std::size_t requestCount);
     int Submit(std::uint32_t operation, void* payload);
 
     mutable std::mutex mutex_;
     thread_context_device_abi::Profile profile_;
+    std::size_t preferredRequestCount_ = 0;
+    bool negotiationComplete_ = false;
     WriteInvoker invoker_;
 };
 

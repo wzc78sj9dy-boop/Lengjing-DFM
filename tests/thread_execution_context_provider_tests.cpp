@@ -156,6 +156,14 @@ struct DeviceCapture {
     ExecutionPacKey128 installedKey{};
     std::int64_t writeResult = 0;
     int error = 0;
+    struct Outcome {
+        std::int64_t result = 0;
+        int error = 0;
+        bool returnRequestCount = false;
+    };
+    std::vector<std::size_t> requestCounts;
+    std::vector<Outcome> outcomes;
+    std::size_t outcomeIndex = 0;
 };
 
 DeviceCapture gDeviceCapture;
@@ -165,6 +173,7 @@ std::int64_t FakeDeviceWrite(int fileDescriptor,
                              std::size_t count) {
     gDeviceCapture.fileDescriptor = fileDescriptor;
     gDeviceCapture.requestCount = count;
+    gDeviceCapture.requestCounts.push_back(count);
     auto* envelope = static_cast<const device_abi::Envelope*>(buffer);
     CHECK(envelope != nullptr);
     CHECK(envelope->reserved == 0);
@@ -188,6 +197,14 @@ std::int64_t FakeDeviceWrite(int fileDescriptor,
     } else {
         errno = ENOSYS;
         return -1;
+    }
+    if (gDeviceCapture.outcomeIndex < gDeviceCapture.outcomes.size()) {
+        const auto& outcome =
+            gDeviceCapture.outcomes[gDeviceCapture.outcomeIndex++];
+        errno = outcome.error;
+        return outcome.returnRequestCount
+            ? static_cast<std::int64_t>(count)
+            : outcome.result;
     }
     errno = gDeviceCapture.error;
     return gDeviceCapture.writeResult;
@@ -482,6 +499,106 @@ void TestDeviceWriteResultPolicies() {
     CHECK(transport.ReadTpidrEl0(1200, value) == -EACCES);
 }
 
+void TestDeviceRequestCountNegotiation() {
+    ThreadContextDeviceTransport transport(
+        device_abi::Profile::Negotiated(45),
+        &FakeDeviceWrite);
+    CHECK(transport.Capabilities().IsUsable());
+
+    gDeviceCapture = {};
+    gDeviceCapture.outcomes = {
+        {-1, EINVAL, false},
+        {0, 0, true},
+        {0, 0, false},
+    };
+    std::uint64_t value = 0;
+    CHECK(transport.ReadTpidrEl0(1201, value) == 0);
+    CHECK(gDeviceCapture.requestCounts == std::vector<std::size_t>({
+        device_abi::kLargeRequestCount,
+        device_abi::kSmallRequestCount,
+    }));
+    CHECK(transport.Configuration().requestCount ==
+          device_abi::kSmallRequestCount);
+
+    CHECK(transport.ReadTpidrEl0(1201, value) == 0);
+    CHECK(gDeviceCapture.requestCounts == std::vector<std::size_t>({
+        device_abi::kLargeRequestCount,
+        device_abi::kSmallRequestCount,
+        device_abi::kSmallRequestCount,
+    }));
+}
+
+void TestDeviceNegotiationOrderAndReset() {
+    ThreadContextDeviceTransport transport(
+        device_abi::Profile::Negotiated(
+            46,
+            device_abi::kSmallRequestCount),
+        &FakeDeviceWrite);
+
+    gDeviceCapture = {};
+    gDeviceCapture.outcomes = {
+        {1, 0, false},
+        {0, 0, false},
+    };
+    std::uint64_t value = 0;
+    CHECK(transport.ReadTpidrEl0(1202, value) == 0);
+    CHECK(gDeviceCapture.requestCounts == std::vector<std::size_t>({
+        device_abi::kSmallRequestCount,
+        device_abi::kLargeRequestCount,
+    }));
+    CHECK(transport.Configuration().requestCount ==
+          device_abi::kLargeRequestCount);
+
+    transport.UpdateFileDescriptor(47);
+    gDeviceCapture = {};
+    gDeviceCapture.writeResult = 0;
+    CHECK(transport.ReadTpidrEl0(1202, value) == 0);
+    CHECK(gDeviceCapture.fileDescriptor == 47);
+    CHECK(gDeviceCapture.requestCounts == std::vector<std::size_t>({
+        device_abi::kSmallRequestCount,
+    }));
+    CHECK(transport.Configuration().requestCount ==
+          device_abi::kSmallRequestCount);
+}
+
+void TestDeviceNegotiationDoesNotRetryPermissionFailure() {
+    ThreadContextDeviceTransport transport(
+        device_abi::Profile::Negotiated(48),
+        &FakeDeviceWrite);
+
+    gDeviceCapture = {};
+    gDeviceCapture.outcomes = {
+        {-1, EACCES, false},
+        {0, 0, false},
+    };
+    std::uint64_t value = 0;
+    CHECK(transport.ReadTpidrEl0(1203, value) == -EACCES);
+    CHECK(gDeviceCapture.requestCounts == std::vector<std::size_t>({
+        device_abi::kLargeRequestCount,
+    }));
+    CHECK(gDeviceCapture.outcomeIndex == 1);
+}
+
+void TestFixedDeviceProfileDoesNotNegotiate() {
+    const device_abi::Profile profile{
+        49,
+        device_abi::kLargeRequestCount,
+        device_abi::WriteSuccessPolicy::ZeroOrRequestCount,
+    };
+    ThreadContextDeviceTransport transport(profile, &FakeDeviceWrite);
+
+    gDeviceCapture = {};
+    gDeviceCapture.outcomes = {
+        {-1, EINVAL, false},
+        {0, 0, false},
+    };
+    std::uint64_t value = 0;
+    CHECK(transport.ReadTpidrEl0(1204, value) == -EINVAL);
+    CHECK(gDeviceCapture.requestCounts == std::vector<std::size_t>({
+        device_abi::kLargeRequestCount,
+    }));
+}
+
 void TestCandidateRejectionRotation() {
     TempProcTree proc;
     constexpr std::int32_t processId = 1300;
@@ -526,6 +643,10 @@ int main() {
         TestMultipleExactCandidates();
         TestDeviceTransportUsesThreadId();
         TestDeviceWriteResultPolicies();
+        TestDeviceRequestCountNegotiation();
+        TestDeviceNegotiationOrderAndReset();
+        TestDeviceNegotiationDoesNotRetryPermissionFailure();
+        TestFixedDeviceProfileDoesNotNegotiate();
         TestCandidateRejectionRotation();
         std::cout << "thread execution context provider tests passed\n";
         return 0;

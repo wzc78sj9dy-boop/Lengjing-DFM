@@ -132,12 +132,14 @@ int RunCoordinateProbe(
             status.coordinateThreadId != last.coordinateThreadId ||
             status.coordinateAttempts != last.coordinateAttempts ||
             status.coordinateSuccesses != last.coordinateSuccesses ||
+            status.coordinateError != last.coordinateError ||
+            status.coordinateSystemError != last.coordinateSystemError ||
             status.message != last.message) {
             std::fprintf(
                 stderr,
                 "[coordinate-probe] phase=%u pid=%d base=%d req=%d "
                 "entry=%d ctx=%d tid=%d pc=0x%llx gen=%llu "
-                "run=%llu/%llu status=%s\n",
+                "run=%llu/%llu error=CD-%04u sys=%d status=%s\n",
                 static_cast<unsigned int>(status.phase),
                 status.processId,
                 status.baseReady ? 1 : 0,
@@ -153,6 +155,10 @@ int RunCoordinateProbe(
                     status.coordinateSuccesses),
                 static_cast<unsigned long long>(
                     status.coordinateAttempts),
+                static_cast<unsigned int>(
+                    lengjing::game::CoordinateDecryptErrorCode(
+                        status.coordinateError)),
+                status.coordinateSystemError,
                 status.message.c_str());
             last = status;
         }

@@ -5,7 +5,9 @@
 #include "game/GameRuntime.h"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <thread>
@@ -13,6 +15,16 @@
 namespace {
 
 using namespace std::chrono_literals;
+
+static_assert(lengjing::game::CoordinateDecryptErrorCode(
+                  lengjing::game::CoordinateDecryptError::
+                      ContextDeviceProtocolMismatch) == 2004);
+static_assert(lengjing::game::CoordinateDecryptErrorCode(
+                  lengjing::game::CoordinateDecryptError::
+                      PtracePacgaOperandsUnavailable) == 2012);
+static_assert(lengjing::game::CoordinateDecryptErrorCode(
+                  lengjing::game::CoordinateDecryptError::
+                      PositionReadFailed) == 5012);
 
 struct BackendState {
     std::atomic_int opens{0};
@@ -28,6 +40,11 @@ struct BackendState {
     std::atomic_bool selfAimSetting{false};
     std::atomic_bool projectileTrackingSetting{false};
     std::atomic_bool frameReady{true};
+    std::atomic<std::uint16_t> coordinateError{
+        static_cast<std::uint16_t>(
+            lengjing::game::CoordinateDecryptError::
+                ContextDeviceProtocolMismatch)};
+    std::atomic_int coordinateSystemError{-EPROTO};
 };
 
 class FakeBackend final : public lengjing::game::GameBackend {
@@ -60,7 +77,7 @@ public:
 
     bool ReadFrame(const lengjing::game::FeatureSettings& settings,
                    lengjing::game::GameFrame& frame,
-                   lengjing::game::RuntimeProbe&,
+                   lengjing::game::RuntimeProbe& probe,
                    std::string& error) override {
         frame.ready = state_->frameReady.load();
         frame.playerCount =
@@ -68,6 +85,11 @@ public:
         state_->selfAimSetting.store(settings.aim.enabled);
         state_->projectileTrackingSetting.store(
             settings.aim.trajectoryTracking);
+        probe.coordinateError =
+            static_cast<lengjing::game::CoordinateDecryptError>(
+                state_->coordinateError.load());
+        probe.coordinateSystemError =
+            state_->coordinateSystemError.load();
         error = frame.ready ? std::string{} : "waiting";
         ++state_->reads;
         return true;
@@ -166,9 +188,22 @@ void RunRuntimeTests() {
     }));
     REQUIRE(runtime.Status().processId == 42);
     REQUIRE(runtime.Status().baseReady);
+    REQUIRE(runtime.Status().coordinateError ==
+            lengjing::game::CoordinateDecryptError::
+                ContextDeviceProtocolMismatch);
+    REQUIRE(runtime.Status().coordinateSystemError == -EPROTO);
     REQUIRE(state->algorithmDecryptRva.load() == 0x1234);
     REQUIRE(state->selfAimSetting.load());
     REQUIRE(!state->projectileTrackingSetting.load());
+
+    state->coordinateError.store(0);
+    state->coordinateSystemError.store(0);
+    REQUIRE(WaitFor([&] {
+        const auto status = runtime.Status();
+        return status.coordinateError ==
+                lengjing::game::CoordinateDecryptError::None &&
+            status.coordinateSystemError == 0;
+    }));
 
     state->frameReady.store(false);
     REQUIRE(WaitFor([&] {

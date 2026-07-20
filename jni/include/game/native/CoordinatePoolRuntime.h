@@ -68,6 +68,8 @@ enum class CoordinatePoolRuntimeError : std::uint8_t {
     PoolPointerReadFailed,
     RingSearchFailed,
     PositionReadFailed,
+    PositionNotFinite,
+    PositionUnstable,
 };
 
 struct CoordinatePoolRuntimeProbe {

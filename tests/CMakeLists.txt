@@ -141,3 +141,25 @@ add_test(
     NAME ptrace_execution_context_provider_tests
     COMMAND ptrace_execution_context_provider_tests
 )
+
+add_executable(pacga_operand_resolver_tests
+    pacga_operand_resolver_tests.cpp
+    ../jni/src/game/native/PacgaOperandResolver.cpp
+)
+
+target_include_directories(pacga_operand_resolver_tests PRIVATE
+    ../jni/include
+)
+
+if(MSVC)
+    target_compile_options(pacga_operand_resolver_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(pacga_operand_resolver_tests PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+endif()
+
+add_test(
+    NAME pacga_operand_resolver_tests
+    COMMAND pacga_operand_resolver_tests
+)
