@@ -4057,8 +4057,7 @@ private:
                 const native::BoneFrameSourceSelection& source) {
                 BoneSourceFrame result{};
                 result.source = source;
-                if (!source || !IsValidPointer(source.mesh) ||
-                    !IsValidPointer(ReadPointer(source.mesh))) {
+                if (!source || !IsValidPointer(source.mesh)) {
                     return result;
                 }
 
