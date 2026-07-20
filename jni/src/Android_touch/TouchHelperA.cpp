@@ -83,8 +83,6 @@ std::atomic_bool g_running{false};
 std::atomic_int g_mode{0};
 std::atomic_uint g_trackingSequence{0};
 std::atomic_bool g_ignoreWriteSlot{false};
-std::atomic_int g_debugQueueLogCount{0};
-std::atomic_int g_debugPumpLogCount{0};
 
 DeviceRange g_inputRange{};
 DeviceRange g_outputRange{};
@@ -513,20 +511,6 @@ void QueueUiInput(const TouchFinger& finger) {
         event.hasPosition = true;
     }
     event.down = finger.tracking_id >= 0 && finger.status != FINGER_UP;
-
-    const int debugIndex =
-        g_debugQueueLogCount.fetch_add(1, std::memory_order_relaxed);
-    if (debugIndex < 20) {
-        std::fprintf(
-            stderr,
-            "[touch-debug] queue raw=(%d,%d) down=%d tracking=%d status=%d\n",
-            event.rawX,
-            event.rawY,
-            event.down ? 1 : 0,
-            finger.tracking_id,
-            finger.status);
-        std::fflush(stderr);
-    }
 
     std::lock_guard<std::mutex> lock(g_uiEventMutex);
     if (g_uiEvents.size() >= kUiEventCapacity) {
@@ -998,21 +982,6 @@ void PumpTouchInput() {
             io.AddMousePosEvent(position.x, position.y);
         }
         io.AddMouseButtonEvent(0, event.down);
-        const int debugIndex =
-            g_debugPumpLogCount.fetch_add(1, std::memory_order_relaxed);
-        if (debugIndex < 20) {
-            std::fprintf(
-                stderr,
-                "[touch-debug] pump batch=%zu raw=(%d,%d) pos=(%.1f,%.1f) has=%d down=%d\n",
-                events.size(),
-                event.rawX,
-                event.rawY,
-                position.x,
-                position.y,
-                event.hasPosition ? 1 : 0,
-                event.down ? 1 : 0);
-            std::fflush(stderr);
-        }
     }
 }
 

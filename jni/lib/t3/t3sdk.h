@@ -22,6 +22,7 @@ struct T3HttpTransportOptions {
     int connectTimeoutMilliseconds = 3000;
     int sendTimeoutMilliseconds = 3000;
     int receiveTimeoutMilliseconds = 5000;
+    int requestTimeoutMilliseconds = 10000;
     std::size_t maximumResponseBytes = 2U * 1024U * 1024U;
 
     bool isValid() const noexcept;

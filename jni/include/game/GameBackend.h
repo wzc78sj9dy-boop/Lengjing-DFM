@@ -5,10 +5,16 @@
 #include "game/GameFrame.h"
 #include "game/native/AlgorithmPositionRuntime.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
 namespace lengjing::game {
+
+enum class RuntimeFailureKind : std::uint8_t {
+    None,
+    CloudLayoutRejected,
+};
 
 struct RuntimeOptions {
     int gameVersionIndex = 0;
@@ -34,6 +40,7 @@ struct RuntimeProbe {
     std::uint64_t coordinateContextGeneration = 0;
     std::uint64_t coordinateAttempts = 0;
     std::uint64_t coordinateSuccesses = 0;
+    RuntimeFailureKind failureKind = RuntimeFailureKind::None;
 };
 
 class GameBackend {

@@ -1,5 +1,6 @@
 #include "game/GameRuntime.h"
 #include "game/FrameRetentionPolicy.h"
+#include "game/aim/AimModePolicy.h"
 
 #include <chrono>
 #include <exception>
@@ -39,7 +40,8 @@ bool GameRuntime::Start(const RuntimeOptions& options) {
     requestedOrientation_.store(
         options.orientation, std::memory_order_release);
     displayGeometryDirty_.store(false, std::memory_order_release);
-    status_ = RuntimeStatus{RuntimePhase::Starting, 0, false, 0, {}};
+    status_ = RuntimeStatus{};
+    status_.phase = RuntimePhase::Starting;
     latestFrame_ = std::make_shared<GameFrame>();
     worker_ = std::thread(&GameRuntime::WorkerMain, this, options);
     return true;
@@ -71,6 +73,8 @@ void GameRuntime::WaitUntilStopped() {
 void GameRuntime::UpdateSettings(const FeatureSettings& settings) {
     std::lock_guard<std::mutex> lock(mutex_);
     settings_ = settings;
+    settings_.aim.trajectoryTracking =
+        IsProjectileTrackingRequested(settings.aim.trajectoryTracking);
 }
 
 void GameRuntime::UpdateDisplayGeometry(
@@ -181,6 +185,7 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
                     probe.coordinateContextGeneration;
                 status_.coordinateAttempts = probe.coordinateAttempts;
                 status_.coordinateSuccesses = probe.coordinateSuccesses;
+                status_.failureKind = probe.failureKind;
                 status_.message = std::move(error);
             }
 
@@ -235,6 +240,7 @@ void GameRuntime::SetStatus(RuntimePhase phase,
     status_.coordinateContextGeneration = probe.coordinateContextGeneration;
     status_.coordinateAttempts = probe.coordinateAttempts;
     status_.coordinateSuccesses = probe.coordinateSuccesses;
+    status_.failureKind = probe.failureKind;
     status_.message = std::move(message);
 }
 

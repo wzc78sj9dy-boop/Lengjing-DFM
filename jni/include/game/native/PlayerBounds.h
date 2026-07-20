@@ -23,6 +23,26 @@ struct PlayerScreenBounds {
     float bottom = 0.0f;
 };
 
+inline bool DoesPlayerScreenBoundsIntersectViewport(
+    const PlayerScreenBounds& bounds,
+    float screenWidth,
+    float screenHeight,
+    float margin = 0.0f) noexcept {
+    if (!std::isfinite(screenWidth) || !std::isfinite(screenHeight) ||
+        !std::isfinite(margin) || screenWidth <= 1.0f ||
+        screenHeight <= 1.0f || margin < 0.0f ||
+        !std::isfinite(bounds.left) || !std::isfinite(bounds.top) ||
+        !std::isfinite(bounds.right) || !std::isfinite(bounds.bottom) ||
+        bounds.right <= bounds.left || bounds.bottom <= bounds.top) {
+        return false;
+    }
+
+    return bounds.right >= -margin &&
+        bounds.left <= screenWidth + margin &&
+        bounds.bottom >= -margin &&
+        bounds.top <= screenHeight + margin;
+}
+
 inline bool CalculatePlayerAnchorBounds(
     const PlayerBoneScreenPoint& lowerAnchor,
     const PlayerBoneScreenPoint& upperAnchor,
@@ -209,7 +229,7 @@ inline bool IsReliablePlayerScreenBounds(
     const float major = std::max(width, height);
     if (!std::isfinite(width) || !std::isfinite(height) ||
         !std::isfinite(major) || width < 4.0f || height < 4.0f ||
-        major > std::max(screenWidth, screenHeight) * 2.0f) {
+        major > std::max(screenWidth, screenHeight) * 8.0f) {
         return false;
     }
 
@@ -219,15 +239,8 @@ inline bool IsReliablePlayerScreenBounds(
         return false;
     }
 
-    const float centerX = (bounds.left + bounds.right) * 0.5f;
-    const float centerY = (bounds.top + bounds.bottom) * 0.5f;
-    const float horizontalMargin = screenWidth * 0.25f;
-    const float verticalMargin = screenHeight * 0.25f;
-    return std::isfinite(centerX) && std::isfinite(centerY) &&
-        centerX >= -horizontalMargin &&
-        centerX <= screenWidth + horizontalMargin &&
-        centerY >= -verticalMargin &&
-        centerY <= screenHeight + verticalMargin;
+    return DoesPlayerScreenBoundsIntersectViewport(
+        bounds, screenWidth, screenHeight);
 }
 
 inline bool SelectPlayerScreenBounds(

@@ -1,5 +1,6 @@
 #include "config/LocalConfig.h"
 
+#include "game/ProjectileTrackingFeature.h"
 #include "vendor/json.hpp"
 
 #include <algorithm>
@@ -106,6 +107,41 @@ Json Serialize(const ui::UiModel& model) {
         randomBones.push_back(weight);
     }
 
+    Json aim{
+        {"enabled", model.aim.enabled},
+        {"cover", model.aim.missMode},
+        {"cover_mode", model.aim.coverMode},
+        {"weapon_profiles_enabled", model.aim.weaponProfilesEnabled},
+        {"weapon_profile", model.aim.weaponProfileIndex},
+        {"weapon_profiles", std::move(profiles)},
+        {"defaults", SaveAimTuning(model.aim.defaults)},
+        {"ignore_bots", model.aim.ignoreBots},
+        {"ignore_downed", model.aim.ignoreDowned},
+        {"persistent_lock", model.aim.persistentLock},
+        {"curved_motion", model.aim.curvedMotion},
+        {"require_visibility", model.aim.requireVisibility},
+        {"enforce_fov", model.aim.enforceFov},
+        {"enforce_distance", model.aim.enforceDistance},
+        {"draw_range", model.aim.drawRange},
+        {"draw_target_ray", model.aim.drawTargetRay},
+        {"trigger_mode", model.aim.triggerMode},
+        {"target_algorithm", model.aim.targetAlgorithm},
+        {"random_bone_weights", std::move(randomBones)},
+        {"input_mode", static_cast<int>(model.aim.inputMode)},
+        {"show_touch_area", model.aim.showTouchArea},
+        {"touch_range", model.aim.touchRange},
+        {"touch_x", model.aim.touchX},
+        {"touch_y", model.aim.touchY},
+    };
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+        aim["trajectory_tracking"] = model.aim.trajectoryTracking;
+        aim["reject_target_state"] = model.aim.rejectTargetState;
+        aim["reject_dead_target"] = model.aim.rejectDeadTarget;
+        aim["player_dead_box"] = model.aim.playerDeadBox;
+        aim["robot_dead_box"] = model.aim.robotDeadBox;
+        aim["hit_percentage"] = model.aim.hitPercentage;
+#endif
+
     return Json{
         {"schema_version", kSchemaVersion},
         {"runtime", {
@@ -188,38 +224,7 @@ Json Serialize(const ui::UiModel& model) {
             {"map_font_size", model.radar.mapFontSize},
             {"map_dot_size", model.radar.mapDotSize},
         }},
-        {"aim", {
-            {"enabled", model.aim.enabled},
-            {"cover", model.aim.missMode},
-            {"cover_mode", model.aim.coverMode},
-            {"weapon_profiles_enabled", model.aim.weaponProfilesEnabled},
-            {"weapon_profile", model.aim.weaponProfileIndex},
-            {"weapon_profiles", std::move(profiles)},
-            {"defaults", SaveAimTuning(model.aim.defaults)},
-            {"ignore_bots", model.aim.ignoreBots},
-            {"ignore_downed", model.aim.ignoreDowned},
-            {"persistent_lock", model.aim.persistentLock},
-            {"curved_motion", model.aim.curvedMotion},
-            {"trajectory_tracking", model.aim.trajectoryTracking},
-            {"require_visibility", model.aim.requireVisibility},
-            {"reject_target_state", model.aim.rejectTargetState},
-            {"reject_dead_target", model.aim.rejectDeadTarget},
-            {"player_dead_box", model.aim.playerDeadBox},
-            {"robot_dead_box", model.aim.robotDeadBox},
-            {"enforce_fov", model.aim.enforceFov},
-            {"enforce_distance", model.aim.enforceDistance},
-            {"hit_percentage", model.aim.hitPercentage},
-            {"draw_range", model.aim.drawRange},
-            {"draw_target_ray", model.aim.drawTargetRay},
-            {"trigger_mode", model.aim.triggerMode},
-            {"target_algorithm", model.aim.targetAlgorithm},
-            {"random_bone_weights", std::move(randomBones)},
-            {"input_mode", static_cast<int>(model.aim.inputMode)},
-            {"show_touch_area", model.aim.showTouchArea},
-            {"touch_range", model.aim.touchRange},
-            {"touch_x", model.aim.touchX},
-            {"touch_y", model.aim.touchY},
-        }},
+        {"aim", std::move(aim)},
         {"system", {
             {"frame_limit", model.system.frameLimitIndex},
             {"render_backend", static_cast<int>(model.system.renderBackend)},
@@ -355,17 +360,31 @@ void Apply(const Json& root, ui::UiModel& model) {
     model.aim.ignoreDowned = ReadBool(aim, "ignore_downed", model.aim.ignoreDowned);
     model.aim.persistentLock = ReadBool(aim, "persistent_lock", model.aim.persistentLock);
     model.aim.curvedMotion = ReadBool(aim, "curved_motion", model.aim.curvedMotion);
-    model.aim.trajectoryTracking = ReadBool(aim, "trajectory_tracking", model.aim.trajectoryTracking);
     model.aim.requireVisibility = ReadBool(aim, "require_visibility", model.aim.requireVisibility);
-    model.aim.rejectTargetState = ReadBool(aim, "reject_target_state", model.aim.rejectTargetState);
-    model.aim.rejectDeadTarget = ReadBool(aim, "reject_dead_target", model.aim.rejectDeadTarget);
-    model.aim.playerDeadBox = ReadBool(
-        aim, "player_dead_box", model.aim.playerDeadBox);
-    model.aim.robotDeadBox = ReadBool(
-        aim, "robot_dead_box", model.aim.robotDeadBox);
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+        model.aim.trajectoryTracking = ReadBool(
+            aim, "trajectory_tracking", model.aim.trajectoryTracking);
+        model.aim.rejectTargetState = ReadBool(
+            aim, "reject_target_state", model.aim.rejectTargetState);
+        model.aim.rejectDeadTarget = ReadBool(
+            aim, "reject_dead_target", model.aim.rejectDeadTarget);
+        model.aim.playerDeadBox = ReadBool(
+            aim, "player_dead_box", model.aim.playerDeadBox);
+        model.aim.robotDeadBox = ReadBool(
+            aim, "robot_dead_box", model.aim.robotDeadBox);
+        model.aim.hitPercentage = ReadNumber(
+            aim, "hit_percentage", model.aim.hitPercentage, 0, 100);
+#else
+        const ui::AimSettings defaults{};
+        model.aim.trajectoryTracking = false;
+        model.aim.rejectTargetState = defaults.rejectTargetState;
+        model.aim.rejectDeadTarget = defaults.rejectDeadTarget;
+        model.aim.playerDeadBox = defaults.playerDeadBox;
+        model.aim.robotDeadBox = defaults.robotDeadBox;
+        model.aim.hitPercentage = defaults.hitPercentage;
+#endif
     model.aim.enforceFov = ReadBool(aim, "enforce_fov", model.aim.enforceFov);
     model.aim.enforceDistance = ReadBool(aim, "enforce_distance", model.aim.enforceDistance);
-    model.aim.hitPercentage = ReadNumber(aim, "hit_percentage", model.aim.hitPercentage, 0, 100);
     model.aim.drawRange = ReadBool(aim, "draw_range", model.aim.drawRange);
     model.aim.drawTargetRay = ReadBool(aim, "draw_target_ray", model.aim.drawTargetRay);
     model.aim.triggerMode = ReadNumber(aim, "trigger_mode", model.aim.triggerMode, 0, 2);

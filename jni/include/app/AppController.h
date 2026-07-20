@@ -42,6 +42,7 @@ public:
     ui::UiModel& Model() noexcept;
     const ui::UiModel& Model() const noexcept;
     bool ExitRequested() const noexcept;
+    int RuntimeExitCode() const;
     int TargetFrameRate() const noexcept;
     ui::RenderBackend DesiredRenderBackend() const noexcept;
     void ReportRenderBackend(

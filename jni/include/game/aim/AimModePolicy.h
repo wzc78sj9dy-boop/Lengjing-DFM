@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game/ProjectileTrackingFeature.h"
+
 namespace lengjing::game::aim {
 
 struct AimModeActivation {
@@ -23,7 +25,7 @@ struct AimOutputAvailability {
 constexpr bool IsAimOutputRequested(
     bool selfAim,
     bool tracking) noexcept {
-    return selfAim || tracking;
+    return selfAim || IsProjectileTrackingRequested(tracking);
 }
 
 constexpr AimModeActivation ResolveAimModeActivation(
@@ -34,7 +36,7 @@ constexpr AimModeActivation ResolveAimModeActivation(
     const bool available = outputEnabled && weaponAllowed;
     return AimModeActivation{
         available && selfAim,
-        available && tracking,
+        available && IsProjectileTrackingRequested(tracking),
     };
 }
 

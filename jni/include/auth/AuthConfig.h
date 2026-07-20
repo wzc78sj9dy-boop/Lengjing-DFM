@@ -2,7 +2,10 @@
 
 #include <string_view>
 
-// 验证参数必须由私有构建配置注入，仓库默认不携带签名材料。
+#if __has_include("auth/AuthConfigPrivate.h")
+#include "auth/AuthConfigPrivate.h"
+#endif
+
 #ifndef LENGJING_T3_LOGIN_CODE
 #define LENGJING_T3_LOGIN_CODE ""
 #endif

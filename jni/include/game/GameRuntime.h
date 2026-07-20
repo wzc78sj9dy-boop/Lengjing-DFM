@@ -34,6 +34,7 @@ struct RuntimeStatus {
     std::uint64_t coordinateContextGeneration = 0;
     std::uint64_t coordinateAttempts = 0;
     std::uint64_t coordinateSuccesses = 0;
+    RuntimeFailureKind failureKind = RuntimeFailureKind::None;
 };
 
 class GameRuntime final {

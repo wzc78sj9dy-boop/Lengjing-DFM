@@ -44,7 +44,7 @@ uint64_t Analyze::execute(arm64_reg reg, std::unordered_map<std::string, uint64_
     return regs[normalizeReg(reg)]->eval(params);
 }
 
-std::shared_ptr<Expr> Analyze::get_expr(arm64_reg reg) 
+std::shared_ptr<Expr> Analyze::get_expr(arm64_reg reg)
 {
     reg = normalizeReg(reg);
 
@@ -348,7 +348,7 @@ int Analyze::parse(cs_insn *insn) {
         case ARM64_INS_LDRB:
         case ARM64_INS_LDR: {
             uint32_t size = insn->id == ARM64_INS_LDRB ? 1 : isW(op[0].reg) ? 4 : 8;
-            
+
             auto it = regs.find(op[1].mem.base);
             if (it == regs.end()) {
                 if (op[1].mem.base == ARM64_REG_SP) {
@@ -416,4 +416,3 @@ int Analyze::parse(cs_insn *insn) {
 }
 
 }  // namespace lengjing::game::native::coordinate_pool_internal
-

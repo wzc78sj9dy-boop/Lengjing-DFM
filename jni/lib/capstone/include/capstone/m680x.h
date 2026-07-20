@@ -125,7 +125,7 @@ typedef struct cs_m680x_op {
 	uint8_t size;			///< size of this operand (in bytes)
 	/// How is this operand accessed? (READ, WRITE or READ|WRITE)
 	/// This field is combined of cs_ac_type.
-	/// NOTE: this field is irrelevant if engine is compiled in DIET 
+	/// NOTE: this field is irrelevant if engine is compiled in DIET
 	uint8_t access;
 } cs_m680x_op;
 

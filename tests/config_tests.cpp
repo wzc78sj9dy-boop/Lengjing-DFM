@@ -185,6 +185,12 @@ void RunConfigTests() {
     REQUIRE(serialized.find("tracking_bone_preset") == std::string::npos);
     REQUIRE(serialized.find("tracking_projectile_speed") == std::string::npos);
     REQUIRE(serialized.find("tracking_gravity") == std::string::npos);
+    REQUIRE(serialized.find("trajectory_tracking") == std::string::npos);
+    REQUIRE(serialized.find("reject_target_state") == std::string::npos);
+    REQUIRE(serialized.find("reject_dead_target") == std::string::npos);
+    REQUIRE(serialized.find("player_dead_box") == std::string::npos);
+    REQUIRE(serialized.find("robot_dead_box") == std::string::npos);
+    REQUIRE(serialized.find("hit_percentage") == std::string::npos);
 
     lengjing::ui::UiModel actual;
     REQUIRE(config.Load(actual, &error));
@@ -219,21 +225,46 @@ void RunConfigTests() {
     REQUIRE(actual.aim.weaponProfilesEnabled);
     REQUIRE(actual.aim.weaponProfiles[4].prediction == 1.75f);
     REQUIRE(actual.aim.weaponProfiles[4].adsDistanceMeters == 225.0f);
-    REQUIRE(actual.aim.trajectoryTracking);
+    REQUIRE(!actual.aim.trajectoryTracking);
     REQUIRE(actual.aim.requireVisibility);
-    REQUIRE(actual.aim.rejectTargetState);
-    REQUIRE(actual.aim.rejectDeadTarget);
-    REQUIRE(!actual.aim.playerDeadBox);
-    REQUIRE(actual.aim.robotDeadBox);
+    REQUIRE(!actual.aim.rejectTargetState);
+    REQUIRE(!actual.aim.rejectDeadTarget);
+    REQUIRE(actual.aim.playerDeadBox);
+    REQUIRE(!actual.aim.robotDeadBox);
     REQUIRE(!actual.aim.enforceFov);
     REQUIRE(!actual.aim.enforceDistance);
-    REQUIRE(actual.aim.hitPercentage == 73);
+    REQUIRE(actual.aim.hitPercentage == 100);
     REQUIRE(actual.aim.randomBoneWeights[8] == 17.0f);
     REQUIRE(actual.system.frameLimitIndex == 4);
     REQUIRE(
         actual.system.renderBackend ==
         lengjing::ui::RenderBackend::Vulkan);
     REQUIRE(!actual.system.toastNotifications);
+
+    {
+        std::ofstream legacy(path, std::ios::binary | std::ios::trunc);
+        legacy << R"({"schema_version":1,"aim":{)"
+               << R"("trajectory_tracking":true,)"
+               << R"("reject_target_state":true,)"
+               << R"("reject_dead_target":true,)"
+               << R"("player_dead_box":false,)"
+               << R"("robot_dead_box":true,)"
+               << R"("hit_percentage":17}})";
+    }
+    actual = {};
+    actual.aim.trajectoryTracking = true;
+    actual.aim.rejectTargetState = true;
+    actual.aim.rejectDeadTarget = true;
+    actual.aim.playerDeadBox = false;
+    actual.aim.robotDeadBox = true;
+    actual.aim.hitPercentage = 17;
+    REQUIRE(config.Load(actual, &error));
+    REQUIRE(!actual.aim.trajectoryTracking);
+    REQUIRE(!actual.aim.rejectTargetState);
+    REQUIRE(!actual.aim.rejectDeadTarget);
+    REQUIRE(actual.aim.playerDeadBox);
+    REQUIRE(!actual.aim.robotDeadBox);
+    REQUIRE(actual.aim.hitPercentage == 100);
 
     expected.runtime.driverIndex = 0;
     REQUIRE(config.Save(expected, &error));

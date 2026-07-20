@@ -62,6 +62,24 @@ bool IsValidGuestAddress(std::uint64_t value) noexcept {
     return IsRemoteAddress(NormalizePointer(value));
 }
 
+bool AddSignedOffset(std::uint64_t base,
+                     std::int32_t offset,
+                     std::uint64_t& result) noexcept {
+    if (offset >= 0) {
+        const auto increment = static_cast<std::uint64_t>(offset);
+        if (base > std::numeric_limits<std::uint64_t>::max() - increment) {
+            return false;
+        }
+        result = base + increment;
+        return true;
+    }
+    const auto decrement = static_cast<std::uint64_t>(
+        -static_cast<std::int64_t>(offset));
+    if (base < decrement) return false;
+    result = base - decrement;
+    return true;
+}
+
 bool IsFinitePosition(const CoordinatePoolPosition& value) noexcept {
     return std::isfinite(value.x) && std::isfinite(value.y) &&
         std::isfinite(value.z);
@@ -180,6 +198,14 @@ struct CoordinatePoolRuntime::Impl {
 
     ~Impl() {
         CloseEngineUnlocked();
+    }
+
+    bool Configure(const CoordinatePoolRuntimeLayout& configuredLayout) {
+        if (!configuredLayout.IsValid()) return false;
+        std::lock_guard<std::mutex> lock(mutex);
+        ResetUnlocked();
+        layout = configuredLayout;
+        return true;
     }
 
     bool Refresh(MemoryTransport& targetMemory,
@@ -456,12 +482,15 @@ private:
         nextEntry = 0;
         if (memory == nullptr ||
             layout.rootRva >
-                std::numeric_limits<std::uintptr_t>::max() - moduleBase - 12) {
+                std::numeric_limits<std::uintptr_t>::max() - moduleBase ||
+            layout.bridgeOffset >
+                std::numeric_limits<std::uintptr_t>::max() -
+                    moduleBase - layout.rootRva) {
             return false;
         }
         std::uint64_t rawBridge = 0;
         if (!ReadRemoteUnlocked(
-                moduleBase + layout.rootRva + 12,
+                moduleBase + layout.rootRva + layout.bridgeOffset,
                 &rawBridge,
                 sizeof(rawBridge))) {
             return false;
@@ -469,11 +498,19 @@ private:
         nextBridge = NormalizePointer(rawBridge);
         std::uint64_t rawContext = 0;
         std::uint64_t rawEntry = 0;
-        if (!IsRemoteAddress(nextBridge) || nextBridge < 8 ||
+        std::uint64_t contextAddress = 0;
+        if (!IsRemoteAddress(nextBridge) ||
+            !AddSignedOffset(
+                nextBridge, layout.contextOffset, contextAddress) ||
+            layout.entryOffset >
+                std::numeric_limits<std::uint64_t>::max() - nextBridge ||
+            !IsRemoteAddress(contextAddress) ||
             !ReadRemoteUnlocked(
-                nextBridge - 8, &rawContext, sizeof(rawContext)) ||
+                contextAddress, &rawContext, sizeof(rawContext)) ||
             !ReadRemoteUnlocked(
-                nextBridge + 0xA0, &rawEntry, sizeof(rawEntry))) {
+                nextBridge + layout.entryOffset,
+                &rawEntry,
+                sizeof(rawEntry))) {
             return false;
         }
         nextContext = rawContext;
@@ -1103,6 +1140,15 @@ CoordinatePoolRuntime::CoordinatePoolRuntime(
     : impl_(new (std::nothrow) Impl(layout)) {}
 
 CoordinatePoolRuntime::~CoordinatePoolRuntime() = default;
+
+bool CoordinatePoolRuntime::Configure(
+    const CoordinatePoolRuntimeLayout& layout) noexcept {
+    try {
+        return impl_ != nullptr && impl_->Configure(layout);
+    } catch (...) {
+        return false;
+    }
+}
 
 bool CoordinatePoolRuntime::Refresh(
     MemoryTransport& memory,

@@ -6,6 +6,48 @@
 void RunFrameProjectionTests() {
     using namespace lengjing::game::native;
 
+    REQUIRE(IsProjectionViewCacheCompatible(
+        true, 0x1000, 0x2000, 0x1000, 0x2000));
+    REQUIRE(!IsProjectionViewCacheCompatible(
+        false, 0x1000, 0x2000, 0x1000, 0x2000));
+    REQUIRE(!IsProjectionViewCacheCompatible(
+        true, 0x1000, 0x2000, 0x3000, 0x2000));
+    REQUIRE(!IsProjectionViewCacheCompatible(
+        true, 0x1000, 0x2000, 0x1000, 0x4000));
+
+    ProjectionFovStabilityState fovState{};
+    float resolvedFov = 0.0f;
+    REQUIRE(ResolveStableProjectionFov(
+        0x1000, 0x2000, 1, true, 90.0f, true, 90.0f,
+        fovState, resolvedFov));
+    REQUIRE(std::fabs(resolvedFov - 90.0f) < 0.001f);
+
+    REQUIRE(ResolveStableProjectionFov(
+        0x1000, 0x2000, 2, true, 60.0f, true, 60.0f,
+        fovState, resolvedFov));
+    REQUIRE(std::fabs(resolvedFov - 90.0f) < 0.001f);
+    REQUIRE(ResolveStableProjectionFov(
+        0x1000, 0x2000, 2, true, 60.0f, true, 60.0f,
+        fovState, resolvedFov));
+    REQUIRE(std::fabs(resolvedFov - 90.0f) < 0.001f);
+    REQUIRE(ResolveStableProjectionFov(
+        0x1000, 0x2000, 3, true, 60.0f, true, 60.0f,
+        fovState, resolvedFov));
+    REQUIRE(std::fabs(resolvedFov - 60.0f) < 0.001f);
+
+    REQUIRE(ResolveStableProjectionFov(
+        0x1000, 0x2000, 4, true, 60.0f, true, 75.0f,
+        fovState, resolvedFov));
+    REQUIRE(std::fabs(resolvedFov - 60.0f) < 0.001f);
+    REQUIRE(ResolveStableProjectionFov(
+        0x3000, 0x4000, 4, true, 100.0f, true, 100.0f,
+        fovState, resolvedFov));
+    REQUIRE(std::fabs(resolvedFov - 100.0f) < 0.001f);
+    REQUIRE(ResolveStableProjectionFov(
+        0x3000, 0x4000, 5, false, 0.0f, false, 0.0f,
+        fovState, resolvedFov));
+    REQUIRE(std::fabs(resolvedFov - 100.0f) < 0.001f);
+
     ProjectionView view{};
     view.fieldOfView = 90.0f;
     const ProjectionPoint target{100.0f, 0.0f, 0.0f};

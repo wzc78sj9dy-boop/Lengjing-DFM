@@ -2,13 +2,13 @@
 
 #include "game/aim/AimModePolicy.h"
 #include "app/RenderBackendSelection.h"
+#include "app/RuntimeExitPolicy.h"
 
 #include "ImGui/imgui.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdio>
 #include <iterator>
 #include <limits>
 #include <utility>
@@ -189,6 +189,14 @@ bool AppController::ExitRequested() const noexcept {
     return exitRequested_;
 }
 
+int AppController::RuntimeExitCode() const {
+    const game::RuntimeStatus status = runtime_.Status();
+    return ResolveRuntimeExitCode(
+        options_.cloudLayout != nullptr,
+        status.phase,
+        status.failureKind);
+}
+
 int AppController::TargetFrameRate() const noexcept {
     const int index = std::clamp(
         model_.system.frameLimitIndex, 0,
@@ -250,9 +258,6 @@ void AppController::AppendLog(std::string message) {
     if (message.empty()) {
         return;
     }
-
-    std::fprintf(stderr, "[touch-debug] app-log=%s\n", message.c_str());
-    std::fflush(stderr);
 
     if (toastNotificationsEnabled_.load(std::memory_order_acquire)) {
         const auto now = std::chrono::steady_clock::now();
@@ -490,6 +495,9 @@ game::FeatureSettings AppController::BuildFeatureSettings() const {
     settings.loot = model_.loot;
     settings.radar = model_.radar;
     settings.aim = model_.aim;
+    settings.aim.trajectoryTracking =
+        game::IsProjectileTrackingRequested(
+            model_.aim.trajectoryTracking);
     return settings;
 }
 
@@ -821,25 +829,6 @@ void AppController::DrawPopulation(const game::GameFrame& frame,
             populationPressActive_ = false;
             populationPressCanceled_ = false;
         }
-    }
-    static int debugPopulationLogCount = 0;
-    if (debugPopulationLogCount < 1 || pressedNow || releasedNow) {
-        std::fprintf(
-            stderr,
-            "[touch-debug] island bounds=(%.1f,%.1f)-(%.1f,%.1f) pos=(%.1f,%.1f) hovered=%d pressed=%d released=%d pressActive=%d visible=%d\n",
-            panelMinimum.x,
-            panelMinimum.y,
-            panelMaximum.x,
-            panelMaximum.y,
-            io.MousePos.x,
-            io.MousePos.y,
-            hovered ? 1 : 0,
-            pressedNow ? 1 : 0,
-            releasedNow ? 1 : 0,
-            populationPressActive_ ? 1 : 0,
-            model_.visible ? 1 : 0);
-        std::fflush(stderr);
-        ++debugPopulationLogCount;
     }
     if (hovered || populationPressActive_) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);

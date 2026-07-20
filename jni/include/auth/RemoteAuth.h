@@ -10,6 +10,19 @@
 
 namespace lengjing::auth {
 
+inline constexpr std::size_t kMaximumEncodedCloudVariablePayloadBytes =
+    kMaximumCloudLayoutPayloadBytes * 6U;
+
+enum class CloudVariablePayloadDecodeStatus {
+    Success,
+    InputTooLarge,
+    OutputTooLarge,
+    UnsupportedEntity,
+};
+
+CloudVariablePayloadDecodeStatus DecodeCloudVariablePayload(
+    std::string& payload) noexcept;
+
 enum class AuthState {
     Idle,
     Authenticating,

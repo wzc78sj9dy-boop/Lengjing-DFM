@@ -251,12 +251,12 @@ namespace lengjing::game::native::coordinate_pool_internal {
         }
 
         bool st(const cs_insn& insn) {
-           
+
             int i;
             if (insn.id == ARM64_INS_STR) i = 1;
             else if (insn.id == ARM64_INS_STP) i = 2;
             else return false;
-            
+
             arm64_op_mem* op = &insn.detail->arm64.operands[i].mem;
 
             for (stack &stack: stack_) {
@@ -994,8 +994,8 @@ namespace lengjing::game::native::coordinate_pool_internal {
             return binary_.create_method(name, address, end, end_range);
         }
 
-        int set(uint64_t base, void* data, uint32_t size) { 
-            return binary_.parse(base, data, size); 
+        int set(uint64_t base, void* data, uint32_t size) {
+            return binary_.parse(base, data, size);
         };
 
         shellcode* get_shellcode() {
@@ -1017,4 +1017,3 @@ namespace lengjing::game::native::coordinate_pool_internal {
     };
 
 }  // namespace lengjing::game::native::coordinate_pool_internal
-

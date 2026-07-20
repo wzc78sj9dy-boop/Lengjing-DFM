@@ -926,4 +926,3 @@ void VulkanGraphics::RemoveTexture(BaseTexData *tex) {
         m_AbandonDevice = true;
     DestroyTextureResources(tex_data);
 }
-

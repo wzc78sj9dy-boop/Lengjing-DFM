@@ -209,6 +209,49 @@ bool InputIsTerminal() noexcept {
 
 }  // namespace
 
+CloudVariablePayloadDecodeStatus DecodeCloudVariablePayload(
+    std::string& payload) noexcept {
+    if (payload.size() > kMaximumEncodedCloudVariablePayloadBytes) {
+        payload.clear();
+        return CloudVariablePayloadDecodeStatus::InputTooLarge;
+    }
+
+    std::size_t readOffset = 0;
+    std::size_t writeOffset = 0;
+    while (readOffset < payload.size()) {
+        char decoded = payload[readOffset];
+        std::size_t consumed = 1;
+        if (decoded == '&') {
+            if (payload.compare(readOffset, 6, "&quot;") == 0) {
+                decoded = '"';
+                consumed = 6;
+            } else if (payload.compare(readOffset, 5, "&amp;") == 0) {
+                decoded = '&';
+                consumed = 5;
+            } else if (payload.compare(readOffset, 5, "&#34;") == 0) {
+                decoded = '"';
+                consumed = 5;
+            } else if (payload.compare(readOffset, 6, "&#x22;") == 0) {
+                decoded = '"';
+                consumed = 6;
+            } else {
+                payload.clear();
+                return CloudVariablePayloadDecodeStatus::UnsupportedEntity;
+            }
+        }
+
+        if (writeOffset == kMaximumCloudLayoutPayloadBytes) {
+            payload.clear();
+            return CloudVariablePayloadDecodeStatus::OutputTooLarge;
+        }
+        payload[writeOffset++] = decoded;
+        readOffset += consumed;
+    }
+
+    payload.resize(writeOffset);
+    return CloudVariablePayloadDecodeStatus::Success;
+}
+
 struct AuthSession::Runtime final {
     std::atomic<AuthState> state{AuthState::Idle};
     std::atomic_bool stopRequested{false};
@@ -476,7 +519,6 @@ std::string AuthSession::ExpiresAt() const {
 
 CloudLayoutUpdateResult AuthSession::RefreshCloudLayout(
     CloudLayoutStore& store) {
-    AuthVariableResult result;
     try {
         std::lock_guard<std::mutex> requestLock(runtime_->requestMutex);
         if (!IsValid()) {
@@ -488,10 +530,45 @@ CloudLayoutUpdateResult AuthSession::RefreshCloudLayout(
                     "get_variable call code, value id, or value name is missing",
                     store.Snapshot()};
         }
-        result = runtime_->gateway->GetVariableByCard(
+        AuthVariableResult result = runtime_->gateway->GetVariableByCard(
             runtime_->cardKey,
             runtime_->cloudVariable.valueId,
             runtime_->cloudVariable.valueName);
+        if (!IsValid()) {
+            return {CloudLayoutStatus::SessionInvalid,
+                    "authentication session ended during cloud layout fetch",
+                    store.Snapshot()};
+        }
+        if (!result.success) {
+            return {CloudLayoutStatus::FetchFailed,
+                    result.error.empty()
+                        ? "getVariableByKami failed"
+                        : runtime_->Sanitize(result.error),
+                    store.Snapshot()};
+        }
+
+        const CloudVariablePayloadDecodeStatus decodeStatus =
+            DecodeCloudVariablePayload(result.value);
+        if (decodeStatus != CloudVariablePayloadDecodeStatus::Success) {
+            const char* detail =
+                "cloud variable payload contains an unsupported HTML entity";
+            if (decodeStatus ==
+                CloudVariablePayloadDecodeStatus::InputTooLarge) {
+                detail = "encoded cloud variable payload is too large";
+            } else if (decodeStatus ==
+                       CloudVariablePayloadDecodeStatus::OutputTooLarge) {
+                detail = "decoded cloud variable payload is too large";
+            }
+            return {CloudLayoutStatus::InvalidJson, detail, store.Snapshot()};
+        }
+        const CloudLayoutUpdateResult update =
+            store.ValidateAndPublish(result.value);
+        if (!IsValid()) {
+            return {CloudLayoutStatus::SessionInvalid,
+                    "authentication session ended during cloud layout validation",
+                    store.Snapshot()};
+        }
+        return update;
     } catch (const std::exception& exception) {
         return {CloudLayoutStatus::FetchFailed,
                 runtime_->Sanitize(exception.what()),
@@ -501,14 +578,6 @@ CloudLayoutUpdateResult AuthSession::RefreshCloudLayout(
                 "getVariableByKami threw an unknown exception",
                 store.Snapshot()};
     }
-    if (!result.success) {
-        return {CloudLayoutStatus::FetchFailed,
-                result.error.empty()
-                    ? "getVariableByKami failed"
-                    : runtime_->Sanitize(std::move(result.error)),
-                store.Snapshot()};
-    }
-    return store.ValidateAndPublish(result.value);
 }
 
 std::shared_ptr<AuthGateway> CreateT3Gateway(

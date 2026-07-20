@@ -4,7 +4,7 @@
 
 namespace lengjing::game::native::coordinate_pool_internal {
 namespace coord_dec {
-   
+
     struct param {
         std::string name;
         uint32_t size;

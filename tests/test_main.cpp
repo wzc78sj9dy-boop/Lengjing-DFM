@@ -6,6 +6,7 @@
 int main() {
     try {
         RunActorFrameVisitSetTests();
+        RunActorRecordSourceTests();
         RunActorRecordResolverTests();
         RunAlgorithmPositionPolicyTests();
         RunAimModePolicyTests();
@@ -14,12 +15,14 @@ int main() {
         RunAuthSessionTests();
         RunAuthTransportTests();
         RunCardInputPolicyTests();
+        RunCloudLayoutStartupPolicyTests();
         RunCloudLayoutTests();
         RunConfigTests();
         RunCpuMailboxPolicyTests();
         RunFrameProjectionTests();
         RunHudMapTests();
         RunKernelModuleCatalogTests();
+        RunOverlayContrastPolicyTests();
         RunPlayerBoundsTests();
         RunPlayerTrackingTests();
         RunPositionResolverTests();
@@ -28,6 +31,7 @@ int main() {
         RunRenderBackendSelectionTests();
         RunRemoteElfIdentityTests();
         RunRuntimeLayoutOverrideTests();
+        RunRuntimeExitPolicyTests();
         RunRuntimeTests();
         RunThreatCatalogTests();
         RunTrackingCalculatorTests();

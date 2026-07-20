@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>
+#include <cstdint>
 
 namespace lengjing::game::native {
 
@@ -34,6 +35,83 @@ struct ScreenProjection {
     CameraSpacePoint camera{};
     bool valid = false;
 };
+
+struct ProjectionFovStabilityState {
+    std::uintptr_t world = 0;
+    std::uintptr_t cameraManager = 0;
+    std::uint64_t pendingFrame = 0;
+    float acceptedFov = 0.0f;
+    float pendingFov = 0.0f;
+    bool acceptedValid = false;
+    bool pendingValid = false;
+};
+
+constexpr bool IsProjectionViewCacheCompatible(
+    bool cacheValid,
+    std::uintptr_t cachedWorld,
+    std::uintptr_t cachedCameraManager,
+    std::uintptr_t currentWorld,
+    std::uintptr_t currentCameraManager) noexcept {
+    return cacheValid && currentWorld != 0 && currentCameraManager != 0 &&
+        cachedWorld == currentWorld &&
+        cachedCameraManager == currentCameraManager;
+}
+
+inline bool ResolveStableProjectionFov(
+    std::uintptr_t world,
+    std::uintptr_t cameraManager,
+    std::uint64_t frameSequence,
+    bool firstValid,
+    float firstFov,
+    bool secondValid,
+    float secondFov,
+    ProjectionFovStabilityState& state,
+    float& resolvedFov) noexcept {
+    resolvedFov = 0.0f;
+    if (world == 0 || cameraManager == 0) return false;
+
+    if (state.world != world || state.cameraManager != cameraManager) {
+        state = ProjectionFovStabilityState{};
+        state.world = world;
+        state.cameraManager = cameraManager;
+    }
+
+    firstValid = firstValid && std::isfinite(firstFov);
+    secondValid = secondValid && std::isfinite(secondFov);
+    if (!firstValid && !secondValid) {
+        if (!state.acceptedValid) return false;
+        resolvedFov = state.acceptedFov;
+        return true;
+    }
+
+    float candidate = secondValid ? secondFov : firstFov;
+    const bool inconsistentDoubleRead = firstValid && secondValid &&
+        std::fabs(firstFov - secondFov) >= 0.5f;
+    if (inconsistentDoubleRead) {
+        candidate = state.acceptedValid ? state.acceptedFov : firstFov;
+        state.pendingValid = false;
+    } else if (state.acceptedValid &&
+               std::fabs(candidate - state.acceptedFov) >= 5.5f) {
+        const bool confirmedOnLaterFrame = state.pendingValid &&
+            frameSequence != state.pendingFrame &&
+            std::fabs(candidate - state.pendingFov) < 0.5f;
+        if (confirmedOnLaterFrame) {
+            state.pendingValid = false;
+        } else {
+            state.pendingFov = candidate;
+            state.pendingFrame = frameSequence;
+            state.pendingValid = true;
+            candidate = state.acceptedFov;
+        }
+    } else {
+        state.pendingValid = false;
+    }
+
+    state.acceptedFov = candidate;
+    state.acceptedValid = true;
+    resolvedFov = candidate;
+    return true;
+}
 
 inline bool IsFinite(const ProjectionPoint& point) noexcept {
     return std::isfinite(point.x) && std::isfinite(point.y) &&

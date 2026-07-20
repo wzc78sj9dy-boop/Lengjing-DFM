@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -9,7 +10,9 @@
 
 namespace lengjing::auth {
 
-inline constexpr std::uint32_t kCloudLayoutSchemaVersion = 1;
+inline constexpr std::uint32_t kCloudLayoutSchemaVersion = 2;
+inline constexpr std::size_t kMaximumCloudLayoutPayloadBytes =
+    64U * 1024U;
 
 struct CloudRuntimeIdentity {
     std::string packageName;
@@ -30,6 +33,19 @@ struct CloudActorRecordLayout {
     std::int32_t fallbackPlainCount = 0;
 };
 
+struct CloudCoordinatePoolLayout {
+    std::uintptr_t rootRva = 0;
+    std::uintptr_t bridgeOffset = 0;
+    std::int32_t contextOffset = 0;
+    std::uintptr_t entryOffset = 0;
+    std::uintptr_t componentKeyOffset = 0;
+    std::uint64_t pacgaData = 0;
+    std::uint64_t pacgaModifier = 0;
+    std::uint32_t entryStride = 0;
+    std::uint32_t poolHeadSkip = 0;
+    std::uint32_t ringRefreshFrames = 0;
+};
+
 struct CloudOffsetLayout {
     std::uintptr_t namePoolOffset = 0;
     std::uintptr_t worldOffset = 0;
@@ -38,6 +54,7 @@ struct CloudOffsetLayout {
     CloudActorRecordLayout actorRecords{};
     std::uintptr_t trackingMatrixRootOffset = 0;
     std::uintptr_t componentPositionFlagOffset = 0;
+    CloudCoordinatePoolLayout coordinatePool{};
 };
 
 struct CloudLayoutDocument {

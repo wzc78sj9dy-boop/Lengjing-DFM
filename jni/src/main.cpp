@@ -1,5 +1,7 @@
 #include "app/AppController.h"
 #include "app/RenderBackendSelection.h"
+#include "app/RuntimeExitPolicy.h"
+#include "auth/CloudLayoutStartupPolicy.h"
 #include "auth/RemoteAuth.h"
 #include "game/native/MemoryTransport.h"
 #include "platform/MenuKeyMonitor.h"
@@ -24,6 +26,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <unistd.h>
 #include <vector>
 
@@ -100,6 +103,7 @@ int RunCoordinateProbe(
     const lengjing::game::native::AlgorithmPositionRuntimeConfig&
         algorithmPosition) {
     using namespace std::chrono_literals;
+    const bool cloudLayoutActive = cloudLayout != nullptr;
     lengjing::game::RuntimeOptions options;
     options.gameVersionIndex = 0;
     options.driverIndex = CoordinateProbeDriver();
@@ -157,6 +161,9 @@ int RunCoordinateProbe(
     }
     runtime.Stop();
     runtime.WaitUntilStopped();
+    const int runtimeExitCode = lengjing::app::ResolveRuntimeExitCode(
+        cloudLayoutActive, last.phase, last.failureKind);
+    if (runtimeExitCode != 0) return runtimeExitCode;
     return last.coordinateSuccesses != 0
         ? 0
         : (last.coordinateContextReady
@@ -164,33 +171,59 @@ int RunCoordinateProbe(
             : (last.coordinateEntryReady ? 12 : 11));
 }
 
-std::shared_ptr<const lengjing::auth::CloudLayoutDocument>
-FetchAuthenticatedCloudLayout(lengjing::auth::AuthSession& session) {
+struct CloudLayoutFetchResult {
+    std::shared_ptr<const lengjing::auth::CloudLayoutDocument> snapshot;
+    bool continueStartup = false;
+};
+
+CloudLayoutFetchResult FetchAuthenticatedCloudLayout(
+    lengjing::auth::AuthSession& session) {
     const lengjing::auth::T3AuthConfig& config =
         lengjing::auth::kDefaultT3AuthConfig;
-    if (!config.cloudVariable.HasAnyValue()) {
-        return {};
-    }
     const lengjing::auth::CloudRuntimeIdentity identity =
         lengjing::auth::ResolveCloudRuntimeIdentity(config);
-    if (!config.cloudVariable.IsConfigured() ||
-        !config.cloudIdentity.IsConfigured() || !identity.IsValid()) {
-        std::fprintf(
-            stderr,
-            "[验证] 云偏移配置不完整，使用内置偏移\n");
+    const bool hasAnyCloudVariableValue =
+        config.cloudVariable.HasAnyValue();
+    const bool configurationComplete =
+        config.cloudVariable.IsConfigured() &&
+        config.cloudIdentity.IsConfigured() && identity.IsValid();
+    const auto initialAction =
+        lengjing::auth::ResolveCloudLayoutStartupAction(
+            hasAnyCloudVariableValue,
+            configurationComplete,
+            false,
+            false,
+            false);
+    if (initialAction ==
+        lengjing::auth::CloudLayoutStartupAction::UseBuiltInLayout) {
+        return {{}, true};
+    }
+    if (initialAction !=
+        lengjing::auth::CloudLayoutStartupAction::FetchCloudLayout) {
+        std::fprintf(stderr, "[验证] 云偏移配置不完整\n");
         return {};
     }
 
     lengjing::auth::CloudLayoutStore store(identity);
     const lengjing::auth::CloudLayoutUpdateResult result =
         session.RefreshCloudLayout(store);
-    if (!result.Succeeded() || result.snapshot == nullptr) {
+    const auto refreshAction =
+        lengjing::auth::ResolveCloudLayoutStartupAction(
+            true,
+            true,
+            true,
+            result.Succeeded(),
+            result.snapshot != nullptr);
+    if (refreshAction !=
+        lengjing::auth::CloudLayoutStartupAction::UseCloudLayout) {
         std::fprintf(
             stderr,
-            "[验证] 云偏移不可用，使用内置偏移\n");
+            "[auth] cloud layout failed: status=%u detail=%s\n",
+            static_cast<unsigned int>(result.status),
+            result.detail.c_str());
         return {};
     }
-    return result.snapshot;
+    return {result.snapshot, true};
 }
 
 std::vector<std::string> DriverOptions() {
@@ -404,7 +437,12 @@ int main() {
         if (!lengjing::auth::LoginInteractive(authSession)) {
             return 2;
         }
-        cloudLayout = FetchAuthenticatedCloudLayout(authSession);
+        CloudLayoutFetchResult cloudFetch =
+            FetchAuthenticatedCloudLayout(authSession);
+        if (!cloudFetch.continueStartup) {
+            return lengjing::auth::kCloudLayoutStartupFailureExitCode;
+        }
+        cloudLayout = std::move(cloudFetch.snapshot);
     }
 
     auto display = android::ANativeWindowCreator::GetDisplayInfo();
@@ -428,7 +466,7 @@ int main() {
     }
 
     ANativeWindow* window = android::ANativeWindowCreator::Create(
-        "lengjing-surface", surfaceWidth, surfaceHeight, true);
+        "lengjing-surface", surfaceWidth, surfaceHeight, false);
     if (window == nullptr) {
         std::fprintf(stderr, "无法创建绘制窗口\n");
         return 1;
@@ -520,7 +558,7 @@ int main() {
                     window = nullptr;
                 }
                 window = android::ANativeWindowCreator::Create(
-                    "lengjing-surface", width, height, true);
+                    "lengjing-surface", width, height, false);
                 if (window != nullptr) {
                     initialization = InitializeGraphics(
                         window, width, height, requestedBackend);
@@ -561,10 +599,13 @@ int main() {
     auto nextDisplayRefresh = std::chrono::steady_clock::time_point{};
     auto nextSurfaceRetry = std::chrono::steady_clock::time_point{};
     bool surfaceFailureReported = false;
+    int runtimeExitCode = 0;
     int orientation = display.orientation;
     while (!gStopRequested.load(std::memory_order_acquire) &&
            !controller.ExitRequested() &&
            (!kRuntimeAuthEnabled || !authSession.ExitRequested())) {
+        runtimeExitCode = controller.RuntimeExitCode();
+        if (runtimeExitCode != 0) break;
         const auto keyRequest = menuKeys.ConsumeRequest();
         if (keyRequest == lengjing::platform::MenuKeyRequest::Show) {
             controller.SetMenuVisible(true);
@@ -639,17 +680,9 @@ int main() {
         graphics->NewFrame();
         controller.RenderFrame(graphics->PresentedFrameRate());
         graphics->EndFrame();
+        runtimeExitCode = controller.RuntimeExitCode();
+        if (runtimeExitCode != 0) break;
     }
-
-    std::fprintf(
-        stderr,
-        "[touch-debug] exit signal=%d controller=%d auth=%d graphics=%d window=%d\n",
-        gStopRequested.load(std::memory_order_acquire) ? 1 : 0,
-        controller.ExitRequested() ? 1 : 0,
-        kRuntimeAuthEnabled && authSession.ExitRequested() ? 1 : 0,
-        graphics != nullptr ? 1 : 0,
-        window != nullptr ? 1 : 0);
-    std::fflush(stderr);
 
     if (kRuntimeAuthEnabled && authSession.ExitRequested()) {
         controller.StopRuntime();
@@ -670,5 +703,5 @@ int main() {
     if (window != nullptr) {
         android::ANativeWindowCreator::Destroy(window);
     }
-    return 0;
+    return runtimeExitCode;
 }

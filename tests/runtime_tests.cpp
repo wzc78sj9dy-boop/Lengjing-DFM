@@ -1,5 +1,6 @@
 #include "test_support.h"
 
+#include "app/RuntimeExitPolicy.h"
 #include "game/FrameRetentionPolicy.h"
 #include "game/GameRuntime.h"
 
@@ -24,6 +25,8 @@ struct BackendState {
     std::atomic_int closeFailuresRemaining{0};
     std::atomic_uintptr_t algorithmDecryptRva{0};
     std::atomic_bool aimEnabled{false};
+    std::atomic_bool selfAimSetting{false};
+    std::atomic_bool projectileTrackingSetting{false};
     std::atomic_bool frameReady{true};
 };
 
@@ -62,6 +65,9 @@ public:
         frame.ready = state_->frameReady.load();
         frame.playerCount =
             frame.ready && settings.visual.enabled ? 3 : 0;
+        state_->selfAimSetting.store(settings.aim.enabled);
+        state_->projectileTrackingSetting.store(
+            settings.aim.trajectoryTracking);
         error = frame.ready ? std::string{} : "waiting";
         ++state_->reads;
         return true;
@@ -86,6 +92,40 @@ private:
     std::shared_ptr<BackendState> state_;
 };
 
+class OpenFailureBackend final : public lengjing::game::GameBackend {
+public:
+    explicit OpenFailureBackend(lengjing::game::RuntimeFailureKind kind)
+        : kind_(kind) {}
+
+    bool Open(const lengjing::game::RuntimeOptions&,
+              lengjing::game::RuntimeProbe& probe,
+              std::string& error) override {
+        probe.failureKind = kind_;
+        error = kind_ == lengjing::game::RuntimeFailureKind::CloudLayoutRejected
+            ? "cloud layout rejected"
+            : "ordinary open failure";
+        return false;
+    }
+
+    bool Close() noexcept override {
+        return true;
+    }
+
+    bool ReadFrame(const lengjing::game::FeatureSettings&,
+                   lengjing::game::GameFrame&,
+                   lengjing::game::RuntimeProbe&,
+                   std::string&) override {
+        return false;
+    }
+
+    void SetAimEnabled(bool) override {}
+    void UpdateDisplayGeometry(int, int, int) override {}
+    void ReloadCustomItems() override {}
+
+private:
+    lengjing::game::RuntimeFailureKind kind_;
+};
+
 template <typename Predicate>
 bool WaitFor(Predicate predicate, std::chrono::milliseconds timeout = 1000ms) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -108,6 +148,8 @@ void RunRuntimeTests() {
 
     lengjing::game::FeatureSettings settings;
     settings.visual.enabled = true;
+    settings.aim.enabled = true;
+    settings.aim.trajectoryTracking = true;
     runtime.UpdateSettings(settings);
 
     lengjing::game::RuntimeOptions options;
@@ -125,6 +167,8 @@ void RunRuntimeTests() {
     REQUIRE(runtime.Status().processId == 42);
     REQUIRE(runtime.Status().baseReady);
     REQUIRE(state->algorithmDecryptRva.load() == 0x1234);
+    REQUIRE(state->selfAimSetting.load());
+    REQUIRE(!state->projectileTrackingSetting.load());
 
     state->frameReady.store(false);
     REQUIRE(WaitFor([&] {
@@ -159,4 +203,41 @@ void RunRuntimeTests() {
     REQUIRE(state->closes.load() == 3);
     REQUIRE(!state->aimEnabled.load());
     REQUIRE(state->reads.load() >= 2);
+
+    {
+        lengjing::game::GameRuntime rejected(
+            std::make_unique<OpenFailureBackend>(
+                lengjing::game::RuntimeFailureKind::CloudLayoutRejected));
+        REQUIRE(rejected.Start({}));
+        REQUIRE(WaitFor([&] {
+            return rejected.Status().phase ==
+                lengjing::game::RuntimePhase::Faulted;
+        }));
+        const lengjing::game::RuntimeStatus status = rejected.Status();
+        REQUIRE(status.failureKind ==
+                lengjing::game::RuntimeFailureKind::CloudLayoutRejected);
+        REQUIRE(lengjing::app::ResolveRuntimeExitCode(
+                    true, status.phase, status.failureKind) ==
+                lengjing::auth::kCloudLayoutStartupFailureExitCode);
+        REQUIRE(lengjing::app::ResolveRuntimeExitCode(
+                    false, status.phase, status.failureKind) == 0);
+        rejected.WaitUntilStopped();
+    }
+
+    {
+        lengjing::game::GameRuntime ordinary(
+            std::make_unique<OpenFailureBackend>(
+                lengjing::game::RuntimeFailureKind::None));
+        REQUIRE(ordinary.Start({}));
+        REQUIRE(WaitFor([&] {
+            return ordinary.Status().phase ==
+                lengjing::game::RuntimePhase::Faulted;
+        }));
+        const lengjing::game::RuntimeStatus status = ordinary.Status();
+        REQUIRE(status.failureKind ==
+                lengjing::game::RuntimeFailureKind::None);
+        REQUIRE(lengjing::app::ResolveRuntimeExitCode(
+                    true, status.phase, status.failureKind) == 0);
+        ordinary.WaitUntilStopped();
+    }
 }

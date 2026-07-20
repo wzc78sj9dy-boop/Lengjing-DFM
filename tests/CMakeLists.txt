@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_executable(lengjing_tests
     actor_frame_visit_set_tests.cpp
+    actor_record_source_tests.cpp
     actor_record_resolver_tests.cpp
     algorithm_position_policy_tests.cpp
     aim_mode_policy_tests.cpp
@@ -17,12 +18,14 @@ add_executable(lengjing_tests
     auth_session_tests.cpp
     auth_transport_tests.cpp
     card_input_policy_tests.cpp
+    cloud_layout_startup_policy_tests.cpp
     cloud_layout_tests.cpp
     config_tests.cpp
     cpu_mailbox_policy_tests.cpp
     frame_projection_tests.cpp
     hud_map_tests.cpp
     kernel_module_catalog_tests.cpp
+    overlay_contrast_policy_tests.cpp
     player_bounds_tests.cpp
     player_tracking_tests.cpp
     position_resolver_tests.cpp
@@ -31,6 +34,7 @@ add_executable(lengjing_tests
     render_backend_selection_tests.cpp
     remote_elf_identity_tests.cpp
     runtime_layout_override_tests.cpp
+    runtime_exit_policy_tests.cpp
     runtime_tests.cpp
     threat_catalog_tests.cpp
     tracking_calculator_tests.cpp

@@ -118,8 +118,8 @@ void TestCandidateRotationAndCache() {
 
     const PacgaOracleInstruction first{
         UINT64_C(0x767F196CC4),
-        UINT64_C(0x412625C7),
-        UINT64_C(0xBB7AC00B),
+        UINT64_C(0x13579BDF),
+        UINT64_C(0x2468ACE0),
     };
     auto refresh = provider.Refresh(first);
     CHECK(refresh.HasContext());
@@ -199,8 +199,8 @@ void TestFailureBackoff() {
         proc.Root().string());
     const PacgaOracleInstruction instruction{
         UINT64_C(0x767F196CC4),
-        UINT64_C(0x412625C7),
-        UINT64_C(0xBB7AC00B),
+        UINT64_C(0x13579BDF),
+        UINT64_C(0x2468ACE0),
     };
     auto refresh = provider.Refresh(instruction);
     CHECK(!refresh.HasContext());

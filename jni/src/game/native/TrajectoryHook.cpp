@@ -1,5 +1,7 @@
 #include "game/native/TrajectoryHook.h"
 
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+
 #include "game/native/MemoryTransport.h"
 
 #include <array>
@@ -609,3 +611,5 @@ void TrajectoryHook::ResetLocal() noexcept {
 }
 
 }  // namespace lengjing::game::native
+
+#endif

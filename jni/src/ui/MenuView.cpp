@@ -1,10 +1,10 @@
 #include "ui/MenuView.h"
 
+#include "game/ProjectileTrackingFeature.h"
 #include "imgui.h"
 
 #include <algorithm>
 #include <array>
-#include <cstdio>
 #include <string>
 
 namespace lengjing::ui {
@@ -966,10 +966,17 @@ void RenderAim(UiModel& model, UiActions& actions) {
         Mark(actions, SettingsDomain::Aim, GridToggle("倒地不瞄", aim.ignoreDowned));
         Mark(actions, SettingsDomain::Aim, GridToggle("持续锁定", aim.persistentLock));
         Mark(actions, SettingsDomain::Aim, GridToggle("曲线瞄准", aim.curvedMotion));
-        Mark(actions, SettingsDomain::Aim, GridToggle("子弹追踪", aim.trajectoryTracking));
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+            Mark(actions, SettingsDomain::Aim,
+                 GridToggle("子弹追踪", aim.trajectoryTracking));
+#endif
         Mark(actions, SettingsDomain::Aim, GridToggle("可见检测", aim.requireVisibility));
-        Mark(actions, SettingsDomain::Aim, GridToggle("目标状态过滤", aim.rejectTargetState));
-        Mark(actions, SettingsDomain::Aim, GridToggle("死亡目标过滤", aim.rejectDeadTarget));
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+            Mark(actions, SettingsDomain::Aim,
+                 GridToggle("目标状态过滤", aim.rejectTargetState));
+            Mark(actions, SettingsDomain::Aim,
+                 GridToggle("死亡目标过滤", aim.rejectDeadTarget));
+#endif
         Mark(actions, SettingsDomain::Aim, GridToggle("范围限制", aim.enforceFov));
         Mark(actions, SettingsDomain::Aim, GridToggle("距离限制", aim.enforceDistance));
         Mark(actions, SettingsDomain::Aim, GridToggle("范围圆圈", aim.drawRange));
@@ -981,17 +988,21 @@ void RenderAim(UiModel& model, UiActions& actions) {
              Combo("漏打范围", aim.coverMode, kCoverModes));
     }
 
-    SectionTitle("真人");
-    if (BeginToggleGrid("##players_tracking")) {
-        Mark(actions, SettingsDomain::Aim, GridToggle("死亡箱", aim.playerDeadBox));
-        ImGui::EndTable();
-    }
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+        SectionTitle("真人");
+        if (BeginToggleGrid("##players_tracking")) {
+            Mark(actions, SettingsDomain::Aim,
+                 GridToggle("死亡箱", aim.playerDeadBox));
+            ImGui::EndTable();
+        }
 
-    SectionTitle("人机");
-    if (BeginToggleGrid("##robots_tracking")) {
-        Mark(actions, SettingsDomain::Aim, GridToggle("死亡箱", aim.robotDeadBox));
-        ImGui::EndTable();
-    }
+        SectionTitle("人机");
+        if (BeginToggleGrid("##robots_tracking")) {
+            Mark(actions, SettingsDomain::Aim,
+                 GridToggle("死亡箱", aim.robotDeadBox));
+            ImGui::EndTable();
+        }
+#endif
 
     SectionTitle("武器配置");
     Mark(
@@ -1009,8 +1020,10 @@ void RenderAim(UiModel& model, UiActions& actions) {
     Mark(actions, SettingsDomain::Aim, Combo("目标算法", aim.targetAlgorithm, kTargetAlgorithms));
     Mark(actions, SettingsDomain::Aim, Combo("腰射锁定部位", tuning.hipBone, kAimBones));
     Mark(actions, SettingsDomain::Aim, Combo("开镜锁定部位", tuning.adsBone, kAimBones));
-    Mark(actions, SettingsDomain::Aim, SliderIntRow(
-        "命中率", &aim.hitPercentage, 0, 100, "%d%%"));
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+        Mark(actions, SettingsDomain::Aim, SliderIntRow(
+            "命中率", &aim.hitPercentage, 0, 100, "%d%%"));
+#endif
 
     if (tuning.hipBone == 6 || tuning.adsBone == 6) {
         SectionTitle("随机部位");
@@ -1222,33 +1235,6 @@ void RenderNavigation(UiModel& model, ImTextureID logoTexture) {
                 kPageNames[i],
                 model.page == kPages[i],
                 ImVec2(ImGui::GetContentRegionAvail().x, 40.0f));
-            if (i == 1 &&
-                (clicked ||
-                 ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
-                 ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
-                static int debugNavigationLogCount = 0;
-                if (debugNavigationLogCount < 10) {
-                    const ImVec2 minimum = ImGui::GetItemRectMin();
-                    const ImVec2 maximum = ImGui::GetItemRectMax();
-                    const ImGuiIO& io = ImGui::GetIO();
-                    std::fprintf(
-                        stderr,
-                        "[touch-debug] visual rect=(%.1f,%.1f)-(%.1f,%.1f) pos=(%.1f,%.1f) hovered=%d active=%d clicked=%d mouseClicked=%d released=%d\n",
-                        minimum.x,
-                        minimum.y,
-                        maximum.x,
-                        maximum.y,
-                        io.MousePos.x,
-                        io.MousePos.y,
-                        ImGui::IsItemHovered() ? 1 : 0,
-                        ImGui::IsItemActive() ? 1 : 0,
-                        clicked ? 1 : 0,
-                        ImGui::IsMouseClicked(ImGuiMouseButton_Left) ? 1 : 0,
-                        ImGui::IsMouseReleased(ImGuiMouseButton_Left) ? 1 : 0);
-                    std::fflush(stderr);
-                    ++debugNavigationLogCount;
-                }
-            }
             if (clicked) {
                 model.page = kPages[i];
             }
@@ -1298,34 +1284,6 @@ float ActionDockHeight(float width) {
     return width >= 560.0f ? 100.0f : 150.0f;
 }
 
-void DebugActionItem(const char* label, bool clicked, int& logCount) {
-    const bool pressed = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
-    const bool released = ImGui::IsMouseReleased(ImGuiMouseButton_Left);
-    if (logCount >= 1 && !clicked && !pressed && !released) {
-        return;
-    }
-    const ImVec2 minimum = ImGui::GetItemRectMin();
-    const ImVec2 maximum = ImGui::GetItemRectMax();
-    const ImGuiIO& io = ImGui::GetIO();
-    std::fprintf(
-        stderr,
-        "[touch-debug] action=%s rect=(%.1f,%.1f)-(%.1f,%.1f) pos=(%.1f,%.1f) hovered=%d active=%d clicked=%d pressed=%d released=%d\n",
-        label,
-        minimum.x,
-        minimum.y,
-        maximum.x,
-        maximum.y,
-        io.MousePos.x,
-        io.MousePos.y,
-        ImGui::IsItemHovered() ? 1 : 0,
-        ImGui::IsItemActive() ? 1 : 0,
-        clicked ? 1 : 0,
-        pressed ? 1 : 0,
-        released ? 1 : 0);
-    std::fflush(stderr);
-    ++logCount;
-}
-
 void RenderRuntimeAction(
     UiModel& model,
     UiActions& actions,
@@ -1344,8 +1302,6 @@ void RenderRuntimeAction(
         }
     } else {
         const bool clicked = ActionButton("启动", ActionTone::Primary, size);
-        static int startActionLogCount = 0;
-        DebugActionItem("启动", clicked, startActionLogCount);
         if (clicked) {
             actions.StartRuntime();
         }
@@ -1392,8 +1348,6 @@ void RenderActionDock(UiModel& model, UiActions& actions, float height) {
             "隐藏菜单",
             ActionTone::Neutral,
             ImVec2(secondaryWidth, 44.0f));
-        static int hideWideActionLogCount = 0;
-        DebugActionItem("隐藏菜单", hideClicked, hideWideActionLogCount);
         if (hideClicked) {
             actions.HideMenu();
         }
@@ -1411,8 +1365,6 @@ void RenderActionDock(UiModel& model, UiActions& actions, float height) {
             "隐藏菜单",
             ActionTone::Neutral,
             ImVec2(halfWidth, 40.0f));
-        static int hideCompactActionLogCount = 0;
-        DebugActionItem("隐藏菜单", hideClicked, hideCompactActionLogCount);
         if (hideClicked) {
             actions.HideMenu();
         }
@@ -1471,22 +1423,6 @@ void MenuView::Render(UiModel& model, UiActions& actions) {
 
     MenuStyleScope style;
     ImGuiIO& io = ImGui::GetIO();
-    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
-        ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-        static int debugMouseLogCount = 0;
-        if (debugMouseLogCount < 20) {
-            std::fprintf(
-                stderr,
-                "[touch-debug] imgui pos=(%.1f,%.1f) down=%d clicked=%d released=%d\n",
-                io.MousePos.x,
-                io.MousePos.y,
-                io.MouseDown[0] ? 1 : 0,
-                ImGui::IsMouseClicked(ImGuiMouseButton_Left) ? 1 : 0,
-                ImGui::IsMouseReleased(ImGuiMouseButton_Left) ? 1 : 0);
-            std::fflush(stderr);
-            ++debugMouseLogCount;
-        }
-    }
     if (!wasVisible_) {
         windowAnimation_ = 0.0f;
         pageAnimation_ = 1.0f;
@@ -1652,31 +1588,6 @@ void MenuView::Render(UiModel& model, UiActions& actions) {
             dragRegionHeight),
         ImGuiButtonFlags_MouseButtonLeft);
     const bool dragRegionActivated = ImGui::IsItemActivated();
-    {
-        static int debugDragLogCount = 0;
-        if (debugDragLogCount < 1 ||
-            dragRegionActivated ||
-            ImGui::IsItemActive() ||
-            ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-            const ImVec2 minimum = ImGui::GetItemRectMin();
-            const ImVec2 maximum = ImGui::GetItemRectMax();
-            std::fprintf(
-                stderr,
-                "[touch-debug] drag rect=(%.1f,%.1f)-(%.1f,%.1f) pos=(%.1f,%.1f) hovered=%d active=%d activated=%d drag=%d\n",
-                minimum.x,
-                minimum.y,
-                maximum.x,
-                maximum.y,
-                io.MousePos.x,
-                io.MousePos.y,
-                ImGui::IsItemHovered() ? 1 : 0,
-                ImGui::IsItemActive() ? 1 : 0,
-                dragRegionActivated ? 1 : 0,
-                dragActive_ ? 1 : 0);
-            std::fflush(stderr);
-            ++debugDragLogCount;
-        }
-    }
     if (dragRegionActivated) {
         dragActive_ = true;
         dragOffsetX_ = io.MousePos.x - windowPosition.x;

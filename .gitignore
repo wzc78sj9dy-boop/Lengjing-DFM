@@ -9,6 +9,11 @@
 *.lo
 *.log
 *.tmp
+/jni/cmake/AuthConfigPrivate.cmake
+/jni/cmake/AuthConfigPrivate.cmake.local
+/jni/include/auth/AuthConfigPrivate.h
+/jni/config/cloud_layout.v2.json
+/jni/config/*.local.json
 
 # Machine-local state
 .adb_wifi

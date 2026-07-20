@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game/ProjectileTrackingFeature.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -29,6 +31,24 @@ constexpr bool IsKernelMemoryTransportMode(
     return mode == MemoryTransportMode::KernelDriver ||
         mode == MemoryTransportMode::PrivateRpc;
 }
+
+struct CoordinateReplayTransportLayout {
+    std::uintptr_t rootRva = 0x0E738950;
+    std::uintptr_t bridgeOffset = 12;
+    std::uintptr_t entryOffset = 0xA0;
+    std::uint64_t pacgaData = UINT64_C(0x412625C7);
+    std::uint64_t pacgaModifier = UINT64_C(0xBB7AC00B);
+
+    constexpr bool IsValid() const noexcept {
+        return rootRva >= 4 && rootRva <= 0xffffffffULL &&
+            (rootRva & 3U) == 0 &&
+            bridgeOffset <= 0x10000 && (bridgeOffset & 3U) == 0 &&
+            bridgeOffset <= 0xffffffffULL - rootRva &&
+            entryOffset >= 8 && entryOffset <= 0x10000 &&
+            (entryOffset & 7U) == 0 &&
+            (pacgaData != 0 || pacgaModifier != 0);
+    }
+};
 
 struct ProcessExecutionContext {
     struct PacgaOracle {
@@ -87,11 +107,17 @@ public:
     std::size_t ReadBatch(const MemoryReadRequest* requests,
                           std::size_t count,
                           std::uint8_t* itemStatus = nullptr);
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
     bool Write(std::uintptr_t address, const void* source, std::size_t size);
+#endif
     std::uintptr_t ModuleBase(std::string_view moduleName);
     bool IsOpen() const noexcept;
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
     bool CanWrite() const noexcept;
     bool UsesKernelBackend() const noexcept;
+#endif
+    bool ConfigureCoordinateReplay(
+        const CoordinateReplayTransportLayout& layout) noexcept;
     bool ReadProcessExecutionContext(ProcessExecutionContext& context);
     bool RejectProcessExecutionContext() noexcept;
 

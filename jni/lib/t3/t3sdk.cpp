@@ -12,8 +12,10 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -38,6 +40,10 @@
     #include <unistd.h>
     #include <sys/ioctl.h>
     #include <net/if.h>
+    #ifdef __ANDROID__
+        #include <curl/curl.h>
+        #include <dlfcn.h>
+    #endif
     #ifdef __APPLE__
         #include <sys/sysctl.h>
         #include <net/if_dl.h>
@@ -649,6 +655,16 @@ struct URLInfo {
     int port;
 };
 
+using HttpClock = std::chrono::steady_clock;
+
+int remainingMilliseconds(const HttpClock::time_point& deadline) noexcept {
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - HttpClock::now());
+    if (remaining.count() <= 0) return 0;
+    return static_cast<int>(std::min<long long>(
+        remaining.count(), std::numeric_limits<int>::max()));
+}
+
 bool parseUrl(const std::string& url, URLInfo& info) {
     std::size_t authorityStart = 0;
     if (url.compare(0, 8, "https://") == 0) {
@@ -719,6 +735,9 @@ using NativeSocket = SOCKET;
 constexpr NativeSocket kInvalidSocket = INVALID_SOCKET;
 int lastSocketError() noexcept { return WSAGetLastError(); }
 bool socketInterrupted(int error) noexcept { return error == WSAEINTR; }
+bool socketWouldBlock(int error) noexcept {
+    return error == WSAEWOULDBLOCK;
+}
 bool connectInProgress(int error) noexcept {
     return error == WSAEINPROGRESS || error == WSAEWOULDBLOCK ||
         error == WSAEINVAL;
@@ -738,6 +757,9 @@ using NativeSocket = int;
 constexpr NativeSocket kInvalidSocket = -1;
 int lastSocketError() noexcept { return errno; }
 bool socketInterrupted(int error) noexcept { return error == EINTR; }
+bool socketWouldBlock(int error) noexcept {
+    return error == EAGAIN || error == EWOULDBLOCK;
+}
 bool connectInProgress(int error) noexcept {
     return error == EINPROGRESS || error == EWOULDBLOCK;
 }
@@ -760,31 +782,27 @@ std::string socketFailure(const char* operation, int error) {
         std::to_string(error) + ")";
 }
 
-bool setSocketTimeouts(NativeSocket value,
-                       const T3HttpTransportOptions& options) noexcept {
+int waitForSocketIo(NativeSocket value, bool writable,
+                    int timeoutMilliseconds, std::string& error) {
+    fd_set descriptorSet;
+    FD_ZERO(&descriptorSet);
+    FD_SET(value, &descriptorSet);
+    timeval timeout{timeoutMilliseconds / 1000,
+                    (timeoutMilliseconds % 1000) * 1000};
 #ifdef _WIN32
-    const DWORD sendTimeout =
-        static_cast<DWORD>(options.sendTimeoutMilliseconds);
-    const DWORD receiveTimeout =
-        static_cast<DWORD>(options.receiveTimeoutMilliseconds);
-    return setsockopt(value, SOL_SOCKET, SO_SNDTIMEO,
-                      reinterpret_cast<const char*>(&sendTimeout),
-                      sizeof(sendTimeout)) == 0 &&
-        setsockopt(value, SOL_SOCKET, SO_RCVTIMEO,
-                   reinterpret_cast<const char*>(&receiveTimeout),
-                   sizeof(receiveTimeout)) == 0;
+    const int selected = writable
+        ? select(0, nullptr, &descriptorSet, nullptr, &timeout)
+        : select(0, &descriptorSet, nullptr, nullptr, &timeout);
 #else
-    const timeval sendTimeout{
-        options.sendTimeoutMilliseconds / 1000,
-        (options.sendTimeoutMilliseconds % 1000) * 1000};
-    const timeval receiveTimeout{
-        options.receiveTimeoutMilliseconds / 1000,
-        (options.receiveTimeoutMilliseconds % 1000) * 1000};
-    return setsockopt(value, SOL_SOCKET, SO_SNDTIMEO,
-                      &sendTimeout, sizeof(sendTimeout)) == 0 &&
-        setsockopt(value, SOL_SOCKET, SO_RCVTIMEO,
-                   &receiveTimeout, sizeof(receiveTimeout)) == 0;
+    const int selected = writable
+        ? select(value + 1, nullptr, &descriptorSet, nullptr, &timeout)
+        : select(value + 1, &descriptorSet, nullptr, nullptr, &timeout);
 #endif
+    if (selected >= 0) return selected;
+    const int socketError = lastSocketError();
+    if (socketInterrupted(socketError)) return 0;
+    error = socketFailure("HTTP socket wait failed", socketError);
+    return -1;
 }
 
 bool waitForConnect(NativeSocket value, int timeoutMilliseconds,
@@ -845,6 +863,9 @@ public:
         if (!options_.isValid()) {
             return {false, {}, "HTTP transport options are invalid"};
         }
+        const HttpClock::time_point requestDeadline =
+            HttpClock::now() + std::chrono::milliseconds(
+                options_.requestTimeoutMilliseconds);
         if (cancelled_.load(std::memory_order_acquire)) {
             return {false, {}, "HTTP request cancelled"};
         }
@@ -883,6 +904,10 @@ public:
         if (resolveResult != 0 || addresses == nullptr) {
             return {false, {}, "HTTP host resolution failed"};
         }
+        if (remainingMilliseconds(requestDeadline) == 0) {
+            freeaddrinfo(addresses);
+            return {false, {}, "HTTP request deadline exceeded"};
+        }
         struct AddressCleanup final {
             addrinfo* value;
             ~AddressCleanup() { freeaddrinfo(value); }
@@ -894,6 +919,12 @@ public:
              address = address->ai_next) {
             if (cancelled_.load(std::memory_order_acquire)) {
                 connectError = "HTTP request cancelled";
+                break;
+            }
+            const int deadlineRemaining =
+                remainingMilliseconds(requestDeadline);
+            if (deadlineRemaining == 0) {
+                connectError = "HTTP request deadline exceeded";
                 break;
             }
             socketValue = socket(address->ai_family, address->ai_socktype,
@@ -924,21 +955,15 @@ public:
                 const int socketError = lastSocketError();
                 if (!connectInProgress(socketError) ||
                     !waitForConnect(socketValue,
-                                    options_.connectTimeoutMilliseconds,
+                                    std::min(
+                                        options_.connectTimeoutMilliseconds,
+                                        deadlineRemaining),
                                     connectError)) {
                     deactivate(socketValue);
                     closeSocket(socketValue);
                     socketValue = kInvalidSocket;
                     continue;
                 }
-            }
-            if (!setSocketBlocking(socketValue, true)) {
-                connectError = socketFailure(
-                    "HTTP socket mode failed", lastSocketError());
-                deactivate(socketValue);
-                closeSocket(socketValue);
-                socketValue = kInvalidSocket;
-                continue;
             }
             break;
         }
@@ -957,9 +982,8 @@ public:
         if (cancelled_.load(std::memory_order_acquire)) {
             return {false, {}, "HTTP request cancelled"};
         }
-        if (!setSocketTimeouts(socketValue, options_)) {
-            return {false, {}, socketFailure(
-                "HTTP socket timeout setup failed", lastSocketError())};
+        if (remainingMilliseconds(requestDeadline) == 0) {
+            return {false, {}, "HTTP request deadline exceeded"};
         }
 
         std::ostringstream request;
@@ -973,9 +997,22 @@ public:
         const std::string requestBytes = request.str();
 
         std::size_t sent = 0;
+        HttpClock::time_point lastSendProgress = HttpClock::now();
         while (sent < requestBytes.size()) {
             if (cancelled_.load(std::memory_order_acquire)) {
                 return {false, {}, "HTTP request cancelled"};
+            }
+            const HttpClock::time_point now = HttpClock::now();
+            const int deadlineRemaining =
+                remainingMilliseconds(requestDeadline);
+            if (deadlineRemaining == 0) {
+                return {false, {}, "HTTP request deadline exceeded"};
+            }
+            const auto sendIdleMilliseconds =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - lastSendProgress).count();
+            if (sendIdleMilliseconds >= options_.sendTimeoutMilliseconds) {
+                return {false, {}, "HTTP send timed out"};
             }
             const int chunkSize = static_cast<int>(std::min<std::size_t>(
                 requestBytes.size() - sent,
@@ -989,10 +1026,25 @@ public:
                 socketValue, requestBytes.data() + sent, chunkSize, sendFlags);
             if (sendResult > 0) {
                 sent += static_cast<std::size_t>(sendResult);
+                lastSendProgress = HttpClock::now();
                 continue;
             }
             const int socketError = lastSocketError();
             if (sendResult < 0 && socketInterrupted(socketError)) continue;
+            if (sendResult < 0 && socketWouldBlock(socketError)) {
+                const int sendRemaining = options_.sendTimeoutMilliseconds -
+                    static_cast<int>(sendIdleMilliseconds);
+                std::string waitError;
+                const int waitResult = waitForSocketIo(
+                    socketValue, true,
+                    std::max(1, std::min(
+                        25, std::min(deadlineRemaining, sendRemaining))),
+                    waitError);
+                if (waitResult < 0) {
+                    return {false, {}, std::move(waitError)};
+                }
+                continue;
+            }
             return {false, {},
                     cancelled_.load(std::memory_order_acquire)
                         ? "HTTP request cancelled"
@@ -1001,23 +1053,59 @@ public:
 
         std::string response;
         char buffer[4096];
+        HttpClock::time_point lastReceiveProgress = HttpClock::now();
         for (;;) {
             if (cancelled_.load(std::memory_order_acquire)) {
                 return {false, {}, "HTTP request cancelled"};
             }
+            const HttpClock::time_point now = HttpClock::now();
+            const int deadlineRemaining =
+                remainingMilliseconds(requestDeadline);
+            if (deadlineRemaining == 0) {
+                return {false, {}, "HTTP request deadline exceeded"};
+            }
+            const auto receiveIdleMilliseconds =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - lastReceiveProgress).count();
+            if (receiveIdleMilliseconds >=
+                options_.receiveTimeoutMilliseconds) {
+                return {false, {}, "HTTP receive timed out"};
+            }
             const int received = recv(
                 socketValue, buffer, static_cast<int>(sizeof(buffer)), 0);
+            if (cancelled_.load(std::memory_order_acquire)) {
+                return {false, {}, "HTTP request cancelled"};
+            }
+            if (remainingMilliseconds(requestDeadline) == 0) {
+                return {false, {}, "HTTP request deadline exceeded"};
+            }
             if (received > 0) {
                 const std::size_t bytes = static_cast<std::size_t>(received);
                 if (bytes > options_.maximumResponseBytes - response.size()) {
                     return {false, {}, "HTTP response exceeds size limit"};
                 }
                 response.append(buffer, bytes);
+                lastReceiveProgress = HttpClock::now();
                 continue;
             }
             if (received == 0) break;
             const int socketError = lastSocketError();
             if (socketInterrupted(socketError)) continue;
+            if (socketWouldBlock(socketError)) {
+                const int receiveRemaining =
+                    options_.receiveTimeoutMilliseconds -
+                    static_cast<int>(receiveIdleMilliseconds);
+                std::string waitError;
+                const int waitResult = waitForSocketIo(
+                    socketValue, false,
+                    std::max(1, std::min(
+                        25, std::min(deadlineRemaining, receiveRemaining))),
+                    waitError);
+                if (waitResult < 0) {
+                    return {false, {}, std::move(waitError)};
+                }
+                continue;
+            }
             return {false, {},
                     cancelled_.load(std::memory_order_acquire)
                         ? "HTTP request cancelled"
@@ -1076,6 +1164,515 @@ private:
     NativeSocket activeSocket_ = kInvalidSocket;
 };
 
+#ifdef __ANDROID__
+
+class CurlApi final {
+public:
+    using GlobalInitFn = CURLcode (*)(long);
+    using EasyInitFn = CURL* (*)();
+    using EasyCleanupFn = void (*)(CURL*);
+    using EasySetoptFn = CURLcode (*)(CURL*, CURLoption, ...);
+    using EasyGetinfoFn = CURLcode (*)(CURL*, CURLINFO, ...);
+    using EasyStrerrorFn = const char* (*)(CURLcode);
+    using SlistAppendFn = curl_slist* (*)(curl_slist*, const char*);
+    using SlistFreeAllFn = void (*)(curl_slist*);
+    using MultiInitFn = CURLM* (*)();
+    using MultiCleanupFn = CURLMcode (*)(CURLM*);
+    using MultiAddHandleFn = CURLMcode (*)(CURLM*, CURL*);
+    using MultiRemoveHandleFn = CURLMcode (*)(CURLM*, CURL*);
+    using MultiPerformFn = CURLMcode (*)(CURLM*, int*);
+    using MultiPollFn = CURLMcode (*)(CURLM*, curl_waitfd*, unsigned int,
+                                      int, int*);
+    using MultiInfoReadFn = CURLMsg* (*)(CURLM*, int*);
+    using MultiWakeupFn = CURLMcode (*)(CURLM*);
+    using MultiStrerrorFn = const char* (*)(CURLMcode);
+
+    static CurlApi& instance() {
+        static CurlApi value;
+        return value;
+    }
+
+    bool ready() const noexcept { return ready_; }
+    const std::string& error() const noexcept { return error_; }
+
+    GlobalInitFn globalInit = nullptr;
+    EasyInitFn easyInit = nullptr;
+    EasyCleanupFn easyCleanup = nullptr;
+    EasySetoptFn easySetopt = nullptr;
+    EasyGetinfoFn easyGetinfo = nullptr;
+    EasyStrerrorFn easyStrerror = nullptr;
+    SlistAppendFn slistAppend = nullptr;
+    SlistFreeAllFn slistFreeAll = nullptr;
+    MultiInitFn multiInit = nullptr;
+    MultiCleanupFn multiCleanup = nullptr;
+    MultiAddHandleFn multiAddHandle = nullptr;
+    MultiRemoveHandleFn multiRemoveHandle = nullptr;
+    MultiPerformFn multiPerform = nullptr;
+    MultiPollFn multiPoll = nullptr;
+    MultiInfoReadFn multiInfoRead = nullptr;
+    MultiWakeupFn multiWakeup = nullptr;
+    MultiStrerrorFn multiStrerror = nullptr;
+
+private:
+    CurlApi() {
+        constexpr std::array<const char*, 2> kLibraryNames = {
+            "/system/lib64/libcurl.so", "/system_ext/lib64/libcurl.so"};
+        for (const char* libraryName : kLibraryNames) {
+            handle_ = dlopen(libraryName, RTLD_NOW | RTLD_LOCAL);
+            if (handle_ != nullptr) break;
+        }
+        if (handle_ == nullptr) {
+            const char* detail = dlerror();
+            error_ = detail == nullptr
+                ? "Android TLS library load failed"
+                : std::string("Android TLS library load failed: ") + detail;
+            return;
+        }
+
+        const bool loaded =
+            load(globalInit, "curl_global_init") &&
+            load(easyInit, "curl_easy_init") &&
+            load(easyCleanup, "curl_easy_cleanup") &&
+            load(easySetopt, "curl_easy_setopt") &&
+            load(easyGetinfo, "curl_easy_getinfo") &&
+            load(easyStrerror, "curl_easy_strerror") &&
+            load(slistAppend, "curl_slist_append") &&
+            load(slistFreeAll, "curl_slist_free_all") &&
+            load(multiInit, "curl_multi_init") &&
+            load(multiCleanup, "curl_multi_cleanup") &&
+            load(multiAddHandle, "curl_multi_add_handle") &&
+            load(multiRemoveHandle, "curl_multi_remove_handle") &&
+            load(multiPerform, "curl_multi_perform") &&
+            load(multiPoll, "curl_multi_poll") &&
+            load(multiInfoRead, "curl_multi_info_read") &&
+            load(multiWakeup, "curl_multi_wakeup") &&
+            load(multiStrerror, "curl_multi_strerror");
+        if (!loaded) return;
+
+        const CURLcode initialization = globalInit(CURL_GLOBAL_DEFAULT);
+        if (initialization != CURLE_OK) {
+            error_ = std::string("Android TLS initialization failed: ") +
+                easyStrerror(initialization);
+            return;
+        }
+        ready_ = true;
+    }
+
+    ~CurlApi() = default;
+
+    template <typename Function>
+    bool load(Function& function, const char* name) {
+        dlerror();
+        function = reinterpret_cast<Function>(dlsym(handle_, name));
+        const char* detail = dlerror();
+        if (function != nullptr && detail == nullptr) return true;
+        error_ = detail == nullptr
+            ? std::string("Android TLS symbol load failed: ") + name
+            : std::string("Android TLS symbol load failed: ") + detail;
+        return false;
+    }
+
+    void* handle_ = nullptr;
+    bool ready_ = false;
+    std::string error_;
+};
+
+struct CurlTransferState final {
+    const std::atomic_bool* cancelled = nullptr;
+    const std::atomic<std::uint64_t>* cancellationSequence = nullptr;
+    std::uint64_t initialCancellationSequence = 0;
+    std::size_t maximumResponseBytes = 0;
+    curl_off_t expectedUploadBytes = 0;
+    int sendTimeoutMilliseconds = 0;
+    int receiveTimeoutMilliseconds = 0;
+    int requestTimeoutMilliseconds = 0;
+    HttpClock::time_point started = HttpClock::now();
+    HttpClock::time_point lastUploadProgress = started;
+    HttpClock::time_point lastDownloadProgress = started;
+    HttpClock::time_point receiveStarted = started;
+    curl_off_t uploadedBytes = 0;
+    curl_off_t downloadedBytes = 0;
+    bool receivePhaseStarted = false;
+    bool responseLimitExceeded = false;
+    bool cancelledDuringTransfer = false;
+    bool sendTimedOut = false;
+    bool receiveTimedOut = false;
+    bool requestTimedOut = false;
+    std::string response;
+
+    bool isCancelled() const noexcept {
+        return cancelled->load(std::memory_order_acquire) ||
+            cancellationSequence->load(std::memory_order_acquire) !=
+                initialCancellationSequence;
+    }
+
+    void updateProgress(curl_off_t downloadNow, curl_off_t uploadNow,
+                        const HttpClock::time_point& now) noexcept {
+        if (uploadNow > uploadedBytes) {
+            uploadedBytes = uploadNow;
+            lastUploadProgress = now;
+        }
+        if (downloadNow > downloadedBytes) {
+            downloadedBytes = downloadNow;
+            lastDownloadProgress = now;
+        }
+        if (!receivePhaseStarted &&
+            (expectedUploadBytes == 0 ||
+             uploadNow >= expectedUploadBytes)) {
+            receivePhaseStarted = true;
+            receiveStarted = now;
+            lastDownloadProgress = now;
+        }
+    }
+
+    bool shouldAbort(const HttpClock::time_point& now) noexcept {
+        if (isCancelled()) {
+            cancelledDuringTransfer = true;
+            return true;
+        }
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - started).count() >= requestTimeoutMilliseconds) {
+            requestTimedOut = true;
+            return true;
+        }
+        if (!receivePhaseStarted) {
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - lastUploadProgress).count() >=
+                sendTimeoutMilliseconds) {
+                sendTimedOut = true;
+                return true;
+            }
+            return false;
+        }
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - lastDownloadProgress).count() >=
+            receiveTimeoutMilliseconds) {
+            receiveTimedOut = true;
+            return true;
+        }
+        return false;
+    }
+};
+
+std::size_t curlWriteCallback(char* data, std::size_t size,
+                              std::size_t count, void* userData) {
+    auto* state = static_cast<CurlTransferState*>(userData);
+    if (size != 0 && count > std::numeric_limits<std::size_t>::max() / size) {
+        state->responseLimitExceeded = true;
+        return 0;
+    }
+    const std::size_t bytes = size * count;
+    if (bytes > state->maximumResponseBytes - state->response.size()) {
+        state->responseLimitExceeded = true;
+        return 0;
+    }
+    state->response.append(data, bytes);
+    state->updateProgress(
+        state->downloadedBytes + static_cast<curl_off_t>(bytes),
+        state->uploadedBytes, HttpClock::now());
+    return bytes;
+}
+
+int curlProgressCallback(void* userData, curl_off_t, curl_off_t downloadNow,
+                         curl_off_t, curl_off_t uploadNow) {
+    auto* state = static_cast<CurlTransferState*>(userData);
+    const HttpClock::time_point now = HttpClock::now();
+    state->updateProgress(downloadNow, uploadNow, now);
+    return state->shouldAbort(now) ? 1 : 0;
+}
+
+template <typename Value>
+bool setCurlOption(CurlApi& api, CURL* easy, CURLoption option, Value value,
+                   std::string& error) {
+    const CURLcode result = api.easySetopt(easy, option, value);
+    if (result == CURLE_OK) return true;
+    error = std::string("HTTPS option setup failed: ") +
+        api.easyStrerror(result);
+    return false;
+}
+
+class AndroidCurlHttpTransport final : public T3HttpTransport {
+public:
+    explicit AndroidCurlHttpTransport(T3HttpTransportOptions options)
+        : options_(options) {}
+
+    T3HttpTransportResult post(const std::string& url,
+                               const std::string& contentType,
+                               const std::string& body) override {
+        std::lock_guard<std::mutex> requestLock(requestMutex_);
+        if (!options_.isValid()) {
+            return {false, {}, "HTTP transport options are invalid"};
+        }
+        if (cancelled_.load(std::memory_order_acquire)) {
+            return {false, {}, "HTTP request cancelled"};
+        }
+        URLInfo info;
+        if (!parseUrl(url, info)) {
+            return {false, {}, "HTTP request URL is invalid"};
+        }
+        if (contentType.empty() ||
+            contentType.find('\r') != std::string::npos ||
+            contentType.find('\n') != std::string::npos) {
+            return {false, {}, "HTTP content type is invalid"};
+        }
+
+        CurlApi& api = CurlApi::instance();
+        if (!api.ready()) return {false, {}, api.error()};
+
+        CURL* easy = api.easyInit();
+        if (easy == nullptr) {
+            return {false, {}, "HTTPS request handle creation failed"};
+        }
+        struct EasyCleanup final {
+            CurlApi* api;
+            CURL* easy;
+            ~EasyCleanup() { api->easyCleanup(easy); }
+        } easyCleanup{&api, easy};
+
+        curl_slist* headers = nullptr;
+        const std::string contentTypeHeader = "Content-Type: " + contentType;
+        headers = api.slistAppend(headers, contentTypeHeader.c_str());
+        if (headers == nullptr) {
+            return {false, {}, "HTTP request header allocation failed"};
+        }
+        curl_slist* completedHeaders = api.slistAppend(headers, "Expect:");
+        if (completedHeaders == nullptr) {
+            api.slistFreeAll(headers);
+            return {false, {}, "HTTP request header allocation failed"};
+        }
+        headers = completedHeaders;
+        struct HeaderCleanup final {
+            CurlApi* api;
+            curl_slist* headers;
+            ~HeaderCleanup() { api->slistFreeAll(headers); }
+        } headerCleanup{&api, headers};
+
+        CurlTransferState state;
+        state.cancelled = &cancelled_;
+        state.cancellationSequence = &cancellationSequence_;
+        state.initialCancellationSequence =
+            cancellationSequence_.load(std::memory_order_acquire);
+        state.maximumResponseBytes = options_.maximumResponseBytes;
+        state.expectedUploadBytes = static_cast<curl_off_t>(body.size());
+        state.sendTimeoutMilliseconds = options_.sendTimeoutMilliseconds;
+        state.receiveTimeoutMilliseconds = options_.receiveTimeoutMilliseconds;
+        state.requestTimeoutMilliseconds = options_.requestTimeoutMilliseconds;
+        state.started = HttpClock::now();
+        state.lastUploadProgress = state.started;
+        state.lastDownloadProgress = state.started;
+        state.receiveStarted = state.started;
+
+        std::array<char, CURL_ERROR_SIZE> curlError{};
+        std::string optionError;
+        const long allowedProtocols = CURLPROTO_HTTP | CURLPROTO_HTTPS;
+        const long tlsVersion = CURL_SSLVERSION_TLSv1_2;
+        if (!setCurlOption(api, easy, CURLOPT_URL, url.c_str(), optionError) ||
+            !setCurlOption(api, easy, CURLOPT_POST, 1L, optionError) ||
+            !setCurlOption(api, easy, CURLOPT_POSTFIELDS, body.data(),
+                           optionError) ||
+            !setCurlOption(api, easy, CURLOPT_POSTFIELDSIZE_LARGE,
+                           static_cast<curl_off_t>(body.size()), optionError) ||
+            !setCurlOption(api, easy, CURLOPT_HTTPHEADER, headers,
+                           optionError) ||
+            !setCurlOption(api, easy, CURLOPT_WRITEFUNCTION,
+                           &curlWriteCallback, optionError) ||
+            !setCurlOption(api, easy, CURLOPT_WRITEDATA, &state,
+                           optionError) ||
+            !setCurlOption(api, easy, CURLOPT_XFERINFOFUNCTION,
+                           &curlProgressCallback, optionError) ||
+            !setCurlOption(api, easy, CURLOPT_XFERINFODATA, &state,
+                           optionError) ||
+            !setCurlOption(api, easy, CURLOPT_NOPROGRESS, 0L,
+                           optionError) ||
+            !setCurlOption(api, easy, CURLOPT_NOSIGNAL, 1L, optionError) ||
+            !setCurlOption(api, easy, CURLOPT_CONNECTTIMEOUT_MS,
+                           static_cast<long>(
+                               options_.connectTimeoutMilliseconds),
+                           optionError) ||
+            !setCurlOption(api, easy, CURLOPT_TIMEOUT_MS,
+                           static_cast<long>(
+                               options_.requestTimeoutMilliseconds),
+                           optionError) ||
+            !setCurlOption(api, easy, CURLOPT_PROTOCOLS,
+                           allowedProtocols, optionError) ||
+            !setCurlOption(api, easy, CURLOPT_FOLLOWLOCATION, 0L,
+                           optionError) ||
+            !setCurlOption(api, easy, CURLOPT_PROXY, "", optionError) ||
+            !setCurlOption(api, easy, CURLOPT_NOPROXY, "*", optionError) ||
+            !setCurlOption(api, easy, CURLOPT_ERRORBUFFER, curlError.data(),
+                           optionError) ||
+            !setCurlOption(api, easy, CURLOPT_USERAGENT,
+                           "Lengjing-T3/1", optionError)) {
+            return {false, {}, std::move(optionError)};
+        }
+        if (info.protocol == "https") {
+            if (!setCurlOption(api, easy, CURLOPT_SSL_VERIFYPEER, 1L,
+                               optionError) ||
+                !setCurlOption(api, easy, CURLOPT_SSL_VERIFYHOST, 2L,
+                               optionError) ||
+                !setCurlOption(api, easy, CURLOPT_CAPATH,
+                               "/system/etc/security/cacerts",
+                               optionError) ||
+                !setCurlOption(api, easy, CURLOPT_SSLVERSION, tlsVersion,
+                               optionError)) {
+                return {false, {}, std::move(optionError)};
+            }
+        }
+
+        CURLM* multi = api.multiInit();
+        if (multi == nullptr) {
+            return {false, {}, "HTTPS multi handle creation failed"};
+        }
+        struct MultiCleanup final {
+            CurlApi* api;
+            CURLM* multi;
+            CURL* easy;
+            bool added = false;
+            ~MultiCleanup() {
+                if (added) api->multiRemoveHandle(multi, easy);
+                api->multiCleanup(multi);
+            }
+        } multiCleanup{&api, multi, easy};
+
+        const CURLMcode addResult = api.multiAddHandle(multi, easy);
+        if (addResult != CURLM_OK) {
+            return {false, {}, std::string("HTTPS transfer setup failed: ") +
+                api.multiStrerror(addResult)};
+        }
+        multiCleanup.added = true;
+        if (!activate(multi)) {
+            return {false, {}, "HTTP request cancelled"};
+        }
+        struct ActiveCleanup final {
+            AndroidCurlHttpTransport* owner;
+            CURLM* multi;
+            ~ActiveCleanup() { owner->deactivate(multi); }
+        } activeCleanup{this, multi};
+
+        int runningHandles = 0;
+        CURLMcode multiResult;
+        do {
+            multiResult = api.multiPerform(multi, &runningHandles);
+        } while (multiResult == CURLM_CALL_MULTI_PERFORM);
+
+        while (multiResult == CURLM_OK && runningHandles > 0) {
+            if (state.shouldAbort(HttpClock::now())) break;
+            int descriptorCount = 0;
+            multiResult = api.multiPoll(multi, nullptr, 0, 25,
+                                        &descriptorCount);
+            if (multiResult != CURLM_OK) break;
+            do {
+                multiResult = api.multiPerform(multi, &runningHandles);
+            } while (multiResult == CURLM_CALL_MULTI_PERFORM);
+        }
+
+        if (state.cancelledDuringTransfer || state.isCancelled()) {
+            return {false, {}, "HTTP request cancelled"};
+        }
+        if (state.requestTimedOut) {
+            return {false, {}, "HTTP request deadline exceeded"};
+        }
+        if (state.sendTimedOut) {
+            return {false, {}, "HTTP send timed out"};
+        }
+        if (state.receiveTimedOut) {
+            return {false, {}, "HTTP receive timed out"};
+        }
+        if (multiResult != CURLM_OK) {
+            return {false, {}, std::string("HTTPS transfer failed: ") +
+                api.multiStrerror(multiResult)};
+        }
+
+        CURLcode transferResult = CURLE_FAILED_INIT;
+        bool transferFinished = false;
+        int messagesRemaining = 0;
+        while (CURLMsg* message =
+                   api.multiInfoRead(multi, &messagesRemaining)) {
+            if (message->msg == CURLMSG_DONE &&
+                message->easy_handle == easy) {
+                transferResult = message->data.result;
+                transferFinished = true;
+                break;
+            }
+        }
+        if (!transferFinished) {
+            return {false, {}, "HTTPS transfer result is missing"};
+        }
+        if (transferResult != CURLE_OK) {
+            if (state.responseLimitExceeded) {
+                return {false, {}, "HTTP response exceeds size limit"};
+            }
+            if (transferResult == CURLE_OPERATION_TIMEDOUT) {
+                return {false, {}, "HTTP request deadline exceeded"};
+            }
+            if (transferResult == CURLE_PEER_FAILED_VERIFICATION ||
+                transferResult == CURLE_SSL_ISSUER_ERROR ||
+                transferResult == CURLE_SSL_CACERT_BADFILE) {
+                return {false, {}, "HTTPS certificate verification failed"};
+            }
+            if (transferResult == CURLE_SSL_CONNECT_ERROR ||
+                transferResult == CURLE_SSL_CERTPROBLEM ||
+                transferResult == CURLE_SSL_CIPHER) {
+                return {false, {}, "HTTPS handshake failed"};
+            }
+            const char* detail = curlError.front() == '\0'
+                ? api.easyStrerror(transferResult)
+                : curlError.data();
+            return {false, {}, std::string("HTTPS transfer failed: ") +
+                detail};
+        }
+
+        long status = 0;
+        const CURLcode statusResult = api.easyGetinfo(
+            easy, CURLINFO_RESPONSE_CODE, &status);
+        if (statusResult != CURLE_OK) {
+            return {false, {}, std::string("HTTP status read failed: ") +
+                api.easyStrerror(statusResult)};
+        }
+        if (status < 200 || status >= 300) {
+            return {false, {}, "HTTP server returned status " +
+                std::to_string(status)};
+        }
+        return {true, std::move(state.response), {}};
+    }
+
+    void cancelPendingRequests() noexcept override {
+        cancelled_.store(true, std::memory_order_release);
+        cancellationSequence_.fetch_add(1, std::memory_order_acq_rel);
+        std::lock_guard<std::mutex> lock(activeMultiMutex_);
+        if (activeMulti_ != nullptr) {
+            CurlApi& api = CurlApi::instance();
+            if (api.ready()) api.multiWakeup(activeMulti_);
+        }
+    }
+
+    void resetCancellation() noexcept override {
+        cancelled_.store(false, std::memory_order_release);
+    }
+
+private:
+    bool activate(CURLM* multi) noexcept {
+        std::lock_guard<std::mutex> lock(activeMultiMutex_);
+        if (cancelled_.load(std::memory_order_acquire)) return false;
+        activeMulti_ = multi;
+        return true;
+    }
+
+    void deactivate(CURLM* multi) noexcept {
+        std::lock_guard<std::mutex> lock(activeMultiMutex_);
+        if (activeMulti_ == multi) activeMulti_ = nullptr;
+    }
+
+    T3HttpTransportOptions options_;
+    std::atomic_bool cancelled_{false};
+    std::atomic<std::uint64_t> cancellationSequence_{0};
+    std::mutex requestMutex_;
+    std::mutex activeMultiMutex_;
+    CURLM* activeMulti_ = nullptr;
+};
+
+#endif
+
 } /* end anonymous namespace */
 
 bool T3HttpTransportOptions::isValid() const noexcept {
@@ -1088,12 +1685,18 @@ bool T3HttpTransportOptions::isValid() const noexcept {
         receiveTimeoutMilliseconds > 0 &&
         receiveTimeoutMilliseconds <= kMaximumTimeoutMilliseconds &&
         maximumResponseBytes > 0 &&
-        maximumResponseBytes <= kMaximumResponseLimit;
+        maximumResponseBytes <= kMaximumResponseLimit &&
+        requestTimeoutMilliseconds > 0 &&
+        requestTimeoutMilliseconds <= kMaximumTimeoutMilliseconds;
 }
 
 std::shared_ptr<T3HttpTransport> createT3DefaultHttpTransport(
     const T3HttpTransportOptions& options) {
+#ifdef __ANDROID__
+    return std::make_shared<AndroidCurlHttpTransport>(options);
+#else
     return std::make_shared<SocketHttpTransport>(options);
+#endif
 }
 
 /* ========== 机器码获取 ========== */

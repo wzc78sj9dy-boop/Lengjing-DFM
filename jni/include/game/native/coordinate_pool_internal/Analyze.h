@@ -27,8 +27,8 @@ class Analyze {
 public:
 	std::vector<VarParam> varParams;
 
-    void reset() 
-	{ 
+    void reset()
+	{
 		varParams.clear();
 		regs.clear();
 	}

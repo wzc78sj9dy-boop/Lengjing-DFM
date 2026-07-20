@@ -161,7 +161,7 @@ typedef enum {
 	SH_OP_REG, ///< = CS_OP_REG (Register operand).
 	SH_OP_IMM, ///< = CS_OP_IMM (Immediate operand).
 	SH_OP_MEM, ///< = CS_OP_MEM (Memory operand).
-} sh_op_type;	
+} sh_op_type;
 
 typedef enum {
 	SH_OP_MEM_INVALID = 0,   /// <= Invalid
@@ -214,7 +214,7 @@ typedef enum sh_dsp_insn {
 	SH_INS_DSP_PINC,
 	SH_INS_DSP_PCLR,
 	SH_INS_DSP_PDMSB,
-	SH_INS_DSP_PNEG, 
+	SH_INS_DSP_PNEG,
 	SH_INS_DSP_PCOPY,
 	SH_INS_DSP_PSTS,
 	SH_INS_DSP_PLDS,
@@ -231,7 +231,7 @@ typedef enum sh_dsp_operand {
 	SH_OP_DSP_REG_INDEX,
 	SH_OP_DSP_REG,
 	SH_OP_DSP_IMM,
-	
+
 } sh_dsp_operand;
 
 typedef enum sh_dsp_cc {
@@ -249,7 +249,7 @@ typedef struct sh_op_dsp {
 	uint8_t imm;
 	int size;
 } sh_op_dsp;
-	
+
 /// Instruction operand
 typedef struct cs_sh_op {
 	sh_op_type type;
@@ -454,7 +454,7 @@ typedef enum sh_insn_group {
 	SH_GRP_SH3DSP,
 	SH_GRP_SH4,
 	SH_GRP_SH4A,
-	
+
 	SH_GRP_ENDING,// <-- mark the end of the list of groups
 } sh_insn_group;
 

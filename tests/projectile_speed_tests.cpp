@@ -43,7 +43,7 @@ void RunProjectileSpeedTests() {
 
     FakeMemory memory;
     memory.Put(weapon + 0x840, identity);
-    memory.Put(weapon + 0x838, std::uint64_t{830000001});
+    memory.Put(weapon + 0x838, std::uint32_t{830000001});
     memory.Put(weapon + 0x220, entries);
     memory.Put(weapon + 0x228, std::uint32_t{1});
     memory.Put(entries, field);

@@ -13,15 +13,29 @@ struct ProcessExecutionContext;
 
 struct CoordinatePoolRuntimeLayout {
     std::uintptr_t rootRva = 0x0E738950;
+    std::uintptr_t bridgeOffset = 12;
+    std::int32_t contextOffset = -8;
+    std::uintptr_t entryOffset = 0xA0;
     std::uintptr_t componentKeyOffset = 0x210;
     std::uint32_t entryStride = 48;
     std::uint32_t poolHeadSkip = 16;
     std::uint32_t ringRefreshFrames = 60;
 
     constexpr bool IsValid() const noexcept {
-        return rootRva >= 4 && (rootRva & 3U) == 0 &&
-            componentKeyOffset != 0 && entryStride >= 12 &&
-            poolHeadSkip <= entryStride && ringRefreshFrames != 0;
+        return rootRva >= 4 && rootRva <= 0xffffffffULL &&
+            (rootRva & 3U) == 0 &&
+            bridgeOffset <= 0x10000 && (bridgeOffset & 3U) == 0 &&
+            bridgeOffset <= 0xffffffffULL - rootRva &&
+            contextOffset != 0 && contextOffset >= -0x10000 &&
+            contextOffset <= 0x10000 && (contextOffset % 8) == 0 &&
+            entryOffset >= 8 && entryOffset <= 0x10000 &&
+            (entryOffset & 7U) == 0 &&
+            componentKeyOffset >= 8 && componentKeyOffset <= 0xffff &&
+            (componentKeyOffset & 7U) == 0 &&
+            entryStride >= 12 && entryStride <= 4096 &&
+            (entryStride & 3U) == 0 && poolHeadSkip <= 4084 &&
+            poolHeadSkip + 12 <= entryStride &&
+            ringRefreshFrames != 0 && ringRefreshFrames <= 3600;
     }
 };
 
@@ -81,6 +95,8 @@ public:
 
     CoordinatePoolRuntime(const CoordinatePoolRuntime&) = delete;
     CoordinatePoolRuntime& operator=(const CoordinatePoolRuntime&) = delete;
+
+    bool Configure(const CoordinatePoolRuntimeLayout& layout) noexcept;
 
     bool Refresh(MemoryTransport& memory,
                  pid_t processId,

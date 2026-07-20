@@ -950,5 +950,3 @@ namespace coord_dec {
 }
 
 }  // namespace lengjing::game::native::coordinate_pool_internal
-
-

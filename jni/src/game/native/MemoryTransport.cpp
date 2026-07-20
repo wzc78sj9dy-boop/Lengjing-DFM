@@ -37,14 +37,9 @@ constexpr std::uintptr_t kMinimumRemoteAddress = 0x10000000ULL;
 constexpr std::uintptr_t kMaximumRemoteAddress = 0x10000000000ULL;
 constexpr char kDefaultThreadContextDevice[] = "/dev/fbe775";
 constexpr char kDefaultThreadContextName[] = "GameThread";
-constexpr std::uintptr_t kCoordinateRootRva = 0x0E738950ULL;
-constexpr std::uintptr_t kCoordinateBridgeFieldOffset = 12;
-constexpr std::uintptr_t kCoordinateEntryFieldOffset = 0xA0;
 constexpr std::uint64_t kPointerPayloadMask =
     UINT64_C(0x0000FFFFFFFFFFFF);
 constexpr std::uint32_t kPacgaX8X8X9 = UINT32_C(0x9AC93108);
-constexpr std::uint64_t kCoordinatePacgaData = UINT64_C(0x412625C7);
-constexpr std::uint64_t kCoordinatePacgaModifier = UINT64_C(0xBB7AC00B);
 constexpr std::size_t kMaximumOracleMappingSize = 2U * 1024U * 1024U;
 constexpr std::size_t kOracleScanChunkSize = 4096;
 
@@ -78,8 +73,13 @@ bool ProcessVmTransferExact(
     pid_t processId,
     std::uintptr_t address,
     void* localBuffer,
-    std::size_t size,
+    std::size_t size
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+    ,
     bool write) {
+#else
+    ) {
+#endif
     auto* bytes = static_cast<std::uint8_t*>(localBuffer);
     std::size_t completed = 0;
     while (completed < size) {
@@ -91,9 +91,13 @@ bool ProcessVmTransferExact(
             reinterpret_cast<void*>(address + completed),
             size - completed,
         };
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
         const long callNumber = write
             ? __NR_process_vm_writev
             : __NR_process_vm_readv;
+#else
+        constexpr long callNumber = __NR_process_vm_readv;
+#endif
         const ssize_t result = static_cast<ssize_t>(syscall(
             callNumber,
             processId,
@@ -215,8 +219,11 @@ struct MemoryTransport::Impl {
         ExecutionContextSource::None;
     std::chrono::steady_clock::time_point nextThreadContextOpen{};
     std::chrono::steady_clock::time_point nextPtraceOracleResolve{};
+    CoordinateReplayTransportLayout coordinateReplayLayout{};
     bool open = false;
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
     bool writable = false;
+#endif
     std::uint64_t ioGeneration = 0;
     mutable std::mutex ioMutex;
 
@@ -232,6 +239,7 @@ struct MemoryTransport::Impl {
         executionContextSource = ExecutionContextSource::None;
         nextThreadContextOpen = {};
         nextPtraceOracleResolve = {};
+        coordinateReplayLayout = {};
         if (privateRpc != nullptr &&
             privateProcessHandle != kernel_rpc_abi::kInvalidProcessHandle) {
             static_cast<void>(privateRpc->ReleaseProcessHandle(
@@ -244,7 +252,9 @@ struct MemoryTransport::Impl {
         mode = MemoryTransportMode::ProcessVm;
         processId = -1;
         open = false;
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
         writable = false;
+#endif
     }
 
     void CloseThreadContextUnlocked() noexcept {
@@ -325,17 +335,19 @@ struct MemoryTransport::Impl {
             moduleBase = FindMappedModuleBase(processId, "libUE4.so");
         }
         if (!IsRemoteRangeValid(moduleBase, 4) ||
-            moduleBase >
-                std::numeric_limits<std::uintptr_t>::max() -
-                    kCoordinateRootRva - kCoordinateBridgeFieldOffset) {
+            coordinateReplayLayout.rootRva >
+                std::numeric_limits<std::uintptr_t>::max() - moduleBase ||
+            coordinateReplayLayout.bridgeOffset >
+                std::numeric_limits<std::uintptr_t>::max() - moduleBase -
+                    coordinateReplayLayout.rootRva) {
             ptraceOracleInstruction = {};
             return false;
         }
 
         std::uint64_t rawBridge = 0;
         if (!ReadUnlocked(
-                moduleBase + kCoordinateRootRva +
-                    kCoordinateBridgeFieldOffset,
+                moduleBase + coordinateReplayLayout.rootRva +
+                    coordinateReplayLayout.bridgeOffset,
                 &rawBridge,
                 sizeof(rawBridge))) {
             ptraceOracleInstruction = {};
@@ -344,9 +356,9 @@ struct MemoryTransport::Impl {
         const std::uintptr_t bridge = static_cast<std::uintptr_t>(
             rawBridge & kPointerPayloadMask);
         if (bridge > std::numeric_limits<std::uintptr_t>::max() -
-                kCoordinateEntryFieldOffset ||
+                coordinateReplayLayout.entryOffset ||
             !IsRemoteRangeValid(
-                bridge + kCoordinateEntryFieldOffset,
+                bridge + coordinateReplayLayout.entryOffset,
                 sizeof(std::uint64_t))) {
             ptraceOracleInstruction = {};
             return false;
@@ -354,7 +366,7 @@ struct MemoryTransport::Impl {
 
         std::uint64_t rawEntry = 0;
         if (!ReadUnlocked(
-                bridge + kCoordinateEntryFieldOffset,
+                bridge + coordinateReplayLayout.entryOffset,
                 &rawEntry,
                 sizeof(rawEntry))) {
             ptraceOracleInstruction = {};
@@ -411,8 +423,8 @@ struct MemoryTransport::Impl {
         }
         ptraceOracleInstruction = {
             found,
-            kCoordinatePacgaData,
-            kCoordinatePacgaModifier,
+            coordinateReplayLayout.pacgaData,
+            coordinateReplayLayout.pacgaModifier,
         };
         instruction = ptraceOracleInstruction;
         return true;
@@ -438,7 +450,9 @@ struct MemoryTransport::Impl {
         processId = targetProcessId;
         switch (mode) {
             case MemoryTransportMode::ProcessVm:
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
                 writable = true;
+#endif
                 break;
             case MemoryTransportMode::KernelDriver:
                 if (!EnsureKernelDriverReady(error)) {
@@ -452,7 +466,9 @@ struct MemoryTransport::Impl {
                     return false;
                 }
                 kernel->initialize(processId);
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
                 writable = true;
+#endif
                 break;
             case MemoryTransportMode::PrivateRpc: {
                 privateRpc.reset(new (std::nothrow) KernelRpcTransport());
@@ -485,7 +501,9 @@ struct MemoryTransport::Impl {
                     ResetUnlocked();
                     return false;
                 }
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
                 writable = true;
+#endif
                 break;
             }
             case MemoryTransportMode::Count:
@@ -511,7 +529,11 @@ struct MemoryTransport::Impl {
 
         if (mode == MemoryTransportMode::ProcessVm) {
             return ProcessVmTransferExact(
-                processId, address, destination, size, false);
+                processId, address, destination, size
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+                , false
+#endif
+            );
         }
         if (mode == MemoryTransportMode::KernelDriver) {
             return kernel != nullptr &&
@@ -599,6 +621,7 @@ struct MemoryTransport::Impl {
         return successful;
     }
 
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
     bool Write(std::uintptr_t address, const void* source, std::size_t size) {
         std::lock_guard<std::mutex> lock(ioMutex);
         if (!open || !writable || source == nullptr ||
@@ -627,6 +650,7 @@ struct MemoryTransport::Impl {
             privateRpc->WriteMemory(
                 privateProcessHandle, address, source, size) == 0;
     }
+#endif
 
     std::uintptr_t ModuleBase(std::string_view moduleName) {
         std::lock_guard<std::mutex> lock(ioMutex);
@@ -654,6 +678,7 @@ struct MemoryTransport::Impl {
         return open;
     }
 
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
     bool CanWrite() const noexcept {
         std::lock_guard<std::mutex> lock(ioMutex);
         return open && writable;
@@ -666,6 +691,19 @@ struct MemoryTransport::Impl {
             ? kernel != nullptr
             : privateRpc != nullptr &&
                 privateProcessHandle != kernel_rpc_abi::kInvalidProcessHandle;
+    }
+#endif
+
+    bool ConfigureCoordinateReplay(
+        const CoordinateReplayTransportLayout& layout) {
+        if (!layout.IsValid()) return false;
+        std::lock_guard<std::mutex> lock(ioMutex);
+        coordinateReplayLayout = layout;
+        ptraceContextProvider.reset();
+        ptraceOracleInstruction = {};
+        executionContextSource = ExecutionContextSource::None;
+        nextPtraceOracleResolve = {};
+        return true;
     }
 
     bool ReadProcessExecutionContext(ProcessExecutionContext& context) {
@@ -796,12 +834,14 @@ std::size_t MemoryTransport::ReadBatch(
         : 0;
 }
 
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
 bool MemoryTransport::Write(
     std::uintptr_t address,
     const void* source,
     std::size_t size) {
     return impl_ != nullptr && impl_->Write(address, source, size);
 }
+#endif
 
 std::uintptr_t MemoryTransport::ModuleBase(std::string_view moduleName) {
     return impl_ != nullptr ? impl_->ModuleBase(moduleName) : 0;
@@ -811,12 +851,23 @@ bool MemoryTransport::IsOpen() const noexcept {
     return impl_ != nullptr && impl_->IsOpen();
 }
 
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
 bool MemoryTransport::CanWrite() const noexcept {
     return impl_ != nullptr && impl_->CanWrite();
 }
 
 bool MemoryTransport::UsesKernelBackend() const noexcept {
     return impl_ != nullptr && impl_->UsesKernelBackend();
+}
+#endif
+
+bool MemoryTransport::ConfigureCoordinateReplay(
+    const CoordinateReplayTransportLayout& layout) noexcept {
+    try {
+        return impl_ != nullptr && impl_->ConfigureCoordinateReplay(layout);
+    } catch (...) {
+        return false;
+    }
 }
 
 bool MemoryTransport::ReadProcessExecutionContext(

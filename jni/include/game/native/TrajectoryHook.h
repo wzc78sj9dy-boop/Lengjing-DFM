@@ -1,8 +1,11 @@
 #pragma once
 
+#include "game/ProjectileTrackingFeature.h"
 #include "game/aim/TrackingCalculator.h"
 
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
 #include <chrono>
+#endif
 #include <cstdint>
 
 #include <sys/types.h>
@@ -11,6 +14,7 @@ namespace lengjing::game::native {
 
 class MemoryTransport;
 
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
 class TrajectoryHook final {
 public:
     TrajectoryHook() = default;
@@ -52,5 +56,30 @@ private:
     bool cleanupRequired_ = false;
     bool installed_ = false;
 };
+#else
+class TrajectoryHook final {
+public:
+    bool EnsureInstalled(
+        MemoryTransport&, pid_t, std::uintptr_t) noexcept {
+        return false;
+    }
+
+    bool Publish(const aim::TrackingCommand&) noexcept {
+        return false;
+    }
+
+    bool Disable() noexcept {
+        return true;
+    }
+
+    bool Shutdown() noexcept {
+        return true;
+    }
+
+    bool Installed() const noexcept {
+        return false;
+    }
+};
+#endif
 
 }  // namespace lengjing::game::native

@@ -1,4 +1,5 @@
 #include "render/overlay_renderer.h"
+#include "render/OverlayContrastPolicy.h"
 
 #include <algorithm>
 #include <cmath>
@@ -114,8 +115,18 @@ void DrawText(ImDrawList* drawList,
               float fontSize,
               const std::string& text) {
     if (drawList == nullptr || text.empty() || !Finite(position)) return;
-    (void)shadow;
-    drawList->AddText(nullptr, fontSize, position, color, text.c_str());
+    const float outlineOffset = std::clamp(fontSize * 0.045f, 0.75f, 1.5f);
+    const ImU32 outlineColor = render::WithMinimumAlpha(
+        shadow, render::kTextOutlineMinimumAlpha);
+    const ImU32 textColor = render::WithMinimumAlpha(
+        color, render::kTextMinimumAlpha);
+    drawList->AddText(
+        nullptr,
+        fontSize,
+        Add(position, ImVec2(outlineOffset, outlineOffset)),
+        outlineColor,
+        text.c_str());
+    drawList->AddText(nullptr, fontSize, position, textColor, text.c_str());
 }
 
 ImVec2 TextExtent(const std::string& text, float fontSize) {
@@ -173,6 +184,26 @@ std::string FitText(const std::string& text, float maximumWidth, float fontSize)
         offset = next;
     }
     return text.substr(0, accepted) + suffix;
+}
+
+void DrawOutlinedLine(ImDrawList* drawList,
+                      const ImVec2& first,
+                      const ImVec2& second,
+                      ImU32 color,
+                      ImU32 shadow,
+                      float width,
+                      float outlineWidth) {
+    if (drawList == nullptr || !Finite(first) || !Finite(second)) return;
+    drawList->AddLine(
+        first,
+        second,
+        render::WithMinimumAlpha(shadow, 120),
+        std::max(outlineWidth, width));
+    drawList->AddLine(
+        first,
+        second,
+        render::WithExactAlpha(color, render::kSolidAlpha),
+        width);
 }
 
 }  // namespace
@@ -329,9 +360,13 @@ void OverlayRenderer::DrawCornerBox(ImDrawList* drawList,
     const float scale = style_.metrics.scale;
     const float horizontalLength = bounds.Width() * 0.25f;
     const float verticalLength = bounds.Height() * 0.25f;
-    const float width = std::max(1.0f, style_.metrics.lineWidth * 0.5f * scale);
-    const ImU32 color = WithAlpha(PlayerColor(style_, tone, visible),
-                                  visible || tone == SemanticTone::Ally ? 0.84f : 0.58f);
+    const float width = render::PlayerStrokeWidth(
+        style_.metrics.lineWidth, scale);
+    const float outline = render::PlayerOutlineWidth(
+        width, style_.metrics.outlineWidth, scale);
+    const ImU32 color = render::WithExactAlpha(
+        PlayerColor(style_, tone, visible), render::kSolidAlpha);
+    const ImU32 shadow = render::WithExactAlpha(style_.colors.shadow, 140);
 
     const ImVec2 topLeft(bounds.left, bounds.top);
     const ImVec2 topRight(bounds.right, bounds.top);
@@ -339,7 +374,8 @@ void OverlayRenderer::DrawCornerBox(ImDrawList* drawList,
     const ImVec2 bottomRight(bounds.right, bounds.bottom);
 
     const auto drawSegment = [&](const ImVec2& first, const ImVec2& second) {
-        drawList->AddLine(first, second, color, width);
+        DrawOutlinedLine(
+            drawList, first, second, color, shadow, width, outline);
     };
 
     drawSegment(topLeft, ImVec2(topLeft.x + horizontalLength, topLeft.y));
@@ -358,19 +394,26 @@ void OverlayRenderer::DrawSkeleton(ImDrawList* drawList,
                                    bool visible) const {
     if (drawList == nullptr || skeleton.joints.empty() || skeleton.links.empty()) return;
     const float scale = style_.metrics.scale;
-    const ImU32 color = WithAlpha(PlayerColor(style_, tone, visible),
-                                  visible || tone == SemanticTone::Ally ? 0.82f : 0.54f);
-    const float width = std::max(1.0f, style_.metrics.lineWidth * 0.5f * scale);
+    const ImU32 color = render::WithExactAlpha(
+        PlayerColor(style_, tone, visible), render::kSolidAlpha);
+    const float width = render::PlayerStrokeWidth(
+        style_.metrics.lineWidth, scale);
+    const float outline = render::PlayerOutlineWidth(
+        width, style_.metrics.outlineWidth, scale);
+    const ImU32 shadow = render::WithExactAlpha(style_.colors.shadow, 140);
     const auto endpointColor = [&](const BoneJoint& joint) {
         if (!skeleton.colorByVisibility) return color;
         switch (joint.visibility) {
             case game::VisibilityState::Visible:
-                return WithAlpha(style_.colors.accent, 0.92f);
+                return render::WithExactAlpha(
+                    style_.colors.accent, render::kSolidAlpha);
             case game::VisibilityState::Occluded:
-                return WithAlpha(style_.colors.danger, 0.62f);
+                return render::WithExactAlpha(
+                    style_.colors.danger, render::kSolidAlpha);
             case game::VisibilityState::Unavailable:
             default:
-                return WithAlpha(style_.colors.textMuted, 0.58f);
+                return render::WithExactAlpha(
+                    style_.colors.textMuted, render::kSolidAlpha);
         }
     };
     for (const BoneLink& link : skeleton.links) {
@@ -378,13 +421,38 @@ void OverlayRenderer::DrawSkeleton(ImDrawList* drawList,
         const BoneJoint& first = skeleton.joints[link.first];
         const BoneJoint& second = skeleton.joints[link.second];
         if (!first.valid || !second.valid || !Finite(first.position) || !Finite(second.position)) continue;
-        const ImVec2 midpoint{
-            (first.position.x + second.position.x) * 0.5f,
-            (first.position.y + second.position.y) * 0.5f};
-        drawList->AddLine(
-            first.position, midpoint, endpointColor(first), width);
-        drawList->AddLine(
-            midpoint, second.position, endpointColor(second), width);
+        const ImU32 firstColor = endpointColor(first);
+        const ImU32 secondColor = endpointColor(second);
+        if (firstColor == secondColor) {
+            DrawOutlinedLine(
+                drawList,
+                first.position,
+                second.position,
+                firstColor,
+                shadow,
+                width,
+                outline);
+        } else {
+            const ImVec2 midpoint{
+                (first.position.x + second.position.x) * 0.5f,
+                (first.position.y + second.position.y) * 0.5f};
+            DrawOutlinedLine(
+                drawList,
+                first.position,
+                midpoint,
+                firstColor,
+                shadow,
+                width,
+                outline);
+            DrawOutlinedLine(
+                drawList,
+                midpoint,
+                second.position,
+                secondColor,
+                shadow,
+                width,
+                outline);
+        }
     }
     if (skeleton.selectedJoint >= 0 &&
         static_cast<std::size_t>(skeleton.selectedJoint) <
@@ -395,7 +463,14 @@ void OverlayRenderer::DrawSkeleton(ImDrawList* drawList,
             drawList->AddCircle(
                 selected.position,
                 3.5f * scale,
-                style_.colors.caution,
+                shadow,
+                0,
+                outline);
+            drawList->AddCircle(
+                selected.position,
+                3.5f * scale,
+                render::WithExactAlpha(
+                    style_.colors.caution, render::kSolidAlpha),
                 0,
                 width);
         }
@@ -431,7 +506,7 @@ void OverlayRenderer::DrawVitalBars(ImDrawList* drawList,
         drawList->AddRectFilled(
             ImVec2(healthMin.x, bounds.bottom - height * healthRatio),
             healthMax,
-            WithAlpha(healthColor, 0.94f));
+            render::WithExactAlpha(healthColor, render::kSolidAlpha));
     }
     if (!hasArmorTrack) return;
 
@@ -445,7 +520,8 @@ void OverlayRenderer::DrawVitalBars(ImDrawList* drawList,
         drawList->AddRectFilled(
             ImVec2(armorMin.x, bounds.bottom - height * armorRatio),
             armorMax,
-            WithAlpha(style_.colors.ally, 0.94f));
+            render::WithExactAlpha(
+                style_.colors.ally, render::kSolidAlpha));
     }
 }
 
@@ -458,8 +534,18 @@ void OverlayRenderer::DrawTracer(ImDrawList* drawList,
     const float scale = style_.metrics.scale;
     const ImU32 color = PlayerColor(style_, tone, visible);
     if (Length(Subtract(target, origin)) <= 1.0f) return;
-    const float width = std::max(1.0f, style_.metrics.lineWidth * 0.5f * scale);
-    drawList->AddLine(origin, target, WithAlpha(color, visible ? 0.72f : 0.52f), width);
+    const float width = render::PlayerStrokeWidth(
+        style_.metrics.lineWidth, scale);
+    const float outline = render::PlayerOutlineWidth(
+        width, style_.metrics.outlineWidth, scale);
+    DrawOutlinedLine(
+        drawList,
+        origin,
+        target,
+        color,
+        render::WithExactAlpha(style_.colors.shadow, 140),
+        width,
+        outline);
 }
 
 void OverlayRenderer::DrawPlayerSignal(ImDrawList* drawList,
@@ -480,10 +566,18 @@ void OverlayRenderer::DrawPlayerSignal(ImDrawList* drawList,
     const ImU32 base = signal.kind == PlayerSignalKind::AimWarning
         ? style_.colors.danger
         : ToneColor(signal.tone);
-    const ImU32 color = WithAlpha(base,
-        signal.kind == PlayerSignalKind::AimWarning ? 0.90f : 0.68f);
-    const float width = std::max(1.0f, style_.metrics.lineWidth * 0.5f * scale);
-    drawList->AddLine(start, end, color, width);
+    const float width = render::PlayerStrokeWidth(
+        style_.metrics.lineWidth, scale);
+    const float outline = render::PlayerOutlineWidth(
+        width, style_.metrics.outlineWidth, scale);
+    DrawOutlinedLine(
+        drawList,
+        start,
+        end,
+        render::WithExactAlpha(base, render::kSolidAlpha),
+        render::WithExactAlpha(style_.colors.shadow, 140),
+        width,
+        outline);
 }
 
 void OverlayRenderer::DrawModelGeometry(

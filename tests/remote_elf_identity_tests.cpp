@@ -103,8 +103,8 @@ FakeImage MakeImage() {
     std::memcpy(image.bytes.data() + 0x200, &note, sizeof(note));
     std::memcpy(image.bytes.data() + 0x20c, "GNU\0", 4);
     const std::array<std::uint8_t, 20> descriptor{
-        0x81, 0x87, 0xdd, 0xb9, 0xed, 0xbc, 0x9d, 0x52, 0x01, 0x20,
-        0x1f, 0xfd, 0x7b, 0x00, 0x8d, 0xf3, 0xbf, 0xe5, 0x33, 0xdb,
+        0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe, 0x01, 0x23,
+        0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x55, 0xaa, 0x11, 0xee,
     };
     std::memcpy(image.bytes.data() + 0x210,
                 descriptor.data(), descriptor.size());
@@ -120,7 +120,7 @@ void RunRemoteElfIdentityTests() {
     std::string buildId;
     REQUIRE(ReadRemoteElfBuildId(
         image.base, &ReadFakeImage, &image, buildId));
-    REQUIRE(buildId == "8187ddb9edbc9d5201201ffd7b008df3bfe533db");
+    REQUIRE(buildId == "1032547698badcfe0123456789abcdef55aa11ee");
 
     image.bytes[4] = 1;
     REQUIRE(!ReadRemoteElfBuildId(
@@ -129,6 +129,54 @@ void RunRemoteElfIdentityTests() {
 
     image = MakeImage();
     image.bytes[0x20c] = 'X';
+    REQUIRE(!ReadRemoteElfBuildId(
+        image.base, &ReadFakeImage, &image, buildId));
+    REQUIRE(buildId.empty());
+
+    image = MakeImage();
+    TestElfHeader header{};
+    std::memcpy(&header, image.bytes.data(), sizeof(header));
+    header.programHeaderSize = 64;
+    std::memcpy(image.bytes.data(), &header, sizeof(header));
+    REQUIRE(ReadRemoteElfBuildId(
+        image.base, &ReadFakeImage, &image, buildId));
+    REQUIRE(buildId == "1032547698badcfe0123456789abcdef55aa11ee");
+
+    image = MakeImage();
+    std::memcpy(&header, image.bytes.data(), sizeof(header));
+    header.programHeaderCount = 2;
+    std::memcpy(image.bytes.data(), &header, sizeof(header));
+    image.bytes[0x20c] = 'X';
+    std::memcpy(image.bytes.data() + 0x300,
+                image.bytes.data() + 0x200, 36);
+    image.bytes[0x30c] = 'G';
+    TestProgramHeader secondProgramHeader{};
+    secondProgramHeader.type = 4;
+    secondProgramHeader.virtualAddress = 0x300;
+    secondProgramHeader.fileSize = 36;
+    secondProgramHeader.memorySize = 36;
+    std::memcpy(
+        image.bytes.data() + header.programHeaderOffset +
+            sizeof(TestProgramHeader),
+        &secondProgramHeader,
+        sizeof(secondProgramHeader));
+    REQUIRE(ReadRemoteElfBuildId(
+        image.base, &ReadFakeImage, &image, buildId));
+    REQUIRE(buildId == "1032547698badcfe0123456789abcdef55aa11ee");
+
+    image = MakeImage();
+    TestNoteHeader note{};
+    std::memcpy(&note, image.bytes.data() + 0x200, sizeof(note));
+    note.descriptorSize = 2;
+    std::memcpy(image.bytes.data() + 0x200, &note, sizeof(note));
+    REQUIRE(!ReadRemoteElfBuildId(
+        image.base, &ReadFakeImage, &image, buildId));
+    REQUIRE(buildId.empty());
+
+    image = MakeImage();
+    std::memcpy(&header, image.bytes.data(), sizeof(header));
+    header.programHeaderOffset = UINT64_MAX;
+    std::memcpy(image.bytes.data(), &header, sizeof(header));
     REQUIRE(!ReadRemoteElfBuildId(
         image.base, &ReadFakeImage, &image, buildId));
     REQUIRE(buildId.empty());

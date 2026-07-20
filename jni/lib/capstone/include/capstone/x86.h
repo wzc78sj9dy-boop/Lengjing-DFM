@@ -362,7 +362,7 @@ typedef struct cs_x86 {
 	/// AVX static rounding mode
 	x86_avx_rm avx_rm;
 
-	
+
 	union {
 		/// EFLAGS updated by this instruction.
 		/// This can be formed from OR combination of X86_EFLAGS_* symbols in x86.h

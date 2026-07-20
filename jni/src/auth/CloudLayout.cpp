@@ -18,9 +18,9 @@ namespace {
 
 using Json = nlohmann::json;
 
-constexpr std::size_t kMaximumPayloadBytes = 64U * 1024U;
 constexpr std::uint64_t kMaximumModuleOffset = 0xffffffffULL;
 constexpr std::uint64_t kMaximumObjectOffset = 0xffffULL;
+constexpr std::uint64_t kMaximumCoordinateFieldOffset = 0x10000ULL;
 
 struct ParseFailure {
     CloudLayoutStatus status = CloudLayoutStatus::SchemaMismatch;
@@ -126,14 +126,46 @@ bool ParseUnsigned(const Json& value,
     return true;
 }
 
-bool ParseOffset(const Json& value,
-                 std::uint64_t minimum,
-                 std::uint64_t maximum,
-                 std::uint64_t alignment,
-                 bool allowZero,
-                 std::uintptr_t& output,
+bool ParseSigned(const Json& value,
+                 std::int64_t minimum,
+                 std::int64_t maximum,
+                 std::int64_t& output,
                  std::string_view field,
                  ParseFailure& failure) {
+    if (!value.is_number_integer()) {
+        failure.status = CloudLayoutStatus::SchemaMismatch;
+        failure.detail = std::string(field) + " must be an integer";
+        return false;
+    }
+    std::int64_t parsed = 0;
+    if (value.is_number_unsigned()) {
+        const auto unsignedValue = value.get<std::uint64_t>();
+        if (unsignedValue >
+            static_cast<std::uint64_t>(
+                std::numeric_limits<std::int64_t>::max())) {
+            failure.status = CloudLayoutStatus::RangeError;
+            failure.detail = std::string(field) + " is outside the accepted range";
+            return false;
+        }
+        parsed = static_cast<std::int64_t>(unsignedValue);
+    } else {
+        parsed = value.get<std::int64_t>();
+    }
+    if (parsed < minimum || parsed > maximum) {
+        failure.status = CloudLayoutStatus::RangeError;
+        failure.detail = std::string(field) + " is outside the accepted range";
+        return false;
+    }
+    output = parsed;
+    return true;
+}
+
+bool ParseHexUnsigned(const Json& value,
+                      std::uint64_t minimum,
+                      std::uint64_t maximum,
+                      std::uint64_t& output,
+                      std::string_view field,
+                      ParseFailure& failure) {
     if (!value.is_string()) {
         failure.status = CloudLayoutStatus::SchemaMismatch;
         failure.detail = std::string(field) + " must be a hexadecimal string";
@@ -167,7 +199,27 @@ bool ParseOffset(const Json& value,
         }
         parsed = parsed * 16U + digit;
     }
+    if (parsed < minimum || parsed > maximum) {
+        failure.status = CloudLayoutStatus::RangeError;
+        failure.detail = std::string(field) + " is outside the accepted range";
+        return false;
+    }
+    output = parsed;
+    return true;
+}
 
+bool ParseOffset(const Json& value,
+                 std::uint64_t minimum,
+                 std::uint64_t maximum,
+                 std::uint64_t alignment,
+                 bool allowZero,
+                 std::uintptr_t& output,
+                 std::string_view field,
+                 ParseFailure& failure) {
+    std::uint64_t parsed = 0;
+    if (!ParseHexUnsigned(value, 0, maximum, parsed, field, failure)) {
+        return false;
+    }
     if (parsed == 0) {
         if (!allowZero) {
             failure.status = CloudLayoutStatus::RangeError;
@@ -177,7 +229,7 @@ bool ParseOffset(const Json& value,
         output = 0;
         return true;
     }
-    if (parsed < minimum || parsed > maximum ||
+    if (parsed < minimum ||
         parsed > std::numeric_limits<std::uintptr_t>::max() ||
         (alignment != 0 && parsed % alignment != 0)) {
         failure.status = CloudLayoutStatus::RangeError;
@@ -197,7 +249,7 @@ bool ParseActorLayout(const Json& object,
              "encrypted_record_count", "plain_record_stride",
              "maximum_plain_count", "fallback_plain_count"})) {
         failure.status = CloudLayoutStatus::SchemaMismatch;
-        failure.detail = "actor_records keys do not match schema version 1";
+        failure.detail = "actor_records keys do not match schema version 2";
         return false;
     }
 
@@ -267,21 +319,101 @@ bool ParseActorLayout(const Json& object,
     return true;
 }
 
+bool ParseCoordinatePoolLayout(const Json& object,
+                               CloudCoordinatePoolLayout& layout,
+                               ParseFailure& failure) {
+    if (!HasExactKeys(
+            object,
+            {"root_rva", "bridge_offset", "context_offset",
+             "entry_offset", "component_key_offset", "pacga_data",
+             "pacga_modifier", "entry_stride", "pool_head_skip",
+             "ring_refresh_frames"})) {
+        failure.status = CloudLayoutStatus::SchemaMismatch;
+        failure.detail = "coordinate_pool keys do not match schema version 2";
+        return false;
+    }
+
+    std::int64_t contextOffset = 0;
+    std::uint64_t pacgaData = 0;
+    std::uint64_t pacgaModifier = 0;
+    std::uint64_t entryStride = 0;
+    std::uint64_t poolHeadSkip = 0;
+    std::uint64_t ringRefreshFrames = 0;
+    if (!ParseOffset(object.at("root_rva"), 4, kMaximumModuleOffset,
+                     4, false, layout.rootRva,
+                     "coordinate_pool.root_rva", failure) ||
+        !ParseOffset(object.at("bridge_offset"), 0,
+                     kMaximumCoordinateFieldOffset, 4, true,
+                     layout.bridgeOffset,
+                     "coordinate_pool.bridge_offset", failure) ||
+        !ParseSigned(object.at("context_offset"), -0x10000, 0x10000,
+                     contextOffset, "coordinate_pool.context_offset",
+                     failure)) {
+        return false;
+    }
+    if (contextOffset == 0 || (contextOffset % 8) != 0) {
+        failure.status = CloudLayoutStatus::RangeError;
+        failure.detail = "coordinate_pool.context_offset must be nonzero and 8-byte aligned";
+        return false;
+    }
+    if (!ParseOffset(object.at("entry_offset"), 8,
+                     kMaximumCoordinateFieldOffset, 8, false,
+                     layout.entryOffset,
+                     "coordinate_pool.entry_offset", failure) ||
+        !ParseOffset(object.at("component_key_offset"), 8,
+                     kMaximumObjectOffset, 8, false,
+                     layout.componentKeyOffset,
+                     "coordinate_pool.component_key_offset", failure) ||
+        !ParseHexUnsigned(object.at("pacga_data"), 0,
+                          std::numeric_limits<std::uint64_t>::max(),
+                          pacgaData, "coordinate_pool.pacga_data", failure) ||
+        !ParseHexUnsigned(object.at("pacga_modifier"), 0,
+                          std::numeric_limits<std::uint64_t>::max(),
+                          pacgaModifier, "coordinate_pool.pacga_modifier",
+                          failure) ||
+        !ParseUnsigned(object.at("entry_stride"), 12, 4096,
+                       entryStride, "coordinate_pool.entry_stride",
+                       failure) ||
+        !ParseUnsigned(object.at("pool_head_skip"), 0, 4084,
+                       poolHeadSkip, "coordinate_pool.pool_head_skip",
+                       failure) ||
+        !ParseUnsigned(object.at("ring_refresh_frames"), 1, 3600,
+                       ringRefreshFrames,
+                       "coordinate_pool.ring_refresh_frames", failure)) {
+        return false;
+    }
+    if ((entryStride % 4) != 0 || poolHeadSkip + 12 > entryStride) {
+        failure.status = CloudLayoutStatus::RangeError;
+        failure.detail = "coordinate_pool entry geometry is inconsistent";
+        return false;
+    }
+    if (pacgaData == 0 && pacgaModifier == 0) {
+        failure.status = CloudLayoutStatus::RangeError;
+        failure.detail = "coordinate_pool PACGA inputs must not both be zero";
+        return false;
+    }
+
+    layout.contextOffset = static_cast<std::int32_t>(contextOffset);
+    layout.pacgaData = pacgaData;
+    layout.pacgaModifier = pacgaModifier;
+    layout.entryStride = static_cast<std::uint32_t>(entryStride);
+    layout.poolHeadSkip = static_cast<std::uint32_t>(poolHeadSkip);
+    layout.ringRefreshFrames =
+        static_cast<std::uint32_t>(ringRefreshFrames);
+    return true;
+}
+
 bool ParseLayout(const Json& object,
                  CloudOffsetLayout& layout,
                  ParseFailure& failure) {
-    const bool legacyKeys = HasExactKeys(
-        object,
-        {"name_pool", "world", "geometry_instances", "actor_records",
-         "tracking_matrix_root", "component_position_flag"});
-    const bool replayKeys = HasExactKeys(
+    const bool exactKeys = HasExactKeys(
         object,
         {"name_pool", "world", "coordinate_replay_entry",
          "geometry_instances", "actor_records", "tracking_matrix_root",
-         "component_position_flag"});
-    if (!legacyKeys && !replayKeys) {
+         "component_position_flag", "coordinate_pool"});
+    if (!exactKeys) {
         failure.status = CloudLayoutStatus::SchemaMismatch;
-        failure.detail = "layout keys do not match schema version 1";
+        failure.detail = "layout keys do not match schema version 2";
         return false;
     }
     if (!ParseOffset(object.at("name_pool"), 4, kMaximumModuleOffset, 4,
@@ -296,8 +428,7 @@ bool ParseLayout(const Json& object,
         failure.detail = "name_pool and world must be distinct";
         return false;
     }
-    if (replayKeys &&
-        !ParseOffset(object.at("coordinate_replay_entry"), 4,
+    if (!ParseOffset(object.at("coordinate_replay_entry"), 4,
                      kMaximumModuleOffset, 4, true,
                      layout.coordinateReplayEntryOffset,
                      "layout.coordinate_replay_entry", failure)) {
@@ -320,16 +451,29 @@ bool ParseLayout(const Json& object,
             return false;
         }
     }
-    return ParseActorLayout(object.at("actor_records"),
-                            layout.actorRecords, failure) &&
-        ParseOffset(object.at("tracking_matrix_root"), 4,
-                    kMaximumModuleOffset, 4, true,
-                    layout.trackingMatrixRootOffset,
-                    "layout.tracking_matrix_root", failure) &&
-        ParseOffset(object.at("component_position_flag"), 4,
-                    kMaximumModuleOffset, 1, true,
-                    layout.componentPositionFlagOffset,
-                    "layout.component_position_flag", failure);
+    if (!ParseActorLayout(object.at("actor_records"),
+                          layout.actorRecords, failure) ||
+        !ParseOffset(object.at("tracking_matrix_root"), 4,
+                     kMaximumModuleOffset, 4, true,
+                     layout.trackingMatrixRootOffset,
+                     "layout.tracking_matrix_root", failure) ||
+        !ParseOffset(object.at("component_position_flag"), 4,
+                     kMaximumModuleOffset, 1, true,
+                     layout.componentPositionFlagOffset,
+                     "layout.component_position_flag", failure) ||
+        !ParseCoordinatePoolLayout(object.at("coordinate_pool"),
+                                   layout.coordinatePool, failure)) {
+        return false;
+    }
+    const CloudCoordinatePoolLayout& coordinate = layout.coordinatePool;
+    if (coordinate.rootRva == layout.namePoolOffset ||
+        coordinate.rootRva == layout.worldOffset ||
+        coordinate.rootRva > kMaximumModuleOffset - coordinate.bridgeOffset) {
+        failure.status = CloudLayoutStatus::RangeError;
+        failure.detail = "coordinate_pool root conflicts with the module layout";
+        return false;
+    }
+    return true;
 }
 
 bool Equivalent(const CloudLayoutDocument& left,
@@ -349,6 +493,26 @@ bool Equivalent(const CloudLayoutDocument& left,
             right.layout.trackingMatrixRootOffset &&
         left.layout.componentPositionFlagOffset ==
             right.layout.componentPositionFlagOffset &&
+        left.layout.coordinatePool.rootRva ==
+            right.layout.coordinatePool.rootRva &&
+        left.layout.coordinatePool.bridgeOffset ==
+            right.layout.coordinatePool.bridgeOffset &&
+        left.layout.coordinatePool.contextOffset ==
+            right.layout.coordinatePool.contextOffset &&
+        left.layout.coordinatePool.entryOffset ==
+            right.layout.coordinatePool.entryOffset &&
+        left.layout.coordinatePool.componentKeyOffset ==
+            right.layout.coordinatePool.componentKeyOffset &&
+        left.layout.coordinatePool.pacgaData ==
+            right.layout.coordinatePool.pacgaData &&
+        left.layout.coordinatePool.pacgaModifier ==
+            right.layout.coordinatePool.pacgaModifier &&
+        left.layout.coordinatePool.entryStride ==
+            right.layout.coordinatePool.entryStride &&
+        left.layout.coordinatePool.poolHeadSkip ==
+            right.layout.coordinatePool.poolHeadSkip &&
+        left.layout.coordinatePool.ringRefreshFrames ==
+            right.layout.coordinatePool.ringRefreshFrames &&
         la.taggedContainerOffset == ra.taggedContainerOffset &&
         la.plainArrayOffset == ra.plainArrayOffset &&
         la.plainRootOffset == ra.plainRootOffset &&
@@ -392,7 +556,8 @@ CloudLayoutUpdateResult CloudLayoutStore::ValidateAndPublish(
         return Failure(CloudLayoutStatus::IdentityMismatch,
                        "expected runtime identity is invalid", previous);
     }
-    if (payload.empty() || payload.size() > kMaximumPayloadBytes) {
+    if (payload.empty() ||
+        payload.size() > kMaximumCloudLayoutPayloadBytes) {
         return Failure(CloudLayoutStatus::InvalidJson,
                        "layout payload is empty or too large", previous);
     }
@@ -430,16 +595,22 @@ CloudLayoutUpdateResult CloudLayoutStore::ValidateAndPublish(
                       {"schema_version", "package", "module", "build_id",
                        "revision", "layout"})) {
         return Failure(CloudLayoutStatus::SchemaMismatch,
-                       "root keys do not match schema version 1", previous);
+                       "root keys do not match schema version 2", previous);
     }
 
     ParseFailure failure;
     std::uint64_t schemaVersion = 0;
     std::uint64_t revision = 0;
-    if (!ParseUnsigned(root.at("schema_version"), kCloudLayoutSchemaVersion,
-                       kCloudLayoutSchemaVersion, schemaVersion, "schema_version",
-                       failure) ||
-        !ParseUnsigned(root.at("revision"), 1,
+    if (!ParseUnsigned(root.at("schema_version"), 0,
+                       std::numeric_limits<std::uint32_t>::max(),
+                       schemaVersion, "schema_version", failure)) {
+        return Failure(failure.status, std::move(failure.detail), previous);
+    }
+    if (schemaVersion != kCloudLayoutSchemaVersion) {
+        return Failure(CloudLayoutStatus::SchemaMismatch,
+                       "unsupported cloud layout schema version", previous);
+    }
+    if (!ParseUnsigned(root.at("revision"), 1,
                        std::numeric_limits<std::uint64_t>::max(), revision,
                        "revision", failure)) {
         return Failure(failure.status, std::move(failure.detail), previous);

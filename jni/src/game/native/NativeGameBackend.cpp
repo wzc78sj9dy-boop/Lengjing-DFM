@@ -3,13 +3,14 @@
 #include "game/aim/AimModePolicy.h"
 #include "game/aim/AimPrediction.h"
 #include "game/aim/CoverSelectionPolicy.h"
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
 #include "game/aim/TrackingCalculator.h"
+#endif
 #include "game/data/CustomItemCatalog.h"
 #include "game/data/ItemCatalog.h"
 #include "game/data/ThreatCatalog.h"
 #include "game/native/ActorRecordResolver.h"
-#include "game/native/ActorFrameVisitSet.h"
-#include "game/native/BoneFrameSource.h"
+#include "game/native/ActorRecordSource.h"
 #include "game/native/CharacterPositionResolver.h"
 #include "game/native/CoordinatePoolRuntime.h"
 #include "game/native/FrameProjection.h"
@@ -22,7 +23,9 @@
 #include "game/native/ProjectileSpeedReader.h"
 #include "game/native/RemoteElfIdentity.h"
 #include "game/native/RuntimeLayoutOverride.h"
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
 #include "game/native/TrajectoryHook.h"
+#endif
 #include "game/native/WorldObjectRefreshPolicy.h"
 
 #include <algorithm>
@@ -124,7 +127,9 @@ struct VersionLayout {
     std::uintptr_t worldOffset = 0;
     std::array<std::uintptr_t, 2> geometryInstancePointerOffsets{};
     native::ActorRecordLayout actorRecordLayout{};
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
     std::uintptr_t trackingMatrixRootOffset = 0;
+#endif
     std::uintptr_t componentPositionFlagOffset = 0;
 };
 
@@ -141,27 +146,34 @@ constexpr std::array<VersionLayout, 3> kVersionLayouts{{
        24,
        10000,
        3000},
-      0x1D0AD4C0ULL,
-      0x1DCFB4FULL},
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+       0x1D0AD4C0ULL,
+#endif
+       0x1DCFB4FULL},
     {"com.proxima.dfm",
      0x1D0F4800ULL,
      0x1D4115A8ULL,
      {0x1B1C0D68ULL, 0},
      {0, 0, 0, 0, 0, 0, 0, 0},
-     0,
-     0},
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+      0,
+#endif
+      0},
     {"com.garena.game.df",
      0x1CF7A440ULL,
      0x1D2971F8ULL,
      {0x1B0669A8ULL, 0},
      {0, 0, 0, 0, 0, 0, 0, 0},
-     0,
-     0},
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+      0,
+#endif
+      0},
 }};
 
 constexpr std::array<int, 15> kBoneIndices{
     31, 30, 1, 34, 6, 35, 7, 36, 8, 58, 62, 59, 63, 60, 64};
 
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
 constexpr std::array<std::uintptr_t, 4> kTrackingClassOffsets{
     0x1A4E2548ULL,
     0x191F50D0ULL,
@@ -174,6 +186,7 @@ constexpr std::array<std::uintptr_t, 3> kTrackingPlayerClassOffsets{
     0x1A4E6110ULL,
     0x1A3D6A20ULL,
 };
+#endif
 
 constexpr std::array<BoneLink, 14> kBoneLinks{{
     {0, 1},
@@ -758,8 +771,6 @@ public:
             : options.programDirectory + "/自定义物资.txt";
         customItems_.Load(customItemPath_);
         layout_ = kVersionLayouts[static_cast<std::size_t>(options.gameVersionIndex)];
-        const auto cloudLayout = native::BuildRuntimeLayoutOverride(
-            options.cloudLayout.get(), layout_.processName, "libUE4.so");
         processId_ = native::FindProcessId(layout_.processName);
         if (processId_ <= 0) {
             error = "未找到目标游戏进程";
@@ -792,16 +803,30 @@ public:
             return false;
         }
 
-        if (cloudLayout.has_value()) {
+        if (options.cloudLayout != nullptr) {
             std::string runtimeBuildId;
             if (!native::ReadRemoteElfBuildId(
                     moduleBase_,
                     &ReadElfBytes,
                     memory_.get(),
-                    runtimeBuildId) ||
-                options.cloudLayout == nullptr ||
-                runtimeBuildId != options.cloudLayout->identity.buildId) {
+                    runtimeBuildId)) {
+                probe.failureKind =
+                    RuntimeFailureKind::CloudLayoutRejected;
                 error = "cloud layout build id mismatch";
+                CloseLocked();
+                return false;
+            }
+            const auto cloudLayout = native::BuildRuntimeLayoutOverride(
+                options.cloudLayout.get(), layout_.processName,
+                "libUE4.so", runtimeBuildId);
+            if (!cloudLayout.has_value() ||
+                !memory_->ConfigureCoordinateReplay(
+                    cloudLayout->coordinateTransport) ||
+                !coordinatePoolRuntime_.Configure(
+                    cloudLayout->coordinatePool)) {
+                probe.failureKind =
+                    RuntimeFailureKind::CloudLayoutRejected;
+                error = "cloud layout validation failed";
                 CloseLocked();
                 return false;
             }
@@ -810,17 +835,19 @@ public:
             layout_.geometryInstancePointerOffsets =
                 cloudLayout->geometryInstancePointerOffsets;
             layout_.actorRecordLayout = cloudLayout->actorRecords;
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
             layout_.trackingMatrixRootOffset =
                 cloudLayout->trackingMatrixRootOffset;
+#endif
             layout_.componentPositionFlagOffset =
                 cloudLayout->componentPositionFlagOffset;
-            if (!algorithmPositionConfig_.IsConfigured() &&
-                cloudLayout->coordinateReplayEntryOffset != 0) {
-                algorithmPositionConfig_ = {
-                    cloudLayout->coordinateReplayEntryOffset,
-                    0,
-                };
-            }
+            algorithmPositionConfig_ =
+                cloudLayout->coordinateReplayEntryOffset != 0
+                ? native::AlgorithmPositionRuntimeConfig{
+                      cloudLayout->coordinateReplayEntryOffset,
+                      0,
+                  }
+                : native::AlgorithmPositionRuntimeConfig{};
         }
 
         RefreshAlgorithmEntry(true);
@@ -904,9 +931,13 @@ public:
         FrameContext context{};
         if (!BuildFrameContext(
                 context,
+                frame.sequence,
                 settings.visual.battlefieldMode,
                 positionMode,
-                settings.aim.trajectoryTracking,
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+                IsProjectileTrackingRequested(
+                    settings.aim.trajectoryTracking),
+#endif
                 settings.visual.antiFlicker,
                 error)) {
             ResetWorldState();
@@ -1043,8 +1074,14 @@ public:
                 aimEnabled_.load(std::memory_order_acquire),
                 WeaponAllowsAim(context.weaponId),
                 settings.aim.enabled,
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
                 settings.aim.trajectoryTracking);
+#else
+                false);
+#endif
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
         const bool recoveredTrackingActive = aimModes.tracking;
+#endif
         const bool aimActive = aimModes.Any();
         const ui::AimTuning aimTuning = ResolveAimTuning(
             settings.aim, context.weaponId);
@@ -1057,10 +1094,12 @@ public:
         std::vector<RuntimeActorRecord> actorRecords =
             CollectActorRecords(context);
         std::unordered_set<std::uintptr_t> seenThreats;
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
         std::unordered_set<std::uintptr_t> seenAimActors;
+#endif
         if (actorRecords.empty()) {
             error = "数据链等待：人物列表暂不可读";
-            RefreshCameraView(context);
+            RefreshCameraView(context, frame.sequence);
             AppendWorldObjectCache(settings, context, frame);
             FinalizeThreatSignals(settings, frame);
             PublishAimFrame(settings.aim, aimTuning, context, aimCandidates, frame);
@@ -1077,11 +1116,12 @@ public:
             std::min<std::size_t>(actorRecords.size(), 256));
         std::size_t validActorCount = 0;
         std::size_t decodedNameCount = 0;
-        for (const RuntimeActorRecord& actorRecord : actorRecords) {
+        for (RuntimeActorRecord actorRecord : actorRecords) {
             const std::uintptr_t actor = actorRecord.actor;
             if (!IsValidPointer(actor) || actor == context.localPawn) continue;
             ++validActorCount;
 
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
             std::uintptr_t actorClass = 0;
             std::uintptr_t trackingClassOffset = 0;
             const bool trackingClassReadable = recoveredTrackingActive &&
@@ -1097,18 +1137,26 @@ public:
                     trackingClassOffset) != kTrackingPlayerClassOffsets.end();
             const bool trackingRangeTarget = trackingClassOffset ==
                 0x1A3D6A20ULL;
+#endif
 
             std::int32_t nameIndex = -1;
             const bool nameIndexAvailable =
                 ReadValue(actor + 0x1C, nameIndex) && nameIndex >= 0;
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
             if (!nameIndexAvailable && !trackingPlayerClass) continue;
+#else
+            if (!nameIndexAvailable) continue;
+#endif
             const std::string className = nameIndexAvailable
                 ? DecodeName(nameIndex, context.namePool)
                 : std::string{};
             if (!className.empty()) {
                 ++decodedNameCount;
             }
-            bool character = IsCharacterClass(className) || trackingPlayerClass;
+            bool character = IsCharacterClass(className);
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+            character = character || trackingPlayerClass;
+#endif
             if (!character) {
                 float compatibilityMarker = 0.0f;
                 character = ReadValue(actor + 0x47C, compatibilityMarker) &&
@@ -1132,12 +1180,19 @@ public:
                 continue;
             }
             const bool rangeTargetClass =
-                IsRangeTargetClass(className) || trackingRangeTarget;
+                IsRangeTargetClass(className)
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+                || trackingRangeTarget
+#endif
+                ;
             const bool namedBotClass = IsBotClass(className);
             const std::uintptr_t playerState = ReadPointer(actor + 0x390);
             const bool playerStateAvailable = IsValidPointer(playerState);
-            const bool botClass = namedBotClass ||
-                (trackingPlayerClass && !playerStateAvailable);
+            const bool botClass = namedBotClass
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+                || (trackingPlayerClass && !playerStateAvailable)
+#endif
+                ;
             if (!native::HasUsablePlayerState(playerStateAvailable, botClass)) {
                 continue;
             }
@@ -1166,20 +1221,26 @@ public:
             const bool enemyEligible = native::IsEnemyEligible(
                 context.localTeam, targetTeam, bot);
 
+            native::FillOrdinaryActorPointers(
+                actorRecord,
+                [&](std::uintptr_t address) { return ReadPointer(address); });
             Vec3 position{};
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
             const native::PositionReadMode actorPositionMode =
                 trackingPlayerClass && actorRecord.resolverRecord
                 ? native::PositionReadMode::Direct
                 : positionMode;
+#else
+            const native::PositionReadMode actorPositionMode = positionMode;
+#endif
             const bool coordinateAvailable = ReadCharacterPosition(
-                actor,
-                actorRecord.root,
+                actorRecord,
                 className,
                 actorPositionMode,
                 settings.visual.antiFlicker,
                 position);
             HealthState health{};
-            bool healthAvailable = ReadHealth(actor, playerState, health);
+            bool healthAvailable = ReadHealth(actor, health);
             if (!healthAvailable && botClass && coordinateAvailable) {
                 health.health = 100.0f;
                 health.maxHealth = 100.0f;
@@ -1195,8 +1256,12 @@ public:
                               (health.health > 0.0f || health.downed),
                       },
                       native::PlayerDirectionData{false});
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
             if (!coordinateAvailable ||
                 (!standardTrackable && !trackingPlayerClass)) {
+#else
+            if (!coordinateAvailable || !standardTrackable) {
+#endif
                 continue;
             }
             const Vec3 delta = Subtract(position, context.localPosition);
@@ -1218,6 +1283,7 @@ public:
                 !(!rangeTargetClass && bot && settings.aim.ignoreBots) &&
                 !(health.downed && settings.aim.ignoreDowned);
             const bool aimEligible = selfAimActorEligible;
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
             bool trackingActorEligible = recoveredTrackingActive &&
                 trackingPlayerClass && actorRecord.resolverRecord &&
                 (rangeTargetClass || enemyEligible);
@@ -1243,7 +1309,7 @@ public:
                     healthAvailable && health.health > 0.0f;
                 trackingActorEligible = excludedState == 0 &&
                     (playerStateGate == 0 || trackingTargetState != 0) &&
-                    ReadTrackingMeshType(actorRecord.mesh, meshType) &&
+                    ReadTrackingMeshType(actorRecord, meshType) &&
                     (rangeTargetClass ||
                      PassTrackingCategory(actor, settings.aim)) &&
                     (rangeTargetClass ||
@@ -1253,9 +1319,14 @@ public:
                      trackingTargetState == 0) &&
                     (!settings.aim.rejectDeadTarget || healthAlive);
             }
+#endif
             const bool visualEligible = standardTrackable &&
                 (!health.downed || settings.visual.downedPlayer);
-            if (!visualEligible && !aimEligible && !trackingActorEligible) {
+            if (!visualEligible && !aimEligible
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+                && !trackingActorEligible
+#endif
+                ) {
                 continue;
             }
             if (bot) ++frame.botCount;
@@ -1290,8 +1361,7 @@ public:
             float actorHeadingRadians = 0.0f;
             const bool actorFacingValid = facingNeeded &&
                 ReadActorFacing(
-                    actor,
-                    actorRecord.mesh,
+                    actorRecord,
                     actorForward,
                     actorHeadingRadians);
             if (radarInRange && !(bot && settings.visual.filterBots)) {
@@ -1366,7 +1436,11 @@ public:
                 settings.visual.warningSize > 0.0f &&
                 horizontalDistanceMeters <= settings.visual.warningDistanceMeters;
             if (!drawingInRange && !warningInRange && !radarInRange &&
-                !aimEligible && !trackingActorEligible) {
+                !aimEligible
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+                && !trackingActorEligible
+#endif
+                ) {
                 continue;
             }
 
@@ -1386,9 +1460,59 @@ public:
                 options_.screenWidth,
                 options_.screenHeight,
                 bodyTop);
-            bool onScreen = bottomProjected && topProjected &&
-                (IsInsideScreen(bodyBottom, options_.screenWidth, options_.screenHeight) ||
-                 IsInsideScreen(bodyTop, options_.screenWidth, options_.screenHeight));
+            native::PlayerScreenBounds anchorBounds{};
+            const bool anchorBoundsReady =
+                native::CalculatePlayerAnchorBounds(
+                    native::PlayerBoneScreenPoint{
+                        bodyBottom.x, bodyBottom.y, bottomProjected},
+                    native::PlayerBoneScreenPoint{
+                        bodyTop.x, bodyTop.y, topProjected},
+                    anchorBounds);
+            bool onScreen = anchorBoundsReady &&
+                native::IsReliablePlayerScreenBounds(
+                    anchorBounds,
+                    static_cast<float>(options_.screenWidth),
+                    static_cast<float>(options_.screenHeight));
+
+            BoneFrame boneFrame{};
+            bool boneFrameReady = false;
+            ScreenRect boneBounds{};
+            bool boneBoundsReady = false;
+            if (aimEligible
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+                || trackingActorEligible
+#endif
+                ||
+                (settings.visual.enabled &&
+                  (settings.visual.box ||
+                   settings.visual.skeleton ||
+                   settings.visual.visibilityColor ||
+                   settings.visual.playerViewRay) &&
+                  visualEligible && drawingInRange)) {
+                boneFrameReady = ReadBoneFrame(
+                    actorRecord,
+                    context.view,
+                    settings.visual.antiFlicker,
+                    &position,
+                    boneFrame);
+                boneBoundsReady = boneFrameReady &&
+                    TryBuildBoneBounds(boneFrame, boneBounds);
+                const native::PlayerScreenBounds projectedBoneBounds{
+                    boneBounds.left,
+                    boneBounds.top,
+                    boneBounds.right,
+                    boneBounds.bottom,
+                };
+                native::PlayerScreenBounds visibleBounds{};
+                onScreen = native::SelectPlayerScreenBounds(
+                    boneBoundsReady,
+                    projectedBoneBounds,
+                    anchorBoundsReady,
+                    anchorBounds,
+                    static_cast<float>(options_.screenWidth),
+                    static_cast<float>(options_.screenHeight),
+                    visibleBounds);
+            }
 
             if (!onScreen && warningInRange && settings.visual.enabled &&
                 !(bot && settings.visual.filterBots)) {
@@ -1432,36 +1556,19 @@ public:
                     frame.playerSignals.push_back(std::move(signal));
                 }
             }
-
-            BoneFrame boneFrame{};
-            bool boneFrameReady = false;
-            ScreenRect boneBounds{};
-            bool boneBoundsReady = false;
-            if (aimEligible || trackingActorEligible ||
-                (settings.visual.enabled &&
-                  (settings.visual.box ||
-                   settings.visual.skeleton ||
-                   settings.visual.visibilityColor ||
-                   settings.visual.playerViewRay) &&
-                  visualEligible && drawingInRange)) {
-                boneFrameReady = ReadBoneFrame(
-                    actorRecord,
-                    context.view,
-                    settings.visual.antiFlicker,
-                    &position,
-                    boneFrame);
-                boneBoundsReady = boneFrameReady &&
-                    TryBuildBoneBounds(boneFrame, boneBounds);
-                onScreen = onScreen || boneFrameReady;
-            }
             native::GeometryVisibility playerVisibility = actorVisibility;
             if (boneFrameReady &&
                 (settings.visual.visibilityColor || settings.aim.missMode ||
-                 ((aimEligible || trackingActorEligible) &&
+                 ((aimEligible
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+                   || trackingActorEligible
+#endif
+                   ) &&
                   settings.aim.requireVisibility))) {
                 playerVisibility = EvaluateBoneVisibility(
                     context.view.location, boneFrame);
             }
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
             if (trackingActorEligible) {
                 CollectTrackingCandidateFromSample(
                     actorRecord,
@@ -1478,6 +1585,7 @@ public:
                     seenAimActors,
                     aimCandidates);
             }
+#endif
             if (settings.visual.enabled && settings.visual.playerViewRay &&
                 threatTeamsValid && !bot && health.health > 0.0f &&
                 drawingInRange && onScreen && actorFacingValid) {
@@ -1613,7 +1721,9 @@ public:
                             false,
                             rangeTargetClass,
                             selfAimActorEligible,
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
                             false,
+#endif
                         });
                     }
                 }
@@ -1625,14 +1735,6 @@ public:
                 continue;
             }
 
-            native::PlayerScreenBounds anchorBounds{};
-            const bool anchorBoundsReady =
-                native::CalculatePlayerAnchorBounds(
-                    native::PlayerBoneScreenPoint{
-                        bodyBottom.x, bodyBottom.y, bottomProjected},
-                    native::PlayerBoneScreenPoint{
-                        bodyTop.x, bodyTop.y, topProjected},
-                    anchorBounds);
             const native::PlayerScreenBounds resolvedBoneBounds{
                 boneBounds.left,
                 boneBounds.top,
@@ -1657,8 +1759,7 @@ public:
                 resolvedBounds.bottom,
             };
             const float height = playerBounds.bottom - playerBounds.top;
-            if (!std::isfinite(height) || height < 8.0f ||
-                height > static_cast<float>(options_.screenHeight) * 2.0f) {
+            if (!std::isfinite(height) || height < 8.0f) {
                 continue;
             }
             PlayerVisual visual{};
@@ -1720,7 +1821,7 @@ public:
             }
             if (settings.visual.heldWeapon && !bot) {
                 const std::uintptr_t weapon = ReadPointer(actor + 0x1790);
-                std::uint64_t weaponId = 0;
+                std::uint32_t weaponId = 0;
                 if (IsValidPointer(weapon)) ReadValue(weapon + 0x838, weaponId);
                 if (const char* weaponName = data::FindHandheldName(weaponId)) {
                     AppendDetail(visual.detail, weaponName);
@@ -1767,38 +1868,41 @@ public:
                         &position,
                         boneFrame);
                 }
-                if (boneFrameReady) {
-                    BuildSkeletonVisual(
-                        boneFrame,
-                        !visual.coverHighlighted &&
-                            (settings.visual.visibilityColor ||
-                             settings.aim.missMode),
-                        visual.skeleton);
-                }
-                if (visual.skeleton.joints.empty()) visual.drawSkeleton = false;
+                visual.skeleton.colorByVisibility =
+                    !visual.coverHighlighted &&
+                    (settings.visual.visibilityColor ||
+                     settings.aim.missMode);
+                if (!boneFrameReady) visual.drawSkeleton = false;
             }
             playerProjectionSources.push_back(PlayerProjectionSource{
                 frame.players.size(),
                 Vec3{position.x, position.y, position.z - 5.0f},
                 Vec3{position.x, position.y, position.z + 205.0f},
-                boneFrame,
+                std::move(boneFrame),
                 boneFrameReady,
             });
             frame.players.push_back(std::move(visual));
         }
 
-        if (!recoveredTrackingActive &&
-            validActorCount > 0 && decodedNameCount == 0) {
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+        const bool requireDecodedNames = !recoveredTrackingActive;
+#else
+        constexpr bool requireDecodedNames = true;
+#endif
+        if (requireDecodedNames && validActorCount > 0 &&
+            decodedNameCount == 0) {
             error = "数据链等待：名称池暂不可读";
             aimController_.ClearTarget();
             lockedAimIdentity_ = 0;
             lockedAimBone_ = -1;
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
             lockedTrackingIdentity_ = 0;
             lockedTrackingBone_ = -1;
+#endif
             return true;
         }
 
-        RefreshCameraView(context);
+        RefreshCameraView(context, frame.sequence);
         ReprojectPlayers(context.view, playerProjectionSources, frame);
         ReprojectAimCandidates(
             context.view, settings.aim, aimTuning, aimCandidates);
@@ -1853,13 +1957,7 @@ public:
     }
 
 private:
-    struct RuntimeActorRecord {
-        std::uintptr_t actor = 0;
-        std::uintptr_t root = 0;
-        std::uintptr_t mesh = 0;
-        bool resolverRecord = false;
-        bool encryptedRecord = false;
-    };
+    using RuntimeActorRecord = native::ActorRecordSource;
 
     struct FrameContext {
         std::uintptr_t world = 0;
@@ -1871,14 +1969,18 @@ private:
         std::uintptr_t cameraManager = 0;
         std::uintptr_t namePool = 0;
         Vec3 localPosition{};
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
         Vec3 firingOrigin{};
+#endif
         CameraView view{};
         std::int32_t localTeam = -1;
         std::int32_t mapBuildId = 0;
         bool warfare = false;
         bool firing = false;
         bool zooming = false;
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
         bool firingOriginValid = false;
+#endif
         bool decodedRecordsEncrypted = false;
         bool decodedRecordSourceReady = false;
         std::uint64_t weaponId = 0;
@@ -1967,7 +2069,9 @@ private:
         bool alignBones = false;
         bool rangeTarget = false;
         bool selfAimEligible = false;
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
         bool trackingEligible = false;
+#endif
     };
 
     struct AimWarningState {
@@ -1983,7 +2087,13 @@ private:
              (settings.visual.modelGeometry ||
               settings.visual.visibilityColor ||
               (settings.visual.skeleton && settings.aim.missMode))) ||
-            ((settings.aim.enabled || settings.aim.trajectoryTracking) &&
+            (aim::IsAimOutputRequested(
+                 settings.aim.enabled,
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+                 settings.aim.trajectoryTracking) &&
+#else
+                 false) &&
+#endif
              aimEnabled_.load(std::memory_order_acquire) &&
              (settings.aim.missMode ||
               settings.aim.requireVisibility));
@@ -2117,13 +2227,11 @@ private:
                 !IsValidPointer(record->mesh)) {
                 continue;
             }
-            result.push_back(RuntimeActorRecord{
+            result.push_back(native::MakeResolvedActorRecord(
                 record->actor,
                 record->root,
                 record->mesh,
-                true,
-                array->encrypted,
-            });
+                array->encrypted));
         }
         return result;
     }
@@ -2131,27 +2239,26 @@ private:
     std::vector<RuntimeActorRecord> CollectActorRecords(
         const FrameContext& context) {
         std::vector<RuntimeActorRecord> result;
-        native::ActorFrameVisitSet seen;
-        result.reserve(context.decodedActors.size());
-        seen.Reserve(context.decodedActors.size());
-        for (const RuntimeActorRecord& record : context.decodedActors) {
-            if (IsValidPointer(record.actor) &&
-                seen.TryVisit(record.actor)) {
-                result.push_back(record);
-            }
-        }
         const std::vector<std::uintptr_t> ordinary =
             CollectActorAddresses(context);
-        result.reserve(result.size() + ordinary.size());
+        result.reserve(context.decodedActors.size() + ordinary.size());
+        std::unordered_map<std::uintptr_t, std::size_t> indices;
+        indices.reserve(context.decodedActors.size() + ordinary.size());
+        const auto appendOrMerge = [&](const RuntimeActorRecord& record) {
+            if (!IsValidPointer(record.actor)) return;
+            const auto inserted = indices.emplace(record.actor, result.size());
+            if (inserted.second) {
+                result.push_back(record);
+                return;
+            }
+            native::MergeActorRecordSource(
+                result[inserted.first->second], record);
+        };
+        for (const RuntimeActorRecord& record : context.decodedActors) {
+            appendOrMerge(record);
+        }
         for (const std::uintptr_t actor : ordinary) {
-            if (!seen.TryVisit(actor)) continue;
-            result.push_back(RuntimeActorRecord{
-                actor,
-                0,
-                0,
-                false,
-                false,
-            });
+            appendOrMerge(native::MakeOrdinaryActorRecord(actor));
         }
         return result;
     }
@@ -2964,9 +3071,12 @@ private:
     }
 
     bool BuildFrameContext(FrameContext& context,
+                           std::uint64_t frameSequence,
                            bool battlefieldMode,
                            native::PositionReadMode positionMode,
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
                            bool trajectoryTracking,
+#endif
                            bool antiFlicker,
                            std::string& diagnostic) {
         if (!IsValidPointer(moduleBase_)) {
@@ -3001,8 +3111,13 @@ private:
             context.actorArray = actors.data;
             context.actorCount = actors.count;
         }
-        if (positionMode == native::PositionReadMode::Direct ||
+        if (positionMode == native::PositionReadMode::Direct
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+            ||
             trajectoryTracking) {
+#else
+            ) {
+#endif
             context.decodedActors = CollectDecodedActorRecords(
                 context.decodedRecordSourceReady,
                 context.decodedRecordsEncrypted);
@@ -3065,24 +3180,24 @@ private:
         context.firing = firing != 0;
         context.weaponRoot = ReadPointer(context.localPawn + 0x1790);
         if (IsValidPointer(context.weaponRoot)) {
-            ReadValue(context.weaponRoot + 0x838, context.weaponId);
+            std::uint32_t weaponId = 0;
+            if (ReadValue(context.weaponRoot + 0x838, weaponId)) {
+                context.weaponId = weaponId;
+            }
         }
 
-        CameraView first{};
-        CameraView second{};
-        const bool firstValid = ReadValue(context.cameraManager + 0x3590, first) && IsFinite(first);
-        const bool secondValid = ReadValue(context.cameraManager + 0x3590, second) && IsFinite(second);
-        if (secondValid) context.view = second;
-        else if (firstValid) context.view = first;
-        else if (lastViewValid_) context.view = lastView_;
-        else {
+        if (!ReadStableCameraView(
+                context.world,
+                context.cameraManager,
+                frameSequence,
+                context.view)) {
             diagnostic = "数据链等待：相机数据暂不可读";
             return false;
         }
-        lastView_ = context.view;
-        lastViewValid_ = true;
-        context.firingOriginValid = ResolveTrackingOrigin(
-            context, context.firingOrigin);
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+        context.firingOriginValid = trajectoryTracking &&
+            ResolveTrackingOrigin(context, context.firingOrigin);
+#endif
 
         const auto localRecord = std::find_if(
             context.decodedActors.begin(),
@@ -3276,15 +3391,52 @@ private:
         return IsFinite(position) && IsNonzero(position);
     }
 
-    bool ReadActorFacing(std::uintptr_t actor,
-                         std::uintptr_t decodedMesh,
-                         Vec3& forward,
-                         float& headingRadians) {
+    bool ReadCharacterPosition(
+        const RuntimeActorRecord& record,
+        std::string_view className,
+        native::PositionReadMode preferredMode,
+        bool antiFlicker,
+        Vec3& position) {
+        position = Vec3{};
+        return native::ReadActorRecordSourceWithFallback(
+            record,
+            [&] {
+                Vec3 candidate{};
+                if (!ReadCharacterPosition(
+                        record.actor,
+                        record.root,
+                        className,
+                        preferredMode,
+                        antiFlicker,
+                        candidate) ||
+                    !IsFinite(candidate) || !IsNonzero(candidate)) {
+                    return false;
+                }
+                position = candidate;
+                return true;
+            },
+            [&] {
+                Vec3 candidate{};
+                if (!ReadCharacterPosition(
+                        record.actor,
+                        record.ordinaryRoot,
+                        className,
+                        native::PositionReadMode::Standard,
+                        antiFlicker,
+                        candidate) ||
+                    !IsFinite(candidate) || !IsNonzero(candidate)) {
+                    return false;
+                }
+                position = candidate;
+                return true;
+            });
+    }
+
+    bool ReadActorFacingFromMesh(std::uintptr_t mesh,
+                                 Vec3& forward,
+                                 float& headingRadians) {
         forward = Vec3{};
         headingRadians = 0.0f;
-        const std::uintptr_t mesh = IsValidPointer(decodedMesh)
-            ? decodedMesh
-            : ReadPointer(actor + 0x3D0);
         if (!IsValidPointer(mesh)) return false;
 
         Transform transform{};
@@ -3309,6 +3461,21 @@ private:
         }
         headingRadians = std::atan2(forward.y, forward.x);
         return std::isfinite(headingRadians);
+    }
+
+    bool ReadActorFacing(const RuntimeActorRecord& record,
+                         Vec3& forward,
+                         float& headingRadians) {
+        return native::ReadActorRecordSourceWithFallback(
+            record,
+            [&] {
+                return ReadActorFacingFromMesh(
+                    record.mesh, forward, headingRadians);
+            },
+            [&] {
+                return ReadActorFacingFromMesh(
+                    record.ordinaryMesh, forward, headingRadians);
+            });
     }
 
     bool ObserveAimWarning(
@@ -3397,14 +3564,12 @@ private:
         }
     }
 
-    bool ReadHealth(std::uintptr_t actor,
-                    std::uintptr_t playerState,
-                    HealthState& state) {
+    bool ReadHealth(std::uintptr_t actor, HealthState& state) {
         const std::uintptr_t healthComponent = ReadPointer(actor + 0x10C8);
         const std::uintptr_t healthSet = ReadPointer(healthComponent + 0x280);
         if (!IsValidPointer(healthSet)) return false;
-        if (!ReadValue(healthSet + 0x38, state.health) ||
-            !ReadValue(healthSet + 0x50, state.maxHealth) ||
+        if (!ReadValue(healthSet + 0x3C, state.health) ||
+            !ReadValue(healthSet + 0x54, state.maxHealth) ||
             !std::isfinite(state.health) || !std::isfinite(state.maxHealth) ||
             state.maxHealth <= 0.0f || state.maxHealth > 100000.0f) {
             return false;
@@ -3412,13 +3577,14 @@ private:
         state.health = std::clamp(state.health, 0.0f, state.maxHealth);
 
         std::uint8_t downed = 0;
-        if (IsValidPointer(playerState)) {
-            ReadValue(playerState + 0x366, downed);
+        const std::uintptr_t blackboard = ReadPointer(actor + 0x1030);
+        if (IsValidPointer(blackboard)) {
+            ReadValue(blackboard + 0x372, downed);
         }
         float downedHealth = 0.0f;
         float maximumDownedHealth = 0.0f;
-        ReadValue(healthSet + 0x110, downedHealth);
-        ReadValue(healthSet + 0x120, maximumDownedHealth);
+        ReadValue(healthSet + 0x114, downedHealth);
+        ReadValue(healthSet + 0x124, maximumDownedHealth);
         const bool downedPoolValid =
             std::isfinite(downedHealth) &&
             std::isfinite(maximumDownedHealth);
@@ -3652,35 +3818,38 @@ private:
         std::array<bool, kBoneIndices.size()> currentValid{};
         std::uintptr_t mesh = 0;
         std::uintptr_t boneArray = 0;
+        std::uintptr_t sourceRoot = 0;
+        bool sourceEncrypted = false;
+        bool sourceResolvedTranslation = false;
         Matrix4 componentMatrix{};
-        const native::BoneFrameRecordSource recordSource{
-            actorRecord.root,
-            actorRecord.mesh,
-            actorRecord.encryptedRecord,
-        };
-        const std::uintptr_t ordinaryMesh = actorRecord.encryptedRecord
-            ? 0
-            : ReadPointer(actor + 0x3D0);
-        const std::uintptr_t preferredMesh =
-            native::SelectBoneFrameMesh(recordSource, ordinaryMesh);
-        const bool useResolvedTranslation = actorRecord.encryptedRecord &&
+        const bool preferredResolvedTranslation =
+            actorRecord.encryptedRecord &&
             resolvedPosition != nullptr && IsFinite(*resolvedPosition) &&
             IsNonzero(*resolvedPosition);
-        const auto cacheSource = [&cached]() {
-            return native::BoneFrameCacheSource{
-                cached->second.root,
-                cached->second.mesh,
-                cached->second.encryptedRecord,
-            };
-        };
         bool cacheFresh = useCache && cached != boneCache_.end() &&
             now - cached->second.lastUpdatedAt <= kCacheLifetime &&
-            cached->second.resolvedTranslation == useResolvedTranslation &&
-            native::IsBoneFrameCacheSourceCompatible(
-                recordSource, preferredMesh, cacheSource());
+            ((actorRecord.resolverRecord &&
+              cached->second.root == actorRecord.root &&
+              cached->second.mesh == actorRecord.mesh &&
+              cached->second.encryptedRecord ==
+                  actorRecord.encryptedRecord &&
+              cached->second.resolvedTranslation ==
+                  preferredResolvedTranslation) ||
+             (actorRecord.ordinarySource &&
+              cached->second.root == actorRecord.ordinaryRoot &&
+              cached->second.mesh == actorRecord.ordinaryMesh &&
+              !cached->second.encryptedRecord &&
+              !cached->second.resolvedTranslation));
 
         const auto readBoneSource =
-            [this, &mesh, &boneArray, &componentMatrix, resolvedPosition](
+            [this,
+             &mesh,
+             &boneArray,
+             &sourceRoot,
+             &sourceEncrypted,
+             &sourceResolvedTranslation,
+             &componentMatrix,
+             resolvedPosition](
                 std::uintptr_t candidate,
                 std::uintptr_t root,
                 bool rebuildResolvedTransform) {
@@ -3719,21 +3888,27 @@ private:
                 }
                 mesh = candidate;
                 boneArray = candidateBoneArray;
+                sourceRoot = root;
+                sourceEncrypted = rebuildResolvedTransform;
+                sourceResolvedTranslation = rebuildResolvedTransform;
                 componentMatrix = TransformToMatrix(componentTransform);
                 return true;
             };
-        bool componentReady = readBoneSource(
-            preferredMesh,
-            actorRecord.root,
-            actorRecord.encryptedRecord);
-        if (!componentReady && !actorRecord.encryptedRecord &&
-            actorRecord.mesh != preferredMesh) {
-            componentReady = readBoneSource(
-                actorRecord.mesh, actorRecord.root, false);
-        }
-        if (!componentReady && cacheFresh &&
-            cached->second.mesh != preferredMesh &&
-            cached->second.mesh != actorRecord.mesh) {
+        bool componentReady = native::ReadActorRecordSourceWithFallback(
+            actorRecord,
+            [&] {
+                return readBoneSource(
+                    actorRecord.mesh,
+                    actorRecord.root,
+                    actorRecord.encryptedRecord);
+            },
+            [&] {
+                return readBoneSource(
+                    actorRecord.ordinaryMesh,
+                    actorRecord.ordinaryRoot,
+                    false);
+            });
+        if (!componentReady && cacheFresh) {
             componentReady = readBoneSource(
                 cached->second.mesh,
                 cached->second.root,
@@ -3766,6 +3941,10 @@ private:
                 IsValidTransform(headTransform)) {
                 mesh = cached->second.mesh;
                 boneArray = cached->second.boneArray;
+                sourceRoot = cached->second.root;
+                sourceEncrypted = cached->second.encryptedRecord;
+                sourceResolvedTranslation =
+                    cached->second.resolvedTranslation;
                 componentMatrix = TransformToMatrix(componentTransform);
                 componentReady = true;
             }
@@ -3827,11 +4006,11 @@ private:
             [](bool valid) { return valid; });
         if (useCache && currentComplete) {
             BoneCacheEntry& entry = boneCache_[actor];
-            entry.root = actorRecord.root;
+            entry.root = sourceRoot;
             entry.mesh = mesh;
             entry.boneArray = boneArray;
-            entry.encryptedRecord = actorRecord.encryptedRecord;
-            entry.resolvedTranslation = useResolvedTranslation;
+            entry.encryptedRecord = sourceEncrypted;
+            entry.resolvedTranslation = sourceResolvedTranslation;
             entry.world = currentWorld;
             entry.lastUpdatedAt = now;
             cached = boneCache_.find(actor);
@@ -3911,32 +4090,72 @@ private:
         skeleton.colorByVisibility = colorByVisibility;
     }
 
-    void RefreshCameraView(FrameContext& context) {
+    bool ReadStableCameraView(
+        std::uintptr_t world,
+        std::uintptr_t cameraManager,
+        std::uint64_t frameSequence,
+        CameraView& view) {
         CameraView first{};
         CameraView second{};
         const bool firstValid =
-            ReadValue(context.cameraManager + 0x3590, first) &&
+            ReadValue(cameraManager + 0x3590, first) &&
             IsFinite(first);
         const bool secondValid =
-            ReadValue(context.cameraManager + 0x3590, second) &&
+            ReadValue(cameraManager + 0x3590, second) &&
             IsFinite(second);
-        if (secondValid) {
-            context.view = second;
-        } else if (firstValid) {
-            context.view = first;
+        if (!firstValid && !secondValid) {
+            if (!native::IsProjectionViewCacheCompatible(
+                    lastViewValid_,
+                    lastViewWorld_,
+                    lastViewCameraManager_,
+                    world,
+                    cameraManager)) {
+                return false;
+            }
+            view = lastView_;
+            return true;
         }
-        if (firstValid || secondValid) {
-            lastView_ = context.view;
-            lastViewValid_ = true;
+
+        CameraView candidate = secondValid ? second : first;
+        float stableFov = 0.0f;
+        if (!native::ResolveStableProjectionFov(
+                world,
+                cameraManager,
+                frameSequence,
+                firstValid,
+                first.fieldOfView,
+                secondValid,
+                second.fieldOfView,
+                viewFovState_,
+                stableFov)) {
+            return false;
+        }
+        candidate.fieldOfView = stableFov;
+        view = candidate;
+        lastView_ = candidate;
+        lastViewWorld_ = world;
+        lastViewCameraManager_ = cameraManager;
+        lastViewValid_ = true;
+        return true;
+    }
+
+    void RefreshCameraView(
+        FrameContext& context,
+        std::uint64_t frameSequence) {
+        CameraView refreshed{};
+        if (ReadStableCameraView(
+                context.world,
+                context.cameraManager,
+                frameSequence,
+                refreshed)) {
+            context.view = refreshed;
         }
     }
 
     bool ReprojectBoneFrame(const BoneFrame& source,
                             const CameraView& view,
                             BoneFrame& projected) const {
-        projected = source;
-        projected.valid.fill(false);
-        projected.screen.fill(Vec2{});
+        projected = BoneFrame{};
         bool anyProjected = false;
         for (std::size_t index = 0;
              index < projected.world.size();
@@ -3958,6 +4177,7 @@ private:
             }
             projected.screen[index] = screen;
             projected.valid[index] = true;
+            projected.visibility[index] = source.visibility[index];
             anyProjected = true;
         }
         return anyProjected;
@@ -3967,8 +4187,7 @@ private:
         const CameraView& view,
         const std::vector<PlayerProjectionSource>& sources,
         GameFrame& frame) const {
-        std::vector<PlayerVisual> projectedPlayers;
-        projectedPlayers.reserve(sources.size());
+        std::size_t writeIndex = 0;
         for (const PlayerProjectionSource& source : sources) {
             if (source.playerIndex >= frame.players.size()) continue;
             Vec2 bottom{};
@@ -4018,12 +4237,11 @@ private:
                 continue;
             }
             const float height = resolved.bottom - resolved.top;
-            if (!std::isfinite(height) || height < 8.0f ||
-                height > static_cast<float>(options_.screenHeight) * 2.0f) {
+            if (!std::isfinite(height) || height < 8.0f) {
                 continue;
             }
 
-            PlayerVisual visual = frame.players[source.playerIndex];
+            PlayerVisual& visual = frame.players[source.playerIndex];
             visual.bounds = ScreenRect{
                 resolved.left,
                 resolved.top,
@@ -4033,20 +4251,23 @@ private:
             if (visual.drawSkeleton) {
                 const bool colorByVisibility =
                     visual.skeleton.colorByVisibility;
-                const int selectedJoint = visual.skeleton.selectedJoint;
-                visual.skeleton = SkeletonVisual{};
+                visual.skeleton.joints.clear();
+                visual.skeleton.links.clear();
+                visual.skeleton.selectedJoint = -1;
                 if (bonesReady) {
                     BuildSkeletonVisual(
                         bones, colorByVisibility, visual.skeleton);
-                    visual.skeleton.selectedJoint = selectedJoint;
                 }
                 if (visual.skeleton.joints.empty()) {
                     visual.drawSkeleton = false;
                 }
             }
-            projectedPlayers.push_back(std::move(visual));
+            if (writeIndex != source.playerIndex) {
+                frame.players[writeIndex] = std::move(visual);
+            }
+            ++writeIndex;
         }
-        frame.players = std::move(projectedPlayers);
+        frame.players.resize(writeIndex);
     }
 
     void ReprojectAimCandidates(
@@ -4420,7 +4641,8 @@ private:
         return false;
     }
 
-    bool ReadTrackingMeshType(
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+    bool ReadTrackingMeshTypeFromMesh(
         std::uintptr_t mesh,
         std::int32_t& meshType) {
         meshType = 0;
@@ -4434,28 +4656,27 @@ private:
             meshType >= 1 && meshType <= 100;
     }
 
+    bool ReadTrackingMeshType(
+        const RuntimeActorRecord& record,
+        std::int32_t& meshType) {
+        return native::ReadActorRecordSourceWithFallback(
+            record,
+            [&] {
+                return ReadTrackingMeshTypeFromMesh(
+                    record.mesh, meshType);
+            },
+            [&] {
+                return ReadTrackingMeshTypeFromMesh(
+                    record.ordinaryMesh, meshType);
+            });
+    }
+
     bool PassTrackingAcquisitionHealth(
         std::uintptr_t actor,
         bool classifiedState) {
-        std::uintptr_t health = ReadPointer(actor + 0x10C8);
-        health = ReadPointer(health + 0x280);
-        health = ReadPointer(health + 0x40);
-        float current = 0.0f;
-        float maximum = 0.0f;
-        if (IsValidPointer(health)) {
-            ReadValue(health + 0x38, current);
-            ReadValue(health + 0x50, maximum);
-        }
-        std::int32_t percent = 0;
-        const float ratio = maximum != 0.0f
-            ? (current * 100.0f) / maximum
-            : 0.0f;
-        if (std::isfinite(ratio) &&
-            ratio >= static_cast<float>(std::numeric_limits<std::int32_t>::min()) &&
-            ratio <= static_cast<float>(std::numeric_limits<std::int32_t>::max())) {
-            percent = static_cast<std::int32_t>(ratio);
-        }
-        return percent > 0 || !classifiedState;
+        HealthState health{};
+        const bool healthAvailable = ReadHealth(actor, health);
+        return (healthAvailable && health.health > 0.0f) || !classifiedState;
     }
 
     bool PassTrackingCategory(
@@ -4573,7 +4794,7 @@ private:
     }
 
     void CollectTrackingAcquisitionCandidate(
-        const RuntimeActorRecord& record,
+        const RuntimeActorRecord& sourceRecord,
         const FrameContext& context,
         const ui::AimSettings& settings,
         const ui::AimTuning& tuning,
@@ -4582,10 +4803,17 @@ private:
         std::uint64_t sequence,
         std::unordered_set<std::uintptr_t>& seenActors,
         std::vector<AimCandidate>& candidates) {
+        RuntimeActorRecord record = sourceRecord;
+        native::FillOrdinaryActorPointers(
+            record,
+            [&](std::uintptr_t address) { return ReadPointer(address); });
         if (!record.resolverRecord ||
             !IsValidPointer(record.actor) ||
-            !IsValidPointer(record.root) ||
-            !IsValidPointer(record.mesh)) {
+            ((!IsValidPointer(record.root) ||
+              !IsValidPointer(record.mesh)) &&
+             (!record.ordinarySource ||
+              !IsValidPointer(record.ordinaryRoot) ||
+              !IsValidPointer(record.ordinaryMesh)))) {
             return;
         }
 
@@ -4651,12 +4879,11 @@ private:
         if (playerStateGate != 0 && targetState == 0) return;
 
         std::int32_t meshType = 0;
-        if (!ReadTrackingMeshType(record.mesh, meshType)) return;
+        if (!ReadTrackingMeshType(record, meshType)) return;
 
         Vec3 position{};
         if (!ReadCharacterPosition(
-                record.actor,
-                record.root,
+                record,
                 std::string_view{},
                 native::PositionReadMode::Direct,
                 antiFlicker,
@@ -4837,7 +5064,9 @@ private:
         return IsValidPointer(state) &&
             ReadValue(state + 0x220, origin) && IsFinite(origin);
     }
+#endif
 
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
     void PublishAimFrame(const ui::AimSettings& settings,
                          const ui::AimTuning& tuning,
                          const FrameContext& context,
@@ -5076,6 +5305,134 @@ private:
         }
         if (guide.drawCircle || guide.drawTargetRay) frame.aimGuide = guide;
     }
+#else
+    void PublishAimFrame(const ui::AimSettings& settings,
+                         const ui::AimTuning& tuning,
+                         const FrameContext& context,
+                         const std::vector<AimCandidate>& candidates,
+                         GameFrame& frame) {
+        const aim::AimModeActivation aimModes =
+            aim::ResolveAimModeActivation(
+                aimEnabled_.load(std::memory_order_acquire),
+                WeaponAllowsAim(context.weaponId),
+                settings.enabled,
+                false);
+        if (!aimModes.selfAim) {
+            aimController_.ClearTarget();
+            lockedAimIdentity_ = 0;
+            lockedAimBone_ = -1;
+            return;
+        }
+
+        const bool touchInput =
+            options_.inputMode == ui::AimInputMode::WriteTouch ||
+            options_.inputMode == ui::AimInputMode::KernelTouch;
+        if (settings.showTouchArea && touchInput) {
+            frame.touchRegion = TouchRegionVisual{
+                ImVec2(settings.touchX, settings.touchY),
+                settings.touchRange,
+            };
+        }
+
+        const bool triggered = AimTriggered(settings, context);
+        const bool lockedTargetRequested = triggered &&
+            settings.persistentLock && lockedAimIdentity_ != 0;
+        const AimCandidate* selected = nullptr;
+        for (const AimCandidate& candidate : candidates) {
+            if (!candidate.selfAimEligible) continue;
+            if (lockedTargetRequested &&
+                candidate.identity != lockedAimIdentity_) {
+                continue;
+            }
+            const bool better = selected == nullptr ||
+                (settings.targetAlgorithm == 0
+                    ? candidate.screenDistancePixels <
+                        selected->screenDistancePixels
+                    : candidate.worldDistanceMeters <
+                        selected->worldDistanceMeters);
+            if (better) selected = &candidate;
+        }
+
+        AimGuide guide{};
+        guide.center = ImVec2(
+            static_cast<float>(options_.screenWidth) * 0.5f,
+            static_cast<float>(options_.screenHeight) * 0.5f);
+        guide.radius = tuning.rangePixels;
+        guide.drawCircle = settings.drawRange;
+        guide.drawTargetRay = settings.drawTargetRay && selected != nullptr;
+        if (selected != nullptr) {
+            guide.target = ImVec2(selected->screen.x, selected->screen.y);
+            guide.targetValid = true;
+            guide.selectedBone = selected->boneIndex;
+            if (selected->boneIndex >= 0) {
+                for (PlayerVisual& player : frame.players) {
+                    if (player.identity != selected->identity) continue;
+                    player.skeleton.selectedJoint = selected->boneIndex;
+                    break;
+                }
+            }
+        }
+
+        if (!triggered || selected == nullptr) {
+            aimController_.ClearTarget();
+            if (!triggered || !settings.persistentLock) {
+                lockedAimIdentity_ = 0;
+                lockedAimBone_ = -1;
+            }
+            if (guide.drawCircle || guide.drawTargetRay) {
+                frame.aimGuide = guide;
+            }
+            return;
+        }
+
+        if (settings.persistentLock) {
+            lockedAimIdentity_ = selected->identity;
+            lockedAimBone_ = selected->boneIndex;
+            guide.locked = true;
+        } else {
+            lockedAimIdentity_ = 0;
+            lockedAimBone_ = -1;
+        }
+
+        aim::TargetSnapshot snapshot{};
+        snapshot.valid = true;
+        snapshot.identity = selected->identity;
+        snapshot.world = aim::Vec3{
+            selected->world.x, selected->world.y, selected->world.z};
+        snapshot.velocity = aim::Vec3{
+            selected->velocity.x,
+            selected->velocity.y,
+            selected->velocity.z};
+        snapshot.screenDistancePixels = selected->screenDistancePixels;
+        snapshot.worldDistanceMeters = selected->worldDistanceMeters;
+        snapshot.projectileSpeedCmPerSecond = ResolveProjectileSpeed(context);
+        snapshot.firing = context.firing;
+        snapshot.zooming = context.zooming;
+        snapshot.curvedMotion = settings.curvedMotion;
+        snapshot.enforceFov = settings.enforceFov;
+        snapshot.enforceDistance = settings.enforceDistance;
+        snapshot.triggerMode = settings.triggerMode;
+        snapshot.orientation = options_.orientation;
+        snapshot.touchRange = settings.touchRange;
+        snapshot.touchCenterX = settings.touchX;
+        snapshot.touchCenterY = settings.touchY;
+        snapshot.tuning = tuning;
+        snapshot.view.location = aim::Vec3{
+            context.view.location.x,
+            context.view.location.y,
+            context.view.location.z};
+        snapshot.view.pitch = context.view.rotation.pitch;
+        snapshot.view.yaw = context.view.rotation.yaw;
+        snapshot.view.roll = context.view.rotation.roll;
+        snapshot.view.fieldOfView = context.view.fieldOfView;
+        snapshot.view.halfWidth =
+            static_cast<float>(options_.screenWidth) * 0.5f;
+        snapshot.view.halfHeight =
+            static_cast<float>(options_.screenHeight) * 0.5f;
+        aimController_.Publish(snapshot);
+        if (guide.drawCircle || guide.drawTargetRay) frame.aimGuide = guide;
+    }
+#endif
 
     void AddRadarBlip(const FrameContext& context,
                       const Vec3& position,
@@ -5185,14 +5542,21 @@ private:
         algorithmPositionRuntime_.Invalidate();
         positionReadMode_ = native::PositionReadMode::Standard;
         projectileSpeedReader_.Invalidate();
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
         trackingHitSelection_.Reset();
+#endif
         lockedAimIdentity_ = 0;
         lockedAimBone_ = -1;
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
         lockedTrackingIdentity_ = 0;
         lockedTrackingBone_ = -1;
+#endif
         aimController_.ClearTarget();
         lastViewValid_ = false;
         lastView_ = CameraView{};
+        lastViewWorld_ = 0;
+        lastViewCameraManager_ = 0;
+        viewFovState_ = native::ProjectionFovStabilityState{};
     }
 
     void RefreshAlgorithmExecutionContext() {
@@ -5390,6 +5754,7 @@ private:
         opened_ = false;
         aimController_.Stop();
         geometryRuntime_.Stop();
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
         bool hookStopped = false;
         for (int attempt = 0; attempt < 3 && !hookStopped; ++attempt) {
             hookStopped = trajectoryHook_.Shutdown();
@@ -5398,6 +5763,7 @@ private:
             aimEnabled_.store(false, std::memory_order_release);
             return false;
         }
+#endif
         geometrySnapshotReady_ = false;
         geometryRefreshEpoch_ = 0;
         geometryRetryAfter_ = {};
@@ -5456,12 +5822,17 @@ private:
     std::uint64_t coordinatePoolFrame_ = 0;
     std::chrono::steady_clock::time_point algorithmEntryValidationAt_{};
     std::chrono::steady_clock::time_point algorithmFailureSince_{};
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
     native::TrajectoryHook trajectoryHook_{};
+#endif
     pid_t processId_ = -1;
     std::uintptr_t moduleBase_ = 0;
     std::uintptr_t world_ = 0;
     CameraView lastView_{};
+    std::uintptr_t lastViewWorld_ = 0;
+    std::uintptr_t lastViewCameraManager_ = 0;
     bool lastViewValid_ = false;
+    native::ProjectionFovStabilityState viewFovState_{};
     bool opened_ = false;
     std::atomic_bool aimEnabled_{false};
     std::unordered_map<std::uintptr_t, PositionCacheEntry> positionCache_;
@@ -5483,15 +5854,19 @@ private:
     native::CharacterPositionResolver characterPositions_{};
     native::PositionReadMode positionReadMode_ = native::PositionReadMode::Standard;
     native::ProjectileSpeedReader projectileSpeedReader_{};
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
     aim::HitSelectionCache trackingHitSelection_{};
+#endif
     native::GeometryRuntime geometryRuntime_{};
     bool geometrySnapshotReady_ = false;
     std::uint64_t geometryRefreshEpoch_ = 0;
     std::chrono::steady_clock::time_point geometryRetryAfter_{};
     std::uint64_t lockedAimIdentity_ = 0;
     int lockedAimBone_ = -1;
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
     std::uint64_t lockedTrackingIdentity_ = 0;
     int lockedTrackingBone_ = -1;
+#endif
     aim::AimController aimController_;
     data::CustomItemCatalog customItems_;
     std::string customItemPath_;

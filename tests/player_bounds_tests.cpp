@@ -9,6 +9,7 @@
 void RunPlayerBoundsTests() {
     using lengjing::game::native::CalculatePlayerAnchorBounds;
     using lengjing::game::native::CalculatePlayerScreenBounds;
+    using lengjing::game::native::DoesPlayerScreenBoundsIntersectViewport;
     using lengjing::game::native::IsBoneFrameCacheSourceCompatible;
     using lengjing::game::native::IsReliablePlayerScreenBounds;
     using lengjing::game::native::kPlayerBoundsBoneCount;
@@ -41,6 +42,33 @@ void RunPlayerBoundsTests() {
         PlayerBoneScreenPoint{300.0f, 200.0f, true},
         PlayerBoneScreenPoint{300.0f, 400.0f, true},
         bounds));
+
+    REQUIRE(CalculatePlayerAnchorBounds(
+        PlayerBoneScreenPoint{960.0f, 3040.0f, true},
+        PlayerBoneScreenPoint{960.0f, -1960.0f, true},
+        bounds));
+    REQUIRE(DoesPlayerScreenBoundsIntersectViewport(
+        bounds, 1920.0f, 1080.0f));
+    REQUIRE(IsReliablePlayerScreenBounds(bounds, 1920.0f, 1080.0f));
+
+    const PlayerScreenBounds edgeIntersection{
+        1910.0f, 100.0f, 3000.0f, 500.0f};
+    REQUIRE(DoesPlayerScreenBoundsIntersectViewport(
+        edgeIntersection, 1920.0f, 1080.0f));
+    REQUIRE(IsReliablePlayerScreenBounds(
+        edgeIntersection, 1920.0f, 1080.0f));
+    REQUIRE(!DoesPlayerScreenBoundsIntersectViewport(
+        PlayerScreenBounds{1921.0f, 100.0f, 2500.0f, 500.0f},
+        1920.0f,
+        1080.0f));
+    REQUIRE(!IsReliablePlayerScreenBounds(
+        PlayerScreenBounds{-1000.0f, 100.0f, -1.0f, 500.0f},
+        1920.0f,
+        1080.0f));
+    REQUIRE(!IsReliablePlayerScreenBounds(
+        PlayerScreenBounds{0.0f, -8000.0f, 100.0f, 8000.0f},
+        1920.0f,
+        1080.0f));
 
     REQUIRE(CalculatePlayerScreenBounds(standing, bounds));
     REQUIRE(bounds.top < 100.0f);

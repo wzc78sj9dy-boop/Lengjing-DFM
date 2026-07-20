@@ -474,4 +474,3 @@ public:
 };
 
 }  // namespace lengjing::game::native::coordinate_pool_internal
-
