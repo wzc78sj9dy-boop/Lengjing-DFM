@@ -1159,6 +1159,28 @@ public:
             std::min<std::size_t>(actorRecords.size(), 256));
         std::size_t validActorCount = 0;
         std::size_t decodedNameCount = 0;
+        std::size_t characterActorCount = 0;
+        std::array<
+            std::size_t,
+            static_cast<std::size_t>(BoneFrameReadStatus::Count)>
+            botBoneStatusCounts{};
+        std::array<
+            std::size_t,
+            static_cast<std::size_t>(BoneFrameReadStatus::Count)>
+            playerBoneStatusCounts{};
+        std::string boneFailureClass;
+        float boneFailureDistance = 0.0f;
+        float boneFailureHealth = 0.0f;
+        bool boneFailureBot = false;
+        bool boneFailureResolver = false;
+        bool boneFailureEncrypted = false;
+        const auto recordBoneStatus =
+            [&botBoneStatusCounts, &playerBoneStatusCounts](
+                bool bot, BoneFrameReadStatus status) {
+                const std::size_t index = static_cast<std::size_t>(status);
+                if (index >= botBoneStatusCounts.size()) return;
+                (bot ? botBoneStatusCounts : playerBoneStatusCounts)[index]++;
+            };
         for (RuntimeActorRecord& actorRecord : actorRecords) {
             const std::uintptr_t actor = actorRecord.actor;
             if (!IsValidPointer(actor) || actor == context.localPawn) continue;
@@ -1222,6 +1244,7 @@ public:
                 }
                 continue;
             }
+            ++characterActorCount;
             const bool rangeTargetClass =
                 IsRangeTargetClass(className)
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
@@ -1519,6 +1542,8 @@ public:
 
             BoneFrame boneFrame{};
             bool boneFrameReady = false;
+            BoneFrameReadStatus boneReadStatus =
+                BoneFrameReadStatus::NotRequested;
             ScreenRect boneBounds{};
             bool boneBoundsReady = false;
             if (aimEligible
@@ -1537,7 +1562,22 @@ public:
                     context.view,
                     settings.visual.antiFlicker,
                     &position,
-                    boneFrame);
+                    boneFrame,
+                    &boneReadStatus);
+                if (boneReadStatus == BoneFrameReadStatus::NoBoneArray &&
+                    health.health <= 0.0f) {
+                    boneReadStatus = BoneFrameReadStatus::Inactive;
+                }
+                recordBoneStatus(bot, boneReadStatus);
+                if (boneReadStatus == BoneFrameReadStatus::NoBoneArray &&
+                    boneFailureClass.empty()) {
+                    boneFailureClass = className;
+                    boneFailureDistance = distanceMeters;
+                    boneFailureHealth = health.health;
+                    boneFailureBot = bot;
+                    boneFailureResolver = actorRecord.resolverRecord;
+                    boneFailureEncrypted = actorRecord.encryptedRecord;
+                }
                 boneBoundsReady = boneFrameReady &&
                     TryBuildBoneBounds(boneFrame, boneBounds);
                 const native::PlayerScreenBounds projectedBoneBounds{
@@ -1903,12 +1943,32 @@ public:
 
             if (visual.drawSkeleton) {
                 if (!boneFrameReady) {
+                    const BoneFrameReadStatus previousBoneReadStatus =
+                        boneReadStatus;
                     boneFrameReady = ReadBoneFrame(
                         actorRecord,
                         context.view,
                         settings.visual.antiFlicker,
                         &position,
-                        boneFrame);
+                        boneFrame,
+                        &boneReadStatus);
+                    if (boneReadStatus == BoneFrameReadStatus::NoBoneArray &&
+                        health.health <= 0.0f) {
+                        boneReadStatus = BoneFrameReadStatus::Inactive;
+                    }
+                    if (previousBoneReadStatus !=
+                        BoneFrameReadStatus::NotRequested) {
+                        const std::size_t previousIndex =
+                            static_cast<std::size_t>(previousBoneReadStatus);
+                        auto& counts = bot
+                            ? botBoneStatusCounts
+                            : playerBoneStatusCounts;
+                        if (previousIndex < counts.size() &&
+                            counts[previousIndex] != 0) {
+                            --counts[previousIndex];
+                        }
+                    }
+                    recordBoneStatus(bot, boneReadStatus);
                 }
                 visual.skeleton.colorByVisibility =
                     !visual.coverHighlighted &&
@@ -1977,6 +2037,83 @@ public:
         }
         ApplyCoordinateDiagnostic(error);
         UpdateCoordinateProbe(probe);
+        const auto boneAuditNow = std::chrono::steady_clock::now();
+        if (boneAuditNow - lastBoneAuditLogAt_ >= std::chrono::seconds(1)) {
+            const auto requested = [](const auto& counts) {
+                std::size_t total = 0;
+                for (std::size_t index = 1; index < counts.size(); ++index) {
+                    if (index == static_cast<std::size_t>(
+                            BoneFrameReadStatus::Inactive)) {
+                        continue;
+                    }
+                    total += counts[index];
+                }
+                return total;
+            };
+            std::fprintf(
+                stderr,
+                "[bone-audit] records=%zu valid=%zu characters=%zu "
+                "targets=%zu bots=%zu players=%zu visuals=%zu "
+                "bot_bones=%zu/%zu bot_offscreen=%zu bot_no_source=%zu "
+                "bot_no_component=%zu bot_no_array=%zu "
+                "bot_no_transforms=%zu bot_inactive=%zu bot_invalid=%zu "
+                "player_bones=%zu/%zu player_offscreen=%zu "
+                "player_no_source=%zu player_no_component=%zu "
+                "player_no_array=%zu player_no_transforms=%zu "
+                "player_inactive=%zu player_invalid=%zu "
+                "failure_class=%s failure_bot=%d "
+                "failure_distance=%.1f failure_health=%.1f "
+                "failure_resolver=%d failure_encrypted=%d\n",
+                actorRecords.size(),
+                validActorCount,
+                characterActorCount,
+                static_cast<std::size_t>(frame.botCount + frame.playerCount),
+                static_cast<std::size_t>(frame.botCount),
+                static_cast<std::size_t>(frame.playerCount),
+                frame.players.size(),
+                botBoneStatusCounts[
+                    static_cast<std::size_t>(BoneFrameReadStatus::Ready)],
+                requested(botBoneStatusCounts),
+                botBoneStatusCounts[
+                    static_cast<std::size_t>(BoneFrameReadStatus::Offscreen)],
+                botBoneStatusCounts[
+                    static_cast<std::size_t>(BoneFrameReadStatus::NoSource)],
+                botBoneStatusCounts[
+                    static_cast<std::size_t>(BoneFrameReadStatus::NoComponent)],
+                botBoneStatusCounts[
+                    static_cast<std::size_t>(BoneFrameReadStatus::NoBoneArray)],
+                botBoneStatusCounts[
+                    static_cast<std::size_t>(BoneFrameReadStatus::NoTransforms)],
+                botBoneStatusCounts[
+                    static_cast<std::size_t>(BoneFrameReadStatus::Inactive)],
+                botBoneStatusCounts[
+                    static_cast<std::size_t>(BoneFrameReadStatus::InvalidActor)],
+                playerBoneStatusCounts[
+                    static_cast<std::size_t>(BoneFrameReadStatus::Ready)],
+                requested(playerBoneStatusCounts),
+                playerBoneStatusCounts[
+                    static_cast<std::size_t>(BoneFrameReadStatus::Offscreen)],
+                playerBoneStatusCounts[
+                    static_cast<std::size_t>(BoneFrameReadStatus::NoSource)],
+                playerBoneStatusCounts[
+                    static_cast<std::size_t>(BoneFrameReadStatus::NoComponent)],
+                playerBoneStatusCounts[
+                    static_cast<std::size_t>(BoneFrameReadStatus::NoBoneArray)],
+                playerBoneStatusCounts[
+                    static_cast<std::size_t>(BoneFrameReadStatus::NoTransforms)],
+                playerBoneStatusCounts[
+                    static_cast<std::size_t>(BoneFrameReadStatus::Inactive)],
+                playerBoneStatusCounts[
+                    static_cast<std::size_t>(BoneFrameReadStatus::InvalidActor)],
+                boneFailureClass.empty() ? "-" : boneFailureClass.c_str(),
+                boneFailureBot ? 1 : 0,
+                boneFailureDistance,
+                boneFailureHealth,
+                boneFailureResolver ? 1 : 0,
+                boneFailureEncrypted ? 1 : 0);
+            std::fflush(stderr);
+            lastBoneAuditLogAt_ = boneAuditNow;
+        }
         frame.ready = true;
         return true;
     }
@@ -2059,6 +2196,19 @@ private:
         std::array<bool, kBoneIndices.size()> worldValid{};
         std::array<bool, kBoneIndices.size()> valid{};
         std::array<native::GeometryVisibility, kBoneIndices.size()> visibility{};
+    };
+
+    enum class BoneFrameReadStatus {
+        NotRequested,
+        InvalidActor,
+        NoSource,
+        NoComponent,
+        NoBoneArray,
+        NoTransforms,
+        Inactive,
+        Offscreen,
+        Ready,
+        Count,
     };
 
     struct PlayerProjectionSource {
@@ -3922,9 +4072,13 @@ private:
                        const CameraView& view,
                        bool antiFlicker,
                        const Vec3* resolvedPosition,
-                       BoneFrame& frame) {
+                       BoneFrame& frame,
+                       BoneFrameReadStatus* readStatus = nullptr) {
         constexpr auto kCacheLifetime = std::chrono::milliseconds(300);
         frame = BoneFrame{};
+        if (readStatus != nullptr) {
+            *readStatus = BoneFrameReadStatus::InvalidActor;
+        }
         const std::uintptr_t actor = actorRecord.actor;
         if (!IsValidPointer(actor)) return false;
         const auto now = std::chrono::steady_clock::now();
@@ -3951,6 +4105,12 @@ private:
                 boneRecord,
                 actorRecord.ordinaryRoot,
                 ordinaryMesh);
+        if (!preferredSource && !fallbackSource) {
+            if (readStatus != nullptr) {
+                *readStatus = BoneFrameReadStatus::NoSource;
+            }
+            return false;
+        }
         bool cacheFresh = useCache && cached != boneCache_.end() &&
             now - cached->second.lastUpdatedAt <= kCacheLifetime &&
             native::IsBoneFrameCacheSourceCompatible(
@@ -3967,6 +4127,8 @@ private:
             native::BoneFrameSourceSelection source{};
             std::uintptr_t boneArray = 0;
             bool resolvedTranslation = false;
+            BoneFrameReadStatus failureStatus =
+                BoneFrameReadStatus::NoSource;
             std::array<Vec3, kBoneIndices.size()> world{};
             std::array<bool, kBoneIndices.size()> valid{};
             std::size_t validCount = 0;
@@ -3991,7 +4153,9 @@ private:
                 bool alignmentReady) {
                 BoneSourceFrame result{};
                 result.boneArray = candidateBoneArray;
+                result.failureStatus = BoneFrameReadStatus::NoBoneArray;
                 if (!IsValidPointer(candidateBoneArray)) return result;
+                result.failureStatus = BoneFrameReadStatus::NoTransforms;
 
                 std::array<Transform, kPlayerBoneTransformCount> transforms{};
                 std::array<
@@ -4060,6 +4224,7 @@ private:
                 if (!source || !IsValidPointer(source.mesh)) {
                     return result;
                 }
+                result.failureStatus = BoneFrameReadStatus::NoComponent;
 
                 Transform componentTransform{};
                 const Vec3* standardizedPosition =
@@ -4070,9 +4235,10 @@ private:
                           source.mesh,
                           standardizedPosition,
                           componentTransform)
-                    : ReadValue(source.mesh + 0x210, componentTransform) &&
-                          IsValidTransform(componentTransform);
+                    : ReadValue(source.mesh + 0x210, componentTransform);
                 if (!componentReady) return result;
+
+                result.failureStatus = BoneFrameReadStatus::NoBoneArray;
 
                 const Matrix4 componentMatrix =
                     TransformToMatrix(componentTransform);
@@ -4190,7 +4356,12 @@ private:
             worldValid.begin(),
             worldValid.end(),
             [](bool valid) { return valid; });
-        if (!anyWorld) return false;
+        if (!anyWorld) {
+            if (readStatus != nullptr) {
+                *readStatus = current.failureStatus;
+            }
+            return false;
+        }
 
         bool anyProjected = false;
         for (std::size_t index = 0; index < world.size(); ++index) {
@@ -4214,6 +4385,11 @@ private:
             frame.screen[index] = screen;
             frame.valid[index] = true;
             anyProjected = true;
+        }
+        if (readStatus != nullptr) {
+            *readStatus = anyProjected
+                ? BoneFrameReadStatus::Ready
+                : BoneFrameReadStatus::Offscreen;
         }
         return anyProjected;
     }
@@ -6057,6 +6233,7 @@ private:
         std::chrono::milliseconds(100)};
     std::unordered_map<std::uintptr_t, PositionCacheEntry> positionCache_;
     std::unordered_map<std::uintptr_t, BoneCacheEntry> boneCache_;
+    std::chrono::steady_clock::time_point lastBoneAuditLogAt_{};
     std::unordered_map<std::int32_t, std::string> nameCache_;
     std::unordered_map<std::uint64_t, std::pair<int, int>> itemMetadata_;
     WorldObjectFrameCache worldObjectFrameCache_{};
