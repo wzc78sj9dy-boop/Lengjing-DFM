@@ -24,6 +24,7 @@ add_executable(lengjing_tests
     config_tests.cpp
     cpu_mailbox_policy_tests.cpp
     frame_projection_tests.cpp
+    geometry_scene_build_policy_tests.cpp
     hud_map_tests.cpp
     kernel_module_catalog_tests.cpp
     overlay_contrast_policy_tests.cpp

@@ -28,6 +28,7 @@ void RunCloudLayoutStartupPolicyTests();
 void RunCloudLayoutTests();
 void RunCpuMailboxPolicyTests();
 void RunFrameProjectionTests();
+void RunGeometrySceneBuildPolicyTests();
 void RunHudMapTests();
 void RunKernelModuleCatalogTests();
 void RunOverlayContrastPolicyTests();

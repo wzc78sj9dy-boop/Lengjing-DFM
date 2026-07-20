@@ -21,6 +21,7 @@ int main() {
         RunConfigTests();
         RunCpuMailboxPolicyTests();
         RunFrameProjectionTests();
+        RunGeometrySceneBuildPolicyTests();
         RunHudMapTests();
         RunKernelModuleCatalogTests();
         RunOverlayContrastPolicyTests();

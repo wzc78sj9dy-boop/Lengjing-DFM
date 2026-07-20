@@ -1,4 +1,5 @@
 #include "game/native/GeometryRuntime.h"
+#include "game/native/GeometrySceneBuildPolicy.h"
 
 #include "embree4/rtcore.h"
 #include "embree4/rtcore_ray.h"
@@ -16,6 +17,10 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+
+#if defined(__ANDROID__)
+#include <sys/resource.h>
+#endif
 
 namespace lengjing::game::native {
 namespace {
@@ -762,6 +767,27 @@ bool FinalizeMesh(const ActorShape& reference, GeometryBodyType bodyType,
     return true;
 }
 
+bool IsSameGeometryMeshContent(const GeometryMesh& left,
+                               const GeometryMesh& right) noexcept {
+    if (left.bodyType != right.bodyType ||
+        left.actorAddress != right.actorAddress ||
+        left.shapeAddress != right.shapeAddress ||
+        left.center.x != right.center.x ||
+        left.center.y != right.center.y ||
+        left.center.z != right.center.z ||
+        left.boundsRadius != right.boundsRadius ||
+        left.vertices.size() != right.vertices.size() ||
+        left.indices != right.indices) {
+        return false;
+    }
+    return std::equal(
+        left.vertices.begin(), left.vertices.end(), right.vertices.begin(),
+        [](const GeometryPoint& first, const GeometryPoint& second) {
+            return first.x == second.x && first.y == second.y &&
+                first.z == second.z;
+        });
+}
+
 GeometryRuntimeConfig Sanitize(GeometryRuntimeConfig config) {
     config.dynamicRefresh =
         std::clamp(config.dynamicRefresh, std::chrono::milliseconds(100),
@@ -815,8 +841,11 @@ private:
 class SceneOwner final {
 public:
     SceneOwner(std::shared_ptr<DeviceOwner> device,
-               std::vector<std::shared_ptr<const GeometryMesh>> meshes)
-        : device_(std::move(device)), meshes_(std::move(meshes)) {}
+               std::vector<std::shared_ptr<const GeometryMesh>> meshes,
+               GeometrySceneKind kind)
+        : device_(std::move(device)),
+          meshes_(std::move(meshes)),
+          buildPolicy_(ResolveGeometrySceneBuildPolicy(kind)) {}
 
     ~SceneOwner() {
         if (scene_ != nullptr) {
@@ -838,11 +867,22 @@ public:
             return false;
         }
 
-        rtcSetSceneBuildQuality(scene_, RTC_BUILD_QUALITY_MEDIUM);
-        rtcSetSceneFlags(
+        rtcSetSceneBuildQuality(
             scene_,
-            static_cast<RTCSceneFlags>(RTC_SCENE_FLAG_ROBUST |
-                                       RTC_SCENE_FLAG_COMPACT));
+            buildPolicy_.lowBuildQuality
+                ? RTC_BUILD_QUALITY_LOW
+                : RTC_BUILD_QUALITY_MEDIUM);
+        unsigned int sceneFlags = RTC_SCENE_FLAG_NONE;
+        if (buildPolicy_.dynamicScene) {
+            sceneFlags |= RTC_SCENE_FLAG_DYNAMIC;
+        }
+        if (buildPolicy_.robust) {
+            sceneFlags |= RTC_SCENE_FLAG_ROBUST;
+        }
+        if (buildPolicy_.compact) {
+            sceneFlags |= RTC_SCENE_FLAG_COMPACT;
+        }
+        rtcSetSceneFlags(scene_, static_cast<RTCSceneFlags>(sceneFlags));
 
         for (const auto& mesh : meshes_) {
             if (!mesh || mesh->vertices.size() < 3 ||
@@ -940,6 +980,7 @@ private:
     std::vector<std::shared_ptr<const GeometryMesh>> meshes_;
     std::unordered_map<unsigned int, std::shared_ptr<const GeometryMesh>>
         geometryById_;
+    GeometrySceneBuildPolicy buildPolicy_{};
     RTCScene scene_ = nullptr;
 };
 
@@ -947,6 +988,7 @@ struct PublishedState {
     std::shared_ptr<const GeometrySnapshot> snapshot;
     std::shared_ptr<const SceneOwner> staticScene;
     std::shared_ptr<const SceneOwner> dynamicScene;
+    std::vector<std::uintptr_t> sourceScenes;
 };
 
 enum class PublishResult : std::uint8_t {
@@ -2641,6 +2683,12 @@ private:
             if (!candidate) {
                 continue;
             }
+            const auto previousIterator = previousByShape.find(reference);
+            if (previousIterator != previousByShape.end()) {
+                ReuseEquivalentGeometryMesh(
+                    previousIterator->second, candidate,
+                    IsSameGeometryMeshContent);
+            }
             const std::size_t candidateTriangles =
                 candidate->indices.size() / 3;
             if (output.size() >= config.maxMeshes - initialMeshCount ||
@@ -2752,17 +2800,36 @@ private:
         }
         if (!staticScene) {
             auto candidate = std::make_shared<SceneOwner>(
-                device, staticMeshes);
+                device, staticMeshes, GeometrySceneKind::Static);
             if (!candidate->Build()) {
                 return PublishResult::Failed;
             }
             staticScene = std::move(candidate);
         }
 
-        auto dynamicScene = std::make_shared<SceneOwner>(
-            device, dynamicMeshes);
-        if (!dynamicScene->Build()) {
-            return PublishResult::Failed;
+        std::shared_ptr<const SceneOwner> dynamicScene;
+        const auto current =
+            std::atomic_load_explicit(&published, std::memory_order_acquire);
+        // Mesh identity is conservative because immutable meshes contain
+        // world-space vertices with the source transform already applied.
+        if (current && current->snapshot && current->snapshot->available &&
+            current->dynamicScene &&
+            CanReuseGeometryScene(
+                current->snapshot->instanceAddress,
+                current->sourceScenes,
+                current->snapshot->dynamicMeshes,
+                instance,
+                expectedScenes,
+                dynamicMeshes)) {
+            dynamicScene = current->dynamicScene;
+        }
+        if (!dynamicScene) {
+            auto candidate = std::make_shared<SceneOwner>(
+                device, dynamicMeshes, GeometrySceneKind::Dynamic);
+            if (!candidate->Build()) {
+                return PublishResult::Failed;
+            }
+            dynamicScene = std::move(candidate);
         }
         if (staticScene->GeometryCount() +
                 dynamicScene->GeometryCount() ==
@@ -2773,6 +2840,7 @@ private:
         auto state = std::make_shared<PublishedState>();
         state->staticScene = std::move(staticScene);
         state->dynamicScene = std::move(dynamicScene);
+        state->sourceScenes = expectedScenes;
         {
             std::lock_guard<std::mutex> lock(waitMutex);
             if (requestEpoch.load(std::memory_order_acquire) != epoch) {
@@ -2805,6 +2873,9 @@ private:
     }
 
     void WorkerMain() noexcept {
+#if defined(__ANDROID__)
+        setpriority(PRIO_PROCESS, 0, 10);
+#endif
         std::vector<std::shared_ptr<const GeometryMesh>> staticMeshes;
         std::vector<std::shared_ptr<const GeometryMesh>> dynamicMeshes;
         ActorShapeMissMap staticMissingCounts;
@@ -2814,7 +2885,10 @@ private:
         std::vector<std::uintptr_t> activeScenePointers;
         auto nextStaticRefresh = std::chrono::steady_clock::time_point::min();
         auto lastGoodAt = std::chrono::steady_clock::time_point::min();
+        auto lastPublishedAt =
+            std::chrono::steady_clock::time_point::min();
         bool hasLastGood = false;
+        bool hasPublishedScene = false;
         std::size_t consecutiveFailures = 0;
 
         while (running.load(std::memory_order_acquire)) {
@@ -2854,6 +2928,9 @@ private:
                         hasLastGood = false;
                         lastGoodAt =
                             std::chrono::steady_clock::time_point::min();
+                        hasPublishedScene = false;
+                        lastPublishedAt =
+                            std::chrono::steady_clock::time_point::min();
                     }
                     nextStaticRefresh = now + config.dynamicRefresh;
                 };
@@ -2878,8 +2955,11 @@ private:
                     dynamicMissingCounts.clear();
                     staticShapeCount = 0;
                     hasLastGood = false;
+                    hasPublishedScene = false;
                     consecutiveFailures = 0;
                     nextStaticRefresh =
+                        std::chrono::steady_clock::time_point::min();
+                    lastPublishedAt =
                         std::chrono::steady_clock::time_point::min();
                     EnsureUnavailable(0, roundEpoch);
                 } else {
@@ -2897,14 +2977,34 @@ private:
                         dynamicMissingCounts.clear();
                         staticShapeCount = 0;
                         hasLastGood = false;
+                        hasPublishedScene = false;
                         consecutiveFailures = 0;
                         nextStaticRefresh =
+                            std::chrono::steady_clock::time_point::min();
+                        lastPublishedAt =
                             std::chrono::steady_clock::time_point::min();
                         EnsureUnavailable(instance, roundEpoch);
                     }
 
                     const bool refreshStatic =
                         sourceChanged || now >= nextStaticRefresh;
+                    if (!ShouldPublishGeometryUpdate(
+                            hasPublishedScene, lastPublishedAt, now,
+                            sourceChanged || refreshStatic)) {
+                        const auto remaining =
+                            kMinimumGeometryPublishInterval -
+                            std::chrono::duration_cast<
+                                std::chrono::milliseconds>(
+                                now - lastPublishedAt);
+                        std::unique_lock<std::mutex> lock(waitMutex);
+                        waitCondition.wait_for(
+                            lock, remaining, [this] {
+                                return !running.load(
+                                           std::memory_order_acquire) ||
+                                    refreshRequested;
+                            });
+                        continue;
+                    }
                     std::vector<std::shared_ptr<const GeometryMesh>>
                         candidateStatic = staticMeshes;
                     std::size_t candidateStaticShapeCount =
@@ -2999,7 +3099,9 @@ private:
                                     : now + config.dynamicRefresh;
                         }
                         hasLastGood = true;
+                        hasPublishedScene = true;
                         lastGoodAt = now;
+                        lastPublishedAt = now;
                         consecutiveFailures = 0;
                         if ((refreshStatic &&
                              (!staticReport.complete ||
