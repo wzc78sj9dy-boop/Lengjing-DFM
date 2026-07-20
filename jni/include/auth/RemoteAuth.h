@@ -43,6 +43,18 @@ struct AuthCallResult {
     std::string error;
 };
 
+struct AuthVersionResult {
+    bool success = false;
+    std::string error;
+    std::string version;
+};
+
+enum class CloudVersionStatus {
+    Current,
+    UpdateRequired,
+    CheckFailed,
+};
+
 struct AuthVariableResult {
     bool success = false;
     std::string error;
@@ -57,6 +69,7 @@ public:
                                   std::string_view deviceCode) = 0;
     virtual AuthCallResult Heartbeat(std::string_view cardKey,
                                      std::string_view stateCode) = 0;
+    virtual AuthVersionResult GetLatestVersion() = 0;
     virtual AuthVariableResult GetVariableByCard(
         std::string_view cardKey,
         std::string_view valueId,
@@ -105,6 +118,10 @@ std::shared_ptr<AuthGateway> CreateT3Gateway(
     const T3AuthConfig& config,
     std::string& error);
 
+CloudVersionStatus CheckCloudVersion(
+    AuthGateway& gateway,
+    std::string_view currentVersion) noexcept;
+
 std::string ResolveDeviceCode();
 
 CloudRuntimeIdentity ResolveCloudRuntimeIdentity(
@@ -112,6 +129,7 @@ CloudRuntimeIdentity ResolveCloudRuntimeIdentity(
 
 bool LoginInteractive(
     AuthSession& session,
+    std::string_view currentVersion,
     std::string_view deviceCode = {},
     const T3AuthConfig& config = kDefaultT3AuthConfig);
 

@@ -35,6 +35,10 @@
 #define LENGJING_VERSION "dev"
 #endif
 
+#ifndef LENGJING_AUTH_VERSION
+#define LENGJING_AUTH_VERSION "1000"
+#endif
+
 #ifndef LENGJING_ENABLE_RUNTIME_AUTH
 #define LENGJING_ENABLE_RUNTIME_AUTH 0
 #endif
@@ -414,7 +418,8 @@ int main() {
     lengjing::auth::AuthSession authSession;
     std::shared_ptr<const lengjing::auth::CloudLayoutDocument> cloudLayout;
     if constexpr (kRuntimeAuthEnabled) {
-        if (!lengjing::auth::LoginInteractive(authSession)) {
+        if (!lengjing::auth::LoginInteractive(
+                authSession, LENGJING_AUTH_VERSION)) {
             return 2;
         }
         CloudLayoutFetchResult cloudFetch =

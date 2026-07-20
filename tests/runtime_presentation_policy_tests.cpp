@@ -43,6 +43,8 @@ void RunRuntimePresentationPolicyTests() {
     REQUIRE(std::string_view(VerificationFailureText()) ==
             "[验证] 验证失败");
     REQUIRE(std::string_view(RuntimeFaultText()) == "运行模块发生错误");
+    REQUIRE(std::string_view(UpdateRequiredText()) ==
+            "请到网盘更新最新版本");
     REQUIRE(std::string_view(RuntimeDataUnavailableText()) ==
             "运行数据暂不可用");
     REQUIRE(std::string_view(RuntimeDataRestoredText()) ==

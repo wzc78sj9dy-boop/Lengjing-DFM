@@ -4,6 +4,12 @@ project(lengjing VERSION 1.0.0 LANGUAGES C CXX)
 option(LENGJING_ENABLE_RUNTIME_AUTH "Enable runtime T3 authentication" OFF)
 option(LENGJING_ENABLE_PROJECTILE_TRACKING
     "Enable projectile tracking runtime and UI" OFF)
+set(LENGJING_AUTH_VERSION "1000" CACHE STRING
+    "Runtime authentication version number")
+if(NOT LENGJING_AUTH_VERSION MATCHES "^[0-9]+$")
+    message(FATAL_ERROR
+        "LENGJING_AUTH_VERSION must contain decimal digits only")
+endif()
 
 set(LENGJING_T3_LOGIN_CODE "" CACHE STRING "Private T3 login call code")
 set(LENGJING_T3_NOTICE_CODE "" CACHE STRING "Private T3 notice call code")
@@ -147,6 +153,7 @@ set_target_properties(lengjing PROPERTIES
 
 target_compile_definitions(lengjing PRIVATE
     LENGJING_VERSION="${PROJECT_VERSION}"
+    LENGJING_AUTH_VERSION="${LENGJING_AUTH_VERSION}"
     LENGJING_ENABLE_RUNTIME_AUTH=$<BOOL:${LENGJING_ENABLE_RUNTIME_AUTH}>
     LENGJING_ENABLE_PROJECTILE_TRACKING=$<BOOL:${LENGJING_ENABLE_PROJECTILE_TRACKING}>
     VK_USE_PLATFORM_ANDROID_KHR

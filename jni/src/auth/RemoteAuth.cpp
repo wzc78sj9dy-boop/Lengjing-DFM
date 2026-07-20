@@ -97,6 +97,14 @@ public:
         return {result.success, result.error};
     }
 
+    AuthVersionResult GetLatestVersion() override {
+        if (verifier_ == nullptr) {
+            return {false, "T3 SDK is not initialized", {}};
+        }
+        const T3VersionResult result = verifier_->getLatestVersion();
+        return {result.success, result.error, result.version};
+    }
+
     AuthVariableResult GetVariableByCard(
         std::string_view cardKey,
         std::string_view valueId,
@@ -724,6 +732,23 @@ std::shared_ptr<AuthGateway> CreateT3Gateway(
     return gateway;
 }
 
+CloudVersionStatus CheckCloudVersion(
+    AuthGateway& gateway,
+    std::string_view currentVersion) noexcept {
+    if (currentVersion.empty()) return CloudVersionStatus::CheckFailed;
+    try {
+        const AuthVersionResult result = gateway.GetLatestVersion();
+        if (!result.success || result.version.empty()) {
+            return CloudVersionStatus::CheckFailed;
+        }
+        return result.version == currentVersion
+            ? CloudVersionStatus::Current
+            : CloudVersionStatus::UpdateRequired;
+    } catch (...) {
+        return CloudVersionStatus::CheckFailed;
+    }
+}
+
 std::string ResolveDeviceCode() {
 #if defined(__ANDROID__)
     std::string androidId =
@@ -760,13 +785,31 @@ CloudRuntimeIdentity ResolveCloudRuntimeIdentity(
 }
 
 bool LoginInteractive(AuthSession& session,
+                      std::string_view currentVersion,
                       std::string_view deviceCode,
                       const T3AuthConfig& config) {
     std::string error;
     std::shared_ptr<AuthGateway> gateway = CreateT3Gateway(config, error);
     if (gateway == nullptr) {
+        if (!error.empty()) {
+            std::fprintf(stderr, "[验证] %s\n", error.c_str());
+        }
         std::fprintf(
             stderr, "%s\n", app::VerificationFailureText());
+        return false;
+    }
+
+    const CloudVersionStatus versionStatus =
+        CheckCloudVersion(*gateway, currentVersion);
+    if (versionStatus != CloudVersionStatus::Current) {
+        if (versionStatus == CloudVersionStatus::CheckFailed) {
+            std::fprintf(stderr, "[验证] version check failed\n");
+        }
+        std::fprintf(
+            stderr, "%s\n",
+            versionStatus == CloudVersionStatus::UpdateRequired
+                ? app::UpdateRequiredText()
+                : app::VerificationFailureText());
         return false;
     }
 
@@ -780,6 +823,8 @@ bool LoginInteractive(AuthSession& session,
     input::CardInputResult card = input::ReadCardKeyFromStream(
         std::cin, std::cout, inputIsTerminal, terminalEcho);
     if (!card) {
+        std::fprintf(stderr, "[验证] card input status=%u\n",
+                     static_cast<unsigned int>(card.status));
         std::fprintf(
             stderr, "%s\n", app::VerificationFailureText());
         return false;
@@ -789,6 +834,7 @@ bool LoginInteractive(AuthSession& session,
         : std::string(deviceCode);
     if (resolvedDeviceCode.empty()) {
         SecureClear(card.value);
+        std::fprintf(stderr, "[验证] device code is empty\n");
         std::fprintf(
             stderr, "%s\n", app::VerificationFailureText());
         return false;
@@ -798,6 +844,10 @@ bool LoginInteractive(AuthSession& session,
     options.cloudVariable = config.cloudVariable;
     if (!session.Login(std::move(gateway), std::move(card.value),
                        std::move(resolvedDeviceCode), options)) {
+        const std::string detail = session.LastError();
+        if (!detail.empty()) {
+            std::fprintf(stderr, "[验证] %s\n", detail.c_str());
+        }
         std::fprintf(
             stderr, "%s\n", app::VerificationFailureText());
         return false;

@@ -1,5 +1,6 @@
 #include "game/native/GeometryRuntime.h"
 #include "game/native/GeometrySceneBuildPolicy.h"
+#include "game/native/GeometryShapeFilterPolicy.h"
 
 #include "embree4/rtcore.h"
 #include "embree4/rtcore_ray.h"
@@ -54,9 +55,6 @@ constexpr std::int32_t kConvexMeshGeometryType = 4;
 constexpr std::int32_t kTriangleMeshGeometryType = 5;
 constexpr std::int32_t kHeightFieldGeometryType = 6;
 constexpr std::int32_t kGeometryTypeCount = 7;
-constexpr std::uint8_t kTriggerShapeFlag = 0x04U;
-constexpr std::uint8_t kSimulationShapeFlag = 0x01U;
-constexpr std::uint8_t kSceneQueryShapeFlag = 0x02U;
 constexpr std::uint8_t kMeshHas16BitIndices = 0x02U;
 constexpr std::uint8_t kHeightFieldTessellationFlag = 0x80U;
 constexpr std::uint8_t kHeightFieldMaterialMask = 0x7FU;
@@ -2475,13 +2473,6 @@ private:
         }
         shape.shapeCore = remoteShape.shapeCore;
 
-        const std::uint8_t shapeFlags = shape.shapeCore.core.shapeFlags;
-        if ((shapeFlags & kTriggerShapeFlag) != 0 ||
-            (shapeFlags &
-             (kSimulationShapeFlag | kSceneQueryShapeFlag)) == 0) {
-            return ReferenceLoadStatus::Resolved;
-        }
-
         std::int32_t geometryType = -1;
         std::memcpy(&geometryType,
                     shape.shapeCore.core.geometry.data.data(),
@@ -2493,13 +2484,11 @@ private:
             geometryType >= kGeometryTypeCount) {
             return ReferenceLoadStatus::Failed;
         }
-        const bool supportedGeometry =
-            geometryType == kTriangleMeshGeometryType ||
-            (bodyType == GeometryBodyType::Static &&
-             (geometryType == kConvexMeshGeometryType ||
-              geometryType == kBoxGeometryType ||
-              geometryType == kHeightFieldGeometryType));
-        if (!supportedGeometry) {
+        if (!ShouldIncludeGeometryShape(
+                bodyType,
+                geometryType,
+                shape.shapeCore.core.shapeFlags,
+                shape.shapeCore.core.materialIndex)) {
             return ReferenceLoadStatus::Resolved;
         }
 

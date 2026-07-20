@@ -29,6 +29,11 @@ public:
         return heartbeatResult;
     }
 
+    lengjing::auth::AuthVersionResult GetLatestVersion() override {
+        ++versionCalls;
+        return versionResult;
+    }
+
     lengjing::auth::AuthVariableResult GetVariableByCard(
         std::string_view,
         std::string_view,
@@ -44,9 +49,12 @@ public:
     lengjing::auth::AuthLoginResult loginResult{
         true, {}, "STATE_FOR_TEST", "2099-12-31 23:59:59"};
     lengjing::auth::AuthCallResult heartbeatResult{true, {}};
+    lengjing::auth::AuthVersionResult versionResult{
+        true, {}, "1.0.0"};
     lengjing::auth::AuthVariableResult variableResult{};
     std::atomic_int loginCalls{0};
     std::atomic_int heartbeatCalls{0};
+    std::atomic_int versionCalls{0};
     std::atomic_int variableCalls{0};
     std::atomic_int cancelCalls{0};
 };
@@ -72,6 +80,10 @@ public:
         exited_ = true;
         condition_.notify_all();
         return {false, "cancelled"};
+    }
+
+    lengjing::auth::AuthVersionResult GetLatestVersion() override {
+        return {true, {}, "1.0.0"};
     }
 
     lengjing::auth::AuthVariableResult GetVariableByCard(
@@ -134,6 +146,10 @@ public:
         std::string_view,
         std::string_view) override {
         return {true, {}};
+    }
+
+    lengjing::auth::AuthVersionResult GetLatestVersion() override {
+        return {true, {}, "1.0.0"};
     }
 
     lengjing::auth::AuthVariableResult GetVariableByCard(
@@ -213,6 +229,23 @@ lengjing::auth::CloudRuntimeIdentity RuntimeIdentity() {
 void RunAuthSessionTests() {
     using namespace std::chrono_literals;
     using namespace lengjing::auth;
+
+    {
+        FakeAuthGateway gateway;
+        REQUIRE(CheckCloudVersion(gateway, "1.0.0") ==
+                CloudVersionStatus::Current);
+        REQUIRE(gateway.versionCalls.load() == 1);
+
+        gateway.versionResult.version = "1.0.1";
+        REQUIRE(CheckCloudVersion(gateway, "1.0.0") ==
+                CloudVersionStatus::UpdateRequired);
+
+        gateway.versionResult = {false, "network error", {}};
+        REQUIRE(CheckCloudVersion(gateway, "1.0.0") ==
+                CloudVersionStatus::CheckFailed);
+        REQUIRE(CheckCloudVersion(gateway, {}) ==
+                CloudVersionStatus::CheckFailed);
+    }
 
     {
         std::string payload = "&quot;&amp;&#34;&#x22;";

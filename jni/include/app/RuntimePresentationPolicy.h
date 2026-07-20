@@ -38,6 +38,10 @@ constexpr const char* VerificationFailureText() noexcept {
     return "[验证] 验证失败";
 }
 
+constexpr const char* UpdateRequiredText() noexcept {
+    return "请到网盘更新最新版本";
+}
+
 constexpr const char* RuntimeFaultText() noexcept {
     return "运行模块发生错误";
 }

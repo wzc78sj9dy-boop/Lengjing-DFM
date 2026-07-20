@@ -1,4 +1,5 @@
 #include "game/native/GeometrySceneBuildPolicy.h"
+#include "game/native/GeometryShapeFilterPolicy.h"
 #include "test_support.h"
 
 #include <chrono>
@@ -7,7 +8,9 @@
 
 void RunGeometrySceneBuildPolicyTests() {
     using lengjing::game::native::GeometrySceneKind;
+    using lengjing::game::native::GeometryBodyType;
     using lengjing::game::native::ResolveGeometrySceneBuildPolicy;
+    using lengjing::game::native::ShouldIncludeGeometryShape;
 
     const auto staticPolicy =
         ResolveGeometrySceneBuildPolicy(GeometrySceneKind::Static);
@@ -133,4 +136,21 @@ void RunGeometrySceneBuildPolicyTests() {
     REQUIRE(ShouldPublishGeometryUpdate(
         true, publishedAt + std::chrono::milliseconds(1), publishedAt,
         false));
+
+    REQUIRE(ShouldIncludeGeometryShape(
+        GeometryBodyType::Static, 5, 0, 1));
+    REQUIRE(!ShouldIncludeGeometryShape(
+        GeometryBodyType::Static, 5, 3, 0));
+    REQUIRE(ShouldIncludeGeometryShape(
+        GeometryBodyType::Dynamic, 5, 0, 0));
+    REQUIRE(!ShouldIncludeGeometryShape(
+        GeometryBodyType::Dynamic, 5, 3, 1));
+    REQUIRE(ShouldIncludeGeometryShape(
+        GeometryBodyType::Static, 3, 2, 0));
+    REQUIRE(!ShouldIncludeGeometryShape(
+        GeometryBodyType::Static, 3, 4, 0));
+    REQUIRE(ShouldIncludeGeometryShape(
+        GeometryBodyType::Dynamic, 0, 1, 0));
+    REQUIRE(!ShouldIncludeGeometryShape(
+        GeometryBodyType::Dynamic, 0, 5, 0));
 }
