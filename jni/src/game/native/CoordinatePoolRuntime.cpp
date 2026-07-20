@@ -1,7 +1,6 @@
 #include "game/native/CoordinatePoolRuntime.h"
 
 #include "game/native/AlgorithmPositionRuntime.h"
-#include "game/native/CoordinatePoolPolicy.h"
 #include "game/native/MemoryTransport.h"
 #include "game/native/coordinate_pool_internal/FindDec.h"
 
@@ -28,6 +27,8 @@ namespace pool = coordinate_pool_internal;
 
 constexpr std::uint64_t kPageSize = 4096;
 constexpr std::uint64_t kPageMask = ~(kPageSize - 1);
+constexpr std::uint64_t kPointerPayloadMask =
+    UINT64_C(0x0000FFFFFFFFFFFF);
 constexpr std::uint64_t kMinimumRemoteAddress = UINT64_C(0x10000000);
 constexpr std::uint64_t kMaximumRemoteAddress = UINT64_C(0x10000000000);
 constexpr std::uint64_t kStackTop = UINT64_C(0x7FF00000);
@@ -49,7 +50,7 @@ constexpr std::uint32_t kSvcMask = 0xFFE0001FU;
 constexpr std::uint32_t kSvcOpcode = 0xD4000001U;
 
 std::uint64_t NormalizePointer(std::uint64_t value) noexcept {
-    return NormalizeCoordinatePoolPointer(value);
+    return value & kPointerPayloadMask;
 }
 
 bool IsRemoteAddress(std::uint64_t value) noexcept {
@@ -326,30 +327,16 @@ struct CoordinatePoolRuntime::Impl {
             SetError(CoordinatePoolRuntimeError::InvalidInput);
             return false;
         }
-        const bool refreshParameters = !parametersReady ||
-            ShouldRefreshCoordinatePoolState(
-                frame, lastParameterFrame, layout.ringRefreshFrames);
-        if (refreshParameters && !PrepareParametersUnlocked(component)) {
+        if (!parametersReady && !PrepareParametersUnlocked(component)) {
             return false;
         }
-        if (refreshParameters) {
-            lastParameterFrame = frame;
-            ringSlots.clear();
-        }
         RefreshPoolPointerUnlocked();
-        if (!parametersReady) {
-            if (!PrepareParametersUnlocked(component)) return false;
-            lastParameterFrame = frame;
-            ringSlots.clear();
-            RefreshPoolPointerUnlocked();
-        }
 
         RingSlot* selected = nullptr;
         auto found = ringSlots.find(component);
         const bool stale = found != ringSlots.end() &&
             frame >= found->second.stamp &&
             frame - found->second.stamp >= layout.ringRefreshFrames;
-        bool usedCachedRing = false;
         if (found == ringSlots.end() || found->second.ring == 0 || stale) {
             std::uint64_t ring = 0;
             if (ExecuteRingSearchUnlocked(component, ring)) {
@@ -359,28 +346,51 @@ struct CoordinatePoolRuntime::Impl {
                 selected = &slot;
             } else if (found != ringSlots.end() && found->second.ring != 0) {
                 selected = &found->second;
-                usedCachedRing = true;
             } else {
                 SetError(CoordinatePoolRuntimeError::RingSearchFailed);
                 return false;
             }
         } else {
             selected = &found->second;
-            usedCachedRing = true;
         }
 
+        const std::uint64_t indexAddress = NormalizePointer(
+            selected->ring + static_cast<std::uint64_t>(finder->index_offset));
+        if (!IsRemoteAddress(indexAddress)) {
+            SetError(CoordinatePoolRuntimeError::PositionReadFailed);
+            return false;
+        }
+
+        std::uint64_t index = 0;
+        std::uint64_t indexAfter = 0;
         CoordinatePoolPosition candidate{};
-        bool stable = ReadStablePositionUnlocked(selected->ring, candidate);
-        if (ShouldRetryCoordinatePoolRing(usedCachedRing, stable)) {
-            ringSlots.erase(component);
-            if (ClearDynamicPagesUnlocked()) {
-                std::uint64_t refreshedRing = 0;
-                if (ExecuteRingSearchUnlocked(component, refreshedRing)) {
-                    RingSlot& slot = ringSlots[component];
-                    slot = RingSlot{refreshedRing, frame};
-                    stable = ReadStablePositionUnlocked(
-                        refreshedRing, candidate);
-                }
+        bool stable = false;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            if (!ReadRemoteUnlocked(indexAddress, &index, sizeof(index))) {
+                break;
+            }
+            const std::uint64_t poolSlot = finder->decode_ring_slot(index);
+            if (poolSlot >
+                (std::numeric_limits<std::uint64_t>::max() -
+                    selected->ring - finder->get_ring_offset() -
+                    layout.poolHeadSkip) /
+                    layout.entryStride) {
+                break;
+            }
+            const std::uint64_t coordinateAddress = NormalizePointer(
+                selected->ring + finder->get_ring_offset() +
+                layout.poolHeadSkip +
+                static_cast<std::uint64_t>(layout.entryStride) * poolSlot);
+            if (!IsRemoteAddress(coordinateAddress) ||
+                !ReadRemoteUnlocked(
+                    coordinateAddress, &candidate, sizeof(candidate)) ||
+                !ReadRemoteUnlocked(
+                    indexAddress, &indexAfter, sizeof(indexAfter))) {
+                break;
+            }
+            if (index == indexAfter) {
+                stable = true;
+                break;
             }
         }
         if (!stable || !IsFinitePosition(candidate)) {
@@ -824,54 +834,6 @@ private:
         return false;
     }
 
-    bool ReadStablePositionUnlocked(
-        std::uint64_t ring,
-        CoordinatePoolPosition& candidate) {
-        candidate = {};
-        if (finder == nullptr) return false;
-        const std::uint64_t indexAddress = NormalizePointer(
-            ring + static_cast<std::uint64_t>(finder->index_offset));
-        if (!IsRemoteAddress(indexAddress)) return false;
-
-        for (int attempt = 0;
-             attempt < kCoordinatePoolStableReadAttempts;
-             ++attempt) {
-            std::uint64_t index = 0;
-            std::uint64_t indexAfter = 0;
-            if (!ReadRemoteUnlocked(indexAddress, &index, sizeof(index))) {
-                continue;
-            }
-            const std::uint64_t poolSlot = finder->decode_ring_slot(index);
-            const std::uint64_t fixedOffset =
-                static_cast<std::uint64_t>(finder->get_ring_offset()) +
-                layout.poolHeadSkip;
-            if (ring > std::numeric_limits<std::uint64_t>::max() -
-                           fixedOffset ||
-                poolSlot >
-                    (std::numeric_limits<std::uint64_t>::max() - ring -
-                     fixedOffset) /
-                        layout.entryStride) {
-                return false;
-            }
-            const std::uint64_t coordinateAddress = NormalizePointer(
-                ring + fixedOffset +
-                static_cast<std::uint64_t>(layout.entryStride) * poolSlot);
-            CoordinatePoolPosition value{};
-            if (!IsRemoteAddress(coordinateAddress) ||
-                !ReadRemoteUnlocked(
-                    coordinateAddress, &value, sizeof(value)) ||
-                !ReadRemoteUnlocked(
-                    indexAddress, &indexAfter, sizeof(indexAfter))) {
-                continue;
-            }
-            if (index == indexAfter && IsFinitePosition(value)) {
-                candidate = value;
-                return true;
-            }
-        }
-        return false;
-    }
-
     void RefreshPoolPointerUnlocked() {
         if (!parametersReady || computedContext == 0 ||
             finder->pool_ptr_offset == 0) {
@@ -882,14 +844,12 @@ private:
             static_cast<std::int64_t>(finder->pool_ptr_offset));
         std::uint64_t pointer = 0;
         if (!IsRemoteAddress(address) ||
-            !ReadRemoteUnlocked(address, &pointer, sizeof(pointer))) {
+            !ReadRemoteUnlocked(address, &pointer, sizeof(pointer)) ||
+            !IsValidGuestAddress(pointer)) {
             return;
         }
-        pointer = NormalizePointer(pointer);
-        if (!IsRemoteAddress(pointer)) return;
         if (lastPoolPointer != 0 && lastPoolPointer != pointer) {
             ringSlots.clear();
-            parametersReady = false;
         }
         lastPoolPointer = pointer;
     }
@@ -1086,7 +1046,6 @@ private:
         searchRegister = ARM64_REG_INVALID;
         computedContext = 0;
         parametersReady = false;
-        lastParameterFrame = 0;
         lastPoolPointer = 0;
         ringSlots.clear();
         probe.bridge = 0;
@@ -1138,7 +1097,6 @@ private:
         parametersReady = false;
         frame = 0;
         lastRootFrame = 0;
-        lastParameterFrame = 0;
         lastPoolPointer = 0;
         ringSlots.clear();
         probe = {};
@@ -1167,7 +1125,6 @@ private:
     bool parametersReady = false;
     std::uint64_t frame = 0;
     std::uint64_t lastRootFrame = 0;
-    std::uint64_t lastParameterFrame = 0;
     std::uint64_t lastPoolPointer = 0;
     std::unordered_map<std::uint64_t, RingSlot> ringSlots;
     std::unique_ptr<pool::coord_dec::FindDec> finder;

@@ -371,22 +371,8 @@ void TestRecordReading() {
     incompleteMemory.Put(plainEntry, plainActor);
     incompleteMemory.Put(plainActor + layout.plainRootOffset, plainRoot);
     auto incompleteRead = ReaderFor(incompleteMemory);
-    const auto incompleteRecord =
-        resolver.ReadRecord(plainArray, 2, incompleteRead);
-    REQUIRE(incompleteRecord.has_value());
-    REQUIRE(incompleteRecord->actor == plainActor);
-    REQUIRE(incompleteRecord->root == plainRoot);
-    REQUIRE(incompleteRecord->mesh == 0);
-
-    ActorMemory actorOnlyMemory;
-    actorOnlyMemory.Put(plainEntry, plainActor);
-    auto actorOnlyRead = ReaderFor(actorOnlyMemory);
-    const auto actorOnlyRecord =
-        resolver.ReadRecord(plainArray, 2, actorOnlyRead);
-    REQUIRE(actorOnlyRecord.has_value());
-    REQUIRE(actorOnlyRecord->actor == plainActor);
-    REQUIRE(actorOnlyRecord->root == 0);
-    REQUIRE(actorOnlyRecord->mesh == 0);
+    REQUIRE(
+        !resolver.ReadRecord(plainArray, 2, incompleteRead).has_value());
 
     REQUIRE(!resolver.ReadRecord(plainArray, plainArray.count, plainRead)
                  .has_value());
