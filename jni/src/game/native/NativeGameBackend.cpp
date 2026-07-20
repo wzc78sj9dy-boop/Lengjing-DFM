@@ -30,6 +30,7 @@
 #include "game/native/TrajectoryHook.h"
 #endif
 #include "game/native/WorldObjectRefreshPolicy.h"
+#include "render/PlayerTracerPolicy.h"
 
 #include <algorithm>
 #include <array>
@@ -1836,9 +1837,8 @@ public:
             visual.drawSkeleton = settings.visual.skeleton &&
                 horizontalDistanceMeters <=
                     settings.visual.skeletonDistanceMeters;
-            visual.tracerOrigin = ImVec2(
-                static_cast<float>(options_.screenWidth) * 0.5f,
-                static_cast<float>(options_.screenHeight) - 10.0f);
+            visual.tracerOrigin = render::TopTracerOrigin(
+                static_cast<float>(options_.screenWidth));
             visual.vitals.health = health.health;
             visual.vitals.maxHealth = health.maxHealth;
             visual.vitals.armor = health.armor;

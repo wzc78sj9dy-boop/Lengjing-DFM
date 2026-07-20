@@ -26,6 +26,7 @@ int main() {
         RunKernelModuleCatalogTests();
         RunOverlayContrastPolicyTests();
         RunPlayerBoundsTests();
+        RunPlayerTracerPolicyTests();
         RunPlayerTrackingTests();
         RunPositionResolverTests();
         RunPresentationRateTests();

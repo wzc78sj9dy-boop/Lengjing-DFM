@@ -1,5 +1,6 @@
 #include "render/overlay_renderer.h"
 #include "render/OverlayContrastPolicy.h"
+#include "render/PlayerTracerPolicy.h"
 
 #include <algorithm>
 #include <cmath>
@@ -262,7 +263,7 @@ void OverlayRenderer::DrawPlayer(ImDrawList* drawList,
     if (player.drawTracer) {
         DrawTracer(drawList,
                    player.tracerOrigin,
-                   ImVec2(player.bounds.Center().x, player.bounds.bottom),
+                   render::TopTracerTarget(player.bounds),
                    player.tone,
                    player.visible);
     }
