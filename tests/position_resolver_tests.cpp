@@ -39,9 +39,11 @@ private:
 
 void RunPositionResolverTests() {
     using lengjing::game::native::CharacterPositionResolver;
+    using lengjing::game::native::CharacterPositionSource;
     using lengjing::game::native::PositionReadMode;
     using lengjing::game::native::ResolveDecodedCharacterZ;
     using lengjing::game::native::ResolvePositionReadMode;
+    using lengjing::game::native::ShouldAlignBoneFrameToCharacterPosition;
     using Coordinate = CharacterPositionResolver::Coordinate;
 
     REQUIRE(ResolvePositionReadMode(false) == PositionReadMode::Standard);
@@ -49,6 +51,12 @@ void RunPositionResolverTests() {
     REQUIRE(ResolveDecodedCharacterZ(1000.0f) == 910.0f);
     REQUIRE(ResolveDecodedCharacterZ(90.0f) == 0.0f);
     REQUIRE(ResolveDecodedCharacterZ(-10.0f) == -100.0f);
+    REQUIRE(ShouldAlignBoneFrameToCharacterPosition(
+        CharacterPositionSource::Decoded));
+    REQUIRE(!ShouldAlignBoneFrameToCharacterPosition(
+        CharacterPositionSource::Standard));
+    REQUIRE(!ShouldAlignBoneFrameToCharacterPosition(
+        CharacterPositionSource::None));
 
     REQUIRE(CharacterPositionResolver::IsPrimaryCharacter("NC_BP_DFMCharacter_C"));
     REQUIRE(CharacterPositionResolver::IsPrimaryCharacter(

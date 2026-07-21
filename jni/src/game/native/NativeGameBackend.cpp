@@ -964,6 +964,7 @@ public:
                 settings.visual.coordinateDecrypt);
         if (positionMode != positionReadMode_) {
             characterPositions_.Clear();
+            decodedPositionCache_.clear();
             algorithmPositionRuntime_.Invalidate();
             algorithmReplayPagePolicy_.Invalidate();
             algorithmExecutionContextRefreshPolicy_.Invalidate();
@@ -1300,12 +1301,15 @@ public:
 #else
             const native::PositionReadMode actorPositionMode = positionMode;
 #endif
+            native::CharacterPositionSource positionSource =
+                native::CharacterPositionSource::None;
             const bool coordinateAvailable = ReadCharacterPosition(
                 actorRecord,
                 className,
                 actorPositionMode,
                 settings.visual.antiFlicker,
-                position);
+                position,
+                &positionSource);
             HealthState health{};
             bool healthAvailable = ReadHealth(actor, health);
             if (!healthAvailable && botClass && coordinateAvailable) {
@@ -1331,6 +1335,10 @@ public:
 #endif
                 continue;
             }
+            const Vec3* resolvedBonePosition =
+                native::ShouldAlignBoneFrameToCharacterPosition(positionSource)
+                ? &position
+                : nullptr;
             const Vec3 delta = Subtract(position, context.localPosition);
             const float distanceMeters = Length(delta) * 0.01f;
             const float horizontalDistanceMeters = HorizontalLength(delta) * 0.01f;
@@ -1562,7 +1570,7 @@ public:
                     actorRecord,
                     context.view,
                     settings.visual.antiFlicker,
-                    &position,
+                    resolvedBonePosition,
                     boneFrame,
                     &boneReadStatus);
                 if (boneReadStatus == BoneFrameReadStatus::NoBoneArray &&
@@ -1951,7 +1959,7 @@ public:
                         actorRecord,
                         context.view,
                         settings.visual.antiFlicker,
-                        &position,
+                        resolvedBonePosition,
                         boneFrame,
                         &boneReadStatus);
                     if (boneReadStatus == BoneFrameReadStatus::NoBoneArray &&
@@ -3526,7 +3534,11 @@ private:
         native::PositionReadMode mode,
         bool antiFlicker,
         Vec3& position,
-        bool localActor = false) {
+        bool localActor = false,
+        native::CharacterPositionSource* positionSource = nullptr) {
+        if (positionSource != nullptr) {
+            *positionSource = native::CharacterPositionSource::None;
+        }
         const bool coordinateDecryptRequested =
             algorithmPositionRequested_ &&
             mode == native::PositionReadMode::Direct;
@@ -3538,19 +3550,26 @@ private:
                 Vec3 adjusted = decoded;
                 adjusted.z = native::ResolveDecodedCharacterZ(adjusted.z);
                 if (antiFlicker) {
-                    positionCache_[actor] = PositionCacheEntry{adjusted, now};
+                    decodedPositionCache_[actor] =
+                        PositionCacheEntry{adjusted, now};
                 }
                 position = adjusted;
+                if (positionSource != nullptr) {
+                    *positionSource = native::CharacterPositionSource::Decoded;
+                }
             };
             const auto readCached = [&]() {
                 if (!antiFlicker) return false;
-                const auto found = positionCache_.find(actor);
-                if (found == positionCache_.end()) return false;
+                const auto found = decodedPositionCache_.find(actor);
+                if (found == decodedPositionCache_.end()) return false;
                 if (now - found->second.updatedAt > kCacheLifetime) {
-                    positionCache_.erase(found);
+                    decodedPositionCache_.erase(found);
                     return false;
                 }
                 position = found->second.position;
+                if (positionSource != nullptr) {
+                    *positionSource = native::CharacterPositionSource::Decoded;
+                }
                 return true;
             };
             if (!algorithmReplayAllowedThisFrame_) {
@@ -3658,7 +3677,11 @@ private:
             return false;
         }
         position = Vec3{coordinate[0], coordinate[1], coordinate[2]};
-        return IsFinite(position) && IsNonzero(position);
+        if (!IsFinite(position) || !IsNonzero(position)) return false;
+        if (positionSource != nullptr) {
+            *positionSource = native::CharacterPositionSource::Standard;
+        }
+        return true;
     }
 
     bool ReadCharacterPosition(
@@ -3666,23 +3689,34 @@ private:
         std::string_view className,
         native::PositionReadMode preferredMode,
         bool antiFlicker,
-        Vec3& position) {
+        Vec3& position,
+        native::CharacterPositionSource* positionSource = nullptr) {
         position = Vec3{};
+        if (positionSource != nullptr) {
+            *positionSource = native::CharacterPositionSource::None;
+        }
         return native::ReadActorRecordSourceWithFallback(
             record,
             [&] {
                 Vec3 candidate{};
+                native::CharacterPositionSource candidateSource =
+                    native::CharacterPositionSource::None;
                 if (!ReadCharacterPosition(
                         record.actor,
                         record.root,
                         className,
                         preferredMode,
                         antiFlicker,
-                        candidate) ||
+                        candidate,
+                        false,
+                        &candidateSource) ||
                     !IsFinite(candidate) || !IsNonzero(candidate)) {
                     return false;
                 }
                 position = candidate;
+                if (positionSource != nullptr) {
+                    *positionSource = candidateSource;
+                }
                 return true;
             },
             [&] {
@@ -3698,6 +3732,9 @@ private:
                     return false;
                 }
                 position = candidate;
+                if (positionSource != nullptr) {
+                    *positionSource = native::CharacterPositionSource::Standard;
+                }
                 return true;
             });
     }
@@ -4229,8 +4266,7 @@ private:
                 result.failureStatus = BoneFrameReadStatus::NoComponent;
 
                 Transform componentTransform{};
-                const Vec3* standardizedPosition =
-                    algorithmPositionRequested_ ? resolvedPosition : nullptr;
+                const Vec3* standardizedPosition = resolvedPosition;
                 const bool componentReady = source.rebuildResolvedTransform
                     ? RebuildResolvedComponentTransform(
                           source.root,
@@ -4247,7 +4283,6 @@ private:
                 Vec3 alignment{};
                 bool alignmentReady = false;
                 if (!source.rebuildResolvedTransform &&
-                    algorithmPositionRequested_ &&
                     standardizedPosition != nullptr &&
                     IsFinite(*standardizedPosition)) {
                     alignment = Subtract(
@@ -5232,12 +5267,15 @@ private:
         if (!ReadTrackingMeshType(record, meshType)) return;
 
         Vec3 position{};
+        native::CharacterPositionSource positionSource =
+            native::CharacterPositionSource::None;
         if (!ReadCharacterPosition(
                 record,
                 std::string_view{},
                 native::PositionReadMode::Direct,
                 antiFlicker,
-                position)) {
+                position,
+                &positionSource)) {
             return;
         }
         const bool playerClass = std::find(
@@ -5271,7 +5309,13 @@ private:
             : -1;
         BoneFrame boneFrame{};
         const bool boneFrameReady = ReadBoneFrame(
-            record, context.view, antiFlicker, &position, boneFrame);
+            record,
+            context.view,
+            antiFlicker,
+            native::ShouldAlignBoneFrameToCharacterPosition(positionSource)
+                ? &position
+                : nullptr,
+            boneFrame);
         if (boneFrameReady &&
             (settings.missMode || settings.requireVisibility)) {
             static_cast<void>(EvaluateBoneVisibility(
@@ -5874,19 +5918,23 @@ private:
 
     void PrunePositionCache(std::chrono::steady_clock::time_point now) {
         constexpr auto kRetention = std::chrono::milliseconds(300);
-        for (auto iterator = positionCache_.begin();
-             iterator != positionCache_.end();) {
-            if (now - iterator->second.updatedAt > kRetention) {
-                iterator = positionCache_.erase(iterator);
-            } else {
-                ++iterator;
+        const auto prune = [now, kRetention](auto& cache) {
+            for (auto iterator = cache.begin(); iterator != cache.end();) {
+                if (now - iterator->second.updatedAt > kRetention) {
+                    iterator = cache.erase(iterator);
+                } else {
+                    ++iterator;
+                }
             }
-        }
+        };
+        prune(positionCache_);
+        prune(decodedPositionCache_);
     }
 
     void ResetWorldState() {
         world_ = 0;
         positionCache_.clear();
+        decodedPositionCache_.clear();
         boneCache_.clear();
         nameCache_.clear();
         itemMetadata_.clear();
@@ -6245,6 +6293,8 @@ private:
     native::ActorRecordRefreshPolicy actorRecordRefreshPolicy_{
         std::chrono::milliseconds(100)};
     std::unordered_map<std::uintptr_t, PositionCacheEntry> positionCache_;
+    std::unordered_map<std::uintptr_t, PositionCacheEntry>
+        decodedPositionCache_;
     std::unordered_map<std::uintptr_t, BoneCacheEntry> boneCache_;
     std::chrono::steady_clock::time_point lastBoneAuditLogAt_{};
     std::unordered_map<std::int32_t, std::string> nameCache_;
