@@ -90,6 +90,9 @@ private:
     ui::UiModel model_{};
     game::RuntimeStatus lastStatus_{};
     bool coordinateDecryptSuccessNotified_ = false;
+    game::CoordinateDecryptError lastReportedCoordinateError_ =
+        game::CoordinateDecryptError::None;
+    int lastReportedCoordinateSystemError_ = 0;
     std::chrono::steady_clock::time_point configSaveDeadline_{};
     std::deque<ToastNotification> toastNotifications_;
     std::mutex toastNotificationsMutex_;

@@ -5,6 +5,7 @@
 #include "game/GameRuntime.h"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -28,6 +29,8 @@ struct BackendState {
     std::atomic_bool selfAimSetting{false};
     std::atomic_bool projectileTrackingSetting{false};
     std::atomic_bool frameReady{true};
+    std::atomic<std::uint16_t> coordinateError{0};
+    std::atomic_int coordinateSystemError{0};
 };
 
 class FakeBackend final : public lengjing::game::GameBackend {
@@ -60,7 +63,7 @@ public:
 
     bool ReadFrame(const lengjing::game::FeatureSettings& settings,
                    lengjing::game::GameFrame& frame,
-                   lengjing::game::RuntimeProbe&,
+                   lengjing::game::RuntimeProbe& probe,
                    std::string& error) override {
         frame.ready = state_->frameReady.load();
         frame.playerCount =
@@ -69,6 +72,11 @@ public:
         state_->projectileTrackingSetting.store(
             settings.aim.trajectoryTracking);
         error = frame.ready ? std::string{} : "waiting";
+        probe.coordinateError =
+            static_cast<lengjing::game::CoordinateDecryptError>(
+                state_->coordinateError.load());
+        probe.coordinateSystemError =
+            state_->coordinateSystemError.load();
         ++state_->reads;
         return true;
     }
@@ -169,6 +177,28 @@ void RunRuntimeTests() {
     REQUIRE(state->algorithmDecryptRva.load() == 0x1234);
     REQUIRE(state->selfAimSetting.load());
     REQUIRE(!state->projectileTrackingSetting.load());
+
+    state->coordinateError.store(
+        lengjing::game::CoordinateDecryptErrorCode(
+            lengjing::game::CoordinateDecryptError::
+                ContextDeviceProtocolMismatch));
+    state->coordinateSystemError.store(-EPROTO);
+    REQUIRE(WaitFor([&] {
+        const lengjing::game::RuntimeStatus status = runtime.Status();
+        return status.coordinateError ==
+                lengjing::game::CoordinateDecryptError::
+                    ContextDeviceProtocolMismatch &&
+            status.coordinateSystemError == -EPROTO;
+    }));
+
+    state->coordinateError.store(0);
+    state->coordinateSystemError.store(0);
+    REQUIRE(WaitFor([&] {
+        const lengjing::game::RuntimeStatus status = runtime.Status();
+        return status.coordinateError ==
+                lengjing::game::CoordinateDecryptError::None &&
+            status.coordinateSystemError == 0;
+    }));
 
     state->frameReady.store(false);
     REQUIRE(WaitFor([&] {

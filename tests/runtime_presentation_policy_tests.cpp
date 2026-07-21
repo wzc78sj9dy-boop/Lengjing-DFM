@@ -1,8 +1,10 @@
 #include "test_support.h"
 
 #include "app/RuntimePresentationPolicy.h"
+#include "game/CoordinateDecryptDiagnostics.h"
 
 #include <array>
+#include <string>
 #include <string_view>
 
 void RunRuntimePresentationPolicyTests() {
@@ -49,4 +51,12 @@ void RunRuntimePresentationPolicyTests() {
             "运行数据暂不可用");
     REQUIRE(std::string_view(RuntimeDataRestoredText()) ==
             "运行数据已恢复");
+
+    const std::string diagnostic =
+        lengjing::game::FormatCoordinateDecryptDiagnostic(
+            lengjing::game::CoordinateDecryptError::
+                ContextDeviceProtocolMismatch,
+            -71);
+    REQUIRE(diagnostic == "COORD CD-2004 SYS=-71");
+    REQUIRE(diagnostic.find('\n') == std::string::npos);
 }

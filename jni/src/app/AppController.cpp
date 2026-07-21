@@ -318,6 +318,8 @@ void AppController::StartRuntime() {
         return;
     }
     coordinateDecryptSuccessNotified_ = false;
+    lastReportedCoordinateError_ = game::CoordinateDecryptError::None;
+    lastReportedCoordinateSystemError_ = 0;
     terminalWorkerJoined_ = false;
 }
 
@@ -524,6 +526,20 @@ void AppController::SyncRuntimeStatus() {
     model_.runtime.busy = status.phase == game::RuntimePhase::Starting ||
         status.phase == game::RuntimePhase::Stopping;
     model_.runtime.stopping = status.phase == game::RuntimePhase::Stopping;
+    model_.runtime.processId = status.processId;
+    model_.runtime.baseReady = status.baseReady;
+    model_.runtime.coordinateRequested = status.coordinateRequested;
+    model_.runtime.coordinateEntryReady = status.coordinateEntryReady;
+    model_.runtime.coordinateContextReady = status.coordinateContextReady;
+    model_.runtime.coordinateThreadId = status.coordinateThreadId;
+    model_.runtime.coordinateGuestPc = status.coordinateGuestPc;
+    model_.runtime.coordinateContextGeneration =
+        status.coordinateContextGeneration;
+    model_.runtime.coordinateAttempts = status.coordinateAttempts;
+    model_.runtime.coordinateSuccesses = status.coordinateSuccesses;
+    model_.runtime.coordinateErrorCode =
+        game::CoordinateDecryptErrorCode(status.coordinateError);
+    model_.runtime.coordinateSystemError = status.coordinateSystemError;
     const CoordinateDecryptPresentation nextDecryptPresentation =
         ResolveCoordinateDecryptPresentation(
             status.coordinateRequested,
@@ -557,12 +573,35 @@ void AppController::SyncRuntimeStatus() {
             AppendLog("正在停止运行模块");
             break;
         case game::RuntimePhase::Faulted:
-            AppendLog(RuntimeFaultText());
+            if (status.coordinateError ==
+                game::CoordinateDecryptError::None) {
+                AppendLog(RuntimeFaultText());
+            }
             break;
         }
-    } else if (!status.message.empty() && lastStatus_.message.empty()) {
+    }
+
+    const bool coordinateDiagnosticChanged =
+        status.coordinateError != game::CoordinateDecryptError::None &&
+        (status.coordinateError != lastReportedCoordinateError_ ||
+         status.coordinateSystemError !=
+             lastReportedCoordinateSystemError_);
+    if (coordinateDiagnosticChanged) {
+        AppendLog(game::FormatCoordinateDecryptDiagnostic(
+            status.coordinateError,
+            status.coordinateSystemError));
+        lastReportedCoordinateError_ = status.coordinateError;
+        lastReportedCoordinateSystemError_ =
+            status.coordinateSystemError;
+    } else if (status.coordinateError ==
+                   game::CoordinateDecryptError::None &&
+               !status.message.empty() && lastStatus_.message.empty()) {
         AppendLog(RuntimeDataUnavailableText());
-    } else if (status.phase == game::RuntimePhase::Running &&
+    } else if (status.coordinateError ==
+                   game::CoordinateDecryptError::None &&
+               lastStatus_.coordinateError ==
+                   game::CoordinateDecryptError::None &&
+               status.phase == game::RuntimePhase::Running &&
                status.message.empty() && !lastStatus_.message.empty()) {
         AppendLog(RuntimeDataRestoredText());
     }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "game/CoordinateDecryptDiagnostics.h"
 #include "game/ProjectileTrackingFeature.h"
 
 #include <cstddef>
@@ -83,6 +84,23 @@ struct ProcessExecutionContext {
     }
 };
 
+enum class ProcessExecutionContextSource : std::uint8_t {
+    None,
+    Device,
+    PtraceOracle,
+};
+
+struct ProcessExecutionContextDiagnostic {
+    ProcessExecutionContextSource source =
+        ProcessExecutionContextSource::None;
+    CoordinateDecryptError error = CoordinateDecryptError::None;
+    int systemError = 0;
+    int deviceStatus = 0;
+    int ptraceStatus = 0;
+    std::size_t deviceRequestCount = 0;
+    bool pacgaOperandsResolved = false;
+};
+
 struct MemoryReadRequest {
     std::uintptr_t remoteAddress = 0;
     void* localBuffer = nullptr;
@@ -119,6 +137,8 @@ public:
     bool ConfigureCoordinateReplay(
         const CoordinateReplayTransportLayout& layout) noexcept;
     bool ReadProcessExecutionContext(ProcessExecutionContext& context);
+    ProcessExecutionContextDiagnostic ExecutionContextDiagnostic()
+        const noexcept;
     bool RejectProcessExecutionContext() noexcept;
 
 private:

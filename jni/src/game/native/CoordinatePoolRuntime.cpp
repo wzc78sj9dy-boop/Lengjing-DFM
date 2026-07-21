@@ -413,10 +413,16 @@ struct CoordinatePoolRuntime::Impl {
                 break;
             }
         }
-        if (!stable || !IsFinitePosition(candidate)) {
+        if (!stable) {
             selected->ring = 0;
             selected->stamp = frame;
-            SetError(CoordinatePoolRuntimeError::PositionReadFailed);
+            SetError(CoordinatePoolRuntimeError::PositionUnstable);
+            return false;
+        }
+        if (!IsFinitePosition(candidate)) {
+            selected->ring = 0;
+            selected->stamp = frame;
+            SetError(CoordinatePoolRuntimeError::PositionNotFinite);
             return false;
         }
 

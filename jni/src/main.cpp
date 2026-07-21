@@ -137,10 +137,25 @@ int RunCoordinateProbe(
     if (!runtime.Start(options)) return 10;
 
     lengjing::game::RuntimeStatus last{};
+    lengjing::game::CoordinateDecryptError lastReportedError =
+        lengjing::game::CoordinateDecryptError::None;
+    int lastReportedSystemError = 0;
     const auto deadline = std::chrono::steady_clock::now() +
         std::chrono::seconds(seconds);
     while (std::chrono::steady_clock::now() < deadline) {
         const lengjing::game::RuntimeStatus status = runtime.Status();
+        if (status.coordinateError !=
+                lengjing::game::CoordinateDecryptError::None &&
+            (status.coordinateError != lastReportedError ||
+             status.coordinateSystemError != lastReportedSystemError)) {
+            const std::string diagnostic =
+                lengjing::game::FormatCoordinateDecryptDiagnostic(
+                    status.coordinateError,
+                    status.coordinateSystemError);
+            std::fprintf(stderr, "%s\n", diagnostic.c_str());
+            lastReportedError = status.coordinateError;
+            lastReportedSystemError = status.coordinateSystemError;
+        }
         last = status;
         if (status.phase == lengjing::game::RuntimePhase::Faulted) break;
         std::this_thread::sleep_for(100ms);

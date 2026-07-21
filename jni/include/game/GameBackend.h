@@ -1,6 +1,7 @@
 #pragma once
 
 #include "auth/CloudLayout.h"
+#include "game/CoordinateDecryptDiagnostics.h"
 #include "game/FeatureSettings.h"
 #include "game/GameFrame.h"
 #include "game/native/AlgorithmPositionRuntime.h"
@@ -40,6 +41,8 @@ struct RuntimeProbe {
     std::uint64_t coordinateContextGeneration = 0;
     std::uint64_t coordinateAttempts = 0;
     std::uint64_t coordinateSuccesses = 0;
+    CoordinateDecryptError coordinateError = CoordinateDecryptError::None;
+    int coordinateSystemError = 0;
     RuntimeFailureKind failureKind = RuntimeFailureKind::None;
 };
 
