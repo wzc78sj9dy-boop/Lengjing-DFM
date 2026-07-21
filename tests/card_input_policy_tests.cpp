@@ -83,6 +83,15 @@ void RunCardInputPolicyTests() {
     }
 
     {
+        std::istringstream input("\xEF\xBB\xBF" "y\n");
+        std::ostringstream output;
+        const CardInputResult result = ReadCardKeyFromStream(
+            input, output, false, {}, "SAVED_CARD_FOR_TEST");
+        REQUIRE(result.status == CardInputStatus::Accepted);
+        REQUIRE(result.value == "SAVED_CARD_FOR_TEST");
+    }
+
+    {
         std::istringstream input("Y\n");
         std::ostringstream output;
         const CardInputResult result = ReadCardKeyFromStream(

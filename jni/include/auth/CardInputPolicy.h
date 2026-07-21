@@ -72,6 +72,10 @@ private:
 };
 
 inline void TrimCardKey(std::string& value) {
+    constexpr std::string_view kUtf8Bom{"\xEF\xBB\xBF", 3};
+    if (value.compare(0, kUtf8Bom.size(), kUtf8Bom) == 0) {
+        value.erase(0, kUtf8Bom.size());
+    }
     const auto isWhitespace = [](unsigned char character) {
         return character == ' ' || character == '\t' ||
             character == '\r' || character == '\n';
