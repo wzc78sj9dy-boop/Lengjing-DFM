@@ -1,6 +1,7 @@
 #include "game/aim/AimInputAdapter.h"
 
 #include "Android_touch/TouchHelperA.h"
+#include "Android_touch/TouchTransform.h"
 #include "ProgramMotionChannel.h"
 #include "game/aim/GyroscopeDirectionPolicy.h"
 #include "game/native/KernelModuleLoader.h"
@@ -31,10 +32,13 @@ struct AimInputAdapter::Impl {
     int width = 0;
     int height = 0;
     int orientation = 0;
+    bool writeTouchReady = false;
     bool kernelTouchReady = false;
     std::array<bool, kTouchSlotCount> activeSlots{};
     std::unique_ptr<paradise_driver> kernel;
     ProgramMotionChannel program;
+    std::chrono::steady_clock::time_point nextTouchStartAttempt{};
+    std::chrono::steady_clock::time_point nextKernelTouchStartAttempt{};
     std::chrono::steady_clock::time_point nextProgramStartAttempt{};
 
     bool IsTouchMode() const noexcept {
@@ -44,57 +48,59 @@ struct AimInputAdapter::Impl {
 
     bool SendRawTouch(int action, int slot, int x, int y) {
         if (mode == ui::AimInputMode::WriteTouch) {
-            if (action == 2) return Touch_Up(slot);
-            if (action == 0) return Touch_Down(slot, x, y);
-            return action == 1 && Touch_Move(slot, x, y);
+            if (!writeTouchReady) return false;
+            const bool sent = action == 2
+                ? Touch_Up(slot)
+                : action == 0
+                    ? Touch_Down(slot, x, y)
+                    : action == 1 && Touch_Move(slot, x, y);
+            if (!sent && !IsTouchWriteReady()) {
+                writeTouchReady = false;
+                nextTouchStartAttempt =
+                    std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            }
+            return sent;
         }
         if (mode != ui::AimInputMode::KernelTouch ||
             kernel == nullptr || !kernelTouchReady) {
             return false;
         }
-        if (action == 2) return kernel->touch_up(slot);
-        if (action == 0) return kernel->touch_down(slot, x, y);
-        return action == 1 && kernel->touch_move(slot, x, y);
+        const bool sent = action == 2
+            ? kernel->touch_up(slot)
+            : action == 0
+                ? kernel->touch_down(slot, x, y)
+                : action == 1 && kernel->touch_move(slot, x, y);
+        if (!sent) {
+            kernel->touch_destroy();
+            kernelTouchReady = false;
+            activeSlots.fill(false);
+            nextKernelTouchStartAttempt =
+                std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        }
+        return sent;
     }
 
     void MapKernelTouch(double x, double y, int& outputX, int& outputY) const {
-        double mappedX = x;
-        double mappedY = y;
-        int maximumX = std::max(0, width);
-        int maximumY = std::max(0, height);
-        switch (orientation) {
-            case 1:
-                mappedX = static_cast<double>(height) - y;
-                mappedY = x;
-                maximumX = std::max(0, height);
-                maximumY = std::max(0, width);
-                break;
-            case 2:
-                mappedX = static_cast<double>(width) - x;
-                mappedY = static_cast<double>(height) - y;
-                break;
-            case 3:
-                mappedX = y;
-                mappedY = static_cast<double>(width) - x;
-                maximumX = std::max(0, height);
-                maximumY = std::max(0, width);
-                break;
-            default:
-                break;
-        }
+        const touch::PixelPoint mapped = touch::DisplayToNaturalPixels(
+            x, y, width, height, orientation);
         outputX = std::clamp(
-            static_cast<int>(std::lround(mappedX)), 0, maximumX);
+            static_cast<int>(std::lround(mapped.x)), 0, mapped.maximumX);
         outputY = std::clamp(
-            static_cast<int>(std::lround(mappedY)), 0, maximumY);
+            static_cast<int>(std::lround(mapped.y)), 0, mapped.maximumY);
     }
 
     bool SendProgramMotion(float pitch, float yaw) {
         if (program.Send(pitch, yaw)) return true;
 
+        return PrepareProgramMotion() && program.Send(pitch, yaw);
+    }
+
+    bool PrepareProgramMotion() {
+        if (program.Ready()) return true;
         const auto now = std::chrono::steady_clock::now();
         if (now < nextProgramStartAttempt) return false;
         nextProgramStartAttempt = now + std::chrono::seconds(2);
-        return program.Start() && program.Send(pitch, yaw);
+        return program.Start();
     }
 };
 
@@ -114,9 +120,10 @@ bool AimInputAdapter::Start(ui::AimInputMode mode) {
             break;
         case ui::AimInputMode::WriteTouch:
             StopTouchScreen();
-            if (!TouchScreenHandle(1)) {
-                TouchScreenHandle(0);
-                return false;
+            impl_->writeTouchReady = TouchScreenHandle(1);
+            if (!impl_->writeTouchReady) {
+                impl_->nextTouchStartAttempt =
+                    std::chrono::steady_clock::now() + std::chrono::seconds(2);
             }
             break;
         case ui::AimInputMode::ProgramGyroscope:
@@ -159,14 +166,26 @@ void AimInputAdapter::Stop() noexcept {
     }
     impl_->program.Close();
     impl_->kernel.reset();
+    impl_->writeTouchReady = false;
     impl_->kernelTouchReady = false;
     impl_->activeSlots.fill(false);
     impl_->width = 0;
     impl_->height = 0;
     impl_->orientation = 0;
+    impl_->nextTouchStartAttempt = {};
+    impl_->nextKernelTouchStartAttempt = {};
     impl_->nextProgramStartAttempt = {};
     impl_->mode = ui::AimInputMode::ReadOnly;
     impl_->started = false;
+}
+
+bool AimInputAdapter::PrepareGyroscope() {
+    if (impl_ == nullptr || !impl_->started) return false;
+    if (impl_->mode == ui::AimInputMode::ProgramGyroscope) {
+        return impl_->PrepareProgramMotion();
+    }
+    return impl_->mode == ui::AimInputMode::KernelGyroscope &&
+        impl_->kernel != nullptr;
 }
 
 bool AimInputAdapter::ConfigureDisplay(
@@ -177,8 +196,27 @@ bool AimInputAdapter::ConfigureDisplay(
         return false;
     }
     const int normalizedOrientation = NormalizeOrientation(orientation);
+    bool releasedForGeometryChange = false;
+    if (impl_->IsTouchMode() && impl_->width > 0 && impl_->height > 0 &&
+        (impl_->width != width || impl_->height != height ||
+         impl_->orientation != normalizedOrientation)) {
+        for (int slot = 0; slot < kTouchSlotCount; ++slot) {
+            if (!impl_->activeSlots[static_cast<std::size_t>(slot)]) continue;
+            impl_->SendRawTouch(2, slot, 0, 0);
+            releasedForGeometryChange = true;
+        }
+        impl_->activeSlots.fill(false);
+    }
     if (impl_->mode == ui::AimInputMode::WriteTouch) {
         ConfigureTouchDisplay(width, height, normalizedOrientation);
+        if (!impl_->writeTouchReady) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now < impl_->nextTouchStartAttempt) return false;
+            impl_->nextTouchStartAttempt = now + std::chrono::seconds(2);
+            StopTouchScreen();
+            impl_->writeTouchReady = TouchScreenHandle(1);
+            if (!impl_->writeTouchReady) return false;
+        }
     }
     if (impl_->mode == ui::AimInputMode::KernelTouch &&
         (!impl_->kernelTouchReady ||
@@ -193,14 +231,22 @@ bool AimInputAdapter::ConfigureDisplay(
             impl_->activeSlots.fill(false);
             impl_->kernel->touch_destroy();
             impl_->kernelTouchReady = false;
+            impl_->nextKernelTouchStartAttempt = {};
         }
+        const auto now = std::chrono::steady_clock::now();
+        if (now < impl_->nextKernelTouchStartAttempt) return false;
         impl_->kernelTouchReady = impl_->kernel->touch_init(width, height);
-        if (!impl_->kernelTouchReady) return false;
+        if (!impl_->kernelTouchReady) {
+            impl_->nextKernelTouchStartAttempt =
+                now + std::chrono::seconds(2);
+            return false;
+        }
+        impl_->nextKernelTouchStartAttempt = {};
     }
     impl_->width = width;
     impl_->height = height;
     impl_->orientation = normalizedOrientation;
-    return true;
+    return !releasedForGeometryChange;
 }
 
 bool AimInputAdapter::SendTouch(
@@ -216,12 +262,14 @@ bool AimInputAdapter::SendTouch(
 
     int touchX = static_cast<int>(std::lround(x));
     int touchY = static_cast<int>(std::lround(y));
+    const std::size_t slotIndex = static_cast<std::size_t>(slot);
+    if (action == 2 && !impl_->activeSlots[slotIndex]) return true;
     if (impl_->mode == ui::AimInputMode::KernelTouch && action != 2) {
         impl_->MapKernelTouch(x, y, touchX, touchY);
     }
     const bool sent = impl_->SendRawTouch(action, slot, touchX, touchY);
     if (sent) {
-        impl_->activeSlots[static_cast<std::size_t>(slot)] = action != 2;
+        impl_->activeSlots[slotIndex] = action != 2;
     }
     return sent;
 }
@@ -243,8 +291,10 @@ bool AimInputAdapter::SendGyroscope(
     }
     if (impl_->mode == ui::AimInputMode::KernelGyroscope &&
         impl_->kernel != nullptr) {
+        const KernelGyroscopeCommand command =
+            ResolveKernelGyroscopeCommand(direction);
         return impl_->kernel->gyro_update(
-            -yaw, -pitch, PARADISE_GYRO_MASK_ALL, true);
+            command.x, command.y, PARADISE_GYRO_MASK_ALL, true);
     }
     return false;
 }

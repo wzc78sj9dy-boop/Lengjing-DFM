@@ -66,4 +66,12 @@ void RunFrameProjectionTests() {
 
     latest.rotation.yaw = 180.0f;
     REQUIRE(!ProjectWorldPoint(target, latest, 2400, 1080).valid);
+
+    ProjectionView rolled = view;
+    rolled.rotation.roll = 90.0f;
+    const ScreenProjection rollRotated = ProjectWorldPoint(
+        {100.0f, 0.0f, -10.0f}, rolled, 2400, 1080);
+    REQUIRE(rollRotated.valid);
+    REQUIRE(rollRotated.x > 1200.0f);
+    REQUIRE(std::fabs(rollRotated.y - 540.0f) < 0.01f);
 }

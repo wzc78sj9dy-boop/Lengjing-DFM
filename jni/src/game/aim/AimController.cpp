@@ -1,23 +1,21 @@
 #include "game/aim/AimController.h"
 
-#include "game/aim/AimPrediction.h"
 #include "game/aim/AimInputAdapter.h"
+#include "game/aim/AimPrediction.h"
+#include "game/aim/GyroscopeDirectionPolicy.h"
+#include "game/aim/TouchMotionPolicy.h"
+#include "game/native/FrameProjection.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 
 namespace lengjing::game::aim {
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
 constexpr int kTouchSlot = 8;
-
-float WrapDegrees(float degrees) {
-    while (degrees > 180.0f) degrees -= 360.0f;
-    while (degrees < -180.0f) degrees += 360.0f;
-    return degrees;
-}
 
 bool Finite(const Vec3& value) {
     return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
@@ -59,63 +57,54 @@ bool TargetAllowed(const TargetSnapshot& target) {
         target.worldDistanceMeters <= std::max(0.0f, distanceLimit);
 }
 
-struct AimError {
-    float pitch = 0.0f;
-    float yaw = 0.0f;
-};
-
-bool CalculateAimError(const TargetSnapshot& target, AimError& output) {
+bool ProjectTarget(
+    const TargetSnapshot& target,
+    int screenWidth,
+    int screenHeight,
+    native::ScreenProjection& output) {
     const Vec3 predicted = PredictAimPoint(target);
-    const float dx = predicted.x - target.view.location.x;
-    const float dy = predicted.y - target.view.location.y;
-    const float dz = predicted.z - target.view.location.z;
-    const float horizontal = std::hypot(dx, dy);
-    if (!std::isfinite(horizontal) || horizontal <= 0.01f) {
-        return false;
-    }
-    const float targetPitch = std::atan2(dz, horizontal) * 180.0f / kPi;
-    const float targetYaw = std::atan2(dy, dx) * 180.0f / kPi;
-    if (target.view.halfWidth <= 0.5f ||
-        !std::isfinite(target.view.fieldOfView)) {
-        return false;
-    }
-    const float smoothing = std::max(0.01f, target.tuning.smoothing);
-    const float divisor = smoothing * 100.0f;
-    const float scale = (target.view.halfWidth * 2.0f /
-        std::clamp(target.view.fieldOfView, 5.0f, 170.0f)) / divisor;
-    output.pitch = WrapDegrees(targetPitch - target.view.pitch) * scale;
-    output.yaw = WrapDegrees(targetYaw - target.view.yaw) * scale;
-    return std::isfinite(output.pitch) && std::isfinite(output.yaw);
+    const native::ProjectionPoint point{
+        predicted.x,
+        predicted.y,
+        predicted.z,
+    };
+    const native::ProjectionView view{
+        {target.view.location.x,
+         target.view.location.y,
+         target.view.location.z},
+        {target.view.pitch, target.view.yaw, target.view.roll},
+        target.view.fieldOfView,
+    };
+    output = native::ProjectWorldPoint(point, view, screenWidth, screenHeight);
+    return output.valid && output.camera.forward > 0.001f;
 }
 
-class StepIntegrator final {
-public:
-    std::pair<int, int> Step(float x, float y, float maximumX, float maximumY) {
-        const float length = std::hypot(x, y);
-        if (!std::isfinite(length) || length <= 0.0001f) {
-            Reset();
-            return {};
-        }
-        const float denominator = std::sqrt(length * length + length);
-        residualX_ += std::clamp(x / denominator * std::fabs(maximumX),
-                                 -std::fabs(x), std::fabs(x));
-        residualY_ += std::clamp(y / denominator * std::fabs(maximumY),
-                                 -std::fabs(y), std::fabs(y));
-        const int wholeX = static_cast<int>(std::trunc(residualX_));
-        const int wholeY = static_cast<int>(std::trunc(residualY_));
-        residualX_ -= wholeX;
-        residualY_ -= wholeY;
-        return {wholeX, wholeY};
-    }
+float RandomTouchOffset() {
+    const float magnitude = static_cast<float>(std::rand() % 16 + 5);
+    return std::rand() % 2 == 0 ? magnitude : -magnitude;
+}
 
-    void Reset() {
-        residualX_ = 0.0;
-        residualY_ = 0.0;
+class TouchLoopDelay final {
+public:
+    TouchLoopDelay(bool enabled, float speed, float smoothing)
+        : enabled_(enabled), speed_(speed), smoothing_(smoothing) {}
+
+    ~TouchLoopDelay() {
+        if (!enabled_ || !std::isfinite(speed_) ||
+            !std::isfinite(smoothing_)) {
+            return;
+        }
+        const float delay = speed_ * std::max(smoothing_, 0.0f) * 100.0f;
+        if (delay > 0.0f) {
+            std::this_thread::sleep_for(std::chrono::microseconds(
+                static_cast<std::int64_t>(delay)));
+        }
     }
 
 private:
-    double residualX_ = 0.0;
-    double residualY_ = 0.0;
+    bool enabled_ = false;
+    float speed_ = 0.0f;
+    float smoothing_ = 0.0f;
 };
 
 }  // namespace
@@ -200,7 +189,7 @@ void AimController::WorkerMain() {
     std::uint64_t identity = 0;
     float initialDistance = 1.0f;
     float curveSign = 1.0f;
-    StepIntegrator integrator;
+    bool curveInitialized = false;
 
     const auto release = [&] {
         if (touchDown) DispatchTouch(2, touchX, touchY);
@@ -210,19 +199,25 @@ void AimController::WorkerMain() {
         touchX = 0.0;
         touchY = 0.0;
         identity = 0;
-        integrator.Reset();
+        curveInitialized = false;
     };
 
-    while (!stopRequested_.load(std::memory_order_acquire)) {
-        std::this_thread::sleep_for(1ms);
-        const TargetSnapshot target = LoadTarget();
-        if (!enabled_.load(std::memory_order_acquire) || !TargetAllowed(target)) {
-            release();
-            continue;
+    while (mode_ == ui::AimInputMode::ProgramGyroscope &&
+           !stopRequested_.load(std::memory_order_acquire) &&
+           (input_ == nullptr || !input_->PrepareGyroscope())) {
+        for (int attempt = 0; attempt < 20 &&
+             !stopRequested_.load(std::memory_order_acquire); ++attempt) {
+            std::this_thread::sleep_for(100ms);
         }
+    }
 
-        AimError error{};
-        if (!CalculateAimError(target, error)) {
+    while (!stopRequested_.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::microseconds(1000000 / 120));
+        const TargetSnapshot target = LoadTarget();
+        const float activeSpeed = ActiveSpeed(target);
+        const TouchLoopDelay touchDelay(
+            touchMode, activeSpeed, target.tuning.smoothing);
+        if (!enabled_.load(std::memory_order_acquire) || !TargetAllowed(target)) {
             release();
             continue;
         }
@@ -242,91 +237,107 @@ void AimController::WorkerMain() {
             release();
             continue;
         }
+
+        native::ScreenProjection projected{};
+        if (!ProjectTarget(
+                target,
+                static_cast<int>(std::lround(screenWidth)),
+                static_cast<int>(std::lround(screenHeight)),
+                projected)) {
+            release();
+            continue;
+        }
+        constexpr float kProjectionBoundary = 50.0f;
+        if (projected.x < -kProjectionBoundary ||
+            projected.x > screenWidth + kProjectionBoundary ||
+            projected.y < -kProjectionBoundary ||
+            projected.y > screenHeight + kProjectionBoundary) {
+            release();
+            continue;
+        }
+
+        const float offsetX = projected.x - screenWidth * 0.5f;
+        const float offsetY = projected.y - screenHeight * 0.5f;
         if (identity != target.identity ||
             (touchMode && touchDown &&
              (std::fabs(anchorX - newAnchorX) > 1.0f ||
               std::fabs(anchorY - newAnchorY) > 1.0f))) {
             release();
             identity = target.identity;
-            initialDistance = std::max(target.screenDistancePixels, 1.0f);
-            curveSign = (identity & 1U) == 0U ? 1.0f : -1.0f;
         }
         if (touchMode) {
             anchorX = newAnchorX;
             anchorY = newAnchorY;
             if (!touchDown) {
-                touchX = anchorX;
-                touchY = anchorY;
+                touchX = anchorX + RandomTouchOffset();
+                touchY = anchorY + RandomTouchOffset();
                 touchDown = DispatchTouch(0, touchX, touchY);
                 if (!touchDown) {
                     release();
                     continue;
                 }
             }
-        }
+            const TouchMotionStep step = ResolveTouchScreenStep(
+                offsetX, offsetY, activeSpeed, screenWidth, screenHeight);
+            touchX += step.x;
+            touchY += step.y;
 
-        if (target.curvedMotion) {
-            const float length = std::hypot(error.pitch, error.yaw);
-            if (length > 0.001f) {
-                const float progress = std::clamp(
-                    target.screenDistancePixels / initialDistance, 0.0f, 1.0f);
+            const float range = std::max(target.touchRange, 0.0f);
+            if (std::fabs(touchX - anchorX) >= range ||
+                std::fabs(touchY - anchorY) >= range) {
+                DispatchTouch(2, touchX, touchY);
+                touchX = anchorX + RandomTouchOffset();
+                touchY = anchorY + RandomTouchOffset();
+                curveInitialized = false;
+                touchDown = DispatchTouch(0, touchX, touchY);
+                if (!touchDown) {
+                    release();
+                    continue;
+                }
+            }
+
+            double outputX = touchX;
+            double outputY = touchY;
+            if (target.curvedMotion) {
+                const float distance = std::hypot(offsetX, offsetY);
+                if (!curveInitialized || distance > initialDistance * 1.5f) {
+                    curveSign = std::rand() % 2 == 0 ? 1.0f : -1.0f;
+                    initialDistance = std::max(distance, 1.0f);
+                    curveInitialized = true;
+                }
+                const float progress = initialDistance > 1.0f
+                    ? std::min(distance / initialDistance, 1.0f)
+                    : 0.0f;
                 const float bend = std::sin(progress * kPi) *
-                    std::min(initialDistance * 0.01f, 3.0f) * curveSign;
-                const float pitch = error.pitch;
-                error.pitch += -error.yaw / length * bend;
-                error.yaw += pitch / length * bend;
+                    std::min(initialDistance * 0.08f, 20.0f) * curveSign;
+                if (distance > 1.0f) {
+                    outputX += -offsetY / distance * bend;
+                    outputY += offsetX / distance * bend;
+                }
+                if (distance < 3.0f) curveInitialized = false;
+            } else {
+                curveInitialized = false;
             }
-        }
-        const float stateScale = ActiveSpeed(target) / 30.0f;
-        if (!touchMode) {
-            const float length = std::hypot(error.pitch, error.yaw);
-            const float denominator = std::sqrt(length * length + length);
-            if (!std::isfinite(denominator) || denominator <= 0.0001f) {
-                release();
-                continue;
-            }
-            const float pitchLimit =
-                std::fabs(target.tuning.verticalSpeed * 0.01f * stateScale);
-            const float yawLimit =
-                std::fabs(target.tuning.horizontalSpeed * 0.005f * stateScale);
-            const float pitchStep = std::clamp(
-                error.pitch / denominator * pitchLimit,
-                -std::fabs(error.pitch),
-                std::fabs(error.pitch));
-            const float yawStep = std::clamp(
-                error.yaw / denominator * yawLimit,
-                -std::fabs(error.yaw),
-                std::fabs(error.yaw));
-            if (!input_->SendGyroscope(
-                    pitchStep, yawStep, target.orientation)) {
-                release();
-                continue;
-            }
-            gyroscopeActive = true;
+            if (!DispatchTouch(1, outputX, outputY)) release();
             continue;
         }
 
-        const auto step = integrator.Step(
-            error.yaw,
-            -error.pitch,
-            target.tuning.horizontalSpeed * 0.005f * stateScale,
-            target.tuning.verticalSpeed * 0.01f * stateScale);
-        touchX += step.first;
-        touchY += step.second;
-
-        const float maximumRange = std::max(
-            target.view.halfWidth * 2.0f,
-            target.view.halfHeight * 2.0f);
-        const float range = std::clamp(target.touchRange, 20.0f, maximumRange);
-        if (std::fabs(touchX - anchorX) >= range ||
-            std::fabs(touchY - anchorY) >= range) {
-            DispatchTouch(2, touchX, touchY);
-            touchX = anchorX;
-            touchY = anchorY;
-            integrator.Reset();
-            touchDown = DispatchTouch(0, touchX, touchY);
+        if (std::fabs(offsetX) < 1.5f && std::fabs(offsetY) < 1.5f) {
+            release();
+            continue;
         }
-        if (touchDown && !DispatchTouch(1, touchX, touchY)) release();
+        const GyroscopeDirection motion = ResolveGyroscopeScreenMotion(
+            offsetX,
+            offsetY,
+            activeSpeed,
+            target.tuning.smoothing,
+            target.orientation);
+        if (!input_->SendGyroscope(
+                motion.pitch, motion.yaw, target.orientation)) {
+            release();
+            continue;
+        }
+        gyroscopeActive = true;
     }
     release();
     running_.store(false, std::memory_order_release);

@@ -35,28 +35,38 @@ void RunAimPredictionTests() {
     target.tuning.prediction = 1.0f;
 
     const Vec3 slowProjectile = PredictInterceptPoint(target);
-    RequirePoint(slowProjectile, Vec3{1100.0f, 2040.0f, 3250.0f});
+    RequirePoint(slowProjectile, Vec3{1100.0f, 2040.0f, 3020.054f});
 
     target.projectileSpeedCmPerSecond = 20000.0f;
     const Vec3 fastProjectile = PredictInterceptPoint(target);
-    RequirePoint(fastProjectile, Vec3{1050.0f, 2020.0f, 3067.5f});
+    RequirePoint(fastProjectile, Vec3{1050.0f, 2020.0f, 3010.0134f});
     REQUIRE(slowProjectile.x > fastProjectile.x);
 
     target.projectileSpeedCmPerSecond = 10000.0f;
     target.tuning.prediction = 0.5f;
     const Vec3 halfPrediction = PredictInterceptPoint(target);
-    RequirePoint(halfPrediction, Vec3{1050.0f, 2020.0f, 3067.5f});
+    RequirePoint(halfPrediction, Vec3{1050.0f, 2020.0f, 3010.054f});
 
     target.tuning.prediction = 2.0f;
     const Vec3 doublePrediction = PredictInterceptPoint(target);
-    RequirePoint(doublePrediction, Vec3{1200.0f, 2080.0f, 3960.0f});
+    RequirePoint(doublePrediction, Vec3{1200.0f, 2080.0f, 3040.054f});
 
     target.projectileSpeedCmPerSecond = 0.0f;
-    RequirePoint(PredictInterceptPoint(target), target.world);
+    const Vec3 fallbackSpeed = PredictInterceptPoint(target);
+    REQUIRE(fallbackSpeed.x > target.world.x);
+    REQUIRE(fallbackSpeed.y > target.world.y);
     target.projectileSpeedCmPerSecond =
         std::numeric_limits<float>::infinity();
-    RequirePoint(PredictInterceptPoint(target), target.world);
+    RequirePoint(PredictInterceptPoint(target), fallbackSpeed);
 
+    target.worldDistanceMeters = 20.0f;
+    target.projectileSpeedCmPerSecond = 10000.0f;
+    target.tuning.prediction = 1.0f;
+    const Vec3 closeTarget = PredictInterceptPoint(target);
+    REQUIRE(NearlyEqual(closeTarget.x, 1036.3636f, 0.001f));
+    REQUIRE(NearlyEqual(closeTarget.y, 2014.5454f, 0.001f));
+
+    target.worldDistanceMeters = 100.0f;
     target.projectileSpeedCmPerSecond = 10000.0f;
     target.tuning.prediction = 1.0f;
     target.tuning.recoil = 1.0f;

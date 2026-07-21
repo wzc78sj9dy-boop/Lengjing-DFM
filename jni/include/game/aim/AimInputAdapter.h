@@ -16,6 +16,7 @@ public:
 
     bool Start(ui::AimInputMode mode);
     void Stop() noexcept;
+    bool PrepareGyroscope();
     bool ConfigureDisplay(int width, int height, int orientation);
     bool SendTouch(int action, int slot, double x, double y);
     bool SendGyroscope(float pitch, float yaw, int orientation);
