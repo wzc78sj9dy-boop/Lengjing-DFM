@@ -5,6 +5,7 @@
 #include "game/native/MemoryTransport.h"
 #include "game/native/coordinate_pool_internal/FindDec.h"
 
+#include <capstone/capstone.h>
 #include <unicorn/unicorn.h>
 
 #include <algorithm>
@@ -39,6 +40,9 @@ constexpr std::uint64_t kStackBase = kStackTop - kStackSize;
 constexpr std::uint64_t kArgumentPage = UINT64_C(0x7FFFF000);
 constexpr std::uint64_t kArgumentValueOffset = UINT64_C(0x200);
 constexpr std::uint64_t kMaximumCodeSize = UINT64_C(0x200000);
+constexpr std::size_t kEntryAnalysisInstructionLimit = 5000;
+constexpr std::size_t kDecodeAnalysisInstructionLimit = 500;
+constexpr std::uint32_t kArm64Nop = UINT32_C(0xD503201F);
 constexpr std::size_t kMaximumCachedPages = 4096;
 constexpr std::size_t kV87InstructionBudget = 2000000;
 constexpr std::size_t kParameterInstructionBudget = 10000000;
@@ -84,6 +88,53 @@ bool AddSignedOffset(std::uint64_t base,
 bool IsFinitePosition(const CoordinatePoolPosition& value) noexcept {
     return std::isfinite(value.x) && std::isfinite(value.y) &&
         std::isfinite(value.z);
+}
+
+struct EntryCodeScan {
+    std::uint64_t returnAddress = 0;
+};
+
+bool ScanEntryCode(const std::vector<std::uint8_t>& bytes,
+                   std::uint64_t mappingStart,
+                   std::uint64_t scanStart,
+                   std::uint64_t scanEnd,
+                   EntryCodeScan& scan) {
+    scan = {};
+    if (scanStart < mappingStart || scanEnd <= scanStart ||
+        scanEnd - mappingStart > bytes.size()) {
+        return false;
+    }
+
+    csh handle = 0;
+    if (cs_open(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN, &handle) != CS_ERR_OK) {
+        return false;
+    }
+    static_cast<void>(cs_option(handle, CS_OPT_SKIPDATA, CS_OPT_ON));
+    cs_insn* instructions = nullptr;
+    const std::size_t offset = static_cast<std::size_t>(
+        scanStart - mappingStart);
+    const std::size_t count = cs_disasm(
+        handle,
+        bytes.data() + offset,
+        static_cast<std::size_t>(scanEnd - scanStart),
+        scanStart,
+        0,
+        &instructions);
+    if (count == 0 || instructions == nullptr) {
+        cs_close(&handle);
+        return false;
+    }
+
+    for (std::size_t index = 0; index < count; ++index) {
+        const cs_insn& instruction = instructions[index];
+        if (instruction.id == ARM64_INS_RET) {
+            scan.returnAddress = instruction.address;
+            break;
+        }
+    }
+    cs_free(instructions, count);
+    cs_close(&handle);
+    return true;
 }
 
 int XRegisterId(std::uint32_t index) noexcept {
@@ -250,6 +301,10 @@ struct CoordinatePoolRuntime::Impl {
             memory = &targetMemory;
             processId = targetProcessId;
             moduleBase = targetModuleBase;
+        }
+
+        if (analysisInvalidated) {
+            ResetAnalysisUnlocked();
         }
 
         const bool shouldResolveRoot = finder == nullptr ||
@@ -486,9 +541,14 @@ private:
                                 void* userData) {
         auto* self = static_cast<Impl*>(userData);
         if (self == nullptr) return false;
-        const bool loaded = self->LoadRemotePageUnlocked(address);
-        if (!loaded) self->hookFailed = true;
-        return loaded;
+        try {
+            const bool loaded = self->LoadRemotePageUnlocked(address);
+            if (!loaded) self->hookFailed = true;
+            return loaded;
+        } catch (...) {
+            self->hookFailed = true;
+            return false;
+        }
     }
 
     static void CodeHook(uc_engine*,
@@ -601,76 +661,192 @@ private:
                 mappingStatus);
             return false;
         }
+        if (mappingEnd <= mappingStart ||
+            mappingEnd - mappingStart > kMaximumCodeSize ||
+            (mappingEnd - mappingStart) % kPageSize != 0 ||
+            guestEntry < mappingStart || guestEntry >= mappingEnd ||
+            (guestEntry & 3U) != 0) {
+            SetError(CoordinatePoolRuntimeError::AnalysisFailed);
+            return false;
+        }
+
         const std::size_t mappingSize = static_cast<std::size_t>(
             mappingEnd - mappingStart);
+        // FindDec keeps one address-indexed Capstone array. Materialize that
+        // array with NOP placeholders, then replace only pages reached by the
+        // entry/decode scans. Placeholders are never copied into Unicorn.
         std::vector<std::uint8_t> bytes(mappingSize);
-        for (std::size_t offset = 0; offset < bytes.size();
-             offset += kPageSize) {
-            const std::size_t count = std::min<std::size_t>(
-                kPageSize, bytes.size() - offset);
+        for (std::size_t offset = 0; offset + sizeof(kArm64Nop) <= bytes.size();
+             offset += sizeof(kArm64Nop)) {
+            std::memcpy(bytes.data() + offset, &kArm64Nop, sizeof(kArm64Nop));
+        }
+        const std::size_t pageCount = mappingSize / kPageSize;
+        std::vector<bool> loadedPages(pageCount, false);
+        std::size_t loadedPageCount = 0;
+
+        auto failCodeRead = [&](CoordinateReadDiagnostic diagnostic) {
+            probe.read = diagnostic;
+            SetError(
+                CoordinatePoolRuntimeError::CodeReadFailed,
+                true,
+                diagnostic.systemError);
+            return false;
+        };
+
+        auto loadPage = [&](std::uint64_t pageAddress) {
+            if (pageAddress < mappingStart || pageAddress >= mappingEnd ||
+                (pageAddress & (kPageSize - 1)) != 0) {
+                return false;
+            }
+            const std::size_t pageIndex = static_cast<std::size_t>(
+                (pageAddress - mappingStart) / kPageSize);
+            if (pageIndex >= loadedPages.size() || loadedPages[pageIndex]) {
+                return true;
+            }
+
+            std::array<std::uint8_t, kPageSize> pageData{};
             CoordinateReadDiagnostic firstRead{};
             if (!ReadRemoteUnlocked(
-                    mappingStart + offset,
-                    bytes.data() + offset,
-                    count,
+                    pageAddress,
+                    pageData.data(),
+                    pageData.size(),
                     CoordinateReadStage::CodePage,
                     &firstRead)) {
                 std::uint64_t refreshedStart = 0;
                 std::uint64_t refreshedEnd = 0;
                 int refreshStatus = 0;
                 const bool mappingFound = FindExecutableMapping(
-                        processId,
-                        guestEntry,
-                        refreshedStart,
-                        refreshedEnd,
-                        &refreshStatus);
+                    processId,
+                    guestEntry,
+                    refreshedStart,
+                    refreshedEnd,
+                    &refreshStatus);
                 if (mappingFound &&
                     (refreshedStart != mappingStart ||
                      refreshedEnd != mappingEnd)) {
-                    firstRead.failure =
-                        CoordinateReadFailure::MappingChanged;
+                    firstRead.failure = CoordinateReadFailure::MappingChanged;
                     firstRead.systemError = -ESTALE;
                 } else if (!mappingFound && refreshStatus == -ENOENT) {
-                    firstRead.failure =
-                        CoordinateReadFailure::MappingChanged;
+                    firstRead.failure = CoordinateReadFailure::MappingChanged;
                     firstRead.systemError = -ESTALE;
                 } else if (mappingFound) {
                     CoordinateReadDiagnostic retryRead{};
                     if (ReadRemoteUnlocked(
-                            mappingStart + offset,
-                            bytes.data() + offset,
-                            count,
+                            pageAddress,
+                            pageData.data(),
+                            pageData.size(),
                             CoordinateReadStage::CodePage,
                             &retryRead)) {
                         ClearReadDiagnosticUnlocked();
-                        continue;
+                        firstRead = {};
+                    } else {
+                        retryRead.attemptedPaths |= firstRead.attemptedPaths;
+                        retryRead.attemptCount += firstRead.attemptCount;
+                        retryRead.primaryPath = firstRead.primaryPath;
+                        retryRead.primaryCompleted = firstRead.primaryCompleted;
+                        retryRead.primarySystemError = firstRead.primarySystemError;
+                        firstRead = retryRead;
                     }
-                    retryRead.attemptedPaths |= firstRead.attemptedPaths;
-                    retryRead.attemptCount += firstRead.attemptCount;
-                    retryRead.primaryPath = firstRead.primaryPath;
-                    retryRead.primaryCompleted =
-                        firstRead.primaryCompleted;
-                    retryRead.primarySystemError =
-                        firstRead.primarySystemError;
-                    firstRead = retryRead;
                 }
-                probe.read = firstRead;
-                SetError(
-                    CoordinatePoolRuntimeError::CodeReadFailed,
-                    true,
-                    firstRead.systemError);
+                if (firstRead.failure != CoordinateReadFailure::None) {
+                    return failCodeRead(firstRead);
+                }
+            }
+
+            const std::size_t byteOffset = pageIndex * kPageSize;
+            std::memcpy(bytes.data() + byteOffset, pageData.data(), pageData.size());
+            loadedPages[pageIndex] = true;
+            ++loadedPageCount;
+            return true;
+        };
+
+        auto loadMethod = [&](std::uint64_t methodAddress,
+                              std::size_t instructionLimit,
+                              EntryCodeScan& scan) {
+            if (methodAddress < mappingStart || methodAddress >= mappingEnd ||
+                (methodAddress & 3U) != 0 || instructionLimit == 0 ||
+                instructionLimit >
+                    (std::numeric_limits<std::uint64_t>::max() / 4U)) {
                 return false;
             }
+            const std::uint64_t maximumBytes =
+                static_cast<std::uint64_t>(instructionLimit) * 4U;
+            if (methodAddress > std::numeric_limits<std::uint64_t>::max() -
+                    maximumBytes) {
+                return false;
+            }
+            const std::uint64_t scanLimitEnd = std::min(
+                mappingEnd, methodAddress + maximumBytes);
+            std::uint64_t pageAddress = methodAddress & kPageMask;
+            while (pageAddress < scanLimitEnd) {
+                if (!loadPage(pageAddress)) return false;
+                const std::uint64_t pageEnd = std::min(
+                    mappingEnd, pageAddress + kPageSize);
+                const std::uint64_t scanEnd = std::min(pageEnd, scanLimitEnd);
+                if (!ScanEntryCode(
+                        bytes,
+                        mappingStart,
+                        methodAddress,
+                        scanEnd,
+                        scan)) {
+                    return false;
+                }
+                if (scan.returnAddress != 0) return true;
+                if (scanEnd >= scanLimitEnd) break;
+                pageAddress += kPageSize;
+            }
+            return false;
+        };
+
+        EntryCodeScan entryScan{};
+        if (!loadMethod(
+                guestEntry,
+                kEntryAnalysisInstructionLimit,
+                entryScan)) {
+            if (!probe.read.HasFailure()) {
+                SetError(CoordinatePoolRuntimeError::AnalysisFailed);
+            }
+            return false;
         }
 
-        auto candidate = std::unique_ptr<pool::coord_dec::FindDec>(
-            new (std::nothrow) pool::coord_dec::FindDec());
-        if (candidate == nullptr ||
-            candidate->set(
-                mappingStart,
-                bytes.data(),
-                static_cast<std::uint32_t>(bytes.size())) != 0 ||
-            candidate->find_dec(guestEntry) != 0) {
+        std::unique_ptr<pool::coord_dec::FindDec> candidate;
+        bool analysisComplete = false;
+        constexpr std::size_t kMaximumAnalysisPasses = 8;
+        for (std::size_t pass = 0; pass < kMaximumAnalysisPasses; ++pass) {
+            candidate = std::unique_ptr<pool::coord_dec::FindDec>(
+                new (std::nothrow) pool::coord_dec::FindDec());
+            if (candidate == nullptr ||
+                candidate->set(
+                    mappingStart,
+                    bytes.data(),
+                    static_cast<std::uint32_t>(bytes.size())) != 0) {
+                SetError(CoordinatePoolRuntimeError::AnalysisFailed);
+                return false;
+            }
+
+            const int result = candidate->find_dec(guestEntry);
+            const auto requestedMethods =
+                candidate->get_shellcode()->requested_method_addresses();
+            const std::size_t loadedBefore = loadedPageCount;
+            for (const std::uint64_t requestedAddress : requestedMethods) {
+                const std::size_t limit = requestedAddress == guestEntry
+                    ? kEntryAnalysisInstructionLimit
+                    : kDecodeAnalysisInstructionLimit;
+                EntryCodeScan methodScan{};
+                if (!loadMethod(requestedAddress, limit, methodScan) &&
+                    probe.read.HasFailure()) {
+                    return false;
+                }
+            }
+            if (loadedPageCount != loadedBefore) continue;
+            if (result != 0) {
+                SetError(CoordinatePoolRuntimeError::AnalysisFailed);
+                return false;
+            }
+            analysisComplete = true;
+            break;
+        }
+        if (!analysisComplete || candidate == nullptr) {
             SetError(CoordinatePoolRuntimeError::AnalysisFailed);
             return false;
         }
@@ -754,7 +930,9 @@ private:
         }
         if (includeParameterCaptures) {
             for (const auto& parameter : finder->analyze.varParams) {
-                if (parameter.addr != 0 && (parameter.addr & 3U) == 0) {
+                if (parameter.addr != 0 && (parameter.addr & 3U) == 0 &&
+                    parameter.addr >= guestBase &&
+                    parameter.addr - guestBase < size) {
                     addresses.push_back(parameter.addr);
                 }
             }
@@ -787,6 +965,134 @@ private:
         return true;
     }
 
+    void ApplyPatchedCodePageUnlocked(
+        std::uint64_t guestPage,
+        std::array<std::uint8_t, kPageSize>& data) {
+        if (finder == nullptr || codeBase == 0 || codeSize == 0 ||
+            guestPage < codeBase || guestPage - codeBase >= codeSize) {
+            return;
+        }
+        auto* shellcode = finder->get_shellcode();
+        if (shellcode == nullptr) return;
+        // Unread snapshot regions contain NOP placeholders. Only explicit
+        // FindDec patches may replace bytes fetched from the remote process.
+        static_cast<void>(shellcode->apply_patches(
+            guestPage, data.data(), data.size()));
+    }
+
+    bool LoadCodePageUnlocked(std::uint64_t guestPage) {
+        if (engine == nullptr || memory == nullptr || finder == nullptr ||
+            codeBase == 0 || codeSize == 0 || guestPage < codeBase ||
+            guestPage - codeBase >= codeSize) {
+            return false;
+        }
+        const auto existing = std::find_if(
+            codePages.begin(),
+            codePages.end(),
+            [guestPage](const CachedPage& page) {
+                return page.guestAddress == guestPage;
+            });
+        if (existing != codePages.end()) return true;
+
+        const std::uint64_t remotePage = NormalizePointer(guestPage) & kPageMask;
+        if (!IsRemoteAddress(remotePage) ||
+            remotePage > kMaximumRemoteAddress - kPageSize) {
+            return false;
+        }
+
+        std::array<std::uint8_t, kPageSize> data{};
+        CoordinateReadDiagnostic firstRead{};
+        if (!ReadRemoteUnlocked(
+                remotePage,
+                data.data(),
+                data.size(),
+                CoordinateReadStage::CodePage,
+                &firstRead)) {
+            std::uint64_t refreshedStart = 0;
+            std::uint64_t refreshedEnd = 0;
+            int refreshStatus = 0;
+            const bool mappingFound = FindExecutableMapping(
+                processId,
+                guestEntry,
+                refreshedStart,
+                refreshedEnd,
+                &refreshStatus);
+            if (mappingFound &&
+                (refreshedStart != codeBase ||
+                 refreshedEnd - refreshedStart != codeSize)) {
+                firstRead.failure = CoordinateReadFailure::MappingChanged;
+                firstRead.systemError = -ESTALE;
+            } else if (!mappingFound && refreshStatus == -ENOENT) {
+                firstRead.failure = CoordinateReadFailure::MappingChanged;
+                firstRead.systemError = -ESTALE;
+            } else if (mappingFound) {
+                CoordinateReadDiagnostic retryRead{};
+                if (ReadRemoteUnlocked(
+                        remotePage,
+                        data.data(),
+                        data.size(),
+                        CoordinateReadStage::CodePage,
+                        &retryRead)) {
+                    ClearReadDiagnosticUnlocked();
+                    firstRead = {};
+                } else {
+                    retryRead.attemptedPaths |= firstRead.attemptedPaths;
+                    retryRead.attemptCount += firstRead.attemptCount;
+                    retryRead.primaryPath = firstRead.primaryPath;
+                    retryRead.primaryCompleted = firstRead.primaryCompleted;
+                    retryRead.primarySystemError = firstRead.primarySystemError;
+                    firstRead = retryRead;
+                }
+            }
+            if (firstRead.failure != CoordinateReadFailure::None) {
+                if (firstRead.failure == CoordinateReadFailure::MappingChanged) {
+                    analysisInvalidated = true;
+                }
+                probe.read = firstRead;
+                probe.systemError = firstRead.systemError;
+                return false;
+            }
+        }
+        ApplyPatchedCodePageUnlocked(guestPage, data);
+
+        if (uc_mem_map(engine, guestPage, kPageSize, UC_PROT_ALL) !=
+            UC_ERR_OK) {
+            return false;
+        }
+        if (uc_mem_write(engine, guestPage, data.data(), data.size()) !=
+            UC_ERR_OK) {
+            static_cast<void>(uc_mem_unmap(engine, guestPage, kPageSize));
+            return false;
+        }
+
+        const std::size_t initialHookCount = codeHooks.size();
+        if (!InstallInstructionHooksUnlocked(
+                guestPage,
+                data.data(),
+                data.size(),
+                true,
+                codeHooks)) {
+            while (codeHooks.size() > initialHookCount) {
+                static_cast<void>(uc_hook_del(engine, codeHooks.back()));
+                codeHooks.pop_back();
+            }
+            static_cast<void>(uc_mem_unmap(engine, guestPage, kPageSize));
+            return false;
+        }
+
+        try {
+            codePages.push_back(CachedPage{guestPage, remotePage, {}});
+        } catch (...) {
+            while (codeHooks.size() > initialHookCount) {
+                static_cast<void>(uc_hook_del(engine, codeHooks.back()));
+                codeHooks.pop_back();
+            }
+            static_cast<void>(uc_mem_unmap(engine, guestPage, kPageSize));
+            return false;
+        }
+        return true;
+    }
+
     bool EnsureEngineUnlocked() {
         if (engine != nullptr) return true;
         if (finder == nullptr || codeBase == 0 || codeSize == 0 ||
@@ -795,13 +1101,7 @@ private:
             return false;
         }
         static_cast<void>(uc_ctl_set_cpu_model(engine, UC_CPU_ARM64_MAX));
-        if (uc_mem_map(engine, codeBase, codeSize, UC_PROT_ALL) != UC_ERR_OK ||
-            uc_mem_write(
-                engine,
-                codeBase,
-                finder->get_shellcode()->data(),
-                codeSize) != UC_ERR_OK ||
-            uc_mem_map(
+        if (uc_mem_map(
                 engine, kStackBase, kStackSize, UC_PROT_READ | UC_PROT_WRITE) !=
                 UC_ERR_OK ||
             uc_mem_map(
@@ -828,16 +1128,6 @@ private:
                 1,
                 0,
                 UC_ARM64_INS_MRS) != UC_ERR_OK) {
-            CloseEngineUnlocked();
-            return false;
-        }
-        if (!InstallInstructionHooksUnlocked(
-                codeBase,
-                static_cast<const std::uint8_t*>(
-                    finder->get_shellcode()->data()),
-                codeSize,
-                true,
-                codeHooks)) {
             CloseEngineUnlocked();
             return false;
         }
@@ -1123,9 +1413,12 @@ private:
         if (engine == nullptr || memory == nullptr) return false;
         const std::uint64_t guestPage = faultAddress & kPageMask;
         if ((guestPage >= kStackBase && guestPage < kStackTop) ||
-            guestPage == kArgumentPage ||
-            (guestPage >= codeBase && guestPage < codeBase + codeSize)) {
+            guestPage == kArgumentPage) {
             return true;
+        }
+        if (codeBase != 0 && codeSize != 0 && guestPage >= codeBase &&
+            guestPage - codeBase < codeSize) {
+            return LoadCodePageUnlocked(guestPage);
         }
         const auto existing = std::find_if(
             dynamicPages.begin(),
@@ -1179,9 +1472,25 @@ private:
             static_cast<void>(
                 RemoveInstructionHooksUnlocked(page.instructionHooks));
             static_cast<void>(uc_mem_unmap(engine, guestPage, kPageSize));
-            throw;
+            return false;
         }
         return true;
+    }
+
+    bool ClearCodePagesUnlocked() {
+        bool cleared = RemoveInstructionHooksUnlocked(codeHooks);
+        if (engine == nullptr) {
+            codePages.clear();
+            return cleared;
+        }
+        for (const CachedPage& page : codePages) {
+            if (uc_mem_unmap(engine, page.guestAddress, kPageSize) !=
+                UC_ERR_OK) {
+                cleared = false;
+            }
+        }
+        codePages.clear();
+        return cleared;
     }
 
     bool ClearDynamicPagesUnlocked() {
@@ -1343,6 +1652,7 @@ private:
         probe.poolPointerOffset = 0;
         probe.indexOffset = 0;
         probe.ringOffset = 0;
+        analysisInvalidated = false;
         ClearReadDiagnosticUnlocked();
         probe.stage = CoordinatePoolRuntimeStage::Idle;
         probe.error = CoordinatePoolRuntimeError::None;
@@ -1350,10 +1660,13 @@ private:
 
     void CloseEngineUnlocked() {
         if (engine != nullptr) {
+            static_cast<void>(ClearCodePagesUnlocked());
+            static_cast<void>(ClearDynamicPagesUnlocked());
             static_cast<void>(uc_close(engine));
             engine = nullptr;
         }
         dynamicPages.clear();
+        codePages.clear();
         codeHooks.clear();
         memoryHook = 0;
         mrsHook = 0;
@@ -1383,6 +1696,7 @@ private:
         searchRegister = ARM64_REG_INVALID;
         computedContext = 0;
         parametersReady = false;
+        analysisInvalidated = false;
         frame = 0;
         lastRootFrame = 0;
         lastPoolPointer = 0;
@@ -1415,6 +1729,7 @@ private:
     std::uint64_t parameterEnd = 0;
     std::uint64_t computedContext = 0;
     bool parametersReady = false;
+    bool analysisInvalidated = false;
     std::uint64_t frame = 0;
     std::uint64_t lastRootFrame = 0;
     CoordinateReadDiagnostic toleratedReadFailure{};
@@ -1428,6 +1743,7 @@ private:
     uc_hook memoryHook = 0;
     uc_hook mrsHook = 0;
     std::vector<uc_hook> codeHooks;
+    std::vector<CachedPage> codePages;
     std::vector<CachedPage> dynamicPages;
     bool hookFailed = false;
     bool captureParameters = false;

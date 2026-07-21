@@ -1,10 +1,12 @@
 ﻿#pragma once
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <unordered_map>
 #include <vector>
 #include "capstone/capstone.h"
 #include <functional>
+#include <limits>
 #include <string>
 #include "DecFormat.h"
 
@@ -303,14 +305,26 @@ namespace lengjing::game::native::coordinate_pool_internal {
         std::vector<found_> founds;
         std::vector<found_> break_;
         uint32_t range_;
+        uint32_t limit_ = std::numeric_limits<uint32_t>::max();
+
+        bool valid(uint32_t pos, uint32_t offset) const noexcept {
+            return static_cast<uint64_t>(pos) + offset < limit_;
+        }
     public:
+
+        void limit(uint32_t index_limit) noexcept {
+            limit_ = index_limit;
+        }
 
         uint32_t find_range(uint32_t pos, cs_insn* insn) {
             return find_range(pos, range_, insn);
         }
 
         uint32_t find_range(uint32_t pos, uint32_t range, cs_insn* insn) {
-            for (uint32_t i = pos; i < pos + range; i++) {
+            const uint64_t end = std::min<uint64_t>(
+                static_cast<uint64_t>(limit_),
+                static_cast<uint64_t>(pos) + range);
+            for (uint32_t i = pos; static_cast<uint64_t>(i) < end; i++) {
                 if (find(i, insn)) {
                     return i;
                 }
@@ -322,19 +336,24 @@ namespace lengjing::game::native::coordinate_pool_internal {
         }
 
         uint32_t find_range_reverse(uint32_t pos, uint32_t range, cs_insn* insn) {
-            for (uint32_t i = pos; i >= pos - range; i--) {
+            if (limit_ == 0) return 0;
+            if (pos >= limit_) pos = limit_ - 1;
+            const uint32_t begin = pos < range ? 0 : pos - range;
+            for (uint32_t i = pos;; i--) {
                 if (find(i, insn)) {
                     return i;
                 }
                 if (find_break(i, insn)) {
                     break;
                 }
+                if (i == begin) break;
             }
             return 0;
         }
 
         bool find_break(uint32_t pos, cs_insn* insn) {
             for (found_& f : break_) {
+                if (!valid(pos, f.offset)) continue;
                 if (f.pattern.find(insn[pos + f.offset])) {
                     return true;
                 }
@@ -344,6 +363,7 @@ namespace lengjing::game::native::coordinate_pool_internal {
 
         bool find(uint32_t pos, cs_insn* insn) {
             for (found_& f : founds) {
+                if (!valid(pos, f.offset)) return false;
                 if (!f.pattern.find(insn[pos + f.offset])) {
                     return false;
                 }
@@ -577,8 +597,10 @@ namespace lengjing::game::native::coordinate_pool_internal {
         uint32_t find(const std::function<void(finder&)>& finder_, const std::function<void(finder&)>& end_, uint32_t start, uint32_t range) {
             finder end;
             end_(end);
+            end.limit(end_index);
             finder f;
             finder_(f);
+            f.limit(end_index);
 
             uint32_t end_i = end.find_range(start + 1, range, insn);
             if (!end_i) return 0;
@@ -589,32 +611,39 @@ namespace lengjing::game::native::coordinate_pool_internal {
         uint32_t find(const std::function<void(finder&)>& finder_, uint32_t start, uint32_t range) {
             finder f;
             finder_(f);
+            f.limit(end_index);
             return f.find_range(start + 1, range, insn);
         }
 
         uint32_t find(finder f, uint32_t start, uint32_t range) {
+            f.limit(end_index);
             return f.find_range(start + 1, range, insn);
         }
 
         uint32_t find(finder f) {
+            f.limit(end_index);
             return f.find_range(start_index, end_index - start_index, insn);
         }
 
         uint32_t find(const std::function<void(finder&)>& finder_) {
             finder f;
             finder_(f);
+            f.limit(end_index);
             return f.find_range(start_index, end_index - start_index, insn);
         }
 
         uint32_t find_reverse(const std::function<void(finder&)>& finder_, uint32_t start, uint32_t range) {
+            if (start == 0) return 0;
             finder f;
             finder_(f);
+            f.limit(end_index);
             return f.find_range_reverse(start - 1, range, insn);
         }
 
         uint32_t find_all(const std::function<void(finder&)>& finder_, std::vector<uint32_t>& indecies) {
             finder f;
             finder_(f);
+            f.limit(end_index);
             uint32_t f_index = start_index;
             while (true) {
                 f_index = f.find_range(f_index, end_index - f_index, insn);
@@ -629,6 +658,7 @@ namespace lengjing::game::native::coordinate_pool_internal {
         }
 
         uint32_t find_all(finder f, std::vector<uint32_t>& indecies) {
+            f.limit(end_index);
             uint32_t f_index = start_index;
             while (true) {
                 f_index = f.find_range(f_index, end_index - f_index, insn);
@@ -645,6 +675,7 @@ namespace lengjing::game::native::coordinate_pool_internal {
         uint32_t find_all(uint32_t start_i, uint32_t end_i, const std::function<void(finder&)>& finder_, std::vector<uint32_t>& indecies) {
             finder f;
             finder_(f);
+            f.limit(std::min(end_i, end_index));
             uint32_t f_index = start_i;
             while (true) {
                 f_index = f.find_range(f_index, end_i - f_index, insn);
@@ -838,8 +869,15 @@ namespace lengjing::game::native::coordinate_pool_internal {
     };
 
     class shellcode {
+        struct patch_record {
+            uint64_t address = 0;
+            std::vector<uint8_t> bytes;
+        };
+
         uint32_t count = 0;
         std::unordered_map<std::string, method> methods;
+        std::vector<uint64_t> method_requests_;
+        std::vector<patch_record> patches_;
         std::unique_ptr<uint8_t[]> data_;
         uint64_t start_address = 0;
         uint64_t end_address = 0;
@@ -876,6 +914,8 @@ namespace lengjing::game::native::coordinate_pool_internal {
                 insn = nullptr;
             }
             methods.clear();
+            method_requests_.clear();
+            patches_.clear();
             data_ = nullptr;
             count = 0;
             start_address = 0;
@@ -884,12 +924,61 @@ namespace lengjing::game::native::coordinate_pool_internal {
         }
 
         void patch(uint32_t i, void* data, uint32_t len) {
+            if (insn == nullptr || i >= count) return;
             uint64_t addr = address(i);
-            if (addr == 0) {
+            if (addr == 0 || data == nullptr || len == 0 ||
+                addr < start_address ||
+                addr - start_address > size_ ||
+                static_cast<uint64_t>(len) > size_ - (addr - start_address)) {
                 return;
             }
 
+            patch_record record;
+            record.address = addr;
+            record.bytes.resize(len);
+            memcpy(record.bytes.data(), data, len);
+            patches_.push_back(std::move(record));
             memcpy(data_.get() + addr - start_address, data, len);
+        }
+
+        bool apply_patches(uint64_t page_address, void* data, std::size_t size) const {
+            if (data == nullptr || size == 0 ||
+                page_address > std::numeric_limits<uint64_t>::max() - size) {
+                return false;
+            }
+
+            const uint64_t page_end = page_address + size;
+            bool applied = false;
+            auto* destination = static_cast<uint8_t*>(data);
+            for (const patch_record& record : patches_) {
+                if (record.bytes.empty() ||
+                    record.address > std::numeric_limits<uint64_t>::max() -
+                        record.bytes.size()) {
+                    continue;
+                }
+
+                const uint64_t patch_end =
+                    record.address + record.bytes.size();
+                if (record.address >= page_end || patch_end <= page_address) {
+                    continue;
+                }
+
+                const uint64_t copy_start =
+                    record.address > page_address ? record.address : page_address;
+                const uint64_t copy_end = patch_end < page_end ? patch_end : page_end;
+                const std::size_t copy_size =
+                    static_cast<std::size_t>(copy_end - copy_start);
+                memcpy(
+                    destination + (copy_start - page_address),
+                    record.bytes.data() + (copy_start - record.address),
+                    copy_size);
+                applied = true;
+            }
+            return applied;
+        }
+
+        const std::vector<uint64_t>& requested_method_addresses() const noexcept {
+            return method_requests_;
         }
 
         int parse(uint64_t base, void* data, uint32_t size) {
@@ -927,7 +1016,7 @@ namespace lengjing::game::native::coordinate_pool_internal {
         uint32_t index(uint64_t address) {
             if (insn == nullptr || address < start_address ||
                 address >= end_address) {
-                return 0;
+                return count;
             }
 
             uint32_t i = (address - start_address) / 4;
@@ -935,7 +1024,7 @@ namespace lengjing::game::native::coordinate_pool_internal {
                 return i;
             }
 
-            return 0;
+            return count;
         }
 
         method* get_method(const char* name) {
@@ -947,20 +1036,24 @@ namespace lengjing::game::native::coordinate_pool_internal {
         }
 
         method* create_method(const char* name, uint64_t address, finder& end, uint32_t end_range) {
+            method_requests_.push_back(address);
             uint32_t start_i = index(address);
-            if (!start_i) return nullptr;
+            if (start_i >= count) return nullptr;
             end.range(end_range);
+            end.limit(count);
             uint32_t end_i = end.find_range(start_i, insn);
             if (!end_i) return nullptr;
             return &methods.insert({ name, method(start_i, end_i, insn) }).first->second;
         }
 
         method* create_method(const char* name, uint64_t address, const std::function<void(finder&)>& end, uint32_t end_range) {
+            method_requests_.push_back(address);
             uint32_t start_i = index(address);
-            if (!start_i) return nullptr;
+            if (start_i >= count) return nullptr;
             finder f;
             end(f);
             f.range(end_range);
+            f.limit(count);
             uint32_t end_i = f.find_range(start_i, insn);
             if (!end_i) return nullptr;
             return &methods.insert({ name, method(start_i, end_i, insn) }).first->second;

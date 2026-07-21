@@ -72,6 +72,9 @@ CoordinateDecryptError CoordinatePoolError(
     native::CoordinatePoolRuntimeError error,
     const CoordinateReadDiagnostic& read) noexcept {
     using native::CoordinatePoolRuntimeError;
+    if (read.HasFailure() && read.stage == CoordinateReadStage::CodePage) {
+        return CoordinateReadError(read.failure);
+    }
     switch (error) {
         case CoordinatePoolRuntimeError::None:
             return CoordinateDecryptError::None;
