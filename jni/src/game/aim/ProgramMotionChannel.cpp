@@ -25,6 +25,7 @@
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 #endif
 
@@ -43,12 +44,16 @@ static_assert(sizeof(ProgramMotionCommand) == 12);
 #if defined(__ANDROID__) && defined(__aarch64__)
 
 constexpr std::string_view kServiceProcess = "system_server";
-constexpr std::string_view kRemoteModulePath = "/data/app/libmotion_input.so";
-constexpr std::string_view kRemoteModuleName = "libmotion_input.so";
+constexpr std::string_view kRemoteModulePath =
+    "/data/app/libmotion_input_6bbf64d2.so";
+constexpr std::string_view kRemoteModuleName = "libmotion_input_6bbf64d2.so";
+constexpr char kRemoteModuleContext[] = "u:object_r:system_lib_file:s0";
 constexpr std::uintptr_t kCommandPointerOffset = 0x12000;
 constexpr std::uintptr_t kMinimumRemoteAddress = 0x10000;
 
 #include "ProgramMotionPayload.inc"
+
+static_assert(sizeof(kProgramMotionModule) == 39912);
 
 struct MapEntry {
     std::uintptr_t start = 0;
@@ -229,12 +234,45 @@ bool WriteModuleFile() {
         O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
         0755);
     if (file < 0) return false;
-    const bool written = WriteAll(
+
+    bool ready = WriteAll(
         file, kProgramMotionModule, sizeof(kProgramMotionModule));
-    if (written) fsync(file);
-    close(file);
-    if (!written || chmod(path.c_str(), 0755) != 0) {
+    int failure = ready ? 0 : errno;
+    if (ready && fchmod(file, 0755) != 0) {
+        ready = false;
+        failure = errno;
+    }
+    if (ready && fsetxattr(
+            file,
+            "security.selinux",
+            kRemoteModuleContext,
+            sizeof(kRemoteModuleContext),
+            0) != 0) {
+        ready = false;
+        failure = errno;
+    }
+    if (ready) {
+        std::array<char, sizeof(kRemoteModuleContext)> context{};
+        const ssize_t contextSize = fgetxattr(
+            file, "security.selinux", context.data(), context.size());
+        if (contextSize != static_cast<ssize_t>(context.size()) ||
+            std::memcmp(
+                context.data(), kRemoteModuleContext, context.size()) != 0) {
+            ready = false;
+            failure = contextSize < 0 ? errno : EIO;
+        }
+    }
+    if (ready && fsync(file) != 0) {
+        ready = false;
+        failure = errno;
+    }
+    if (close(file) != 0 && ready) {
+        ready = false;
+        failure = errno;
+    }
+    if (!ready) {
         unlink(path.c_str());
+        errno = failure;
         return false;
     }
     return true;
@@ -517,6 +555,10 @@ bool ProgramMotionChannel::Start() {
 #else
     return false;
 #endif
+}
+
+bool ProgramMotionChannel::Ready() const noexcept {
+    return ready_;
 }
 
 bool ProgramMotionChannel::Send(float pitch, float yaw) {

@@ -14,6 +14,7 @@ public:
     ProgramMotionChannel& operator=(const ProgramMotionChannel&) = delete;
 
     bool Start();
+    bool Ready() const noexcept;
     bool Send(float pitch, float yaw);
     bool Release() noexcept;
     void Close() noexcept;
