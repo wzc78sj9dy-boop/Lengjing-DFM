@@ -11,11 +11,37 @@ set "TARGET="
 set "PRODUCT="
 set "AUTH_CONFIG="
 set "PROJECTILE_TRACKING=OFF"
+set "BUILD_RESULT=0"
+set "CLEAN_BUILD=0"
+set "PAUSE_ON_EXIT=1"
+
+if /i "%LENGJING_NO_PAUSE%"=="1" set "PAUSE_ON_EXIT=0"
+if defined CI set "PAUSE_ON_EXIT=0"
+
+:parse_build_args
+if "%~1"=="" goto :build_args_done
+if /i "%~1"=="clean" (
+    set "CLEAN_BUILD=1"
+    shift
+    goto :parse_build_args
+)
+if /i "%~1"=="--no-pause" (
+    set "PAUSE_ON_EXIT=0"
+    shift
+    goto :parse_build_args
+)
+echo [ERROR] Unsupported option: %~1
+echo [USAGE] 1_build.bat [clean] [--no-pause]
+set "BUILD_RESULT=1"
+goto :finish
+
+:build_args_done
 
 if defined LENGJING_AUTH_CONFIG (
     if not exist "%LENGJING_AUTH_CONFIG%" (
         echo [ERROR] LENGJING_AUTH_CONFIG does not exist: %LENGJING_AUTH_CONFIG%
-        exit /b 1
+        set "BUILD_RESULT=1"
+        goto :finish
     )
     set "AUTH_CONFIG=%LENGJING_AUTH_CONFIG%"
 )
@@ -33,12 +59,14 @@ if not defined NDK call :probe_sdk_ndk
 
 if not exist "%NDK%\build\cmake\android.toolchain.cmake" (
     echo [ERROR] Required Android NDK not found.
-    exit /b 1
+    set "BUILD_RESULT=1"
+    goto :finish
 )
 where cmake.exe >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] cmake.exe not found in PATH.
-    exit /b 1
+    set "BUILD_RESULT=1"
+    goto :finish
 )
 if defined NINJA_PATH (
     if exist "%NINJA_PATH%\ninja.exe" set "NINJA=%NINJA_PATH%\ninja.exe"
@@ -50,7 +78,8 @@ if not defined NINJA if exist "E:\demo\fenxi\lengjing\tools\python\bin\ninja.exe
 )
 if not defined NINJA (
     echo [ERROR] ninja.exe not found in PATH.
-    exit /b 1
+    set "BUILD_RESULT=1"
+    goto :finish
 )
 
 for /f "tokens=2 delims=( " %%T in ('findstr /R /I /C:"^[ ]*add_executable(" "%SOURCE_DIR%\CMakeLists.txt"') do (
@@ -61,18 +90,20 @@ for /f "tokens=2" %%P in ('findstr /R /I /C:"^[ ]*OUTPUT_NAME[ ]" "%SOURCE_DIR%\
 )
 if not defined TARGET (
     echo [ERROR] Unable to resolve the Android build target.
-    exit /b 1
+    set "BUILD_RESULT=1"
+    goto :finish
 )
 set "TARGET=!TARGET:"=!"
 if not defined PRODUCT set "PRODUCT=!TARGET!"
 set "PRODUCT=!PRODUCT:"=!"
 
-if /i "%~1"=="clean" (
+if "!CLEAN_BUILD!"=="1" (
     for %%D in ("%BUILD_DIR%") do set "RESOLVED_BUILD=%%~fD"
     for %%D in ("%ROOT%jni\build") do set "EXPECTED_BUILD=%%~fD"
     if /i not "!RESOLVED_BUILD!"=="!EXPECTED_BUILD!" (
         echo [ERROR] Refusing to clean an unexpected directory: !RESOLVED_BUILD!
-        exit /b 1
+        set "BUILD_RESULT=1"
+        goto :finish
     )
     if exist "!RESOLVED_BUILD!" rmdir /s /q "!RESOLVED_BUILD!"
 )
@@ -102,13 +133,15 @@ cmake -Wno-deprecated --no-warn-unused-cli -S "%SOURCE_DIR%" -B "%BUILD_DIR%" -G
     -DCMAKE_BUILD_TYPE=Release
 if errorlevel 1 (
     echo [ERROR] Android configuration failed.
-    exit /b 1
+    set "BUILD_RESULT=1"
+    goto :finish
 )
 
 cmake --build "%BUILD_DIR%" --target "!TARGET!" --parallel 8
 if errorlevel 1 (
     echo [ERROR] Android build failed.
-    exit /b 1
+    set "BUILD_RESULT=1"
+    goto :finish
 )
 
 set "BIN=%BUILD_DIR%\!PRODUCT!"
@@ -124,11 +157,13 @@ if not exist "!BIN!" (
 )
 if not exist "!BIN!" (
     echo [ERROR] Product not found for target: !TARGET!
-    exit /b 1
+    set "BUILD_RESULT=1"
+    goto :finish
 )
 
 for %%I in ("!BIN!") do echo [DONE] %%~fI ^(%%~zI bytes^)
-exit /b 0
+set "BUILD_RESULT=0"
+goto :finish
 
 :probe_sdk_ndk
 set "_NDK_BASE=%LOCALAPPDATA%\Android\Sdk\ndk"
@@ -141,3 +176,16 @@ for /f "delims=" %%D in ('dir /B /AD /O-N "%_NDK_BASE%" 2^>nul') do (
     )
 )
 exit /b 0
+
+:finish
+if "!PAUSE_ON_EXIT!"=="1" (
+    echo.
+    if "!BUILD_RESULT!"=="0" (
+        echo [RESULT] Build succeeded.
+    ) else (
+        echo [RESULT] Build failed with exit code !BUILD_RESULT!.
+    )
+    echo Press any key to close this window...
+    pause >nul
+)
+endlocal & exit /b %BUILD_RESULT%
