@@ -5,7 +5,7 @@
 void RunRenderBackendSelectionTests() {
     REQUIRE(
         lengjing::ui::UiModel{}.system.renderBackend ==
-        lengjing::ui::RenderBackend::Cpu);
+        lengjing::ui::RenderBackend::Vulkan);
     REQUIRE(
         lengjing::app::GraphicsApiForRenderBackend(
             lengjing::ui::RenderBackend::Cpu) ==

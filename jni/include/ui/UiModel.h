@@ -253,7 +253,7 @@ struct AimSettings {
 
 struct SystemSettings {
     int frameLimitIndex = 3;
-    RenderBackend renderBackend = RenderBackend::Cpu;
+    RenderBackend renderBackend = RenderBackend::Vulkan;
     bool autoScrollLogs = true;
     bool toastNotifications = true;
 };

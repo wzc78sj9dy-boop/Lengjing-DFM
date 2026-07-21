@@ -702,6 +702,8 @@ AimTuning& CurrentAimTuning(AimSettings& aim) {
 
 void RenderRuntime(UiModel& model, UiActions& actions) {
     RuntimeModel& runtime = model.runtime;
+    VisualSettings& visual = model.visual;
+    SystemSettings& system = model.system;
 
     SectionTitle("运行状态");
     const float metricsWidth = ImGui::GetContentRegionAvail().x;
@@ -726,6 +728,20 @@ void RenderRuntime(UiModel& model, UiActions& actions) {
             static_cast<std::size_t>(rendererIndex)];
         StatusMetric("渲染方式", renderer, kAccent);
         ImGui::EndTable();
+    }
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    Mark(
+        actions,
+        SettingsDomain::Visual,
+        Toggle("坐标解密", visual.coordinateDecrypt));
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+    int renderBackend = std::clamp(
+        static_cast<int>(system.renderBackend),
+        static_cast<int>(RenderBackend::Cpu),
+        static_cast<int>(RenderBackend::OpenGl));
+    if (Combo("渲染方式", renderBackend, kRenderBackends)) {
+        system.renderBackend = static_cast<RenderBackend>(renderBackend);
+        actions.SettingsChanged(SettingsDomain::System);
     }
 
     SectionTitle("运行环境");
@@ -761,11 +777,6 @@ void RenderVisual(UiModel& model, UiActions& actions) {
         bool allEnabled = AllVisualEnabled(visual);
         if (GridToggle("绘制全开", allEnabled)) {
             SetAllVisual(visual, allEnabled);
-            actions.SettingsChanged(SettingsDomain::Visual);
-        }
-        bool coordinateDecrypt = visual.coordinateDecrypt;
-        if (GridToggle("坐标解密", coordinateDecrypt)) {
-            visual.coordinateDecrypt = coordinateDecrypt;
             actions.SettingsChanged(SettingsDomain::Visual);
         }
         ImGui::EndTable();
@@ -1066,14 +1077,6 @@ void RenderSystem(UiModel& model, UiActions& actions) {
 
     SectionTitle("性能");
     Mark(actions, SettingsDomain::System, Combo("帧率上限", system.frameLimitIndex, kFrameLimits));
-    int renderBackend = std::clamp(
-        static_cast<int>(system.renderBackend),
-        static_cast<int>(RenderBackend::Cpu),
-        static_cast<int>(RenderBackend::OpenGl));
-    if (Combo("渲染方式", renderBackend, kRenderBackends)) {
-        system.renderBackend = static_cast<RenderBackend>(renderBackend);
-        actions.SettingsChanged(SettingsDomain::System);
-    }
 
     SectionTitle("运行日志");
     const float logHeight = std::clamp(ImGui::GetContentRegionAvail().y * 0.48f, 160.0f, 360.0f);
