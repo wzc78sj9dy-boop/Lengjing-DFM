@@ -665,9 +665,6 @@ void AppController::DrawGameFrame(const game::GameFrame& frame,
     if (model_.visual.enabled && model_.visual.playerCount) {
         DrawPopulation(frame, ImGui::GetForegroundDrawList());
     }
-    if (model_.visual.enabled && model_.visual.debugInfo) {
-        DrawDebugInfo(frame, drawList);
-    }
 }
 
 void AppController::DrawPopulation(const game::GameFrame& frame,
@@ -968,96 +965,6 @@ void AppController::DrawPopulation(const game::GameFrame& frame,
                        populationHover_ * 0.36f +
                        populationPress_ * 0.16f)),
         std::max(1.0f, 1.4f * scale));
-}
-
-void AppController::DrawDebugInfo(const game::GameFrame& frame,
-                                  ImDrawList* drawList) const {
-    if (drawList == nullptr) return;
-
-    std::array<std::array<char, 112>, 8> buffers{};
-    std::snprintf(
-        buffers[0].data(), buffers[0].size(), "FPS %.1f",
-        model_.runtime.framesPerSecond);
-    std::snprintf(
-        buffers[1].data(), buffers[1].size(), "PID %d  BASE %s",
-        model_.runtime.processId, model_.runtime.baseReady ? "OK" : "--");
-    std::snprintf(
-        buffers[2].data(), buffers[2].size(), "SEQ %llu",
-        static_cast<unsigned long long>(frame.sequence));
-    std::snprintf(
-        buffers[3].data(), buffers[3].size(), "PLAYER %d  BOT %d  NEAR %d",
-        frame.playerCount, frame.botCount, frame.nearbyEnemyCount);
-    std::snprintf(
-        buffers[4].data(), buffers[4].size(), "LABEL %zu  SIGNAL %zu  OBJECT %zu",
-        frame.worldLabels.size(), frame.playerSignals.size(), frame.projectiles.size());
-    std::snprintf(
-        buffers[5].data(), buffers[5].size(),
-        "GEO %s  MESH %zu  TRI %zu  GEN %llu",
-        frame.geometryAvailable ? "OK" : "--",
-        frame.geometryMeshCount,
-        frame.geometryTriangleCount,
-        static_cast<unsigned long long>(frame.geometryGeneration));
-    std::snprintf(
-        buffers[6].data(), buffers[6].size(),
-        "COORD REQ %s  ENTRY %s  CTX %s  TID %d  ERR %04u  SYS %d",
-        model_.runtime.coordinateRequested ? "YES" : "NO",
-        model_.runtime.coordinateEntryReady ? "OK" : "--",
-        model_.runtime.coordinateContextReady ? "OK" : "--",
-        model_.runtime.coordinateThreadId,
-        static_cast<unsigned int>(model_.runtime.coordinateErrorCode),
-        model_.runtime.coordinateSystemError);
-    std::snprintf(
-        buffers[7].data(), buffers[7].size(),
-        "COORD PC %llX  GEN %llu  RUN %llu/%llu",
-        static_cast<unsigned long long>(
-            model_.runtime.coordinateGuestPc),
-        static_cast<unsigned long long>(
-            model_.runtime.coordinateContextGeneration),
-        static_cast<unsigned long long>(
-            model_.runtime.coordinateSuccesses),
-        static_cast<unsigned long long>(
-            model_.runtime.coordinateAttempts));
-
-    const RenderStyle& style = renderer_.Style();
-    ImFont* font = ImGui::GetFont();
-    const float fontSize = std::max(11.0f, style.metrics.smallFontSize);
-    const float lineHeight = fontSize + 4.0f;
-    float contentWidth = 0.0f;
-    for (const auto& buffer : buffers) {
-        contentWidth = std::max(
-            contentWidth,
-            font->CalcTextSizeA(fontSize, 1000.0f, 0.0f, buffer.data()).x);
-    }
-
-    constexpr float paddingX = 12.0f;
-    constexpr float paddingY = 9.0f;
-    const ImVec2 minimum{18.0f, 18.0f};
-    const ImVec2 maximum{
-        minimum.x + contentWidth + paddingX * 2.0f,
-        minimum.y + paddingY * 2.0f + lineHeight * buffers.size(),
-    };
-    drawList->AddRectFilled(
-        ImVec2(minimum.x + 2.0f, minimum.y + 3.0f),
-        ImVec2(maximum.x + 2.0f, maximum.y + 3.0f),
-        style.colors.shadow, style.metrics.panelRounding);
-    drawList->AddRectFilled(
-        minimum, maximum, style.colors.surfaceRaised, style.metrics.panelRounding);
-    drawList->AddRect(
-        minimum, maximum, style.colors.border, style.metrics.panelRounding,
-        0, 1.0f);
-    drawList->AddLine(
-        ImVec2(minimum.x, minimum.y),
-        ImVec2(minimum.x, maximum.y),
-        style.colors.accent, 3.0f);
-    for (std::size_t index = 0; index < buffers.size(); ++index) {
-        drawList->AddText(
-            font, fontSize,
-            ImVec2(
-                minimum.x + paddingX,
-                minimum.y + paddingY + lineHeight * static_cast<float>(index)),
-            index == 0 ? style.colors.accent : style.colors.textMuted,
-            buffers[index].data());
-    }
 }
 
 void AppController::ScheduleConfigSave() {

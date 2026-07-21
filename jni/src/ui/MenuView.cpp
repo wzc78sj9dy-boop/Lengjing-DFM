@@ -834,7 +834,6 @@ void RenderVisual(UiModel& model, UiActions& actions) {
 
     SectionTitle("调试");
     if (BeginToggleGrid("##visual_debug")) {
-        Mark(actions, SettingsDomain::Visual, GridToggle("调试信息", visual.debugInfo));
         Mark(actions, SettingsDomain::Visual, GridToggle("类名调试", visual.classNameDebug));
         ImGui::EndTable();
     }

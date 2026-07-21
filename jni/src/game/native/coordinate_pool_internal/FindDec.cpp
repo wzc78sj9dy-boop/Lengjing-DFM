@@ -291,7 +291,6 @@ namespace coord_dec {
 			}, indexes);
 
 		if (indexes.empty()) {
-			std::cout << "found hash_func all madd failed" << std::endl;
 			return false;
 		}
 
@@ -324,25 +323,18 @@ namespace coord_dec {
 				continue;
 			}
 
-			print_asm(offset);
-
 			hash_end_madd = index;
 			hash_end = offset;
 
 			if (entry->id(index) == ARM64_INS_MADD) {
 				break;
 			}
-
-			//print_asm(index);
 		}
 
 		if (!hash_end) {
-			std::cout << "found hash end failed" << std::endl;
 			return false;
 		}
 
-		std::cout << "hash_end:" << std::endl;
-		print_asm(hash_end);
 		entry->add_point("hash_end", hash_end, reg);
 		return true;
 	}
@@ -351,11 +343,8 @@ namespace coord_dec {
 		uint64_t madd = hash_end_madd;
 
 		if (!madd) {
-			std::cout << "[pool_ptr_offset]hash_end_madd not found" << std::endl;
 			return false;
 		}
-
-		print_asm(madd);
 
 		arm64_reg reg = entry->reg(madd, 3);
 		uint32_t stp = madd;
@@ -367,29 +356,19 @@ namespace coord_dec {
 				}, stp, 100);
 
 			if (!pool_ptr_calc_b) {
-				std::cout << "[pool_ptr_offset]pool_ptr_calc_b not found" << std::endl;
 				return false;
 			}
-
-			printf(
-				"analyze from %llx to %llx\n",
-				static_cast<unsigned long long>(
-					entry->address(pool_ptr_calc_b + 1)),
-				static_cast<unsigned long long>(entry->address(stp)));
 
 			Analyze pool_ptr_calc;
 			for (uint32_t i = pool_ptr_calc_b + 1; i < stp; i++) {
 				if (pool_ptr_calc.parse(entry->get_insn(i)) != 0) {
-					std::cout << "pool_ptr_calc analyze failed" << std::endl;
 					return false;
 				}
 			}
 
-			std::cout << "pool_ptr_calc Analyze:" << pool_ptr_calc.str(reg) << std::endl;
 			std::set<mem_param> pool_ptr_calc_params;
 			int32_t disp = 0;
 			if (!pool_ptr_calc.list_mem_param(reg, pool_ptr_calc_params)) {
-				std::cout << "pool_ptr_calc expression missing" << std::endl;
 				return false;
 			}
 			for (auto p : pool_ptr_calc_params) {
@@ -407,7 +386,6 @@ namespace coord_dec {
 				}
 
 				if (p.size == 8) {
-					std::cout << p.name << " is pool ptr str" << std::endl;
 					disp = p.disp;
 					break;
 				}
@@ -416,29 +394,19 @@ namespace coord_dec {
 				}
 			}
 
-			if (disp == 0) {
-				std::cout << "[pool_ptr_offset]pool ptr str not found" << std::endl;
-			}
-
 			stp = entry->find([&](finder& f) {
 				f.st(0, ARM64_REG_SP, disp);
 				});
 
 			if (!stp) {
-				std::cout << "[pool_ptr_offset]stp" << std::endl;
 				return false;
 			}
 
 			reg = entry->st_reg(stp, disp);
 
 			if (reg == ARM64_REG_INVALID) {
-				std::cout << "[pool_ptr_offset]reg" << std::endl;
 				return false;
 			}
-
-			printf(
-				"[pool_ptr_offset]pool ptr st: %llx\n",
-				static_cast<unsigned long long>(entry->address(stp)));
 		}
 
 
@@ -447,11 +415,9 @@ namespace coord_dec {
 
 	bool FindDec::analyze_hash_binary_search() {
 		if (!find_binary_search_end()) {
-			std::cout << "found binary search end failed" << std::endl;
 			return false;
 		}
 		if (!find_pool_ptr_offset()) {
-			std::cout << "found pool ptr offset failed" << std::endl;
 			return false;
 		}
 		return true;
@@ -476,23 +442,17 @@ namespace coord_dec {
 				continue;
 			}
 
-
-			print_asm(index);
-
 			ring_madd = i;
 			break;
 		}
 
 		if (!ring_madd) {
-			std::cout << "ring madd not found" << std::endl;
 			return false;
 		}
 
 		ring_offset_madd_block = entry->find_reverse([&](finder& f) {
 			f.is_b();
 			}, ring_madd, 100) + 1;
-		std::cout << "ring_offset_madd_block:" << std::endl;
-		std::cout << ring_offset_madd_block << std::endl;
 
 		uint32_t add = entry->find_reverse([&](finder& f) {
 			f.is_add(0);
@@ -506,9 +466,6 @@ namespace coord_dec {
 		else {
 			ring_offset = entry->imm(add, 2);
 		}
-
-		std::cout << "ring offset: " << ring_offset << std::endl;
-
 		return true;
 	}
 
@@ -521,7 +478,6 @@ namespace coord_dec {
 			}, madds);
 
 		if (madds.empty()) {
-			std::cout << "madds empty" << std::endl;
 			return false;
 		}
 
@@ -546,18 +502,6 @@ namespace coord_dec {
 			int32_t candidate_disp = 0;
 			uint32_t candidate_ldr = find_pool_load(entry, madd,
 				ring_offset_madd_block + 100, 50, candidate_disp);
-			std::cout << "[base_index] base candidate madd=0x"
-				<< coordinate_pool_format::Format("{:x}", entry->address(madd))
-				<< " imm=0x" << coordinate_pool_format::Format("{:x}", immediate)
-				<< " def=0x" << coordinate_pool_format::Format("{:x}", entry->address(immediate_def));
-			if (candidate_ldr) {
-				std::cout << " load=0x" << coordinate_pool_format::Format("{:x}", entry->address(candidate_ldr))
-					<< " disp=0x" << coordinate_pool_format::Format("{:x}", candidate_disp);
-			}
-			else {
-				std::cout << " load=none";
-			}
-			std::cout << std::endl;
 
 			if (candidate_ldr && !ring_base_madd) {
 				ring_base_madd = madd;
@@ -567,24 +511,16 @@ namespace coord_dec {
 		}
 
 		if (ring_madds.empty()) {
-			std::cout << "ring_madds empty" << std::endl;
 			return false;
 		}
 
 		if (ring_madds.size() != 2) {
-			std::cout << "ring_madds != 2" << std::endl;
 			return false;
 		}
 
 		if (!ring_base_madd || !pool_ldr) {
-			std::cout << "ring base madd/pool load not found" << std::endl;
 			return false;
 		}
-
-		std::cout << "[base_index] selected madd=0x"
-			<< coordinate_pool_format::Format("{:x}", entry->address(ring_base_madd))
-			<< " pool_load=0x" << coordinate_pool_format::Format("{:x}", entry->address(pool_ldr))
-			<< " disp=0x" << coordinate_pool_format::Format("{:x}", pool_disp) << std::endl;
 
 		uint32_t end = ring_madds.back() - 1;
 		uint32_t start = ring_offset_madd_block;
@@ -592,11 +528,6 @@ namespace coord_dec {
 		entry->add_point("ring_calc_start", start);
 
 		bool for_index = false;
-
-		printf(
-			"analyze from %llx to %llx\n",
-			static_cast<unsigned long long>(entry->address(start)),
-			static_cast<unsigned long long>(entry->address(end)));
 		struct RingIndexCandidate {
 			uint32_t madd = 0;
 			std::shared_ptr<Expr> expr;
@@ -623,13 +554,11 @@ namespace coord_dec {
 
 				for (uint32_t j = decode->start_i(); j < decode->end_i(); j++) {
 					if (analyze.parse(entry->get_insn(j))) {
-						std::cout << "ptr_decode analyze failed" << std::endl;
 						return false;
 					}
 				}
 			}
 			else if (analyze.parse(entry->get_insn(i))) {
-				std::cout << "base_index analyze failed" << std::endl;
 				return false;
 			}
 
@@ -637,7 +566,6 @@ namespace coord_dec {
 				count++;
 				auto candidate_expr = analyze.get_expr(entry->reg(i + 1, 1));
 				if (!candidate_expr) {
-					std::cout << "ring index candidate expression missing" << std::endl;
 					return false;
 				}
 
@@ -646,15 +574,11 @@ namespace coord_dec {
 				candidate.expr = candidate_expr;
 				candidate.expr->param(candidate.memory_params);
 				candidate.expr->dependencies(candidate.dependencies);
-				std::cout << "ring index candidate MADD 0x"
-					<< coordinate_pool_format::Format("{:x}", entry->address(i + 1))
-					<< ": " << analyze.str(entry->reg(i + 1, 1)) << std::endl;
 				candidates.push_back(std::move(candidate));
 			}
 		}
 
 		if (candidates.size() != 2) {
-			std::cout << "ring index candidates != 2" << std::endl;
 			return false;
 		}
 
@@ -670,34 +594,21 @@ namespace coord_dec {
 		const bool second_is_current = uses_ring_index(candidates[1]) &&
 			is_strict_subset(candidates[1].dependencies, candidates[0].dependencies);
 		if (first_is_current == second_is_current) {
-			std::cout << "current ring slot dependency relation is ambiguous" << std::endl;
 			return false;
 		}
 
 		const RingIndexCandidate& current = candidates[first_is_current ? 0 : 1];
 		index_expr = current.expr;
 		analyze.retain_var_params(current.dependencies);
-		std::cout << "selected current ring slot MADD 0x"
-			<< coordinate_pool_format::Format("{:x}", entry->address(current.madd)) << std::endl;
 
 		entry->add_point("all_params_exec_end", current.madd);
-
-		std::vector<std::string> expr_str;
-		std::cout << index_expr->str(expr_str) << std::endl;
-		std::cout << "analyze ok" << std::endl;
-
-		for (auto p : analyze.varParams) {
-			std::cout << p.name << " - 0x" << coordinate_pool_format::Format("{:x} ", p.addr) << p.reg << std::endl;
-		}
 
 		std::set<mem_param> params;
 		index_expr->param(params);
 
-		print_asm(pool_ldr);
 		for (auto& p : params) {
 			if (!for_index && !p.offset.empty() && p.offset[0] == pool_disp) {
 				for_index = true;
-				std::cout << p.name << " for index" << std::endl;
 				index_offset = p.offset[0];
 				ring_index_param = p.name;
 				continue;
@@ -710,8 +621,6 @@ namespace coord_dec {
 		}
 
 		if (!for_index || ring_index_param.empty() || index_offset != pool_disp) {
-			std::cout << "ring index parameter not found for pool disp 0x"
-				<< coordinate_pool_format::Format("{:x}", pool_disp) << std::endl;
 			return false;
 		}
 
@@ -720,12 +629,10 @@ namespace coord_dec {
 
 	bool FindDec::analyze_index_calc() {
 		if (!find_ring_offset()) {
-			std::cout << "found ring offset failed" << std::endl;
 			return false;
 		}
 
 		if (!analyze_base_index_calc()) {
-			std::cout << "analyze base index calc" << std::endl;
 			return false;
 		}
 		return true;
@@ -777,8 +684,6 @@ namespace coord_dec {
 					}, i, 10);
 
 				if (index) {
-                    std::cout << "continue:" << std::endl;
-					print_asm(index);
 					continue;
 				}
 
@@ -788,7 +693,6 @@ namespace coord_dec {
 		}
 
 		for (const auto& i : patch_blr) {
-			std::cout << "patch blr. addr:" << coordinate_pool_format::Format("{:x}", binary_.address(i)) << std::endl;
 			binary_.patch(i, patch_nop, 4);
 		}
 
@@ -807,7 +711,6 @@ namespace coord_dec {
 			}, indexes);
 
 		if (indexes.empty()) {
-			std::cout << "bl not found" << std::endl;
 			return false;
 		}
 
@@ -849,10 +752,8 @@ namespace coord_dec {
 		if (!addr) return false;
 
 		addr = entry->address(addr + 1);
-		std::cout << "jump addr: " << coordinate_pool_format::Format("{:x}", addr) << std::endl;
 
 		for (const auto& i : patch_svc) {
-			std::cout << "patch svc. addr:" << coordinate_pool_format::Format("{:x}", binary_.address(i)) << std::endl;
 			uint32_t patch_b = generate_branch(addr - entry->address(i));
 			binary_.patch(i, &patch_b, 4);
 		}
@@ -885,64 +786,23 @@ namespace coord_dec {
 
 		entry = binary_.create_method("entry", entry_address, f, 5000);
 		if (!entry) {
-			std::cout << "creat method entry failed" << std::endl;
 			return -1;
 		}
-		std::cout << "creat method entry ok: " << coordinate_pool_format::Format("{:x}", entry->end_address())
-			<< std::endl;
 
 
 		if (!find_v87_str()) {
-			std::cout << "find_v87_str failed" << std::endl;
 			return -1;
 		}
-
-		std::cout << "find_v87_str ok" << std::endl;
-		print_asm(v87_str_point);
 
 		if (!analyze_hash_binary_search()) {
-			std::cout << "analyze hash binary search failed" << std::endl;
 			return -1;
 		}
 
-		std::cout << "pool_ptr_offset: " << pool_ptr_offset << std::endl;
-
-
 		if (!analyze_index_calc()) {
-			std::cout << "analyze index calc failed" << std::endl;
 			return -1;
 		}
 		if (!patch()) {
-			std::cout << "patch failed" << std::endl;
 			return -1;
-		}
-
-
-		std::cout << "ring offset: " << ring_offset << std::endl;
-		std::cout << "pool_ptr_offset offset: " << pool_ptr_offset << std::endl;
-		binary_.print_all_methods();
-
-		std::cout << "ring_index_param: " << std::endl;
-		std::cout << "name: " << ring_index_param << " offset: " << index_offset << std::endl;
-
-		std::cout << "mem_params:" << std::endl;
-		for (param& p : mem_param_list) {
-			std::cout << "name: " << p.name << " ";
-			std::cout << "size: " << p.size << " ";
-			std::cout << "disp: " << p.disp << " ";
-			std::cout << "offset:";
-			for (const auto& off : p.offset) {
-				std::cout << "+" << off;
-			}
-			std::cout << std::endl;
-		}
-
-		std::cout << "var_params:" << std::endl;
-		for (auto& p : analyze.varParams) {
-			std::cout << "name: " << p.name << " ";
-			std::cout << "addr: " << coordinate_pool_format::Format("0x{:X}", p.addr) << " ";
-			std::cout << "reg: " << p.reg << " ";
-			std::cout << std::endl;
 		}
 
 		return 0;

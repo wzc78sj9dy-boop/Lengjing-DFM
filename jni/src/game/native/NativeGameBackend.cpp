@@ -1041,19 +1041,6 @@ public:
             RequestGeometryRefresh();
         }
         RefreshWorldObjectCache(context, settings);
-        if (settings.visual.debugInfo) {
-            const std::shared_ptr<const native::GeometrySnapshot> snapshot =
-                geometryRuntime_.GetSnapshot();
-            frame.geometryAvailable = geometrySnapshotReady_ &&
-                snapshot != nullptr && snapshot->available;
-            if (frame.geometryAvailable) {
-                frame.geometryMeshCount =
-                    snapshot->staticMeshes.size() +
-                    snapshot->dynamicMeshes.size();
-                frame.geometryTriangleCount = snapshot->triangleCount;
-                frame.geometryGeneration = snapshot->generation;
-            }
-        }
 
         if (!settings.visual.antiFlicker) boneCache_.clear();
 

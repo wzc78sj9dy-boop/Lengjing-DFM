@@ -97,7 +97,6 @@ struct VisualSettings {
     bool aimWarning = false;
     bool aimWarningRay = false;
     bool playerViewRay = false;
-    bool debugInfo = false;
     bool classNameDebug = false;
 
     int drawDistanceMeters = 500;

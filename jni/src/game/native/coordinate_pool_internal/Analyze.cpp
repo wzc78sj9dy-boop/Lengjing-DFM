@@ -1,7 +1,6 @@
 ﻿#include "game/native/coordinate_pool_internal/Analyze.h"
 #include <algorithm>
 #include <cstdint>
-#include <iostream>
 #include "game/native/coordinate_pool_internal/DecFormat.h"
 
 namespace lengjing::game::native::coordinate_pool_internal {
@@ -177,8 +176,6 @@ int Analyze::parse(cs_insn *insn) {
 
     auto store_result = [&](std::shared_ptr<Expr> expr) -> bool {
         if (!expr) {
-            std::cout << "[analyze] " << coordinate_pool_format::Format("0x{:X}", insn->address)
-                      << " " << insn->mnemonic << " operand unsupported" << std::endl;
             return false;
         }
         if (isW(op[0].reg)) {
@@ -207,8 +204,6 @@ int Analyze::parse(cs_insn *insn) {
         case ARM64_INS_MOV: {
             auto expr = operand_expr(op[1]);
             if (!expr) {
-                std::cout << "[analyze] " << coordinate_pool_format::Format("0x{:X}", insn->address)
-                          << " MOV operand unsupported" << std::endl;
                 return -1;
             }
             if (isW(op[0].reg) && op[1].type == ARM64_OP_IMM) {
@@ -223,10 +218,6 @@ int Analyze::parse(cs_insn *insn) {
             if (op_count < 2 || op[1].type != ARM64_OP_IMM ||
                 op[1].shift.value > 48 ||
                 (op[1].shift.value & 15U) != 0) {
-                std::cout << "[analyze] "
-                          << coordinate_pool_format::Format(
-                                 "0x{:X}", insn->address)
-                          << " MOVK operand unsupported" << std::endl;
                 return -1;
             }
             const unsigned int shift = op[1].shift.value;
@@ -361,13 +352,11 @@ int Analyze::parse(cs_insn *insn) {
 						op[0].reg, size, op[1].mem.disp, op[1].mem.base);
                     break;
                 }
-                std::cout << "[analyze] " << coordinate_pool_format::Format("0x{:X}", insn->address) << " fold failed : target reg not found" << std::endl;
 				regs.erase(reg);
                 break;
             }
 
             if (!it->second || it->second->kind() != EXPR_MEMORY) {
-                std::cout << "[analyze] " << coordinate_pool_format::Format("0x{:X}", insn->address) << " fold failed: not MemVarExpr" << std::endl;
 				make_runtime_memory(
 					op[0].reg, size, op[1].mem.disp, op[1].mem.base);
                 break;
@@ -376,11 +365,9 @@ int Analyze::parse(cs_insn *insn) {
 
             if (insn->detail->arm64.writeback) {
                 if (regs.find(op[1].mem.base) == regs.end()) {
-                    std::cout << "[analyze] write back fold failed: target reg not found" << std::endl;
                     break;
                 }
                 if (!it->second || it->second->kind() != EXPR_MEMORY) {
-                    std::cout << "[analyze] write back fold failed: not MemVarExpr" << std::endl;
                     break;
                 }
                 auto *back = static_cast<MemVarExpr *>(it->second.get());

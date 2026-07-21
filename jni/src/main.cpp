@@ -1,9 +1,8 @@
 #include "app/AppController.h"
 #include "app/RenderBackendSelection.h"
-#include "app/RuntimeExitPolicy.h"
 #include "auth/CloudLayoutStartupPolicy.h"
 #include "auth/RemoteAuth.h"
-#include "game/native/MemoryTransport.h"
+#include "game/native/AlgorithmPositionRuntime.h"
 #include "platform/MenuKeyMonitor.h"
 
 #include "Android_Graphics/GraphicsManager.h"
@@ -16,12 +15,12 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <charconv>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -48,6 +47,16 @@ void HandleSignal(int) {
     gStopRequested.store(true, std::memory_order_release);
 }
 
+void SilenceExternalOutput() noexcept {
+    std::fflush(stdout);
+    std::fflush(stderr);
+    const int nullOutput = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (nullOutput < 0) return;
+    static_cast<void>(dup2(nullOutput, STDOUT_FILENO));
+    static_cast<void>(dup2(nullOutput, STDERR_FILENO));
+    close(nullOutput);
+}
+
 std::string CurrentDirectory() {
     char path[1024]{};
     return getcwd(path, sizeof(path)) != nullptr
@@ -68,113 +77,6 @@ CoordinateReplayConfiguration() {
             decryptRva);
     }
     return {};
-}
-
-int CoordinateProbeSeconds() {
-    const char* value = std::getenv("LENGJING_COORDINATE_PROBE_SECONDS");
-    if (value == nullptr || value[0] == '\0') return 0;
-    int seconds = 0;
-    const char* end = value + std::char_traits<char>::length(value);
-    const auto parsed = std::from_chars(value, end, seconds, 10);
-    return parsed.ec == std::errc{} && parsed.ptr == end &&
-            seconds >= 1 && seconds <= 120
-        ? seconds
-        : 0;
-}
-
-int CoordinateProbeDriver() {
-    const char* value = std::getenv("LENGJING_COORDINATE_PROBE_DRIVER");
-    if (value == nullptr || value[0] == '\0') return 1;
-    int driver = -1;
-    const char* end = value + std::char_traits<char>::length(value);
-    const auto parsed = std::from_chars(value, end, driver, 10);
-    return parsed.ec == std::errc{} && parsed.ptr == end &&
-            lengjing::game::native::IsValidMemoryTransportMode(driver)
-        ? driver
-        : 1;
-}
-
-int RunCoordinateProbe(
-    int seconds,
-    int width,
-    int height,
-    const std::string& programDirectory,
-    std::shared_ptr<const lengjing::auth::CloudLayoutDocument> cloudLayout,
-    const lengjing::game::native::AlgorithmPositionRuntimeConfig&
-        algorithmPosition) {
-    using namespace std::chrono_literals;
-    const bool cloudLayoutActive = cloudLayout != nullptr;
-    lengjing::game::RuntimeOptions options;
-    options.gameVersionIndex = 0;
-    options.driverIndex = CoordinateProbeDriver();
-    options.inputMode = lengjing::ui::AimInputMode::ReadOnly;
-    options.screenWidth = width;
-    options.screenHeight = height;
-    options.programDirectory = programDirectory;
-    options.cloudLayout = std::move(cloudLayout);
-    options.algorithmPosition = algorithmPosition;
-
-    lengjing::game::FeatureSettings settings;
-    settings.visual.coordinateDecrypt = true;
-    lengjing::game::GameRuntime runtime(
-        lengjing::game::CreateNativeGameBackend());
-    runtime.UpdateSettings(settings);
-    if (!runtime.Start(options)) return 10;
-
-    lengjing::game::RuntimeStatus last{};
-    const auto deadline = std::chrono::steady_clock::now() +
-        std::chrono::seconds(seconds);
-    while (std::chrono::steady_clock::now() < deadline) {
-        const lengjing::game::RuntimeStatus status = runtime.Status();
-        if (status.phase != last.phase ||
-            status.coordinateEntryReady != last.coordinateEntryReady ||
-            status.coordinateContextReady != last.coordinateContextReady ||
-            status.coordinateThreadId != last.coordinateThreadId ||
-            status.coordinateAttempts != last.coordinateAttempts ||
-            status.coordinateSuccesses != last.coordinateSuccesses ||
-            status.coordinateError != last.coordinateError ||
-            status.coordinateSystemError != last.coordinateSystemError ||
-            status.message != last.message) {
-            std::fprintf(
-                stderr,
-                "[coordinate-probe] phase=%u pid=%d base=%d req=%d "
-                "entry=%d ctx=%d tid=%d pc=0x%llx gen=%llu "
-                "run=%llu/%llu error=CD-%04u sys=%d status=%s\n",
-                static_cast<unsigned int>(status.phase),
-                status.processId,
-                status.baseReady ? 1 : 0,
-                status.coordinateRequested ? 1 : 0,
-                status.coordinateEntryReady ? 1 : 0,
-                status.coordinateContextReady ? 1 : 0,
-                status.coordinateThreadId,
-                static_cast<unsigned long long>(
-                    status.coordinateGuestPc),
-                static_cast<unsigned long long>(
-                    status.coordinateContextGeneration),
-                static_cast<unsigned long long>(
-                    status.coordinateSuccesses),
-                static_cast<unsigned long long>(
-                    status.coordinateAttempts),
-                static_cast<unsigned int>(
-                    lengjing::game::CoordinateDecryptErrorCode(
-                        status.coordinateError)),
-                status.coordinateSystemError,
-                status.message.c_str());
-            last = status;
-        }
-        if (status.phase == lengjing::game::RuntimePhase::Faulted) break;
-        std::this_thread::sleep_for(100ms);
-    }
-    runtime.Stop();
-    runtime.WaitUntilStopped();
-    const int runtimeExitCode = lengjing::app::ResolveRuntimeExitCode(
-        cloudLayoutActive, last.phase, last.failureKind);
-    if (runtimeExitCode != 0) return runtimeExitCode;
-    return last.coordinateSuccesses != 0
-        ? 0
-        : (last.coordinateContextReady
-            ? 13
-            : (last.coordinateEntryReady ? 12 : 11));
 }
 
 struct CloudLayoutFetchResult {
@@ -451,6 +353,8 @@ int main() {
         cloudLayout = std::move(cloudFetch.snapshot);
     }
 
+    SilenceExternalOutput();
+
     auto display = android::ANativeWindowCreator::GetDisplayInfo();
     int surfaceWidth = display.width;
     int surfaceHeight = display.height;
@@ -460,17 +364,6 @@ int main() {
     }
 
     const auto algorithmPosition = CoordinateReplayConfiguration();
-    const int coordinateProbeSeconds = CoordinateProbeSeconds();
-    if (coordinateProbeSeconds != 0) {
-        return RunCoordinateProbe(
-            coordinateProbeSeconds,
-            surfaceWidth,
-            surfaceHeight,
-            programDirectory,
-            std::move(cloudLayout),
-            algorithmPosition);
-    }
-
     ANativeWindow* window = android::ANativeWindowCreator::Create(
         "lengjing-surface", surfaceWidth, surfaceHeight, false);
     if (window == nullptr) {
@@ -503,11 +396,6 @@ int main() {
         initialGraphics.activeBackend;
     controller.ReportRenderBackend(
         activeBackend, initialGraphics.fallbackApplied);
-    if (initialGraphics.fallbackApplied) {
-        std::fprintf(
-            stderr,
-            "[render] selected backend initialization failed, using CPU\n");
-    }
 
     InstallChineseFont();
     BaseTexData* menuLogo = graphics->LoadTextureFromMemory(
@@ -585,11 +473,6 @@ int main() {
             activeBackend = initialization.activeBackend;
             controller.ReportRenderBackend(
                 activeBackend, initialization.fallbackApplied);
-            if (initialization.fallbackApplied) {
-                std::fprintf(
-                    stderr,
-                    "[render] selected backend initialization failed, using CPU\n");
-            }
             InstallChineseFont();
             menuLogo = graphics->LoadTextureFromMemory(
                 const_cast<unsigned char*>(
@@ -604,7 +487,6 @@ int main() {
         };
     auto nextDisplayRefresh = std::chrono::steady_clock::time_point{};
     auto nextSurfaceRetry = std::chrono::steady_clock::time_point{};
-    bool surfaceFailureReported = false;
     int runtimeExitCode = 0;
     int orientation = display.orientation;
     while (!gStopRequested.load(std::memory_order_acquire) &&
@@ -660,18 +542,11 @@ int main() {
                     targetHeight,
                     targetOrientation,
                     desiredBackend)) {
-                if (!surfaceFailureReported) {
-                    std::fprintf(
-                        stderr,
-                        "无法重建绘制窗口，正在重试\n");
-                    surfaceFailureReported = true;
-                }
                 nextSurfaceRetry =
                     now + std::chrono::milliseconds(100);
                 nextDisplayRefresh = now;
                 continue;
             }
-            surfaceFailureReported = false;
             nextSurfaceRetry = std::chrono::steady_clock::time_point{};
         }
         if (recreationRequested) {
@@ -690,7 +565,6 @@ int main() {
 
     if (kRuntimeAuthEnabled && authSession.ExitRequested()) {
         controller.StopRuntime();
-        std::fprintf(stderr, "[验证] 会话已失效\n");
     }
 
     menuKeys.Stop();

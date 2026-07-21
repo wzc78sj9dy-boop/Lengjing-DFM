@@ -177,7 +177,6 @@ Json Serialize(const ui::UiModel& model) {
             {"aim_warning", model.visual.aimWarning},
             {"aim_warning_ray", model.visual.aimWarningRay},
             {"player_view_ray", model.visual.playerViewRay},
-            {"debug_info", model.visual.debugInfo},
             {"class_name_debug", model.visual.classNameDebug},
             {"draw_distance_meters", model.visual.drawDistanceMeters},
             {"warning_size", model.visual.warningSize},
@@ -274,7 +273,6 @@ void Apply(const Json& root, ui::UiModel& model) {
     LOAD_VISUAL_BOOL(aimWarning, "aim_warning");
     LOAD_VISUAL_BOOL(aimWarningRay, "aim_warning_ray");
     LOAD_VISUAL_BOOL(playerViewRay, "player_view_ray");
-    LOAD_VISUAL_BOOL(debugInfo, "debug_info");
     LOAD_VISUAL_BOOL(classNameDebug, "class_name_debug");
 #undef LOAD_VISUAL_BOOL
     model.visual.drawDistanceMeters = ReadNumber(visual, "draw_distance_meters", model.visual.drawDistanceMeters, 0, 2000);

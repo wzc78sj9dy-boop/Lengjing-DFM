@@ -658,10 +658,6 @@ bool LoginInteractive(AuthSession& session,
         return false;
     }
 
-    const std::string expiresAt = session.ExpiresAt();
-    std::cout << "登录成功";
-    if (!expiresAt.empty()) std::cout << ", 有效期: " << expiresAt;
-    std::cout << '\n';
     return true;
 }
 

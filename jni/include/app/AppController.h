@@ -78,7 +78,6 @@ private:
     void RefreshRenderStyle();
     void DrawGameFrame(const game::GameFrame& frame, ImDrawList* drawList);
     void DrawPopulation(const game::GameFrame& frame, ImDrawList* drawList);
-    void DrawDebugInfo(const game::GameFrame& frame, ImDrawList* drawList) const;
     void ScheduleConfigSave();
     bool FlushConfig(bool force);
 
