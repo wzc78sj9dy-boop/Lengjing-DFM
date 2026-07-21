@@ -168,8 +168,17 @@ ImVec4 Mix(const ImVec4& from, const ImVec4& to, float amount) {
 
 struct SectionLayoutState {
     bool active = false;
-    bool tableOpen = false;
     bool cardOpen = false;
+    int columnCount = 1;
+    int nextColumn = 0;
+    int activeColumn = 0;
+    float originX = 0.0f;
+    float originY = 0.0f;
+    float width = 0.0f;
+    float columnWidth = 0.0f;
+    float horizontalGap = 0.0f;
+    float verticalGap = 0.0f;
+    std::array<float, 2> nextY{};
 };
 
 SectionLayoutState gSectionLayout;
@@ -179,38 +188,66 @@ void CloseSectionCard() {
         return;
     }
     ImGui::Dummy(ImVec2(0.0f, 3.0f));
+    const float cardBottom =
+        ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
     ImGui::EndChild();
+    gSectionLayout.nextY[static_cast<std::size_t>(
+        gSectionLayout.activeColumn)] =
+        cardBottom + gSectionLayout.verticalGap;
     gSectionLayout.cardOpen = false;
 }
 
 void BeginSectionLayout(const char* id) {
     gSectionLayout = {};
     gSectionLayout.active = true;
-    const float width = ImGui::GetContentRegionAvail().x;
-    const int columns = width >= 760.0f ? 2 : 1;
-    gSectionLayout.tableOpen = ImGui::BeginTable(
-        id,
-        columns,
-        ImGuiTableFlags_SizingStretchSame |
-            ImGuiTableFlags_NoSavedSettings |
-            ImGuiTableFlags_PadOuterX,
-        ImVec2(0.0f, 0.0f));
+    ImGui::PushID(id);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    gSectionLayout.originX = origin.x;
+    gSectionLayout.originY = origin.y;
+    gSectionLayout.width = ImGui::GetContentRegionAvail().x;
+    gSectionLayout.columnCount =
+        gSectionLayout.width >= 760.0f ? 2 : 1;
+    gSectionLayout.horizontalGap =
+        gSectionLayout.columnCount > 1
+            ? ImGui::GetStyle().ItemSpacing.x
+            : 0.0f;
+    gSectionLayout.verticalGap = 4.0f;
+    gSectionLayout.columnWidth =
+        (gSectionLayout.width - gSectionLayout.horizontalGap) /
+        static_cast<float>(gSectionLayout.columnCount);
+    gSectionLayout.nextY.fill(origin.y);
 }
 
 void EndSectionLayout() {
     CloseSectionCard();
-    if (gSectionLayout.tableOpen) {
-        ImGui::EndTable();
+    float bottom = gSectionLayout.originY;
+    for (int column = 0; column < gSectionLayout.columnCount; ++column) {
+        bottom = std::max(
+            bottom,
+            gSectionLayout.nextY[static_cast<std::size_t>(column)] -
+                gSectionLayout.verticalGap);
     }
+    ImGui::SetCursorScreenPos(ImVec2(gSectionLayout.originX, bottom));
+    ImGui::Dummy(ImVec2(gSectionLayout.width, 0.0f));
+    ImGui::PopID();
     gSectionLayout = {};
 }
 
 void SectionTitle(const char* title, float height = 0.0f) {
     if (gSectionLayout.active) {
         CloseSectionCard();
-        if (gSectionLayout.tableOpen) {
-            ImGui::TableNextColumn();
-        }
+        const int column = gSectionLayout.nextColumn;
+        gSectionLayout.nextColumn =
+            (gSectionLayout.nextColumn + 1) % gSectionLayout.columnCount;
+        gSectionLayout.activeColumn = column;
+        const ImVec2 cardPosition{
+            gSectionLayout.originX +
+                static_cast<float>(column) *
+                    (gSectionLayout.columnWidth +
+                     gSectionLayout.horizontalGap),
+            gSectionLayout.nextY[static_cast<std::size_t>(column)]};
+        ImGui::SetCursorScreenPos(cardPosition);
+        ImGui::SetNextWindowPos(cardPosition, ImGuiCond_Always);
         ImGuiChildFlags childFlags = ImGuiChildFlags_Border;
         if (height <= 0.0f) {
             childFlags |= ImGuiChildFlags_AutoResizeY |
@@ -221,7 +258,9 @@ void SectionTitle(const char* title, float height = 0.0f) {
         ImGui::PushStyleColor(ImGuiCol_Border, kBorder);
         ImGui::BeginChild(
             title,
-            ImVec2(0.0f, std::max(0.0f, height)),
+            ImVec2(
+                gSectionLayout.columnWidth,
+                std::max(0.0f, height)),
             childFlags,
             ImGuiWindowFlags_NoScrollbar |
                 ImGuiWindowFlags_NoScrollWithMouse |
