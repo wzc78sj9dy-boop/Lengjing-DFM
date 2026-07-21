@@ -21,6 +21,7 @@ int main() {
         RunCloudLayoutTests();
         RunConfigTests();
         RunCoordinatePoolPolicyTests();
+        RunCoordinateOutputPolicyTests();
         RunCpuMailboxPolicyTests();
         RunFrameProjectionTests();
         RunGeometrySceneBuildPolicyTests();

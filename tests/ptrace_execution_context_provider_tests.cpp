@@ -120,6 +120,10 @@ void TestCandidateRotationAndCache() {
         UINT64_C(0x767F196CC4),
         UINT64_C(0x13579BDF),
         UINT64_C(0x2468ACE0),
+        {
+            UINT64_C(0x767F190000),
+            UINT64_C(0xA17C9E210001),
+        },
     };
     auto refresh = provider.Refresh(first);
     CHECK(refresh.HasContext());
@@ -137,16 +141,26 @@ void TestCandidateRotationAndCache() {
     CHECK(refresh.snapshot.generation == 1);
     CHECK(reader.attempts.empty());
 
+    PacgaOracleInstruction rewritten = first;
+    rewritten.codeIdentity.fingerprint = UINT64_C(0xA17C9E210002);
+    reader.attempts.clear();
+    refresh = provider.Refresh(rewritten);
+    CHECK(refresh.HasContext());
+    CHECK(refresh.snapshot.generation == 2);
+    CHECK(reader.attempts == std::vector<std::int32_t>({1402}));
+    CHECK(reader.lastInstruction == rewritten);
+
     const PacgaOracleInstruction second{
         UINT64_C(0x767F196CC8),
         first.data,
         first.modifier,
+        rewritten.codeIdentity,
     };
     reader.attempts.clear();
     refresh = provider.Refresh(second);
     CHECK(refresh.HasContext());
     CHECK(refresh.snapshot.threadId == 1402);
-    CHECK(refresh.snapshot.generation == 2);
+    CHECK(refresh.snapshot.generation == 3);
     CHECK(reader.attempts == std::vector<std::int32_t>({1402}));
 
     CHECK(provider.RejectCurrent());
@@ -159,7 +173,7 @@ void TestCandidateRotationAndCache() {
     refresh = provider.Refresh(second);
     CHECK(refresh.HasContext());
     CHECK(refresh.snapshot.threadId == 1401);
-    CHECK(refresh.snapshot.generation == 3);
+    CHECK(refresh.snapshot.generation == 4);
     CHECK(reader.attempts == std::vector<std::int32_t>({1401}));
 
     CHECK(provider.RejectCurrent());
@@ -167,7 +181,7 @@ void TestCandidateRotationAndCache() {
     refresh = provider.Refresh(second);
     CHECK(refresh.HasContext());
     CHECK(refresh.snapshot.threadId == 1401);
-    CHECK(refresh.snapshot.generation == 4);
+    CHECK(refresh.snapshot.generation == 5);
     CHECK(reader.attempts == std::vector<std::int32_t>({1401}));
 }
 
@@ -201,6 +215,10 @@ void TestFailureBackoff() {
         UINT64_C(0x767F196CC4),
         UINT64_C(0x13579BDF),
         UINT64_C(0x2468ACE0),
+        {
+            UINT64_C(0x767F190000),
+            UINT64_C(0xA17C9E210001),
+        },
     };
     auto refresh = provider.Refresh(instruction);
     CHECK(!refresh.HasContext());
@@ -212,6 +230,18 @@ void TestFailureBackoff() {
     CHECK(!refresh.HasContext());
     CHECK(refresh.status == -EPERM);
     CHECK(reader.attempts.empty());
+
+    reader.values[1601] = {
+        0,
+        UINT64_C(0x772984DA80),
+        UINT64_C(0x3579425300000000),
+    };
+    PacgaOracleInstruction rewritten = instruction;
+    rewritten.codeIdentity.fingerprint = UINT64_C(0xA17C9E210002);
+    refresh = provider.Refresh(rewritten);
+    CHECK(refresh.HasContext());
+    CHECK(refresh.snapshot.generation == 1);
+    CHECK(reader.attempts == std::vector<std::int32_t>({1601}));
 }
 
 }  // namespace

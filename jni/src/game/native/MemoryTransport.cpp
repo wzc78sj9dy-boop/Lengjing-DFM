@@ -44,6 +44,31 @@ constexpr std::uint32_t kPacgaX8X8X9 = UINT32_C(0x9AC93108);
 constexpr std::size_t kMaximumOracleMappingSize = 2U * 1024U * 1024U;
 constexpr std::size_t kOracleScanChunkSize = 4096;
 constexpr std::size_t kOracleImmediateWindowInstructions = 16;
+constexpr std::size_t kOracleEntryFingerprintSize = 64;
+constexpr std::size_t kOracleMaximumFingerprintWindowSize =
+    (kOracleImmediateWindowInstructions + 1U) * sizeof(std::uint32_t);
+constexpr int kOracleStableSnapshotAttempts = 3;
+constexpr std::uint64_t kOracleFingerprintOffset =
+    UINT64_C(14695981039346656037);
+constexpr std::uint64_t kOracleFingerprintPrime = UINT64_C(1099511628211);
+
+std::uint64_t HashOracleBytes(const void* data,
+                              std::size_t size,
+                              std::uint64_t hash =
+                                  kOracleFingerprintOffset) noexcept {
+    const auto* bytes = static_cast<const std::uint8_t*>(data);
+    for (std::size_t index = 0; index < size; ++index) {
+        hash ^= bytes[index];
+        hash *= kOracleFingerprintPrime;
+    }
+    return hash;
+}
+
+template <typename Value>
+std::uint64_t HashOracleValue(std::uint64_t hash,
+                              const Value& value) noexcept {
+    return HashOracleBytes(&value, sizeof(value), hash);
+}
 
 bool IsNumericName(const char* name) {
     if (name == nullptr || *name == '\0') return false;
@@ -266,6 +291,52 @@ bool FindExecutableMapping(pid_t processId,
 }  // namespace
 
 struct MemoryTransport::Impl {
+    struct PtraceOracleRootSnapshot {
+        std::uintptr_t bridge = 0;
+        std::uintptr_t entry = 0;
+        std::uintptr_t mappingStart = 0;
+        std::uintptr_t mappingEnd = 0;
+        std::size_t entryWindowSize = 0;
+        std::uint64_t entryFingerprint = 0;
+
+        bool operator==(
+            const PtraceOracleRootSnapshot& other) const noexcept {
+            return bridge == other.bridge && entry == other.entry &&
+                mappingStart == other.mappingStart &&
+                mappingEnd == other.mappingEnd &&
+                entryWindowSize == other.entryWindowSize &&
+                entryFingerprint == other.entryFingerprint;
+        }
+    };
+
+    struct PtraceOracleCacheKey {
+        PtraceOracleRootSnapshot root{};
+        std::uintptr_t oracleWindowStart = 0;
+        std::size_t oracleWindowSize = 0;
+        std::uint64_t oracleWindowFingerprint = 0;
+        bool operandsResolved = false;
+
+        bool IsValid() const noexcept {
+            return root.entry != 0 && root.entryFingerprint != 0 &&
+                oracleWindowStart != 0 && oracleWindowSize != 0 &&
+                oracleWindowFingerprint != 0;
+        }
+
+        std::uint64_t CodeFingerprint() const noexcept {
+            std::uint64_t hash = kOracleFingerprintOffset;
+            hash = HashOracleValue(hash, root.bridge);
+            hash = HashOracleValue(hash, root.entry);
+            hash = HashOracleValue(hash, root.mappingStart);
+            hash = HashOracleValue(hash, root.mappingEnd);
+            hash = HashOracleValue(hash, root.entryWindowSize);
+            hash = HashOracleValue(hash, root.entryFingerprint);
+            hash = HashOracleValue(hash, oracleWindowStart);
+            hash = HashOracleValue(hash, oracleWindowSize);
+            hash = HashOracleValue(hash, oracleWindowFingerprint);
+            return hash != 0 ? hash : UINT64_C(1);
+        }
+    };
+
     MemoryTransportMode mode = MemoryTransportMode::ProcessVm;
     pid_t processId = -1;
     paradise_driver* kernel = nullptr;
@@ -279,6 +350,7 @@ struct MemoryTransport::Impl {
     PtracePacgaOracleReader ptraceContextReader;
     std::unique_ptr<PtraceExecutionContextProvider> ptraceContextProvider;
     PacgaOracleInstruction ptraceOracleInstruction{};
+    PtraceOracleCacheKey ptraceOracleCacheKey{};
     ProcessExecutionContextSource executionContextSource =
         ProcessExecutionContextSource::None;
     ProcessExecutionContextDiagnostic executionContextDiagnostic{};
@@ -306,6 +378,7 @@ struct MemoryTransport::Impl {
         CloseThreadContextUnlocked();
         ptraceContextProvider.reset();
         ptraceOracleInstruction = {};
+        ptraceOracleCacheKey = {};
         executionContextSource = ProcessExecutionContextSource::None;
         executionContextDiagnostic = {};
         lastThreadContextOpenStatus = 0;
@@ -391,17 +464,6 @@ struct MemoryTransport::Impl {
     bool ResolvePtraceOracleInstructionUnlocked(
         PacgaOracleInstruction& instruction) {
         instruction = {};
-        const auto now = std::chrono::steady_clock::now();
-        if (nextPtraceOracleResolve.time_since_epoch().count() != 0 &&
-            now < nextPtraceOracleResolve) {
-            if (ptraceOracleInstruction.IsValid()) {
-                instruction = ptraceOracleInstruction;
-                ptraceOracleFailure = CoordinateDecryptError::None;
-                return true;
-            }
-            return false;
-        }
-        nextPtraceOracleResolve = now + std::chrono::seconds(1);
         ptraceOracleFailure =
             CoordinateDecryptError::PtraceOracleResolveFailed;
         ptraceOracleSystemError = 0;
@@ -416,15 +478,16 @@ struct MemoryTransport::Impl {
                 std::numeric_limits<std::uintptr_t>::max() - moduleBase -
                     coordinateReplayLayout.rootRva) {
             ptraceOracleInstruction = {};
+            ptraceOracleCacheKey = {};
+            nextPtraceOracleResolve = {};
             ptraceOracleFailure = CoordinateDecryptError::RootReadFailed;
             ptraceOracleSystemError = -ERANGE;
             return false;
         }
 
-        const auto readCoordinate = [this](
-                                        std::uintptr_t address,
-                                        void* destination,
-                                        std::size_t size) {
+        const auto readCoordinate = [this](std::uintptr_t address,
+                                           void* destination,
+                                           std::size_t size) {
             CoordinateReadDiagnostic diagnostic{};
             const bool read = ReadCoordinateMemoryUnlocked(
                 address, destination, size, diagnostic);
@@ -432,50 +495,125 @@ struct MemoryTransport::Impl {
             return read;
         };
 
-        std::uint64_t rawBridge = 0;
-        if (!readCoordinate(
-                moduleBase + coordinateReplayLayout.rootRva +
-                    coordinateReplayLayout.bridgeOffset,
-                &rawBridge,
-                sizeof(rawBridge))) {
+        const auto invalidateCache = [this]() {
             ptraceOracleInstruction = {};
-            ptraceOracleFailure = CoordinateDecryptError::RootReadFailed;
-            return false;
-        }
-        const std::uintptr_t bridge = static_cast<std::uintptr_t>(
-            rawBridge & kPointerPayloadMask);
-        if (bridge > std::numeric_limits<std::uintptr_t>::max() -
-                coordinateReplayLayout.entryOffset ||
-            !IsRemoteRangeValid(
-                bridge + coordinateReplayLayout.entryOffset,
-                sizeof(std::uint64_t))) {
-            ptraceOracleInstruction = {};
-            ptraceOracleFailure = CoordinateDecryptError::RootReadFailed;
-            ptraceOracleSystemError = -ERANGE;
-            return false;
-        }
+            ptraceOracleCacheKey = {};
+            nextPtraceOracleResolve = {};
+        };
 
-        std::uint64_t rawEntry = 0;
-        if (!readCoordinate(
-                bridge + coordinateReplayLayout.entryOffset,
-                &rawEntry,
-                sizeof(rawEntry))) {
-            ptraceOracleInstruction = {};
+        const auto readRootPointers = [&](std::uintptr_t& bridge,
+                                          std::uintptr_t& entry) {
+            bridge = 0;
+            entry = 0;
+            std::uint64_t rawBridge = 0;
+            if (!readCoordinate(
+                    moduleBase + coordinateReplayLayout.rootRva +
+                        coordinateReplayLayout.bridgeOffset,
+                    &rawBridge,
+                    sizeof(rawBridge))) {
+                ptraceOracleFailure = CoordinateDecryptError::RootReadFailed;
+                return false;
+            }
+            bridge = static_cast<std::uintptr_t>(
+                rawBridge & kPointerPayloadMask);
+            if (bridge > std::numeric_limits<std::uintptr_t>::max() -
+                    coordinateReplayLayout.entryOffset ||
+                !IsRemoteRangeValid(
+                    bridge + coordinateReplayLayout.entryOffset,
+                    sizeof(std::uint64_t))) {
+                ptraceOracleFailure = CoordinateDecryptError::RootReadFailed;
+                ptraceOracleSystemError = -ERANGE;
+                return false;
+            }
+
+            std::uint64_t rawEntry = 0;
+            if (!readCoordinate(
+                    bridge + coordinateReplayLayout.entryOffset,
+                    &rawEntry,
+                    sizeof(rawEntry))) {
+                ptraceOracleFailure = CoordinateDecryptError::RootReadFailed;
+                return false;
+            }
+            entry = static_cast<std::uintptr_t>(
+                rawEntry & kPointerPayloadMask);
+            if (!IsRemoteRangeValid(entry, sizeof(std::uint32_t))) {
+                ptraceOracleFailure = CoordinateDecryptError::RootReadFailed;
+                ptraceOracleSystemError = -ERANGE;
+                return false;
+            }
+            return true;
+        };
+
+        const auto readFingerprint = [&](std::uintptr_t address,
+                                         std::size_t size,
+                                         std::uint64_t& fingerprint) {
+            fingerprint = 0;
+            if (size == 0 ||
+                size > kOracleMaximumFingerprintWindowSize) {
+                ptraceOracleSystemError = -ERANGE;
+                return false;
+            }
+            std::array<std::uint8_t,
+                       kOracleMaximumFingerprintWindowSize> bytes{};
+            if (!readCoordinate(address, bytes.data(), size)) return false;
+            fingerprint = HashOracleBytes(bytes.data(), size);
+            if (fingerprint == 0) fingerprint = UINT64_C(1);
+            return true;
+        };
+
+        const auto readStableRoot = [&](PtraceOracleRootSnapshot& snapshot) {
+            snapshot = {};
+            for (int attempt = 0;
+                 attempt < kOracleStableSnapshotAttempts;
+                 ++attempt) {
+                std::uintptr_t bridgeBefore = 0;
+                std::uintptr_t entryBefore = 0;
+                if (!readRootPointers(bridgeBefore, entryBefore)) return false;
+
+                std::uintptr_t mappingStart = 0;
+                std::uintptr_t mappingEnd = 0;
+                if (!FindExecutableMapping(
+                        processId,
+                        entryBefore,
+                        mappingStart,
+                        mappingEnd)) {
+                    ptraceOracleFailure =
+                        CoordinateDecryptError::EntryMappingMissing;
+                    ptraceOracleSystemError = -ENOENT;
+                    return false;
+                }
+                const std::size_t entryWindowSize =
+                    std::min<std::size_t>(
+                        kOracleEntryFingerprintSize,
+                        static_cast<std::size_t>(mappingEnd - entryBefore));
+                std::uint64_t entryFingerprint = 0;
+                if (!readFingerprint(
+                        entryBefore,
+                        entryWindowSize,
+                        entryFingerprint)) {
+                    return false;
+                }
+
+                std::uintptr_t bridgeAfter = 0;
+                std::uintptr_t entryAfter = 0;
+                if (!readRootPointers(bridgeAfter, entryAfter)) return false;
+                if (bridgeBefore == bridgeAfter &&
+                    entryBefore == entryAfter) {
+                    snapshot = {
+                        bridgeBefore,
+                        entryBefore,
+                        mappingStart,
+                        mappingEnd,
+                        entryWindowSize,
+                        entryFingerprint,
+                    };
+                    return true;
+                }
+            }
             ptraceOracleFailure = CoordinateDecryptError::RootReadFailed;
+            ptraceOracleSystemError = -EAGAIN;
             return false;
-        }
-        const std::uintptr_t entry = static_cast<std::uintptr_t>(
-            rawEntry & kPointerPayloadMask);
-        std::uintptr_t mappingStart = 0;
-        std::uintptr_t mappingEnd = 0;
-        if (!FindExecutableMapping(
-                processId, entry, mappingStart, mappingEnd)) {
-            ptraceOracleInstruction = {};
-            ptraceOracleFailure =
-                CoordinateDecryptError::EntryMappingMissing;
-            ptraceOracleSystemError = -ENOENT;
-            return false;
-        }
+        };
 
         const auto scan = [&readCoordinate](std::uintptr_t begin,
                                             std::uintptr_t end,
@@ -505,57 +643,162 @@ struct MemoryTransport::Impl {
             return false;
         };
 
-        std::uintptr_t found = 0;
-        const std::uintptr_t preferredEnd = std::min(
-            mappingEnd,
-            entry <= std::numeric_limits<std::uintptr_t>::max() - 0x5000U
-                ? entry + 0x5000U
-                : mappingEnd);
-        if (!scan(entry, preferredEnd, found) &&
-            !scan(mappingStart, mappingEnd, found)) {
-            ptraceOracleInstruction = {};
-            return false;
-        }
-        PacgaOperands operands{
-            coordinateReplayLayout.pacgaData,
-            coordinateReplayLayout.pacgaModifier,
-        };
-        const std::uintptr_t operandWindowStart = std::max(
-            mappingStart,
-            found >= kOracleImmediateWindowInstructions *
-                    sizeof(std::uint32_t)
-                ? found - kOracleImmediateWindowInstructions *
-                    sizeof(std::uint32_t)
-                : mappingStart);
-        const std::size_t operandInstructionCount =
-            static_cast<std::size_t>(
-                (found - operandWindowStart) / sizeof(std::uint32_t)) + 1U;
-        std::array<std::uint32_t,
-                   kOracleImmediateWindowInstructions + 1U>
-            operandInstructions{};
-        const bool operandsRead =
-            operandInstructionCount <= operandInstructions.size() &&
-            readCoordinate(
+        for (int attempt = 0;
+             attempt < kOracleStableSnapshotAttempts;
+             ++attempt) {
+            PtraceOracleRootSnapshot root{};
+            if (!readStableRoot(root)) {
+                invalidateCache();
+                return false;
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (nextPtraceOracleResolve.time_since_epoch().count() != 0 &&
+                now < nextPtraceOracleResolve &&
+                ptraceOracleInstruction.IsValid() &&
+                ptraceOracleCacheKey.IsValid() &&
+                ptraceOracleCacheKey.root == root) {
+                std::uint64_t currentOracleFingerprint = 0;
+                if (!readFingerprint(
+                        ptraceOracleCacheKey.oracleWindowStart,
+                        ptraceOracleCacheKey.oracleWindowSize,
+                        currentOracleFingerprint)) {
+                    invalidateCache();
+                    return false;
+                }
+                PtraceOracleRootSnapshot verifiedRoot{};
+                if (!readStableRoot(verifiedRoot)) {
+                    invalidateCache();
+                    return false;
+                }
+                if (!(verifiedRoot == root)) {
+                    invalidateCache();
+                    ptraceOracleFailure =
+                        CoordinateDecryptError::PtraceOracleResolveFailed;
+                    ptraceOracleSystemError = -EAGAIN;
+                    continue;
+                }
+                if (currentOracleFingerprint ==
+                    ptraceOracleCacheKey.oracleWindowFingerprint) {
+                    instruction = ptraceOracleInstruction;
+                    ptraceOracleOperandsResolved =
+                        ptraceOracleCacheKey.operandsResolved;
+                    ptraceOracleFailure = CoordinateDecryptError::None;
+                    ptraceOracleSystemError = 0;
+                    return true;
+                }
+                invalidateCache();
+            } else if (ptraceOracleInstruction.IsValid() ||
+                       ptraceOracleCacheKey.IsValid()) {
+                invalidateCache();
+            }
+
+            std::uintptr_t found = 0;
+            const std::uintptr_t preferredEnd = std::min(
+                root.mappingEnd,
+                root.entry <=
+                        std::numeric_limits<std::uintptr_t>::max() - 0x5000U
+                    ? root.entry + 0x5000U
+                    : root.mappingEnd);
+            if (!scan(root.entry, preferredEnd, found) &&
+                !scan(root.mappingStart, root.mappingEnd, found)) {
+                invalidateCache();
+                return false;
+            }
+
+            PacgaOperands operands{
+                coordinateReplayLayout.pacgaData,
+                coordinateReplayLayout.pacgaModifier,
+            };
+            const std::uintptr_t operandWindowStart = std::max(
+                root.mappingStart,
+                found >= kOracleImmediateWindowInstructions *
+                        sizeof(std::uint32_t)
+                    ? found - kOracleImmediateWindowInstructions *
+                        sizeof(std::uint32_t)
+                    : root.mappingStart);
+            const std::size_t operandInstructionCount =
+                static_cast<std::size_t>(
+                    (found - operandWindowStart) /
+                    sizeof(std::uint32_t)) +
+                1U;
+            std::array<std::uint32_t,
+                       kOracleImmediateWindowInstructions + 1U>
+                operandInstructions{};
+            if (operandInstructionCount > operandInstructions.size() ||
+                !readCoordinate(
+                    operandWindowStart,
+                    operandInstructions.data(),
+                    operandInstructionCount * sizeof(std::uint32_t))) {
+                invalidateCache();
+                return false;
+            }
+            const std::size_t operandWindowSize =
+                operandInstructionCount * sizeof(std::uint32_t);
+            std::uint64_t operandFingerprint = HashOracleBytes(
+                operandInstructions.data(), operandWindowSize);
+            if (operandFingerprint == 0) operandFingerprint = UINT64_C(1);
+
+            PacgaOperands resolvedOperands{};
+            const bool operandsResolved =
+                ResolvePacgaOperandsFromImmediateBlock(
+                    operandInstructions.data(),
+                    operandInstructionCount,
+                    operandInstructionCount - 1U,
+                    resolvedOperands);
+            if (operandsResolved) operands = resolvedOperands;
+
+            PtraceOracleRootSnapshot verifiedRootBefore{};
+            PtraceOracleRootSnapshot verifiedRootAfter{};
+            std::uint64_t verifiedOperandFingerprint = 0;
+            if (!readStableRoot(verifiedRootBefore) ||
+                !readFingerprint(
+                    operandWindowStart,
+                    operandWindowSize,
+                    verifiedOperandFingerprint) ||
+                !readStableRoot(verifiedRootAfter)) {
+                invalidateCache();
+                return false;
+            }
+            if (!(verifiedRootBefore == root) ||
+                !(verifiedRootAfter == root) ||
+                verifiedOperandFingerprint != operandFingerprint) {
+                invalidateCache();
+                ptraceOracleFailure =
+                    CoordinateDecryptError::PtraceOracleResolveFailed;
+                ptraceOracleSystemError = -EAGAIN;
+                continue;
+            }
+
+            ptraceOracleCacheKey = {
+                verifiedRootAfter,
                 operandWindowStart,
-                operandInstructions.data(),
-                operandInstructionCount * sizeof(std::uint32_t));
-        PacgaOperands resolvedOperands{};
-        const bool operandsResolved = operandsRead &&
-            ResolvePacgaOperandsFromImmediateBlock(
-                operandInstructions.data(),
-                operandInstructionCount,
-                operandInstructionCount - 1U,
-                resolvedOperands);
-        if (operandsResolved) operands = resolvedOperands;
-        ptraceOracleOperandsResolved = operandsResolved;
-        ptraceOracleInstruction = {
-            found,
-            operands.data,
-            operands.modifier,
-        };
-        instruction = ptraceOracleInstruction;
-        ptraceOracleFailure = CoordinateDecryptError::None;
-        return true;
+                operandWindowSize,
+                verifiedOperandFingerprint,
+                operandsResolved,
+            };
+            ptraceOracleInstruction = {
+                found,
+                operands.data,
+                operands.modifier,
+                {
+                    verifiedRootAfter.entry,
+                    ptraceOracleCacheKey.CodeFingerprint(),
+                },
+            };
+            instruction = ptraceOracleInstruction;
+            ptraceOracleOperandsResolved = operandsResolved;
+            ptraceOracleFailure = CoordinateDecryptError::None;
+            ptraceOracleSystemError = 0;
+            nextPtraceOracleResolve = now + std::chrono::seconds(1);
+            return true;
+        }
+
+        invalidateCache();
+        ptraceOracleFailure =
+            CoordinateDecryptError::PtraceOracleResolveFailed;
+        ptraceOracleSystemError = -EAGAIN;
+        return false;
     }
 
     void Close() noexcept {
@@ -960,6 +1203,7 @@ struct MemoryTransport::Impl {
         coordinateReplayLayout = layout;
         ptraceContextProvider.reset();
         ptraceOracleInstruction = {};
+        ptraceOracleCacheKey = {};
         ptraceOracleOperandsResolved = false;
         ptraceOracleFailure =
             CoordinateDecryptError::PtraceOracleResolveFailed;

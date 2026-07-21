@@ -303,15 +303,17 @@ PtraceExecutionContextRefresh PtraceExecutionContextProvider::Refresh(
     const PacgaOracleInstruction& instruction) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (processId_ <= 0 || threadName_.empty() || !instruction.IsValid()) {
+        retryInstruction_ = {};
         return InvalidateLocked(-EINVAL);
     }
 
     const auto now = std::chrono::steady_clock::now();
     if (!current_.IsUsable() &&
         retryAfter_.time_since_epoch().count() != 0 &&
-        now < retryAfter_) {
+        now < retryAfter_ && retryInstruction_ == instruction) {
         return {lastStatus_ != 0 ? lastStatus_ : -EAGAIN, {}};
     }
+    retryInstruction_ = instruction;
     if (current_.IsUsable() && current_.instruction == instruction &&
         refreshAfter_.time_since_epoch().count() != 0 &&
         now < refreshAfter_) {
@@ -427,6 +429,7 @@ PtraceExecutionContextRefresh PtraceExecutionContextProvider::Refresh(
     current_ = candidate;
     refreshAfter_ = now + std::chrono::seconds(1);
     retryAfter_ = {};
+    retryInstruction_ = {};
     lastStatus_ = 0;
     return {0, current_};
 }
@@ -445,6 +448,7 @@ bool PtraceExecutionContextProvider::RejectCurrent() noexcept {
     current_ = {};
     refreshAfter_ = {};
     retryAfter_ = {};
+    retryInstruction_ = {};
     lastStatus_ = 0;
     return true;
 }
@@ -456,6 +460,7 @@ void PtraceExecutionContextProvider::Reset() noexcept {
     generation_ = 0;
     refreshAfter_ = {};
     retryAfter_ = {};
+    retryInstruction_ = {};
     lastStatus_ = 0;
 }
 

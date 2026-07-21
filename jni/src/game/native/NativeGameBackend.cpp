@@ -16,6 +16,7 @@
 #include "game/native/AlgorithmReplayPolicy.h"
 #include "game/native/BoneFrameSource.h"
 #include "game/native/CharacterPositionResolver.h"
+#include "game/native/CoordinateOutputPolicy.h"
 #include "game/native/CoordinatePoolRuntime.h"
 #include "game/native/FrameProjection.h"
 #include "game/native/GeometryRuntime.h"
@@ -102,6 +103,14 @@ CoordinateDecryptError CoordinatePoolError(
             return CoordinateDecryptError::PoolPointerReadFailed;
         case CoordinatePoolRuntimeError::RingSearchFailed:
             return CoordinateDecryptError::RingSearchFailed;
+        case CoordinatePoolRuntimeError::RingPreparationFailed:
+            return CoordinateDecryptError::RingPreparationFailed;
+        case CoordinatePoolRuntimeError::RingExecutionFailed:
+            return CoordinateDecryptError::RingExecutionFailed;
+        case CoordinatePoolRuntimeError::RingRegisterReadFailed:
+            return CoordinateDecryptError::RingRegisterReadFailed;
+        case CoordinatePoolRuntimeError::RingValueInvalid:
+            return CoordinateDecryptError::RingValueInvalid;
         case CoordinatePoolRuntimeError::PositionReadFailed:
             return CoordinateDecryptError::PositionReadFailed;
         case CoordinatePoolRuntimeError::PositionNotFinite:
@@ -1030,6 +1039,8 @@ public:
         algorithmFrameAttemptCount_ = 0;
         algorithmFrameSuccessCount_ = 0;
         algorithmFrameOutputError_ = CoordinateDecryptError::None;
+        algorithmFrameFailure_ = {};
+        algorithmFrameAgedDecodedFailure_ = false;
         RefreshAlgorithmEntry(false);
         const auto algorithmFrameNow = std::chrono::steady_clock::now();
         algorithmReplayAllowedThisFrame_ =
@@ -2117,6 +2128,8 @@ public:
             lockedTrackingIdentity_ = 0;
             lockedTrackingBone_ = -1;
 #endif
+            FinalizeCoordinateExecutionHealth(infrastructureProbeFailed);
+            UpdateCoordinateProbe(probe);
             return true;
         }
 
@@ -2144,13 +2157,7 @@ public:
                 entries.resize(static_cast<std::size_t>(frame.highValueList->maxRows));
             }
         }
-        EvaluateAlgorithmExecutionHealth();
-        if (!infrastructureProbeFailed) {
-            algorithmReplayBackoffPolicy_.ObserveFrame(
-                static_cast<std::size_t>(algorithmFrameAttemptCount_),
-                static_cast<std::size_t>(algorithmFrameSuccessCount_),
-                std::chrono::steady_clock::now());
-        }
+        FinalizeCoordinateExecutionHealth(infrastructureProbeFailed);
         UpdateCoordinateProbe(probe);
         ApplyCoordinateDiagnostic(error, probe);
         const auto boneAuditNow = std::chrono::steady_clock::now();
@@ -2360,6 +2367,13 @@ private:
     struct PositionCacheEntry {
         Vec3 position{};
         std::chrono::steady_clock::time_point updatedAt{};
+        std::uintptr_t world = 0;
+    };
+
+    struct DecodedPositionCacheEntry {
+        Vec3 position{};
+        std::chrono::steady_clock::time_point updatedAt{};
+        native::DecodedPositionCacheIdentity identity{};
     };
 
     struct BoneCacheEntry {
@@ -3627,7 +3641,8 @@ private:
              (ReadValue(component + 0x220, candidate) && IsFinite(candidate) && IsNonzero(candidate)));
         if (valid) {
             if (allowCache) {
-                positionCache_[actor] = PositionCacheEntry{candidate, now};
+                positionCache_[actor] =
+                    PositionCacheEntry{candidate, now, world_};
             }
             position = candidate;
             return true;
@@ -3635,6 +3650,7 @@ private:
         if (allowCache) {
             const auto found = positionCache_.find(actor);
             if (found != positionCache_.end() &&
+                found->second.world == world_ &&
                 now - found->second.updatedAt <= kCacheLifetime) {
                 position = found->second.position;
                 return true;
@@ -3661,14 +3677,30 @@ private:
             mode == native::PositionReadMode::Direct;
         if (native::ShouldRequireAlgorithmPosition(
                 localActor, coordinateDecryptRequested)) {
-            constexpr auto kCacheLifetime = std::chrono::milliseconds(300);
             const auto now = std::chrono::steady_clock::now();
+            const std::uintptr_t coordinateIdentityCandidate =
+                IsValidPointer(decodedRoot)
+                ? decodedRoot
+                : ReadPointer(actor + 0x180);
+            const std::uintptr_t coordinateIdentity =
+                IsValidPointer(coordinateIdentityCandidate)
+                ? coordinateIdentityCandidate
+                : 0;
+            const native::DecodedPositionCacheIdentity currentCacheIdentity{
+                world_,
+                actor,
+                coordinateIdentity,
+            };
             const auto storeDecoded = [&](const Vec3& decoded) {
                 Vec3 adjusted = decoded;
                 adjusted.z = native::ResolveDecodedCharacterZ(adjusted.z);
-                if (antiFlicker) {
+                if (antiFlicker && IsValidPointer(coordinateIdentity)) {
                     decodedPositionCache_[actor] =
-                        PositionCacheEntry{adjusted, now};
+                        DecodedPositionCacheEntry{
+                            adjusted,
+                            now,
+                            currentCacheIdentity,
+                        };
                 }
                 position = adjusted;
                 if (positionSource != nullptr) {
@@ -3679,7 +3711,33 @@ private:
                 if (!antiFlicker) return false;
                 const auto found = decodedPositionCache_.find(actor);
                 if (found == decodedPositionCache_.end()) return false;
-                if (now - found->second.updatedAt > kCacheLifetime) {
+                const native::DecodedPositionCacheIdentityState identityState =
+                    native::ClassifyDecodedPositionCacheIdentity(
+                        found->second.identity,
+                        currentCacheIdentity);
+                if (native::IsDecodedPositionCacheOwnerMatch(
+                        found->second.identity,
+                        currentCacheIdentity) &&
+                    native::ShouldEscalateDecodedPositionFailure(
+                        found->second.updatedAt,
+                        now)) {
+                    algorithmFrameAgedDecodedFailure_ = true;
+                }
+                if (identityState ==
+                    native::DecodedPositionCacheIdentityState::Unknown) {
+                    return false;
+                }
+                if (native::ShouldDiscardDecodedPositionCache(
+                        identityState)) {
+                    decodedPositionCache_.erase(found);
+                    return false;
+                }
+                if (!native::CanRetainDecodedPosition(
+                        antiFlicker,
+                        found->second.identity,
+                        currentCacheIdentity,
+                        found->second.updatedAt,
+                        now)) {
                     decodedPositionCache_.erase(found);
                     return false;
                 }
@@ -3696,13 +3754,10 @@ private:
                 ++algorithmAttemptCount_;
                 ++algorithmFrameAttemptCount_;
                 native::CoordinatePoolPosition candidate{};
-                const std::uintptr_t component =
-                    IsValidPointer(decodedRoot)
-                    ? decodedRoot
-                    : ReadPointer(actor + 0x180);
-                if (coordinatePoolReady_ && memory_ != nullptr &&
-                    IsValidPointer(component) &&
-                    coordinatePoolRuntime_.ReadPosition(
+                const std::uintptr_t component = coordinateIdentity;
+                const bool canReadPosition = coordinatePoolReady_ &&
+                    memory_ != nullptr && IsValidPointer(component);
+                if (canReadPosition && coordinatePoolRuntime_.ReadPosition(
                         component, candidate)) {
                     const Vec3 decoded{
                         candidate.x,
@@ -3712,13 +3767,29 @@ private:
                     if (IsFinite(decoded) && IsNonzero(decoded)) {
                         ++algorithmSuccessCount_;
                         ++algorithmFrameSuccessCount_;
-                        algorithmReplayBackoffPolicy_.MarkSucceeded();
                         storeDecoded(decoded);
                         return true;
                     }
                     algorithmFrameOutputError_ = IsFinite(decoded)
                         ? CoordinateDecryptError::OutputZero
                         : CoordinateDecryptError::OutputNotFinite;
+                } else if (canReadPosition) {
+                    const native::CoordinatePoolRuntimeProbe failedProbe =
+                        coordinatePoolRuntime_.Probe();
+                    const CoordinateDecryptError failureError =
+                        CoordinatePoolError(
+                            failedProbe.error, failedProbe.read);
+                    RecordCoordinateFrameFailure(CoordinateFailure{
+                        failureError != CoordinateDecryptError::None
+                            ? failureError
+                            : CoordinateDecryptError::PositionReadFailed,
+                        failedProbe.systemError,
+                        failedProbe.read,
+                    });
+                } else {
+                    RecordCoordinateFrameFailure(CoordinateFailure{
+                        CoordinateDecryptError::PositionReadFailed,
+                    });
                 }
                 return readCached();
             }
@@ -3739,7 +3810,7 @@ private:
                         });
                 ++algorithmAttemptCount_;
                 ++algorithmFrameAttemptCount_;
-                if (memory_ != nullptr &&
+                const bool executed = memory_ != nullptr &&
                     algorithmPositionRuntime_.ExecuteAtGuestPc(
                         *memory_,
                         algorithmGuestPc_,
@@ -3750,7 +3821,8 @@ private:
                             algorithmExecutionContext_.pacgaHigh,
                         },
                         candidate,
-                        refreshCachedPages)) {
+                        refreshCachedPages);
+                if (executed) {
                     const Vec3 decoded{
                         candidate.x,
                         candidate.y,
@@ -3759,13 +3831,16 @@ private:
                     if (IsFinite(decoded) && IsNonzero(decoded)) {
                         ++algorithmSuccessCount_;
                         ++algorithmFrameSuccessCount_;
-                        algorithmReplayBackoffPolicy_.MarkSucceeded();
                         storeDecoded(decoded);
                         return true;
                     }
                     algorithmFrameOutputError_ = IsFinite(decoded)
                         ? CoordinateDecryptError::OutputZero
                         : CoordinateDecryptError::OutputNotFinite;
+                } else {
+                    RecordCoordinateFrameFailure(CoordinateFailure{
+                        CoordinateDecryptError::ReplayExecutionFailed,
+                    });
                 }
             }
             return readCached();
@@ -3817,6 +3892,22 @@ private:
         position = Vec3{};
         if (positionSource != nullptr) {
             *positionSource = native::CharacterPositionSource::None;
+        }
+        if (native::ShouldKeepDecodedPositionSource(
+                algorithmPositionRequested_,
+                preferredMode == native::PositionReadMode::Direct)) {
+            const std::uintptr_t decodedRoot = record.resolverRecord
+                ? record.root
+                : record.ordinaryRoot;
+            return ReadCharacterPosition(
+                record.actor,
+                decodedRoot,
+                className,
+                native::PositionReadMode::Direct,
+                antiFlicker,
+                position,
+                false,
+                positionSource);
         }
         return native::ReadActorRecordSourceWithFallback(
             record,
@@ -6041,17 +6132,17 @@ private:
 
     void PrunePositionCache(std::chrono::steady_clock::time_point now) {
         constexpr auto kRetention = std::chrono::milliseconds(300);
-        const auto prune = [now, kRetention](auto& cache) {
+        const auto prune = [now](auto& cache, auto retention) {
             for (auto iterator = cache.begin(); iterator != cache.end();) {
-                if (now - iterator->second.updatedAt > kRetention) {
+                if (now - iterator->second.updatedAt > retention) {
                     iterator = cache.erase(iterator);
                 } else {
                     ++iterator;
                 }
             }
         };
-        prune(positionCache_);
-        prune(decodedPositionCache_);
+        prune(positionCache_, kRetention);
+        prune(decodedPositionCache_, native::kDecodedPositionRetention);
     }
 
     void ResetWorldState() {
@@ -6233,6 +6324,25 @@ private:
         }
     }
 
+    void RecordCoordinateFrameFailure(const CoordinateFailure& failure) {
+        if (failure.error == CoordinateDecryptError::None) return;
+        if (algorithmFrameFailure_.error == CoordinateDecryptError::None ||
+            failure.read.HasFailure() ||
+            !algorithmFrameFailure_.read.HasFailure()) {
+            algorithmFrameFailure_ = failure;
+        }
+    }
+
+    void FinalizeCoordinateExecutionHealth(
+        bool infrastructureProbeFailed) {
+        EvaluateAlgorithmExecutionHealth();
+        if (infrastructureProbeFailed) return;
+        algorithmReplayBackoffPolicy_.ObserveFrame(
+            static_cast<std::size_t>(algorithmFrameAttemptCount_),
+            static_cast<std::size_t>(algorithmFrameSuccessCount_),
+            std::chrono::steady_clock::now());
+    }
+
     void EvaluateAlgorithmExecutionHealth() {
         if (!algorithmPositionRequested_ || !CoordinateEntryReady() ||
             !algorithmExecutionContextReady_ ||
@@ -6243,7 +6353,10 @@ private:
             }
             return;
         }
-        if (algorithmFrameSuccessCount_ != 0) {
+        if (native::IsCoordinateFrameHealthy(
+                static_cast<std::size_t>(algorithmFrameAttemptCount_),
+                static_cast<std::size_t>(algorithmFrameSuccessCount_),
+                algorithmFrameAgedDecodedFailure_)) {
             algorithmFailureSince_ = {};
             return;
         }
@@ -6253,7 +6366,10 @@ private:
             algorithmFailureSince_ = now;
             return;
         }
-        if (now - algorithmFailureSince_ < std::chrono::seconds(2) ||
+        if (!native::HasCoordinateFailureRecoveryElapsed(
+                algorithmFailureSince_,
+                now,
+                algorithmFrameAgedDecodedFailure_) ||
             memory_ == nullptr) {
             return;
         }
@@ -6323,9 +6439,17 @@ private:
                 contextDiagnostic.systemError,
             };
         }
-        if (algorithmFrameSuccessCount_ != 0) return {};
+        if (native::IsCoordinateFrameHealthy(
+                static_cast<std::size_t>(algorithmFrameAttemptCount_),
+                static_cast<std::size_t>(algorithmFrameSuccessCount_),
+                algorithmFrameAgedDecodedFailure_)) {
+            return {};
+        }
         if (algorithmFrameOutputError_ != CoordinateDecryptError::None) {
             return {algorithmFrameOutputError_, 0};
+        }
+        if (algorithmFrameFailure_.error != CoordinateDecryptError::None) {
+            return algorithmFrameFailure_;
         }
 
         const bool unresolvedPtraceOperands =
@@ -6337,6 +6461,13 @@ private:
                 (poolError ==
                      CoordinateDecryptError::ParameterExecutionFailed ||
                  poolError == CoordinateDecryptError::RingSearchFailed ||
+                 poolError ==
+                     CoordinateDecryptError::RingPreparationFailed ||
+                 poolError ==
+                     CoordinateDecryptError::RingExecutionFailed ||
+                 poolError ==
+                     CoordinateDecryptError::RingRegisterReadFailed ||
+                 poolError == CoordinateDecryptError::RingValueInvalid ||
                  poolError == CoordinateDecryptError::PositionReadFailed)) {
                 return {
                     CoordinateDecryptError::PtracePacgaOperandsUnavailable,
@@ -6366,7 +6497,8 @@ private:
         diagnostic = FormatCoordinateDecryptDiagnostic(
             probe.coordinateError,
             probe.coordinateSystemError,
-            probe.coordinateRead);
+            probe.coordinateRead,
+            probe.coordinatePoolPointer);
     }
 
     void UpdateCoordinateProbe(RuntimeProbe& probe) const {
@@ -6394,6 +6526,7 @@ private:
         probe.coordinateError = failure.error;
         probe.coordinateSystemError = failure.systemError;
         probe.coordinateRead = failure.read;
+        probe.coordinatePoolPointer = poolProbe.poolPointer;
     }
 
     bool CloseLocked() noexcept {
@@ -6432,6 +6565,8 @@ private:
         algorithmFrameAttemptCount_ = 0;
         algorithmFrameSuccessCount_ = 0;
         algorithmFrameOutputError_ = CoordinateDecryptError::None;
+        algorithmFrameFailure_ = {};
+        algorithmFrameAgedDecodedFailure_ = false;
         algorithmPositionRequested_ = false;
         algorithmPositionConfig_ = {};
         coordinatePoolFallback_ = false;
@@ -6475,6 +6610,8 @@ private:
     std::uint64_t algorithmFrameSuccessCount_ = 0;
     CoordinateDecryptError algorithmFrameOutputError_ =
         CoordinateDecryptError::None;
+    CoordinateFailure algorithmFrameFailure_{};
+    bool algorithmFrameAgedDecodedFailure_ = false;
     std::uint64_t coordinatePoolFrame_ = 0;
     std::chrono::steady_clock::time_point algorithmEntryValidationAt_{};
     std::chrono::steady_clock::time_point algorithmFailureSince_{};
@@ -6495,7 +6632,7 @@ private:
     native::ActorRecordRefreshPolicy actorRecordRefreshPolicy_{
         std::chrono::milliseconds(100)};
     std::unordered_map<std::uintptr_t, PositionCacheEntry> positionCache_;
-    std::unordered_map<std::uintptr_t, PositionCacheEntry>
+    std::unordered_map<std::uintptr_t, DecodedPositionCacheEntry>
         decodedPositionCache_;
     std::unordered_map<std::uintptr_t, BoneCacheEntry> boneCache_;
     std::chrono::steady_clock::time_point lastBoneAuditLogAt_{};

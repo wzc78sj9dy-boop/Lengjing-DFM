@@ -591,21 +591,27 @@ void AppController::SyncRuntimeStatus() {
         (status.coordinateError != lastReportedCoordinateError_ ||
          status.coordinateSystemError !=
              lastReportedCoordinateSystemError_ ||
-         status.coordinateRead != lastReportedCoordinateRead_);
+         status.coordinateRead != lastReportedCoordinateRead_ ||
+         status.coordinatePoolPointer !=
+             lastReportedCoordinatePoolPointer_);
     if (coordinateDiagnosticChanged) {
         AppendLog(game::FormatCoordinateDecryptDiagnostic(
             status.coordinateError,
             status.coordinateSystemError,
-            status.coordinateRead));
+            status.coordinateRead,
+            status.coordinatePoolPointer));
         lastReportedCoordinateError_ = status.coordinateError;
         lastReportedCoordinateSystemError_ =
             status.coordinateSystemError;
         lastReportedCoordinateRead_ = status.coordinateRead;
+        lastReportedCoordinatePoolPointer_ =
+            status.coordinatePoolPointer;
     } else if (status.coordinateError ==
                game::CoordinateDecryptError::None) {
         lastReportedCoordinateError_ = game::CoordinateDecryptError::None;
         lastReportedCoordinateSystemError_ = 0;
         lastReportedCoordinateRead_ = {};
+        lastReportedCoordinatePoolPointer_ = {};
     }
 
     const game::RuntimeError reportedRuntimeError =

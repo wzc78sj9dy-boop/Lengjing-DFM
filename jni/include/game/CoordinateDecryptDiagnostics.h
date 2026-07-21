@@ -40,13 +40,21 @@ enum class CoordinateDecryptError : std::uint16_t {
     PtracePacgaOperandsUnavailable = 2012,
 
     EngineSetupFailed = 5001,
+    PoolPointerStateInvalid = 5002,
     ParameterExecutionFailed = 5003,
     ParameterReadFailed = 5004,
     PoolPointerReadFailed = 5005,
     RingSearchFailed = 5006,
     PacgaUnavailable = 5007,
+    PoolPointerOffsetMissing = 5008,
+    PoolPointerAddressInvalid = 5009,
+    PoolPointerValueInvalid = 5010,
     ReplayExecutionFailed = 5011,
     PositionReadFailed = 5012,
+    RingPreparationFailed = 5013,
+    RingExecutionFailed = 5014,
+    RingRegisterReadFailed = 5015,
+    RingValueInvalid = 5016,
 
     OutputNotFinite = 6002,
     OutputZero = 6003,
@@ -127,6 +135,22 @@ struct CoordinateReadDiagnostic {
     }
 };
 
+struct CoordinatePoolPointerDiagnostic {
+    CoordinateDecryptError error = CoordinateDecryptError::None;
+    std::uint32_t stateFlags = 0;
+    std::int32_t offset = 0;
+    std::uintptr_t computedContext = 0;
+    std::uintptr_t address = 0;
+    std::uint64_t rawValue = 0;
+    std::uint64_t normalizedValue = 0;
+    int systemError = 0;
+    CoordinateReadDiagnostic read{};
+
+    constexpr bool HasFailure() const noexcept {
+        return error != CoordinateDecryptError::None;
+    }
+};
+
 constexpr bool operator==(const CoordinateReadDiagnostic& left,
                           const CoordinateReadDiagnostic& right) noexcept {
     return left.stage == right.stage &&
@@ -144,6 +168,23 @@ constexpr bool operator==(const CoordinateReadDiagnostic& left,
 
 constexpr bool operator!=(const CoordinateReadDiagnostic& left,
                           const CoordinateReadDiagnostic& right) noexcept {
+    return !(left == right);
+}
+
+constexpr bool operator==(
+    const CoordinatePoolPointerDiagnostic& left,
+    const CoordinatePoolPointerDiagnostic& right) noexcept {
+    return left.error == right.error &&
+        left.stateFlags == right.stateFlags && left.offset == right.offset &&
+        left.computedContext == right.computedContext &&
+        left.address == right.address && left.rawValue == right.rawValue &&
+        left.normalizedValue == right.normalizedValue &&
+        left.systemError == right.systemError && left.read == right.read;
+}
+
+constexpr bool operator!=(
+    const CoordinatePoolPointerDiagnostic& left,
+    const CoordinatePoolPointerDiagnostic& right) noexcept {
     return !(left == right);
 }
 
@@ -257,6 +298,65 @@ inline std::string FormatCoordinateDecryptDiagnostic(
         static_cast<unsigned int>(CoordinateDecryptErrorCode(error)),
         systemError);
     return message.data();
+}
+
+inline std::string FormatCoordinateDecryptDiagnostic(
+    CoordinateDecryptError error,
+    int systemError,
+    const CoordinateReadDiagnostic& read);
+
+inline std::string FormatCoordinateDecryptDiagnostic(
+    CoordinateDecryptError error,
+    int systemError,
+    const CoordinateReadDiagnostic& read,
+    const CoordinatePoolPointerDiagnostic& poolPointer) {
+    std::string message =
+        FormatCoordinateDecryptDiagnostic(error, systemError, read);
+    if (!poolPointer.HasFailure()) return message;
+
+    std::array<char, 512> suffix{};
+    if (poolPointer.read.HasFailure()) {
+        std::snprintf(
+            suffix.data(),
+            suffix.size(),
+            " POOL=CD-%04u P_SYS=%d P_STATE=0x%X P_OFF=%d "
+            "P_CTX=0x%llX P_AT=0x%llX P_RAW=0x%llX P_VALUE=0x%llX "
+            "P_READ=%s P_PRI=%s P_PSYS=%d P_LAST=%s P_LSYS=%d "
+            "P_TRY=0x%X P_CALLS=%u",
+            static_cast<unsigned int>(
+                CoordinateDecryptErrorCode(poolPointer.error)),
+            poolPointer.systemError,
+            static_cast<unsigned int>(poolPointer.stateFlags),
+            poolPointer.offset,
+            static_cast<unsigned long long>(poolPointer.computedContext),
+            static_cast<unsigned long long>(poolPointer.address),
+            static_cast<unsigned long long>(poolPointer.rawValue),
+            static_cast<unsigned long long>(poolPointer.normalizedValue),
+            CoordinateReadFailureName(poolPointer.read.failure),
+            CoordinateReadPathName(poolPointer.read.primaryPath),
+            poolPointer.read.primarySystemError,
+            CoordinateReadPathName(poolPointer.read.lastPath),
+            poolPointer.read.lastSystemError,
+            static_cast<unsigned int>(poolPointer.read.attemptedPaths),
+            static_cast<unsigned int>(poolPointer.read.attemptCount));
+    } else {
+        std::snprintf(
+            suffix.data(),
+            suffix.size(),
+            " POOL=CD-%04u P_SYS=%d P_STATE=0x%X P_OFF=%d "
+            "P_CTX=0x%llX P_AT=0x%llX P_RAW=0x%llX P_VALUE=0x%llX",
+            static_cast<unsigned int>(
+                CoordinateDecryptErrorCode(poolPointer.error)),
+            poolPointer.systemError,
+            static_cast<unsigned int>(poolPointer.stateFlags),
+            poolPointer.offset,
+            static_cast<unsigned long long>(poolPointer.computedContext),
+            static_cast<unsigned long long>(poolPointer.address),
+            static_cast<unsigned long long>(poolPointer.rawValue),
+            static_cast<unsigned long long>(poolPointer.normalizedValue));
+    }
+    message.append(suffix.data());
+    return message;
 }
 
 inline std::string FormatCoordinateDecryptDiagnostic(

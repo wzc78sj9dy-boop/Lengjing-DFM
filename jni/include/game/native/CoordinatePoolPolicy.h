@@ -7,6 +7,101 @@ namespace lengjing::game::native {
 
 inline constexpr std::size_t kCoordinatePoolRingSearchesPerFrame = 4;
 inline constexpr std::uint64_t kCoordinatePoolRingRetryFrames = 8;
+inline constexpr std::uint64_t kCoordinatePoolCodeValidationFrames = 60;
+inline constexpr std::uint64_t kCoordinatePoolCodeValidationRetryFrames = 8;
+inline constexpr std::uint64_t kCoordinatePoolPointerPayloadMask =
+    UINT64_C(0x0000FFFFFFFFFFFF);
+
+struct CoordinatePoolRootSnapshot {
+    std::uint64_t bridge = 0;
+    std::uint64_t context = 0;
+    std::uint64_t entry = 0;
+};
+
+constexpr bool CoordinatePoolRootSnapshotsMatch(
+    const CoordinatePoolRootSnapshot& left,
+    const CoordinatePoolRootSnapshot& right) noexcept {
+    return left.bridge == right.bridge && left.context == right.context &&
+        left.entry == right.entry;
+}
+
+constexpr bool CoordinatePoolCodeIdentityChanged(
+    const CoordinatePoolRootSnapshot& previous,
+    const CoordinatePoolRootSnapshot& current) noexcept {
+    return previous.entry != current.entry;
+}
+
+constexpr bool CoordinatePoolContextIdentityChanged(
+    const CoordinatePoolRootSnapshot& previous,
+    const CoordinatePoolRootSnapshot& current) noexcept {
+    return previous.bridge != current.bridge ||
+        previous.context != current.context;
+}
+
+class CoordinatePoolRootStabilityWindow final {
+public:
+    bool Observe(const CoordinatePoolRootSnapshot& snapshot) noexcept {
+        const bool stable = ready_ &&
+            CoordinatePoolRootSnapshotsMatch(previous_, snapshot);
+        previous_ = snapshot;
+        ready_ = true;
+        return stable;
+    }
+
+    void Reset() noexcept {
+        previous_ = {};
+        ready_ = false;
+    }
+
+private:
+    CoordinatePoolRootSnapshot previous_{};
+    bool ready_ = false;
+};
+
+constexpr std::uint64_t NormalizeCoordinatePoolPointer(
+    std::uint64_t value) noexcept {
+    return value & kCoordinatePoolPointerPayloadMask;
+}
+
+inline std::uint64_t CoordinatePoolCodeFingerprint(
+    const std::uint8_t* bytes,
+    std::size_t size) noexcept {
+    constexpr std::uint64_t kOffsetBasis = UINT64_C(14695981039346656037);
+    constexpr std::uint64_t kPrime = UINT64_C(1099511628211);
+    std::uint64_t fingerprint = kOffsetBasis;
+    if (bytes == nullptr) return size == 0 ? fingerprint : 0;
+    for (std::size_t index = 0; index < size; ++index) {
+        fingerprint ^= bytes[index];
+        fingerprint *= kPrime;
+    }
+    return fingerprint;
+}
+
+constexpr bool ShouldValidateCoordinatePoolCode(
+    std::uint64_t frame,
+    std::uint64_t nextValidationFrame,
+    bool requested) noexcept {
+    return requested || (frame < nextValidationFrame &&
+        nextValidationFrame - frame > kCoordinatePoolCodeValidationFrames) ||
+        frame >= nextValidationFrame;
+}
+
+constexpr std::uint64_t NextCoordinatePoolCodeValidationFrame(
+    std::uint64_t frame,
+    bool validationSucceeded) noexcept {
+    const std::uint64_t interval = validationSucceeded
+        ? kCoordinatePoolCodeValidationFrames
+        : kCoordinatePoolCodeValidationRetryFrames;
+    return frame > UINT64_MAX - interval ? UINT64_MAX : frame + interval;
+}
+
+constexpr bool ShouldClearCoordinatePoolRingsAfterPointerRefresh(
+    bool refreshSucceeded,
+    std::uint64_t previousPointer,
+    std::uint64_t refreshedPointer) noexcept {
+    return refreshSucceeded && previousPointer != 0 &&
+        previousPointer != refreshedPointer;
+}
 
 constexpr std::uint64_t CoordinatePoolRingRefreshPhase(
     std::uintptr_t component,

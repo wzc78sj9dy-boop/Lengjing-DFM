@@ -11,19 +11,36 @@
 
 namespace lengjing::game::native {
 
+struct PacgaOracleCodeIdentity {
+    std::uintptr_t entry = 0;
+    std::uint64_t fingerprint = 0;
+
+    constexpr bool IsValid() const noexcept {
+        return entry != 0 && (entry & 3U) == 0 && fingerprint != 0;
+    }
+
+    constexpr bool operator==(
+        const PacgaOracleCodeIdentity& other) const noexcept {
+        return entry == other.entry && fingerprint == other.fingerprint;
+    }
+};
+
 struct PacgaOracleInstruction {
     std::uintptr_t address = 0;
     std::uint64_t data = 0;
     std::uint64_t modifier = 0;
+    PacgaOracleCodeIdentity codeIdentity{};
 
     constexpr bool IsValid() const noexcept {
-        return address != 0 && (address & 3U) == 0;
+        return address != 0 && (address & 3U) == 0 &&
+            codeIdentity.IsValid();
     }
 
     constexpr bool operator==(
         const PacgaOracleInstruction& other) const noexcept {
         return address == other.address && data == other.data &&
-            modifier == other.modifier;
+            modifier == other.modifier &&
+            codeIdentity == other.codeIdentity;
     }
 };
 
@@ -106,6 +123,7 @@ private:
     std::uint64_t generation_ = 0;
     std::chrono::steady_clock::time_point refreshAfter_{};
     std::chrono::steady_clock::time_point retryAfter_{};
+    PacgaOracleInstruction retryInstruction_{};
     int lastStatus_ = 0;
 };
 

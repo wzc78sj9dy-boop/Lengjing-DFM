@@ -94,6 +94,8 @@ private:
         game::CoordinateDecryptError::None;
     int lastReportedCoordinateSystemError_ = 0;
     game::CoordinateReadDiagnostic lastReportedCoordinateRead_{};
+    game::CoordinatePoolPointerDiagnostic
+        lastReportedCoordinatePoolPointer_{};
     game::RuntimeError lastReportedRuntimeError_ =
         game::RuntimeError::None;
     int lastReportedRuntimeSystemError_ = 0;

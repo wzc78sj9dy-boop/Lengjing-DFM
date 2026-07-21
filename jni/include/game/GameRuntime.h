@@ -37,6 +37,7 @@ struct RuntimeStatus {
     CoordinateDecryptError coordinateError = CoordinateDecryptError::None;
     int coordinateSystemError = 0;
     CoordinateReadDiagnostic coordinateRead{};
+    CoordinatePoolPointerDiagnostic coordinatePoolPointer{};
     RuntimeError runtimeError = RuntimeError::None;
     int runtimeSystemError = 0;
     RuntimeFailureKind failureKind = RuntimeFailureKind::None;

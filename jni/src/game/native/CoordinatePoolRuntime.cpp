@@ -30,8 +30,6 @@ namespace pool = coordinate_pool_internal;
 
 constexpr std::uint64_t kPageSize = 4096;
 constexpr std::uint64_t kPageMask = ~(kPageSize - 1);
-constexpr std::uint64_t kPointerPayloadMask =
-    UINT64_C(0x0000FFFFFFFFFFFF);
 constexpr std::uint64_t kMinimumRemoteAddress = UINT64_C(0x10000000);
 constexpr std::uint64_t kMaximumRemoteAddress = UINT64_C(0x10000000000);
 constexpr std::uint64_t kStackTop = UINT64_C(0x7FF00000);
@@ -44,6 +42,7 @@ constexpr std::size_t kEntryAnalysisInstructionLimit = 5000;
 constexpr std::size_t kDecodeAnalysisInstructionLimit = 500;
 constexpr std::uint32_t kArm64Nop = UINT32_C(0xD503201F);
 constexpr std::size_t kMaximumCachedPages = 4096;
+constexpr std::size_t kRootSnapshotReadLimit = 3;
 constexpr std::size_t kV87InstructionBudget = 2000000;
 constexpr std::size_t kParameterInstructionBudget = 10000000;
 constexpr std::size_t kSearchInstructionBudget = 100000;
@@ -54,9 +53,13 @@ constexpr std::uint32_t kPacgaMask = 0xFFE0FC00U;
 constexpr std::uint32_t kPacgaOpcode = 0x9AC03000U;
 constexpr std::uint32_t kSvcMask = 0xFFE0001FU;
 constexpr std::uint32_t kSvcOpcode = 0xD4000001U;
+constexpr std::uint32_t kPoolPointerFinderReady = 1U << 0U;
+constexpr std::uint32_t kPoolPointerParametersReady = 1U << 1U;
+constexpr std::uint32_t kPoolPointerContextReady = 1U << 2U;
+constexpr std::uint32_t kPoolPointerOffsetReady = 1U << 3U;
 
 std::uint64_t NormalizePointer(std::uint64_t value) noexcept {
-    return value & kPointerPayloadMask;
+    return NormalizeCoordinatePoolPointer(value);
 }
 
 bool IsRemoteAddress(std::uint64_t value) noexcept {
@@ -257,6 +260,18 @@ struct CoordinatePoolRuntime::Impl {
         std::vector<uc_hook> instructionHooks;
     };
 
+    struct CodeRangeFingerprint {
+        std::uint64_t remoteAddress = 0;
+        std::size_t size = 0;
+        std::uint64_t fingerprint = 0;
+    };
+
+    enum class CodeValidationResult : std::uint8_t {
+        Unchanged,
+        Changed,
+        Unavailable,
+    };
+
     struct RingSlot {
         std::uint64_t ring = 0;
         std::uint64_t stamp = 0;
@@ -303,45 +318,78 @@ struct CoordinatePoolRuntime::Impl {
             moduleBase = targetModuleBase;
         }
 
-        if (analysisInvalidated) {
-            ResetAnalysisUnlocked();
-        }
-
-        const bool shouldResolveRoot = finder == nullptr ||
-            targetFrame < lastRootFrame ||
-            targetFrame - lastRootFrame >= layout.ringRefreshFrames;
-        if (shouldResolveRoot) {
-            std::uint64_t nextBridge = 0;
-            std::uint64_t nextContext = 0;
-            std::uint64_t nextEntry = 0;
-            if (!ResolveRootUnlocked(
-                    nextBridge, nextContext, nextEntry)) {
+        CoordinatePoolRootSnapshot nextRoot{};
+        int rootStatus = 0;
+        if (!ResolveRootUnlocked(nextRoot, rootStatus)) {
+            if (rootStatus != 0 && !probe.read.HasFailure()) {
+                SetError(
+                    CoordinatePoolRuntimeError::RootReadFailed,
+                    true,
+                    rootStatus);
+            } else {
                 SetError(CoordinatePoolRuntimeError::RootReadFailed);
-                return false;
             }
-            lastRootFrame = targetFrame;
-            const bool rootChanged = bridge != nextBridge ||
-                decryptContext != nextContext || guestEntry != nextEntry;
-            if (rootChanged && finder != nullptr) {
-                ResetAnalysisUnlocked();
-            }
-            bridge = nextBridge;
-            decryptContext = nextContext;
-            guestEntry = nextEntry;
-            probe.bridge = bridge;
-            probe.context = decryptContext;
-            probe.guestEntry = guestEntry;
-            probe.stage = CoordinatePoolRuntimeStage::RootResolved;
+            return false;
         }
 
-        if (finder == nullptr && !AnalyzeCodeUnlocked()) return false;
+        const CoordinatePoolRootSnapshot previousRoot{
+            bridge,
+            decryptContext,
+            guestEntry,
+        };
+        const bool codeIdentityChanged = finder != nullptr &&
+            CoordinatePoolCodeIdentityChanged(previousRoot, nextRoot);
+        const bool runtimeContextChanged = finder != nullptr &&
+            CoordinatePoolContextIdentityChanged(previousRoot, nextRoot);
+        bool resetAnalysis = analysisInvalidated || codeIdentityChanged;
+        if (!resetAnalysis && finder != nullptr &&
+            ShouldValidateCoordinatePoolCode(
+                targetFrame,
+                nextCodeValidationFrame,
+                codeValidationRequested)) {
+            const CodeValidationResult validation =
+                ValidateCodeFingerprintsUnlocked();
+            codeValidationRequested = false;
+            if (validation == CodeValidationResult::Changed) {
+                analysisInvalidated = true;
+                resetAnalysis = true;
+            } else {
+                nextCodeValidationFrame =
+                    NextCoordinatePoolCodeValidationFrame(
+                        targetFrame,
+                        validation == CodeValidationResult::Unchanged);
+                if (validation == CodeValidationResult::Unavailable) {
+                    ClearReadDiagnosticUnlocked();
+                }
+            }
+        }
+        if (resetAnalysis) ResetAnalysisUnlocked();
+        if (!resetAnalysis && runtimeContextChanged &&
+            !InvalidateRuntimeContextUnlocked()) {
+            SetError(CoordinatePoolRuntimeError::EngineSetupFailed);
+            return false;
+        }
+
+        bridge = nextRoot.bridge;
+        decryptContext = nextRoot.context;
+        guestEntry = nextRoot.entry;
+        probe.bridge = bridge;
+        probe.context = decryptContext;
+        probe.guestEntry = guestEntry;
+        probe.stage = CoordinatePoolRuntimeStage::RootResolved;
+
+        if (finder == nullptr) {
+            if (!AnalyzeCodeUnlocked()) return false;
+            nextCodeValidationFrame = NextCoordinatePoolCodeValidationFrame(
+                targetFrame, true);
+            codeValidationRequested = false;
+        }
 
         probe.threadId = targetExecutionContext.threadId;
         probe.contextGeneration = targetExecutionContext.generation;
         if (!targetExecutionContext.IsUsable()) {
             executionContext = {};
-            parametersReady = false;
-            ringSlots.clear();
+            static_cast<void>(InvalidateRuntimeContextUnlocked());
             probe.stage = CoordinatePoolRuntimeStage::CodeAnalyzed;
             SetError(CoordinatePoolRuntimeError::ContextMissing, false);
             return false;
@@ -365,14 +413,7 @@ struct CoordinatePoolRuntime::Impl {
                 targetExecutionContext.pacgaOracle.result;
         if (contextChanged) {
             executionContext = targetExecutionContext;
-            parametersReady = false;
-            computedContext = 0;
-            lastPoolPointer = 0;
-            poolPointerRefreshFrame =
-                std::numeric_limits<std::uint64_t>::max();
-            ringSlots.clear();
-            ringSearchBudget.Reset();
-            if (!ClearDynamicPagesUnlocked()) {
+            if (!InvalidateRuntimeContextUnlocked()) {
                 SetError(CoordinatePoolRuntimeError::EngineSetupFailed);
                 return false;
             }
@@ -407,6 +448,8 @@ struct CoordinatePoolRuntime::Impl {
             SetError(CoordinatePoolRuntimeError::InvalidInput);
             return false;
         }
+        const bool validationWasRequested = codeValidationRequested;
+        codeValidationRequested = true;
         if (!parametersReady && !PrepareParametersUnlocked(component)) {
             return false;
         }
@@ -428,7 +471,9 @@ struct CoordinatePoolRuntime::Impl {
         if ((retryMissing || refreshStale) &&
             ringSearchBudget.TryConsume(frame)) {
             std::uint64_t ring = 0;
-            if (ExecuteRingSearchUnlocked(component, ring)) {
+            CoordinatePoolRuntimeError ringError =
+                CoordinatePoolRuntimeError::RingSearchFailed;
+            if (ExecuteRingSearchUnlocked(component, ring, ringError)) {
                 RingSlot& slot = ringSlots[component];
                 slot.ring = ring;
                 slot.stamp = frame;
@@ -439,7 +484,7 @@ struct CoordinatePoolRuntime::Impl {
                 RingSlot& slot = ringSlots[component];
                 slot.ring = 0;
                 slot.stamp = frame;
-                SetError(CoordinatePoolRuntimeError::RingSearchFailed);
+                SetError(ringError);
                 return false;
             }
         } else if (hasRing) {
@@ -516,6 +561,7 @@ struct CoordinatePoolRuntime::Impl {
 
         position = candidate;
         ++probe.successes;
+        codeValidationRequested = validationWasRequested;
         ClearReadDiagnosticUnlocked();
         probe.error = CoordinatePoolRuntimeError::None;
         probe.stage = CoordinatePoolRuntimeStage::Active;
@@ -595,12 +641,8 @@ private:
         return 1;
     }
 
-    bool ResolveRootUnlocked(std::uint64_t& nextBridge,
-                             std::uint64_t& nextContext,
-                             std::uint64_t& nextEntry) {
-        nextBridge = 0;
-        nextContext = 0;
-        nextEntry = 0;
+    bool ReadRootSnapshotUnlocked(CoordinatePoolRootSnapshot& snapshot) {
+        snapshot = {};
         if (memory == nullptr ||
             layout.rootRva >
                 std::numeric_limits<std::uintptr_t>::max() - moduleBase ||
@@ -617,7 +659,7 @@ private:
                 CoordinateReadStage::Root)) {
             return false;
         }
-        nextBridge = NormalizePointer(rawBridge);
+        const std::uint64_t nextBridge = NormalizePointer(rawBridge);
         std::uint64_t rawContext = 0;
         std::uint64_t rawEntry = 0;
         std::uint64_t contextAddress = 0;
@@ -639,13 +681,56 @@ private:
                 CoordinateReadStage::Entry)) {
             return false;
         }
-        nextContext = rawContext;
-        nextEntry = NormalizePointer(rawEntry);
-        return IsValidGuestAddress(nextContext) &&
-            IsRemoteAddress(nextEntry) && (nextEntry & 3U) == 0;
+        snapshot = {
+            nextBridge,
+            rawContext,
+            NormalizePointer(rawEntry),
+        };
+        return IsValidGuestAddress(snapshot.context) &&
+            IsRemoteAddress(snapshot.entry) && (snapshot.entry & 3U) == 0;
+    }
+
+    bool ResolveRootUnlocked(CoordinatePoolRootSnapshot& snapshot,
+                             int& status) {
+        snapshot = {};
+        status = 0;
+        CoordinatePoolRootStabilityWindow stability;
+        for (std::size_t attempt = 0;
+             attempt < kRootSnapshotReadLimit;
+             ++attempt) {
+            CoordinatePoolRootSnapshot current{};
+            if (!ReadRootSnapshotUnlocked(current)) {
+                stability.Reset();
+                continue;
+            }
+            if (stability.Observe(current)) {
+                snapshot = current;
+                ClearReadDiagnosticUnlocked();
+                return true;
+            }
+        }
+        status = probe.read.HasFailure() ? probe.systemError : -EAGAIN;
+        return false;
     }
 
     bool AnalyzeCodeUnlocked() {
+        constexpr std::size_t kMaximumSnapshotAttempts = 2;
+        for (std::size_t attempt = 0;
+             attempt < kMaximumSnapshotAttempts;
+             ++attempt) {
+            analysisInvalidated = false;
+            if (AnalyzeCodeAttemptUnlocked()) return true;
+            if (!analysisInvalidated ||
+                attempt + 1 == kMaximumSnapshotAttempts) {
+                return false;
+            }
+            analysisCodeFingerprints.clear();
+            ClearReadDiagnosticUnlocked();
+        }
+        return false;
+    }
+
+    bool AnalyzeCodeAttemptUnlocked() {
         std::uint64_t mappingStart = 0;
         std::uint64_t mappingEnd = 0;
         int mappingStatus = 0;
@@ -682,9 +767,14 @@ private:
         }
         const std::size_t pageCount = mappingSize / kPageSize;
         std::vector<bool> loadedPages(pageCount, false);
+        std::vector<CodeRangeFingerprint> rangeFingerprints;
         std::size_t loadedPageCount = 0;
 
         auto failCodeRead = [&](CoordinateReadDiagnostic diagnostic) {
+            if (diagnostic.failure ==
+                CoordinateReadFailure::MappingChanged) {
+                analysisInvalidated = true;
+            }
             probe.read = diagnostic;
             SetError(
                 CoordinatePoolRuntimeError::CodeReadFailed,
@@ -760,6 +850,34 @@ private:
             return true;
         };
 
+        auto recordMethodRange = [&](std::uint64_t methodAddress,
+                                     std::uint64_t returnAddress) {
+            if (returnAddress < methodAddress ||
+                returnAddress > mappingEnd - 4) {
+                return false;
+            }
+            const std::uint64_t rangeEnd = returnAddress + 4;
+            const std::size_t size = static_cast<std::size_t>(
+                rangeEnd - methodAddress);
+            const std::size_t offset = static_cast<std::size_t>(
+                methodAddress - mappingStart);
+            const auto existing = std::find_if(
+                rangeFingerprints.begin(),
+                rangeFingerprints.end(),
+                [methodAddress, size](const CodeRangeFingerprint& range) {
+                    return range.remoteAddress == methodAddress &&
+                        range.size == size;
+                });
+            if (existing == rangeFingerprints.end()) {
+                rangeFingerprints.push_back(CodeRangeFingerprint{
+                    methodAddress,
+                    size,
+                    CoordinatePoolCodeFingerprint(bytes.data() + offset, size),
+                });
+            }
+            return true;
+        };
+
         auto loadMethod = [&](std::uint64_t methodAddress,
                               std::size_t instructionLimit,
                               EntryCodeScan& scan) {
@@ -791,7 +909,10 @@ private:
                         scan)) {
                     return false;
                 }
-                if (scan.returnAddress != 0) return true;
+                if (scan.returnAddress != 0) {
+                    return recordMethodRange(
+                        methodAddress, scan.returnAddress);
+                }
                 if (scanEnd >= scanLimitEnd) break;
                 pageAddress += kPageSize;
             }
@@ -850,6 +971,22 @@ private:
             SetError(CoordinatePoolRuntimeError::AnalysisFailed);
             return false;
         }
+        if (rangeFingerprints.empty()) {
+            SetError(CoordinatePoolRuntimeError::AnalysisFailed);
+            return false;
+        }
+        const CodeValidationResult snapshotValidation =
+            ValidateCodeFingerprintsUnlocked(rangeFingerprints);
+        if (snapshotValidation != CodeValidationResult::Unchanged) {
+            if (snapshotValidation == CodeValidationResult::Changed) {
+                analysisInvalidated = true;
+            }
+            SetError(
+                CoordinatePoolRuntimeError::CodeReadFailed,
+                true,
+                probe.read.HasFailure() ? probe.read.systemError : -ESTALE);
+            return false;
+        }
 
         pool::method* entry =
             candidate->get_shellcode()->get_method("entry");
@@ -872,6 +1009,7 @@ private:
         }
 
         finder = std::move(candidate);
+        analysisCodeFingerprints = std::move(rangeFingerprints);
         codeBase = mappingStart;
         codeSize = mappingSize;
         entryStart = entry->start_address();
@@ -889,6 +1027,58 @@ private:
         probe.error = CoordinatePoolRuntimeError::None;
         probe.stage = CoordinatePoolRuntimeStage::CodeAnalyzed;
         return true;
+    }
+
+    CodeValidationResult ValidateCodeFingerprintUnlocked(
+        const CodeRangeFingerprint& expected) {
+        if (expected.size == 0 ||
+            expected.remoteAddress >
+                std::numeric_limits<std::uint64_t>::max() - expected.size) {
+            return CodeValidationResult::Changed;
+        }
+        std::vector<std::uint8_t> data(expected.size);
+        CoordinateReadDiagnostic diagnostic{};
+        if (!ReadRemoteUnlocked(
+                expected.remoteAddress,
+                data.data(),
+                data.size(),
+                CoordinateReadStage::CodePage,
+                &diagnostic)) {
+            return CodeValidationResult::Unavailable;
+        }
+        if (CoordinatePoolCodeFingerprint(data.data(), data.size()) ==
+            expected.fingerprint) {
+            return CodeValidationResult::Unchanged;
+        }
+
+        diagnostic = {};
+        diagnostic.stage = CoordinateReadStage::CodePage;
+        diagnostic.failure = CoordinateReadFailure::MappingChanged;
+        diagnostic.address = expected.remoteAddress;
+        diagnostic.size = data.size();
+        diagnostic.systemError = -ESTALE;
+        probe.read = diagnostic;
+        probe.systemError = diagnostic.systemError;
+        return CodeValidationResult::Changed;
+    }
+
+    CodeValidationResult ValidateCodeFingerprintsUnlocked(
+        const std::vector<CodeRangeFingerprint>& fingerprints) {
+        bool unavailable = false;
+        for (const CodeRangeFingerprint& fingerprint : fingerprints) {
+            const CodeValidationResult result =
+                ValidateCodeFingerprintUnlocked(fingerprint);
+            if (result == CodeValidationResult::Changed) return result;
+            unavailable = unavailable ||
+                result == CodeValidationResult::Unavailable;
+        }
+        return unavailable
+            ? CodeValidationResult::Unavailable
+            : CodeValidationResult::Unchanged;
+    }
+
+    CodeValidationResult ValidateCodeFingerprintsUnlocked() {
+        return ValidateCodeFingerprintsUnlocked(analysisCodeFingerprints);
     }
 
     static bool RequiresInstructionHook(std::uint32_t instruction) noexcept {
@@ -1329,56 +1519,145 @@ private:
         return false;
     }
 
+    bool InvalidateRuntimeContextUnlocked() {
+        parametersReady = false;
+        computedContext = 0;
+        ClearPoolPointerUnlocked();
+        poolPointerRefreshFrame =
+            std::numeric_limits<std::uint64_t>::max();
+        return ClearDynamicPagesUnlocked();
+    }
+
+    void ClearPoolPointerUnlocked() {
+        lastPoolPointer = 0;
+        ringSlots.clear();
+        ringSearchBudget.Reset();
+        probe.poolPointer = {};
+    }
+
     void RefreshPoolPointerUnlocked() {
         if (poolPointerRefreshFrame == frame) return;
         poolPointerRefreshFrame = frame;
-        if (!parametersReady || computedContext == 0 ||
-            finder->pool_ptr_offset == 0) {
+
+        CoordinatePoolPointerDiagnostic& diagnostic = probe.poolPointer;
+        diagnostic = {};
+        diagnostic.computedContext = computedContext;
+        if (finder != nullptr) {
+            diagnostic.stateFlags |= kPoolPointerFinderReady;
+            diagnostic.offset = finder->pool_ptr_offset;
+        }
+        if (parametersReady) {
+            diagnostic.stateFlags |= kPoolPointerParametersReady;
+        }
+        if (computedContext != 0) {
+            diagnostic.stateFlags |= kPoolPointerContextReady;
+        }
+        if (finder != nullptr && finder->pool_ptr_offset != 0) {
+            diagnostic.stateFlags |= kPoolPointerOffsetReady;
+        }
+        if (finder == nullptr || !parametersReady || computedContext == 0) {
+            diagnostic.error = CoordinateDecryptError::PoolPointerStateInvalid;
+            diagnostic.systemError = -EAGAIN;
             return;
         }
-        const std::uint64_t address = NormalizePointer(
-            computedContext +
-            static_cast<std::int64_t>(finder->pool_ptr_offset));
-        std::uint64_t pointer = 0;
-        if (!IsRemoteAddress(address) ||
-            !ReadRemoteUnlocked(
-                address,
-                &pointer,
-                sizeof(pointer),
-                CoordinateReadStage::PoolPointer) ||
-            !IsValidGuestAddress(pointer)) {
+        if (finder->pool_ptr_offset == 0) {
+            diagnostic.error =
+                CoordinateDecryptError::PoolPointerOffsetMissing;
+            diagnostic.systemError = -ENODATA;
             return;
         }
-        if (lastPoolPointer != 0 && lastPoolPointer != pointer) {
+
+        std::uint64_t rawAddress = 0;
+        if (!AddSignedOffset(
+                computedContext, finder->pool_ptr_offset, rawAddress)) {
+            diagnostic.error =
+                CoordinateDecryptError::PoolPointerAddressInvalid;
+            diagnostic.systemError = -ERANGE;
+            return;
+        }
+        const std::uint64_t address = NormalizePointer(rawAddress);
+        diagnostic.address = address;
+        if (!IsRemoteAddress(address)) {
+            diagnostic.error =
+                CoordinateDecryptError::PoolPointerAddressInvalid;
+            diagnostic.systemError = -ERANGE;
+            return;
+        }
+
+        std::uint64_t rawPointer = 0;
+        CoordinateReadDiagnostic readDiagnostic{};
+        const CoordinateReadDiagnostic previousRead = probe.read;
+        const int previousSystemError = probe.systemError;
+        const bool read = ReadRemoteUnlocked(
+            address,
+            &rawPointer,
+            sizeof(rawPointer),
+            CoordinateReadStage::PoolPointer,
+            &readDiagnostic);
+        probe.read = previousRead;
+        probe.systemError = previousSystemError;
+        diagnostic.rawValue = rawPointer;
+        diagnostic.normalizedValue = NormalizePointer(rawPointer);
+        if (!read) {
+            diagnostic.error = CoordinateDecryptError::PoolPointerReadFailed;
+            diagnostic.systemError = readDiagnostic.systemError;
+            diagnostic.read = readDiagnostic;
+            return;
+        }
+        if (rawPointer == 0) {
+            diagnostic.error =
+                CoordinateDecryptError::PoolPointerValueInvalid;
+            diagnostic.systemError = -ENODATA;
+            return;
+        }
+
+        const std::uint64_t pointer = diagnostic.normalizedValue != 0
+            ? diagnostic.normalizedValue
+            : rawPointer;
+        if (ShouldClearCoordinatePoolRingsAfterPointerRefresh(
+                true, lastPoolPointer, pointer)) {
             ringSlots.clear();
             ringSearchBudget.Reset();
         }
         lastPoolPointer = pointer;
     }
 
-    bool ExecuteRingSearchUnlocked(std::uint64_t component,
-                                   std::uint64_t& ring) {
+    bool ExecuteRingSearchUnlocked(
+        std::uint64_t component,
+        std::uint64_t& ring,
+        CoordinatePoolRuntimeError& error) {
         ring = 0;
+        error = CoordinatePoolRuntimeError::RingSearchFailed;
         if (layout.componentKeyOffset >
             std::numeric_limits<std::uint64_t>::max() - component ||
             !PrepareRegistersUnlocked(
                 decryptContext,
                 component + layout.componentKeyOffset,
-                true) ||
-            !RunStageUnlocked(
+                true)) {
+            error = CoordinatePoolRuntimeError::RingPreparationFailed;
+            return false;
+        }
+        if (!RunStageUnlocked(
                 searchEnd,
                 kSearchInstructionBudget,
                 kSearchTimeout)) {
+            error = CoordinatePoolRuntimeError::RingExecutionFailed;
             return false;
         }
         const int registerId = CapstoneXRegisterId(searchRegister);
         std::uint64_t rawRing = 0;
         if (registerId == UC_ARM64_REG_INVALID ||
             uc_reg_read(engine, registerId, &rawRing) != UC_ERR_OK) {
+            error = CoordinatePoolRuntimeError::RingRegisterReadFailed;
             return false;
         }
         ring = NormalizePointer(rawRing);
-        return IsRemoteAddress(ring);
+        if (!IsRemoteAddress(ring)) {
+            error = CoordinatePoolRuntimeError::RingValueInvalid;
+            return false;
+        }
+        error = CoordinatePoolRuntimeError::None;
+        return true;
     }
 
     bool ReadRemoteUnlocked(
@@ -1626,6 +1905,7 @@ private:
     void ResetAnalysisUnlocked() {
         CloseEngineUnlocked();
         finder.reset();
+        analysisCodeFingerprints.clear();
         bridge = 0;
         decryptContext = 0;
         guestEntry = 0;
@@ -1653,6 +1933,8 @@ private:
         probe.indexOffset = 0;
         probe.ringOffset = 0;
         analysisInvalidated = false;
+        nextCodeValidationFrame = 0;
+        codeValidationRequested = false;
         ClearReadDiagnosticUnlocked();
         probe.stage = CoordinatePoolRuntimeStage::Idle;
         probe.error = CoordinatePoolRuntimeError::None;
@@ -1679,6 +1961,7 @@ private:
         const CoordinatePoolRuntimeLayout configuredLayout = layout;
         CloseEngineUnlocked();
         finder.reset();
+        analysisCodeFingerprints.clear();
         memory = nullptr;
         processId = -1;
         moduleBase = 0;
@@ -1697,8 +1980,9 @@ private:
         computedContext = 0;
         parametersReady = false;
         analysisInvalidated = false;
+        nextCodeValidationFrame = 0;
+        codeValidationRequested = false;
         frame = 0;
-        lastRootFrame = 0;
         lastPoolPointer = 0;
         poolPointerRefreshFrame =
             std::numeric_limits<std::uint64_t>::max();
@@ -1731,7 +2015,6 @@ private:
     bool parametersReady = false;
     bool analysisInvalidated = false;
     std::uint64_t frame = 0;
-    std::uint64_t lastRootFrame = 0;
     CoordinateReadDiagnostic toleratedReadFailure{};
     std::uint64_t lastPoolPointer = 0;
     std::uint64_t poolPointerRefreshFrame =
@@ -1739,6 +2022,9 @@ private:
     std::unordered_map<std::uint64_t, RingSlot> ringSlots;
     CoordinatePoolRingSearchBudget ringSearchBudget;
     std::unique_ptr<pool::coord_dec::FindDec> finder;
+    std::vector<CodeRangeFingerprint> analysisCodeFingerprints;
+    std::uint64_t nextCodeValidationFrame = 0;
+    bool codeValidationRequested = false;
     uc_engine* engine = nullptr;
     uc_hook memoryHook = 0;
     uc_hook mrsHook = 0;

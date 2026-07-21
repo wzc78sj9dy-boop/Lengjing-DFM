@@ -88,6 +88,40 @@ void RunRuntimePresentationPolicyTests() {
         "PRI=PVM P_SYS=-1 P_DONE=0 LAST=PMEM L_SYS=-13 L_DONE=0 "
         "TRY=0x3 CALLS=4 AT=0x12345000 N=4096");
     REQUIRE(detailedDiagnostic.find('\n') == std::string::npos);
+
+    lengjing::game::CoordinatePoolPointerDiagnostic poolPointer{};
+    poolPointer.error = lengjing::game::CoordinateDecryptError::
+        PoolPointerAddressInvalid;
+    poolPointer.stateFlags = 0xFU;
+    poolPointer.offset = 152;
+    poolPointer.computedContext = 0x12340000U;
+    poolPointer.address = 0x42U;
+    poolPointer.systemError = -34;
+    const std::string poolDiagnostic =
+        lengjing::game::FormatCoordinateDecryptDiagnostic(
+            lengjing::game::CoordinateDecryptError::RingSearchFailed,
+            0,
+            {},
+            poolPointer);
+    REQUIRE(poolDiagnostic ==
+        "COORD CD-5006 SYS=0 POOL=CD-5009 P_SYS=-34 P_STATE=0xF "
+        "P_OFF=152 P_CTX=0x12340000 P_AT=0x42 P_RAW=0x0 P_VALUE=0x0");
+    REQUIRE(lengjing::game::CoordinateDecryptErrorCode(
+                lengjing::game::CoordinateDecryptError::
+                    PoolPointerReadFailed) == 5005);
+    REQUIRE(lengjing::game::CoordinateDecryptErrorCode(
+                lengjing::game::CoordinateDecryptError::
+                    PoolPointerOffsetMissing) == 5008);
+    REQUIRE(lengjing::game::CoordinateDecryptErrorCode(
+                lengjing::game::CoordinateDecryptError::
+                    PoolPointerValueInvalid) == 5010);
+    REQUIRE(lengjing::game::CoordinateDecryptErrorCode(
+                lengjing::game::CoordinateDecryptError::
+                    RingPreparationFailed) == 5013);
+    REQUIRE(lengjing::game::CoordinateDecryptErrorCode(
+                lengjing::game::CoordinateDecryptError::RingValueInvalid) ==
+            5016);
+
     struct ReadErrorMapping {
         lengjing::game::CoordinateReadFailure failure;
         lengjing::game::CoordinateDecryptError error;

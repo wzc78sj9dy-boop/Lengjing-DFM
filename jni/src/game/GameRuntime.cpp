@@ -206,6 +206,8 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
                 status_.coordinateSystemError =
                     probe.coordinateSystemError;
                 status_.coordinateRead = probe.coordinateRead;
+                status_.coordinatePoolPointer =
+                    probe.coordinatePoolPointer;
                 status_.runtimeError = probe.runtimeError;
                 status_.runtimeSystemError = probe.runtimeSystemError;
                 status_.failureKind = probe.failureKind;
@@ -270,6 +272,7 @@ void GameRuntime::SetStatus(RuntimePhase phase,
     status_.coordinateError = probe.coordinateError;
     status_.coordinateSystemError = probe.coordinateSystemError;
     status_.coordinateRead = probe.coordinateRead;
+    status_.coordinatePoolPointer = probe.coordinatePoolPointer;
     status_.runtimeError = probe.runtimeError;
     status_.runtimeSystemError = probe.runtimeSystemError;
     status_.failureKind = probe.failureKind;

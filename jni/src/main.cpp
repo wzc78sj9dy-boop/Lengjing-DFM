@@ -148,6 +148,8 @@ int RunCoordinateProbe(
         lengjing::game::CoordinateDecryptError::None;
     int lastReportedSystemError = 0;
     lengjing::game::CoordinateReadDiagnostic lastReportedRead{};
+    lengjing::game::CoordinatePoolPointerDiagnostic
+        lastReportedPoolPointer{};
     lengjing::game::RuntimeError lastReportedRuntimeError =
         lengjing::game::RuntimeError::None;
     int lastReportedRuntimeSystemError = 0;
@@ -159,22 +161,26 @@ int RunCoordinateProbe(
                 lengjing::game::CoordinateDecryptError::None &&
             (status.coordinateError != lastReportedError ||
              status.coordinateSystemError != lastReportedSystemError ||
-             status.coordinateRead != lastReportedRead)) {
+             status.coordinateRead != lastReportedRead ||
+             status.coordinatePoolPointer != lastReportedPoolPointer)) {
             const std::string diagnostic =
                 lengjing::game::FormatCoordinateDecryptDiagnostic(
                     status.coordinateError,
                     status.coordinateSystemError,
-                    status.coordinateRead);
+                    status.coordinateRead,
+                    status.coordinatePoolPointer);
             std::fprintf(stderr, "%s\n", diagnostic.c_str());
             lastReportedError = status.coordinateError;
             lastReportedSystemError = status.coordinateSystemError;
             lastReportedRead = status.coordinateRead;
+            lastReportedPoolPointer = status.coordinatePoolPointer;
         } else if (status.coordinateError ==
                    lengjing::game::CoordinateDecryptError::None) {
             lastReportedError =
                 lengjing::game::CoordinateDecryptError::None;
             lastReportedSystemError = 0;
             lastReportedRead = {};
+            lastReportedPoolPointer = {};
         }
         if (status.runtimeError != lengjing::game::RuntimeError::None &&
             (status.runtimeError != lastReportedRuntimeError ||
