@@ -389,7 +389,7 @@ void RunConfigTests() {
         "jni" / "src" / "ui" / "MenuView.cpp";
     const std::string menuText = ReadText(menuSource);
     for (const char* inputModeName : {
-             "只读", "写入触摸", "程序陀螺仪", "内核触摸", "内核陀螺仪"}) {
+             "只读", "写入触摸（不推荐）", "程序陀螺仪", "内核触摸", "内核陀螺仪"}) {
         REQUIRE(menuText.find(inputModeName) != std::string::npos);
     }
     REQUIRE(menuText.find("visual.aimWarningRay && visual.playerViewRay") != std::string::npos);

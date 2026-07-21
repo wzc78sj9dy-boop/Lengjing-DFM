@@ -39,7 +39,7 @@ constexpr std::array<const char*, 3> kGameVersions{
     "国服", "国际服", "台服"};
 
 constexpr std::array<const char*, 5> kInputModes{
-    "只读", "写入触摸", "程序陀螺仪", "内核触摸", "内核陀螺仪"};
+    "只读", "写入触摸（不推荐）", "程序陀螺仪", "内核触摸", "内核陀螺仪"};
 
 constexpr std::array<const char*, 7> kFrameLimits{
     "30 FPS", "60 FPS", "90 FPS", "120 FPS", "144 FPS", "165 FPS", "无限制"};
