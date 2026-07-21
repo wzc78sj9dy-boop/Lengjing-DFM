@@ -1,5 +1,7 @@
 #include "ProgramMotionChannel.h"
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -17,6 +19,7 @@
 #include <elf.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/ptrace.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -237,12 +240,18 @@ bool WriteModuleFile() {
     return true;
 }
 
-bool WaitForStop(pid_t processId, std::chrono::milliseconds timeout) {
+bool WaitForStop(pid_t processId,
+                 std::chrono::milliseconds timeout,
+                 int* stopSignal = nullptr) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
         int status = 0;
         const pid_t result = waitpid(processId, &status, WNOHANG | __WALL);
-        if (result == processId) return WIFSTOPPED(status);
+        if (result == processId) {
+            if (!WIFSTOPPED(status)) return false;
+            if (stopSignal != nullptr) *stopSignal = WSTOPSIG(status);
+            return true;
+        }
         if (result < 0 && errno != EINTR) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
@@ -315,10 +324,9 @@ bool PtraceWrite(pid_t processId,
     return true;
 }
 
-std::uintptr_t RemoteDlopenAddress(pid_t processId) {
+std::uintptr_t RemoteFunctionAddress(pid_t processId,
+                                     std::uintptr_t localAddress) {
     Dl_info info{};
-    const std::uintptr_t localAddress =
-        reinterpret_cast<std::uintptr_t>(&dlopen);
     if (dladdr(reinterpret_cast<void*>(localAddress), &info) == 0 ||
         info.dli_fbase == nullptr || info.dli_fname == nullptr) {
         return 0;
@@ -331,40 +339,117 @@ std::uintptr_t RemoteDlopenAddress(pid_t processId) {
     return remoteBase == 0 ? 0 : remoteBase + (localAddress - localBase);
 }
 
+bool CallRemoteFunction(pid_t processId,
+                        std::uintptr_t functionAddress,
+                        const std::uintptr_t* parameters,
+                        std::size_t parameterCount,
+                        const user_pt_regs& baseRegisters,
+                        user_pt_regs& resultRegisters,
+                        bool& stopped) {
+    if (!stopped || functionAddress == 0 || parameterCount > 8 ||
+        (parameterCount != 0 && parameters == nullptr)) {
+        return false;
+    }
+
+    user_pt_regs callRegisters = baseRegisters;
+    for (std::size_t index = 0; index < parameterCount; ++index) {
+        callRegisters.regs[index] = parameters[index];
+    }
+    callRegisters.regs[30] = 0;
+    callRegisters.pc = functionAddress;
+    if (!SetRegisters(processId, callRegisters) ||
+        ptrace(PTRACE_CONT, processId, nullptr, nullptr) != 0) {
+        return false;
+    }
+
+    stopped = false;
+    int stopSignal = 0;
+    if (!WaitForStop(
+            processId, std::chrono::seconds(5), &stopSignal)) {
+        return false;
+    }
+    stopped = true;
+    if (stopSignal != SIGSEGV && stopSignal != SIGTRAP) {
+        return false;
+    }
+    return GetRegisters(processId, resultRegisters);
+}
+
 bool LoadRemoteModule(pid_t processId) {
-    const std::uintptr_t dlopenAddress = RemoteDlopenAddress(processId);
-    if (dlopenAddress == 0) return false;
+    const std::uintptr_t mmapAddress = RemoteFunctionAddress(
+        processId, reinterpret_cast<std::uintptr_t>(&mmap));
+    const std::uintptr_t munmapAddress = RemoteFunctionAddress(
+        processId, reinterpret_cast<std::uintptr_t>(&munmap));
+    const std::uintptr_t dlopenAddress = RemoteFunctionAddress(
+        processId, reinterpret_cast<std::uintptr_t>(&dlopen));
+    if (mmapAddress == 0 || dlopenAddress == 0) return false;
     if (ptrace(PTRACE_ATTACH, processId, nullptr, nullptr) != 0) return false;
 
     bool stopped = WaitForStop(processId, std::chrono::seconds(3));
     bool originalSaved = false;
     user_pt_regs original{};
     user_pt_regs current{};
-    std::vector<std::uint8_t> backup;
-    std::uintptr_t pathAddress = 0;
+    std::uintptr_t scratchAddress = 0;
     bool result = false;
 
     if (stopped && GetRegisters(processId, original)) {
         originalSaved = true;
         const std::string path(kRemoteModulePath);
-        pathAddress = (static_cast<std::uintptr_t>(original.sp) + 0x100U + 15U) &
-            ~static_cast<std::uintptr_t>(15U);
-        backup.resize(path.size() + 1);
-        if (IsWritableRange(processId, pathAddress, backup.size()) &&
-            PtraceRead(processId, pathAddress, backup.data(), backup.size()) &&
-            PtraceWrite(processId, pathAddress, path.c_str(), path.size() + 1)) {
-            current = original;
-            current.regs[0] = pathAddress;
-            current.regs[1] = RTLD_NOW | RTLD_GLOBAL;
-            current.regs[30] = 0;
-            current.pc = dlopenAddress;
-            if (SetRegisters(processId, current) &&
-                ptrace(PTRACE_CONT, processId, nullptr, nullptr) == 0) {
-                stopped = WaitForStop(processId, std::chrono::seconds(5));
-                if (stopped && GetRegisters(processId, current)) {
-                    result = current.regs[0] != 0;
-                }
+        constexpr std::size_t kScratchSize = 4096;
+        const std::array<std::uintptr_t, 6> mmapParameters{
+            0,
+            kScratchSize,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            static_cast<std::uintptr_t>(-1),
+            0,
+        };
+        if (CallRemoteFunction(
+                processId,
+                mmapAddress,
+                mmapParameters.data(),
+                mmapParameters.size(),
+                original,
+                current,
+                stopped)) {
+            scratchAddress = current.regs[0];
+        }
+        if (scratchAddress != 0 && scratchAddress != UINTPTR_MAX &&
+            IsWritableRange(processId, scratchAddress, kScratchSize) &&
+            path.size() + 1 <= kScratchSize &&
+            PtraceWrite(
+                processId, scratchAddress, path.c_str(), path.size() + 1)) {
+            const std::array<std::uintptr_t, 2> dlopenParameters{
+                scratchAddress,
+                RTLD_NOW | RTLD_GLOBAL,
+            };
+            if (CallRemoteFunction(
+                    processId,
+                    dlopenAddress,
+                    dlopenParameters.data(),
+                    dlopenParameters.size(),
+                    original,
+                    current,
+                    stopped)) {
+                result = current.regs[0] != 0;
             }
+        }
+
+        if (stopped && scratchAddress != 0 &&
+            scratchAddress != UINTPTR_MAX && munmapAddress != 0) {
+            const std::array<std::uintptr_t, 2> munmapParameters{
+                scratchAddress,
+                kScratchSize,
+            };
+            user_pt_regs ignored{};
+            CallRemoteFunction(
+                processId,
+                munmapAddress,
+                munmapParameters.data(),
+                munmapParameters.size(),
+                original,
+                ignored,
+                stopped);
         }
     }
 
@@ -374,10 +459,6 @@ bool LoadRemoteModule(pid_t processId) {
     }
     if (stopped) {
         bool restored = true;
-        if (originalSaved && !backup.empty() && pathAddress != 0) {
-            restored = PtraceWrite(
-                processId, pathAddress, backup.data(), backup.size());
-        }
         if (originalSaved) restored = SetRegisters(processId, original) && restored;
         restored = ptrace(PTRACE_DETACH, processId, nullptr, nullptr) == 0 &&
             restored;

@@ -1,6 +1,7 @@
 #include "test_support.h"
 
 #include "game/aim/AimModePolicy.h"
+#include "game/aim/GyroscopeDirectionPolicy.h"
 
 void RunAimModePolicyTests() {
     using lengjing::game::IsProjectileTrackingRequested;
@@ -9,6 +10,7 @@ void RunAimModePolicyTests() {
     using lengjing::game::aim::IsAimOutputRequested;
     using lengjing::game::aim::ResolveAimModeActivation;
     using lengjing::game::aim::ResolveAimOutputAvailability;
+    using lengjing::game::aim::ResolveGyroscopeDirection;
 
     REQUIRE(!kProjectileTrackingCompiled);
     REQUIRE(!ResolveProjectileTrackingRequest(false, false));
@@ -59,4 +61,20 @@ void RunAimModePolicyTests() {
     const auto noTarget = ResolveAimOutputAvailability(
         both, false, false);
     REQUIRE(!noTarget.Any());
+
+    const auto natural = ResolveGyroscopeDirection(0, 1.0f, 2.0f);
+    REQUIRE(natural.pitch == 1.0f);
+    REQUIRE(natural.yaw == 2.0f);
+    const auto landscapeRight = ResolveGyroscopeDirection(1, 1.0f, 2.0f);
+    REQUIRE(landscapeRight.pitch == 1.0f);
+    REQUIRE(landscapeRight.yaw == 2.0f);
+    const auto upsideDown = ResolveGyroscopeDirection(2, 1.0f, 2.0f);
+    REQUIRE(upsideDown.pitch == 1.0f);
+    REQUIRE(upsideDown.yaw == 2.0f);
+    const auto landscapeLeft = ResolveGyroscopeDirection(3, 1.0f, 2.0f);
+    REQUIRE(landscapeLeft.pitch == -1.0f);
+    REQUIRE(landscapeLeft.yaw == -2.0f);
+    const auto normalized = ResolveGyroscopeDirection(-1, 1.0f, 2.0f);
+    REQUIRE(normalized.pitch == -1.0f);
+    REQUIRE(normalized.yaw == -2.0f);
 }

@@ -2,11 +2,13 @@
 
 #include "Android_touch/TouchHelperA.h"
 #include "ProgramMotionChannel.h"
+#include "game/aim/GyroscopeDirectionPolicy.h"
 #include "game/native/KernelModuleLoader.h"
 #include "paradise/paradise_api.h"
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <memory>
@@ -21,23 +23,6 @@ int NormalizeOrientation(int orientation) {
     return ((orientation % 4) + 4) % 4;
 }
 
-void ApplyOrientation(int orientation, float& pitch, float& yaw) {
-    switch (NormalizeOrientation(orientation)) {
-        case 0:
-            pitch = -pitch;
-            break;
-        case 1:
-            break;
-        case 2:
-            yaw = -yaw;
-            break;
-        default:
-            pitch = -pitch;
-            yaw = -yaw;
-            break;
-    }
-}
-
 }  // namespace
 
 struct AimInputAdapter::Impl {
@@ -50,6 +35,7 @@ struct AimInputAdapter::Impl {
     std::array<bool, kTouchSlotCount> activeSlots{};
     std::unique_ptr<paradise_driver> kernel;
     ProgramMotionChannel program;
+    std::chrono::steady_clock::time_point nextProgramStartAttempt{};
 
     bool IsTouchMode() const noexcept {
         return mode == ui::AimInputMode::WriteTouch ||
@@ -101,6 +87,15 @@ struct AimInputAdapter::Impl {
         outputY = std::clamp(
             static_cast<int>(std::lround(mappedY)), 0, maximumY);
     }
+
+    bool SendProgramMotion(float pitch, float yaw) {
+        if (program.Send(pitch, yaw)) return true;
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now < nextProgramStartAttempt) return false;
+        nextProgramStartAttempt = now + std::chrono::seconds(2);
+        return program.Start() && program.Send(pitch, yaw);
+    }
 };
 
 AimInputAdapter::AimInputAdapter() : impl_(std::make_unique<Impl>()) {}
@@ -125,7 +120,6 @@ bool AimInputAdapter::Start(ui::AimInputMode mode) {
             }
             break;
         case ui::AimInputMode::ProgramGyroscope:
-            if (!impl_->program.Start()) return false;
             break;
         case ui::AimInputMode::KernelTouch: {
             std::string error;
@@ -170,6 +164,7 @@ void AimInputAdapter::Stop() noexcept {
     impl_->width = 0;
     impl_->height = 0;
     impl_->orientation = 0;
+    impl_->nextProgramStartAttempt = {};
     impl_->mode = ui::AimInputMode::ReadOnly;
     impl_->started = false;
 }
@@ -239,9 +234,12 @@ bool AimInputAdapter::SendGyroscope(
         !std::isfinite(pitch) || !std::isfinite(yaw)) {
         return false;
     }
-    ApplyOrientation(orientation, pitch, yaw);
+    const GyroscopeDirection direction =
+        ResolveGyroscopeDirection(orientation, pitch, yaw);
+    pitch = direction.pitch;
+    yaw = direction.yaw;
     if (impl_->mode == ui::AimInputMode::ProgramGyroscope) {
-        return impl_->program.Send(pitch, yaw);
+        return impl_->SendProgramMotion(pitch, yaw);
     }
     if (impl_->mode == ui::AimInputMode::KernelGyroscope &&
         impl_->kernel != nullptr) {
