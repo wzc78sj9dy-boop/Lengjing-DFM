@@ -1746,26 +1746,27 @@ public:
                 const int aimMode = context.zooming
                     ? aimTuning.adsBone
                     : aimTuning.hipBone;
-                const bool aimPointReady = rangeTargetClass
-                    ? SelectRangeTargetAimPoint(
-                          position,
-                          aimMode,
-                          settings.aim,
-                          context.view.location,
-                          context.view,
-                          aimWorld,
-                          aimScreen)
-                    : boneFrameReady && SelectAimPoint(
-                          boneFrame,
-                          aimMode,
-                          settings.aim,
-                          context.view.location,
-                          identity,
-                          frame.sequence,
-                          preferredBone,
-                          aimWorld,
-                          aimScreen,
-                          aimBone);
+                bool aimPointReady = boneFrameReady && SelectAimPoint(
+                    boneFrame,
+                    aimMode,
+                    settings.aim,
+                    context.view.location,
+                    identity,
+                    frame.sequence,
+                    preferredBone,
+                    aimWorld,
+                    aimScreen,
+                    aimBone);
+                if (!aimPointReady && rangeTargetClass) {
+                    aimPointReady = SelectRangeTargetAimPoint(
+                        position,
+                        aimMode,
+                        settings.aim,
+                        context.view.location,
+                        context.view,
+                        aimWorld,
+                        aimScreen);
+                }
                 if (aimPointReady) {
                     Vec3 velocity{};
                     const std::uintptr_t movement =
@@ -5075,26 +5076,27 @@ private:
         Vec3 targetPoint{};
         Vec2 targetScreen{};
         int selectedBone = -1;
-        const bool aimPointReady = rangeTargetClass
-            ? SelectRangeTargetAimPoint(
-                  position,
-                  aimMode,
-                  settings,
-                  context.view.location,
-                  context.view,
-                  targetPoint,
-                  targetScreen)
-            : boneFrameReady && SelectAimPoint(
-                  boneFrame,
-                  aimMode,
-                  settings,
-                  context.view.location,
-                  identity,
-                  sequence,
-                  preferredBone,
-                  targetPoint,
-                  targetScreen,
-                  selectedBone);
+        bool aimPointReady = boneFrameReady && SelectAimPoint(
+            boneFrame,
+            aimMode,
+            settings,
+            context.view.location,
+            identity,
+            sequence,
+            preferredBone,
+            targetPoint,
+            targetScreen,
+            selectedBone);
+        if (!aimPointReady && rangeTargetClass) {
+            aimPointReady = SelectRangeTargetAimPoint(
+                position,
+                aimMode,
+                settings,
+                context.view.location,
+                context.view,
+                targetPoint,
+                targetScreen);
+        }
         if (!aimPointReady) return;
 
         const float centerX =
@@ -5268,39 +5270,37 @@ private:
             ? lockedTrackingBone_
             : -1;
         BoneFrame boneFrame{};
-        bool boneFrameReady = false;
-        if (!rangeTargetClass) {
-            boneFrameReady = ReadBoneFrame(
-                record, context.view, antiFlicker, &position, boneFrame);
-            if (boneFrameReady &&
-                (settings.missMode || settings.requireVisibility)) {
-                static_cast<void>(EvaluateBoneVisibility(
-                    context.view.location, boneFrame));
-            }
+        const bool boneFrameReady = ReadBoneFrame(
+            record, context.view, antiFlicker, &position, boneFrame);
+        if (boneFrameReady &&
+            (settings.missMode || settings.requireVisibility)) {
+            static_cast<void>(EvaluateBoneVisibility(
+                context.view.location, boneFrame));
         }
         Vec3 targetPoint{};
         Vec2 targetScreen{};
         int selectedBone = -1;
-        const bool aimPointReady = rangeTargetClass
-            ? SelectRangeTargetAimPoint(
-                  position,
-                  aimMode,
-                  settings,
-                  context.view.location,
-                  context.view,
-                  targetPoint,
-                  targetScreen)
-            : boneFrameReady && SelectAimPoint(
-                  boneFrame,
-                  aimMode,
-                  settings,
-                  context.view.location,
-                  identity,
-                  sequence,
-                  preferredBone,
-                  targetPoint,
-                  targetScreen,
-                  selectedBone);
+        bool aimPointReady = boneFrameReady && SelectAimPoint(
+            boneFrame,
+            aimMode,
+            settings,
+            context.view.location,
+            identity,
+            sequence,
+            preferredBone,
+            targetPoint,
+            targetScreen,
+            selectedBone);
+        if (!aimPointReady && rangeTargetClass) {
+            aimPointReady = SelectRangeTargetAimPoint(
+                position,
+                aimMode,
+                settings,
+                context.view.location,
+                context.view,
+                targetPoint,
+                targetScreen);
+        }
         if (!aimPointReady) return;
 
         Vec3 velocity{};
