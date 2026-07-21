@@ -10,7 +10,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <dirent.h>
@@ -926,7 +925,6 @@ bool TouchScreenHandle(int mode) {
     StoreOutputRange(range);
 
     if (selectedMode == 1 && !OpenWriteTouch(selectedPath, range)) {
-        std::fprintf(stderr, "写入触摸初始化失败，已切换为只读监听\n");
         selectedMode = 0;
     }
 

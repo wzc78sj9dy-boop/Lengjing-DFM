@@ -21,7 +21,6 @@ VkResult g_LastBackendError = VK_SUCCESS;
 static void check_vk_result(VkResult err) {
     if (err == VK_SUCCESS)
         return;
-    fprintf(stderr, "[vulkan] Error: VkResult = %d\n", err);
     g_LastBackendError = err;
 }
 
@@ -78,29 +77,24 @@ bool VulkanGraphics::Create() {
 
     if (m_Window == nullptr)
         return false;
-    if (InitVulkan() != 1) {
-        fprintf(stderr, "[vulkan] Vulkan loader initialization failed\n");
+    if (InitVulkan() != 1)
         return false;
-    }
 
     void *libvulkan = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
-    if (libvulkan == nullptr) {
-        fprintf(stderr, "[vulkan] dlopen(libvulkan.so) failed: %s\n", dlerror());
+    if (libvulkan == nullptr)
         return false;
-    }
     const bool functions_loaded = ImGui_ImplVulkan_LoadFunctions(VK_API_VERSION_1_1, [](const char *function_name, void *handle) -> PFN_vkVoidFunction {
         return reinterpret_cast<PFN_vkVoidFunction>(dlsym(handle, function_name));
     }, libvulkan);
     dlclose(libvulkan);
     if (!functions_loaded || vkCreateAndroidSurfaceKHR == nullptr || vkAcquireNextImageKHR == nullptr ||
-        vkQueuePresentKHR == nullptr || vkGetPhysicalDeviceSurfaceSupportKHR == nullptr) {
-        fprintf(stderr, "[vulkan] required Vulkan functions are unavailable\n");
+        vkQueuePresentKHR == nullptr || vkGetPhysicalDeviceSurfaceSupportKHR == nullptr)
         return false;
-    }
 
     wd = std::make_unique<ImGui_ImplVulkanH_Window>();
     auto fail = [&](const char *operation, VkResult result) {
-        fprintf(stderr, "[vulkan] %s failed: VkResult = %d\n", operation, result);
+        (void)operation;
+        (void)result;
         Cleanup();
         return false;
     };
@@ -526,8 +520,7 @@ void VulkanGraphics::Render(ImDrawData *drawData) {
 }
 
 void VulkanGraphics::DisableRendering(const char *operation, VkResult error) {
-    fprintf(stderr, "[vulkan] %s failed: VkResult = %d; rendering disabled\n",
-            operation, error);
+    (void)operation;
     if (error == VK_ERROR_DEVICE_LOST || error == VK_TIMEOUT)
         m_AbandonDevice = true;
     m_SurfaceRecoveryRequested.store(true, std::memory_order_release);
@@ -543,6 +536,7 @@ bool VulkanGraphics::ConsumeSurfaceRecoveryRequest() {
 }
 
 bool VulkanGraphics::WaitForQueueCompletion(const char *operation) {
+    (void)operation;
     if (m_AbandonDevice)
         return false;
     if (m_Device == VK_NULL_HANDLE || m_Queue == VK_NULL_HANDLE || wd == nullptr)
@@ -558,8 +552,6 @@ bool VulkanGraphics::WaitForQueueCompletion(const char *operation) {
     VkResult result = TakeBackendError();
     if (result == VK_SUCCESS)
         result = VK_TIMEOUT;
-    fprintf(stderr, "[vulkan] %s failed while waiting for the queue: VkResult = %d\n",
-            operation, result);
     m_SurfaceRecoveryRequested.store(true, std::memory_order_release);
     if (result == VK_TIMEOUT || result == VK_ERROR_DEVICE_LOST)
         m_AbandonDevice = true;
@@ -577,7 +569,6 @@ void VulkanGraphics::PrepareShutdown() {
 
 void VulkanGraphics::Cleanup() {
     if (m_AbandonDevice) {
-        fprintf(stderr, "[vulkan] abandoning an unresponsive device without blocking cleanup\n");
         wd.reset();
         m_UploadFence = VK_NULL_HANDLE;
         m_UploadPool = VK_NULL_HANDLE;
@@ -657,7 +648,6 @@ BaseTexData *VulkanGraphics::LoadTexture(BaseTexData *tex, void *pixel_data) {
 
     VkCommandBuffer command_buffer = VK_NULL_HANDLE;
     auto fail = [&](const char *operation, VkResult result) -> BaseTexData * {
-        fprintf(stderr, "[vulkan] texture upload %s failed: VkResult = %d\n", operation, result);
         if (m_UploadInFlight) {
             // The queue accepted this upload, but the fence never confirmed
             // completion. No Vulkan object referenced by it is safe to free.

@@ -53,10 +53,7 @@ bool OpenGLGraphics::Create() {
         Cleanup();
         return false;
     }
-    if (eglSwapInterval(m_EglDisplay, 1) != EGL_TRUE) {
-        fprintf(stderr, "[opengl] eglSwapInterval(1) failed: EGL error = 0x%x\n",
-                eglGetError());
-    }
+    (void)eglSwapInterval(m_EglDisplay, 1);
     glClearColor(0.0, 0.0, 0.0, 0.0);
     return true;
 }
@@ -131,14 +128,9 @@ bool OpenGLGraphics::EnsureCurrentContext() {
 void OpenGLGraphics::RequestSurfaceRecovery(
     const char* operation,
     EGLint error) {
-    if (!m_SurfaceRecoveryRequested.exchange(
-            true, std::memory_order_acq_rel)) {
-        fprintf(
-            stderr,
-            "[opengl] %s failed: EGL error = 0x%x; requesting surface recovery\n",
-            operation,
-            error);
-    }
+    (void)operation;
+    (void)error;
+    m_SurfaceRecoveryRequested.store(true, std::memory_order_release);
     m_RenderingDisabled = true;
 }
 

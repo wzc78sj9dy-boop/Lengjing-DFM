@@ -359,7 +359,6 @@ int main() {
     int surfaceWidth = display.width;
     int surfaceHeight = display.height;
     if (surfaceWidth <= 0 || surfaceHeight <= 0) {
-        std::fprintf(stderr, "无法获取屏幕尺寸\n");
         return 1;
     }
 
@@ -367,7 +366,6 @@ int main() {
     ANativeWindow* window = android::ANativeWindowCreator::Create(
         "lengjing-surface", surfaceWidth, surfaceHeight, false);
     if (window == nullptr) {
-        std::fprintf(stderr, "无法创建绘制窗口\n");
         return 1;
     }
 
@@ -386,7 +384,6 @@ int main() {
         surfaceHeight,
         controller.DesiredRenderBackend());
     if (initialGraphics.graphics == nullptr) {
-        std::fprintf(stderr, "无法初始化图形接口\n");
         android::ANativeWindowCreator::Destroy(window);
         return 1;
     }

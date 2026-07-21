@@ -27,7 +27,6 @@
 #define A_NATIVE_WINDOW_CREATOR_H
 
 #include <android/native_window.h>
-#include <android/log.h>
 #include <dlfcn.h>
 #include <sys/system_properties.h>
 
@@ -46,62 +45,11 @@
 #include <climits>
 #include <utility>
 
-// Log system configuration
-#ifndef SURFACE_LOG_TAG
-#define SURFACE_LOG_TAG "lengjing"
-#endif
-
-#ifndef SURFACE_LOG_ENABLE
-#define SURFACE_LOG_ENABLE 1  // Set to 0 to completely disable logging
-#endif
-
-// Log level control
-#ifndef SURFACE_LOG_LEVEL
-#define SURFACE_LOG_LEVEL_ERROR   1
-#define SURFACE_LOG_LEVEL_WARN    2
-#define SURFACE_LOG_LEVEL_INFO    3
-#define SURFACE_LOG_LEVEL_DEBUG   4
-#define SURFACE_LOG_LEVEL         SURFACE_LOG_LEVEL_DEBUG  // Default DEBUG level
-#endif
-
-// Unified log macro definitions
-#if SURFACE_LOG_ENABLE
-#define SURFACE_LOG_ERROR(...) \
-        do { \
-            if (SURFACE_LOG_LEVEL >= SURFACE_LOG_LEVEL_ERROR) \
-                __android_log_print(ANDROID_LOG_ERROR, SURFACE_LOG_TAG, __VA_ARGS__); \
-        } while(0)
-
-#define SURFACE_LOG_WARN(...) \
-        do { \
-            if (SURFACE_LOG_LEVEL >= SURFACE_LOG_LEVEL_WARN) \
-                __android_log_print(ANDROID_LOG_WARN, SURFACE_LOG_TAG, __VA_ARGS__); \
-        } while(0)
-
-#define SURFACE_LOG_INFO(...) \
-        do { \
-            if (SURFACE_LOG_LEVEL >= SURFACE_LOG_LEVEL_INFO) \
-                __android_log_print(ANDROID_LOG_INFO, SURFACE_LOG_TAG, __VA_ARGS__); \
-        } while(0)
-
-#define SURFACE_LOG_DEBUG(...) \
-        do { \
-            if (SURFACE_LOG_LEVEL >= SURFACE_LOG_LEVEL_DEBUG) \
-                __android_log_print(ANDROID_LOG_DEBUG, SURFACE_LOG_TAG, __VA_ARGS__); \
-        } while(0)
-
-#define SURFACE_LOG_TRACE(...) \
-        do { \
-            if (SURFACE_LOG_LEVEL >= SURFACE_LOG_LEVEL_DEBUG) \
-                __android_log_print(ANDROID_LOG_DEBUG, SURFACE_LOG_TAG, __VA_ARGS__); \
-        } while(0)
-#else
-#define SURFACE_LOG_ERROR(fmt, ...)   ((void)0)
-    #define SURFACE_LOG_WARN(fmt, ...)    ((void)0)
-    #define SURFACE_LOG_INFO(fmt, ...)    ((void)0)
-    #define SURFACE_LOG_DEBUG(fmt, ...)   ((void)0)
-    #define SURFACE_LOG_TRACE(fmt, ...)   ((void)0)
-#endif
+#define SURFACE_LOG_ERROR(...) ((void)0)
+#define SURFACE_LOG_WARN(...) ((void)0)
+#define SURFACE_LOG_INFO(...) ((void)0)
+#define SURFACE_LOG_DEBUG(...) ((void)0)
+#define SURFACE_LOG_TRACE(...) ((void)0)
 
 #define ResolveMethod(ClassName, MethodName, Handle, MethodSignature)                                                                    \
     ClassName##__##MethodName = reinterpret_cast<decltype(ClassName##__##MethodName)>(symbolMethod.Find(Handle, MethodSignature));       \
