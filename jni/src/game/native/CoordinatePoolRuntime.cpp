@@ -1,6 +1,7 @@
 #include "game/native/CoordinatePoolRuntime.h"
 
 #include "game/native/AlgorithmPositionRuntime.h"
+#include "game/native/CoordinatePoolPolicy.h"
 #include "game/native/MemoryTransport.h"
 #include "game/native/coordinate_pool_internal/FindDec.h"
 
@@ -185,6 +186,7 @@ struct CoordinatePoolRuntime::Impl {
     struct CachedPage {
         std::uint64_t guestAddress = 0;
         std::uint64_t remoteAddress = 0;
+        std::vector<uc_hook> instructionHooks;
     };
 
     struct RingSlot {
@@ -293,7 +295,10 @@ struct CoordinatePoolRuntime::Impl {
             parametersReady = false;
             computedContext = 0;
             lastPoolPointer = 0;
+            poolPointerRefreshFrame =
+                std::numeric_limits<std::uint64_t>::max();
             ringSlots.clear();
+            ringSearchBudget.Reset();
             if (!ClearDynamicPagesUnlocked()) {
                 SetError(CoordinatePoolRuntimeError::EngineSetupFailed);
                 return false;
@@ -334,24 +339,39 @@ struct CoordinatePoolRuntime::Impl {
 
         RingSlot* selected = nullptr;
         auto found = ringSlots.find(component);
-        const bool stale = found != ringSlots.end() &&
-            frame >= found->second.stamp &&
-            frame - found->second.stamp >= layout.ringRefreshFrames;
-        if (found == ringSlots.end() || found->second.ring == 0 || stale) {
+        const bool hasRing = found != ringSlots.end() &&
+            found->second.ring != 0;
+        const bool retryMissing = found == ringSlots.end() ||
+            (!hasRing && ShouldRetryCoordinatePoolRing(
+                found->second.stamp, frame));
+        const bool refreshStale = hasRing &&
+            ShouldRefreshCoordinatePoolRing(
+                component,
+                found->second.stamp,
+                frame,
+                layout.ringRefreshFrames);
+        if ((retryMissing || refreshStale) &&
+            ringSearchBudget.TryConsume(frame)) {
             std::uint64_t ring = 0;
             if (ExecuteRingSearchUnlocked(component, ring)) {
                 RingSlot& slot = ringSlots[component];
                 slot.ring = ring;
                 slot.stamp = frame;
                 selected = &slot;
-            } else if (found != ringSlots.end() && found->second.ring != 0) {
+            } else if (hasRing) {
                 selected = &found->second;
             } else {
+                RingSlot& slot = ringSlots[component];
+                slot.ring = 0;
+                slot.stamp = frame;
                 SetError(CoordinatePoolRuntimeError::RingSearchFailed);
                 return false;
             }
-        } else {
+        } else if (hasRing) {
             selected = &found->second;
+        } else {
+            SetError(CoordinatePoolRuntimeError::RingSearchFailed);
+            return false;
         }
 
         const std::uint64_t indexAddress = NormalizePointer(
@@ -394,6 +414,8 @@ struct CoordinatePoolRuntime::Impl {
             }
         }
         if (!stable || !IsFinitePosition(candidate)) {
+            selected->ring = 0;
+            selected->stamp = frame;
             SetError(CoordinatePoolRuntimeError::PositionReadFailed);
             return false;
         }
@@ -591,6 +613,78 @@ private:
         return true;
     }
 
+    static bool RequiresInstructionHook(std::uint32_t instruction) noexcept {
+        return (instruction & kPacgaMask) == kPacgaOpcode ||
+            (instruction & kSvcMask) == kSvcOpcode;
+    }
+
+    bool RemoveInstructionHooksUnlocked(
+        std::vector<uc_hook>& hooks) noexcept {
+        bool removed = true;
+        if (engine != nullptr) {
+            for (const uc_hook hook : hooks) {
+                removed = uc_hook_del(engine, hook) == UC_ERR_OK && removed;
+            }
+        }
+        hooks.clear();
+        return removed;
+    }
+
+    bool InstallInstructionHooksUnlocked(
+        std::uint64_t guestBase,
+        const std::uint8_t* bytes,
+        std::size_t size,
+        bool includeParameterCaptures,
+        std::vector<uc_hook>& hooks) {
+        if (engine == nullptr || bytes == nullptr || size < 4 ||
+            guestBase > std::numeric_limits<std::uint64_t>::max() - size) {
+            return false;
+        }
+
+        std::vector<std::uint64_t> addresses;
+        addresses.reserve(size / 256 + 8);
+        for (std::size_t offset = 0; offset <= size - 4; offset += 4) {
+            std::uint32_t instruction = 0;
+            std::memcpy(&instruction, bytes + offset, sizeof(instruction));
+            if (RequiresInstructionHook(instruction)) {
+                addresses.push_back(guestBase + offset);
+            }
+        }
+        if (includeParameterCaptures) {
+            for (const auto& parameter : finder->analyze.varParams) {
+                if (parameter.addr != 0 && (parameter.addr & 3U) == 0) {
+                    addresses.push_back(parameter.addr);
+                }
+            }
+        }
+        std::sort(addresses.begin(), addresses.end());
+        addresses.erase(
+            std::unique(addresses.begin(), addresses.end()),
+            addresses.end());
+
+        const std::size_t initialSize = hooks.size();
+        hooks.reserve(initialSize + addresses.size());
+        for (const std::uint64_t address : addresses) {
+            uc_hook hook = 0;
+            if (uc_hook_add(
+                    engine,
+                    &hook,
+                    UC_HOOK_CODE,
+                    reinterpret_cast<void*>(CodeHook),
+                    this,
+                    address,
+                    address) != UC_ERR_OK) {
+                while (hooks.size() > initialSize) {
+                    static_cast<void>(uc_hook_del(engine, hooks.back()));
+                    hooks.pop_back();
+                }
+                return false;
+            }
+            hooks.push_back(hook);
+        }
+        return true;
+    }
+
     bool EnsureEngineUnlocked() {
         if (engine != nullptr) return true;
         if (finder == nullptr || codeBase == 0 || codeSize == 0 ||
@@ -625,14 +719,6 @@ private:
                 0) != UC_ERR_OK ||
             uc_hook_add(
                 engine,
-                &codeHook,
-                UC_HOOK_CODE,
-                reinterpret_cast<void*>(CodeHook),
-                this,
-                1,
-                0) != UC_ERR_OK ||
-            uc_hook_add(
-                engine,
                 &mrsHook,
                 UC_HOOK_INSN,
                 reinterpret_cast<void*>(MrsHook),
@@ -640,6 +726,16 @@ private:
                 1,
                 0,
                 UC_ARM64_INS_MRS) != UC_ERR_OK) {
+            CloseEngineUnlocked();
+            return false;
+        }
+        if (!InstallInstructionHooksUnlocked(
+                codeBase,
+                static_cast<const std::uint8_t*>(
+                    finder->get_shellcode()->data()),
+                codeSize,
+                true,
+                codeHooks)) {
             CloseEngineUnlocked();
             return false;
         }
@@ -835,6 +931,8 @@ private:
     }
 
     void RefreshPoolPointerUnlocked() {
+        if (poolPointerRefreshFrame == frame) return;
+        poolPointerRefreshFrame = frame;
         if (!parametersReady || computedContext == 0 ||
             finder->pool_ptr_offset == 0) {
             return;
@@ -850,6 +948,7 @@ private:
         }
         if (lastPoolPointer != 0 && lastPoolPointer != pointer) {
             ringSlots.clear();
+            ringSearchBudget.Reset();
         }
         lastPoolPointer = pointer;
     }
@@ -922,7 +1021,24 @@ private:
             static_cast<void>(uc_mem_unmap(engine, guestPage, kPageSize));
             return false;
         }
-        dynamicPages.push_back({guestPage, remotePage});
+        CachedPage page{guestPage, remotePage, {}};
+        if (!InstallInstructionHooksUnlocked(
+                guestPage,
+                data.data(),
+                data.size(),
+                false,
+                page.instructionHooks)) {
+            static_cast<void>(uc_mem_unmap(engine, guestPage, kPageSize));
+            return false;
+        }
+        try {
+            dynamicPages.push_back(std::move(page));
+        } catch (...) {
+            static_cast<void>(
+                RemoveInstructionHooksUnlocked(page.instructionHooks));
+            static_cast<void>(uc_mem_unmap(engine, guestPage, kPageSize));
+            throw;
+        }
         return true;
     }
 
@@ -931,9 +1047,10 @@ private:
             dynamicPages.clear();
             return true;
         }
-        for (const CachedPage& page : dynamicPages) {
-            if (uc_mem_unmap(engine, page.guestAddress, kPageSize) !=
-                UC_ERR_OK) {
+        for (CachedPage& page : dynamicPages) {
+            if (!RemoveInstructionHooksUnlocked(page.instructionHooks) ||
+                uc_mem_unmap(engine, page.guestAddress, kPageSize) !=
+                    UC_ERR_OK) {
                 return false;
             }
         }
@@ -1047,7 +1164,10 @@ private:
         computedContext = 0;
         parametersReady = false;
         lastPoolPointer = 0;
+        poolPointerRefreshFrame =
+            std::numeric_limits<std::uint64_t>::max();
         ringSlots.clear();
+        ringSearchBudget.Reset();
         probe.bridge = 0;
         probe.context = 0;
         probe.guestEntry = 0;
@@ -1061,13 +1181,13 @@ private:
     }
 
     void CloseEngineUnlocked() {
-        dynamicPages.clear();
         if (engine != nullptr) {
             static_cast<void>(uc_close(engine));
             engine = nullptr;
         }
+        dynamicPages.clear();
+        codeHooks.clear();
         memoryHook = 0;
-        codeHook = 0;
         mrsHook = 0;
         hookFailed = false;
         captureParameters = false;
@@ -1098,7 +1218,10 @@ private:
         frame = 0;
         lastRootFrame = 0;
         lastPoolPointer = 0;
+        poolPointerRefreshFrame =
+            std::numeric_limits<std::uint64_t>::max();
         ringSlots.clear();
+        ringSearchBudget.Reset();
         probe = {};
         layout = configuredLayout;
     }
@@ -1126,12 +1249,15 @@ private:
     std::uint64_t frame = 0;
     std::uint64_t lastRootFrame = 0;
     std::uint64_t lastPoolPointer = 0;
+    std::uint64_t poolPointerRefreshFrame =
+        std::numeric_limits<std::uint64_t>::max();
     std::unordered_map<std::uint64_t, RingSlot> ringSlots;
+    CoordinatePoolRingSearchBudget ringSearchBudget;
     std::unique_ptr<pool::coord_dec::FindDec> finder;
     uc_engine* engine = nullptr;
     uc_hook memoryHook = 0;
-    uc_hook codeHook = 0;
     uc_hook mrsHook = 0;
+    std::vector<uc_hook> codeHooks;
     std::vector<CachedPage> dynamicPages;
     bool hookFailed = false;
     bool captureParameters = false;

@@ -342,6 +342,7 @@ struct AlgorithmPositionRuntime::Impl {
     struct CachedPage {
         std::uint64_t guestAddress = 0;
         std::uint64_t remoteAddress = 0;
+        std::vector<uc_hook> instructionHooks;
     };
 
     struct PendingExecution {
@@ -886,6 +887,60 @@ private:
             address < kMaximumRemoteAddress;
     }
 
+    static bool RequiresInstructionHook(std::uint32_t instruction) noexcept {
+        return (instruction & kPacgaMask) == kPacgaOpcode ||
+            (instruction & kSvcMask) == kSvcOpcode;
+    }
+
+    bool RemovePageInstructionHooks(CachedPage& page) noexcept {
+        bool removed = true;
+        if (engine_ != nullptr) {
+            for (const uc_hook hook : page.instructionHooks) {
+                removed = uc_hook_del(engine_, hook) == UC_ERR_OK && removed;
+            }
+        }
+        page.instructionHooks.clear();
+        return removed;
+    }
+
+    bool InstallPageInstructionHooks(CachedPage& page,
+                                     const std::uint8_t* bytes,
+                                     std::size_t size) {
+        if (engine_ == nullptr || bytes == nullptr || size < 4 ||
+            page.guestAddress >
+                std::numeric_limits<std::uint64_t>::max() - size) {
+            return false;
+        }
+
+        std::vector<std::uint64_t> addresses;
+        addresses.reserve(size / 256 + 4);
+        for (std::size_t offset = 0; offset <= size - 4; offset += 4) {
+            std::uint32_t instruction = 0;
+            std::memcpy(&instruction, bytes + offset, sizeof(instruction));
+            if (RequiresInstructionHook(instruction)) {
+                addresses.push_back(page.guestAddress + offset);
+            }
+        }
+
+        page.instructionHooks.reserve(addresses.size());
+        for (const std::uint64_t address : addresses) {
+            uc_hook hook = 0;
+            if (uc_hook_add(
+                    engine_,
+                    &hook,
+                    UC_HOOK_CODE,
+                    reinterpret_cast<void*>(CodeHook),
+                    this,
+                    address,
+                    address) != UC_ERR_OK) {
+                static_cast<void>(RemovePageInstructionHooks(page));
+                return false;
+            }
+            page.instructionHooks.push_back(hook);
+        }
+        return true;
+    }
+
     bool EnsureEngine(MemoryTransport& memory) {
         if (engine_ != nullptr && activeContextMemory_ == &memory) {
             return true;
@@ -909,14 +964,6 @@ private:
                     UC_HOOK_MEM_WRITE_UNMAPPED |
                     UC_HOOK_MEM_FETCH_UNMAPPED,
                 reinterpret_cast<void*>(MemoryFaultHook),
-                this,
-                1,
-                0) != UC_ERR_OK ||
-            uc_hook_add(
-                engine_,
-                &codeHook_,
-                UC_HOOK_CODE,
-                reinterpret_cast<void*>(CodeHook),
                 this,
                 1,
                 0) != UC_ERR_OK ||
@@ -952,7 +999,6 @@ private:
         }
         activeContextMemory_ = nullptr;
         memoryHook_ = 0;
-        codeHook_ = 0;
         mrsHook_ = 0;
     }
 
@@ -1032,9 +1078,15 @@ private:
             static_cast<void>(uc_mem_unmap(engine_, guestPage, kPageSize));
             return false;
         }
+        CachedPage page{guestPage, remotePage, {}};
+        if (!InstallPageInstructionHooks(page, data.data(), data.size())) {
+            static_cast<void>(uc_mem_unmap(engine_, guestPage, kPageSize));
+            return false;
+        }
         try {
-            cachedPages_.push_back(CachedPage{guestPage, remotePage});
+            cachedPages_.push_back(std::move(page));
         } catch (...) {
+            static_cast<void>(RemovePageInstructionHooks(page));
             static_cast<void>(uc_mem_unmap(engine_, guestPage, kPageSize));
             throw;
         }
@@ -1047,9 +1099,10 @@ private:
         }
         while (cachedPages_.size() >
                kAlgorithmPositionRetainedCachedPages) {
-            const CachedPage page = cachedPages_.front();
-            if (uc_mem_unmap(engine_, page.guestAddress, kPageSize) !=
-                UC_ERR_OK) {
+            CachedPage& page = cachedPages_.front();
+            if (!RemovePageInstructionHooks(page) ||
+                uc_mem_unmap(engine_, page.guestAddress, kPageSize) !=
+                    UC_ERR_OK) {
                 return false;
             }
             cachedPages_.pop_front();
@@ -1063,9 +1116,10 @@ private:
             return true;
         }
         while (!cachedPages_.empty()) {
-            const CachedPage page = cachedPages_.front();
-            if (uc_mem_unmap(engine_, page.guestAddress, kPageSize) !=
-                UC_ERR_OK) {
+            CachedPage& page = cachedPages_.front();
+            if (!RemovePageInstructionHooks(page) ||
+                uc_mem_unmap(engine_, page.guestAddress, kPageSize) !=
+                    UC_ERR_OK) {
                 return false;
             }
             cachedPages_.pop_front();
@@ -1331,7 +1385,6 @@ private:
     uc_engine* engine_ = nullptr;
     uc_context* baseline_ = nullptr;
     uc_hook memoryHook_ = 0;
-    uc_hook codeHook_ = 0;
     uc_hook mrsHook_ = 0;
     std::deque<CachedPage> cachedPages_;
     AlgorithmPositionResultCache positionCache_;

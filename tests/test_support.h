@@ -13,6 +13,7 @@
     } while (false)
 
 void RunConfigTests();
+void RunCoordinatePoolPolicyTests();
 void RunActorFrameVisitSetTests();
 void RunActorRecordRefreshPolicyTests();
 void RunActorRecordSourceTests();
