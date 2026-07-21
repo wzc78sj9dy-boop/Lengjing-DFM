@@ -341,6 +341,28 @@ void RunAuthSessionTests() {
 
     {
         auto gateway = std::make_shared<FakeAuthGateway>();
+        AuthSessionOptions options;
+        options.heartbeatInterval = 1ms;
+        options.startHeartbeat = false;
+
+        AuthSession session;
+        REQUIRE(session.Login(
+            gateway, "CARD_FOR_TEST", "DEVICE_FOR_TEST", options));
+        std::this_thread::sleep_for(5ms);
+        REQUIRE(gateway->heartbeatCalls.load() == 0);
+        REQUIRE(session.StartHeartbeat());
+        REQUIRE(session.StartHeartbeat());
+        for (int attempt = 0;
+             attempt < 200 && gateway->heartbeatCalls.load() == 0;
+             ++attempt) {
+            std::this_thread::sleep_for(1ms);
+        }
+        REQUIRE(gateway->heartbeatCalls.load() > 0);
+        session.Stop();
+    }
+
+    {
+        auto gateway = std::make_shared<FakeAuthGateway>();
         gateway->variableResult = {true, {}, CloudPayload()};
         AuthSessionOptions options;
         options.cloudVariable = {"CALL_CODE", "VALUE_ID", "VALUE_NAME"};

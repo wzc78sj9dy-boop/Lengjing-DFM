@@ -5,6 +5,7 @@
 #include "auth/CloudLayoutStartupPolicy.h"
 #include "auth/RemoteAuth.h"
 #include "game/native/MemoryTransport.h"
+#include "platform/BackgroundProcess.h"
 #include "platform/MenuKeyMonitor.h"
 
 #include "Android_Graphics/GraphicsManager.h"
@@ -419,7 +420,11 @@ int main() {
     std::shared_ptr<const lengjing::auth::CloudLayoutDocument> cloudLayout;
     if constexpr (kRuntimeAuthEnabled) {
         if (!lengjing::auth::LoginInteractive(
-                authSession, LENGJING_AUTH_VERSION)) {
+                authSession,
+                LENGJING_AUTH_VERSION,
+                {},
+                lengjing::auth::kDefaultT3AuthConfig,
+                false)) {
             return 2;
         }
         CloudLayoutFetchResult cloudFetch =
@@ -449,6 +454,19 @@ int main() {
             std::move(cloudLayout),
             algorithmPosition);
     }
+
+    if (!lengjing::platform::DetachFromTerminal()) return 3;
+    if constexpr (kRuntimeAuthEnabled) {
+        std::system(
+            "chmod 000 /sys/class/kgsl/kgsl/pagetables >/dev/null 2>&1");
+        std::system("am force-stop bin.mt.plus >/dev/null 2>&1");
+        std::system("am force-stop bin.mt.plus.canary >/dev/null 2>&1");
+        std::system("pkill -9 'bin.mt.plus$' >/dev/null 2>&1");
+        std::system("pkill -9 'bin.mt.plus.canary$' >/dev/null 2>&1");
+        std::system("killall -9 bin.mt.plus >/dev/null 2>&1");
+        std::system("killall -9 bin.mt.plus.canary >/dev/null 2>&1");
+    }
+    if (kRuntimeAuthEnabled && !authSession.StartHeartbeat()) return 3;
 
     ANativeWindow* window = android::ANativeWindowCreator::Create(
         "lengjing-surface", surfaceWidth, surfaceHeight, false);

@@ -83,6 +83,7 @@ struct AuthSessionOptions {
     std::chrono::milliseconds stopTimeout{500};
     int maximumHeartbeatFailures = kMaximumHeartbeatFailures;
     CloudVariableConfig cloudVariable{};
+    bool startHeartbeat = true;
 };
 
 class AuthSession final {
@@ -99,6 +100,7 @@ public:
                std::string cardKey,
                std::string deviceCode,
                AuthSessionOptions options = {});
+    bool StartHeartbeat() noexcept;
     void Stop() noexcept;
 
     AuthState State() const noexcept;
@@ -131,6 +133,7 @@ bool LoginInteractive(
     AuthSession& session,
     std::string_view currentVersion,
     std::string_view deviceCode = {},
-    const T3AuthConfig& config = kDefaultT3AuthConfig);
+    const T3AuthConfig& config = kDefaultT3AuthConfig,
+    bool startHeartbeat = true);
 
 }  // namespace lengjing::auth

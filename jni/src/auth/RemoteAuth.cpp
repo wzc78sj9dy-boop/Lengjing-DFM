@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <initializer_list>
 #include <iostream>
@@ -205,6 +206,46 @@ std::string ReadSystemProperty(const char* name) {
     std::string value(buffer, static_cast<std::size_t>(length));
     value = Trimmed(std::move(value));
     return value == "null" || value == "unknown" ? std::string{} : value;
+}
+
+constexpr const char* kDeviceCodePath = "/data/adb/.lengjing_device";
+
+bool IsPersistableDeviceCode(std::string_view value) noexcept {
+    return !value.empty() && value.size() <= 256U &&
+        std::all_of(value.begin(), value.end(), [](unsigned char character) {
+            return character >= 0x21U && character <= 0x7eU;
+        });
+}
+
+std::string ReadPersistedDeviceCode() {
+    std::ifstream stream(kDeviceCodePath, std::ios::binary);
+    std::string value;
+    if (stream && std::getline(stream, value)) {
+        value = Trimmed(std::move(value));
+        if (IsPersistableDeviceCode(value)) return value;
+    }
+    return {};
+}
+
+void PersistDeviceCode(const std::string& deviceCode) noexcept {
+    if (!IsPersistableDeviceCode(deviceCode)) return;
+    const std::string temporaryPath =
+        std::string(kDeviceCodePath) + ".tmp." + std::to_string(getpid());
+    {
+        std::ofstream stream(
+            temporaryPath, std::ios::binary | std::ios::trunc);
+        if (!stream) return;
+        stream << deviceCode << '\n';
+        stream.flush();
+        if (!stream) {
+            stream.close();
+            std::remove(temporaryPath.c_str());
+            return;
+        }
+    }
+    if (std::rename(temporaryPath.c_str(), kDeviceCodePath) != 0) {
+        std::remove(temporaryPath.c_str());
+    }
 }
 #endif
 
@@ -579,18 +620,30 @@ bool AuthSession::Login(std::shared_ptr<AuthGateway> gateway,
         runtime_->expiresAt = std::move(result.expiresAt);
     }
     runtime_->state.store(AuthState::Valid, std::memory_order_release);
+    if (options.startHeartbeat && !StartHeartbeat()) return false;
+    return true;
+}
+
+bool AuthSession::StartHeartbeat() noexcept {
+    if (runtime_ == nullptr || !IsValid()) return false;
+    {
+        std::lock_guard<std::mutex> lock(runtime_->waitMutex);
+        if (runtime_->heartbeatStarted && !runtime_->heartbeatFinished) {
+            return true;
+        }
+    }
+    if (runtime_->heartbeatThread.joinable()) return false;
+
     try {
         runtime_->StartHeartbeat(runtime_);
+        return true;
     } catch (const std::exception& exception) {
         runtime_->SetInvalid(exception.what());
-        runtime_->Stop();
-        return false;
     } catch (...) {
         runtime_->SetInvalid("failed to start heartbeat thread");
-        runtime_->Stop();
-        return false;
     }
-    return true;
+    runtime_->Stop();
+    return false;
 }
 
 void AuthSession::Stop() noexcept {
@@ -710,6 +763,9 @@ CloudVersionStatus CheckCloudVersion(
 
 std::string ResolveDeviceCode() {
 #if defined(__ANDROID__)
+    const std::string persisted = ReadPersistedDeviceCode();
+    if (!persisted.empty()) return persisted;
+
     std::string androidId =
         ReadCommandValue("settings get secure android_id 2>/dev/null");
     const bool validAndroidId = androidId.size() >= 8 &&
@@ -728,10 +784,17 @@ std::string ResolveDeviceCode() {
     std::string serial = ReadSystemProperty("ro.serialno");
     if (serial.empty()) serial = ReadSystemProperty("ro.boot.serialno");
     if (!androidId.empty() || !serial.empty()) {
-        return StableDeviceHash(androidId + "|" + serial);
+        const std::string resolved =
+            StableDeviceHash(androidId + "|" + serial);
+        PersistDeviceCode(resolved);
+        return resolved;
     }
 #endif
-    return getMachineCode();
+    const std::string resolved = getMachineCode();
+#if defined(__ANDROID__)
+    PersistDeviceCode(resolved);
+#endif
+    return resolved;
 }
 
 CloudRuntimeIdentity ResolveCloudRuntimeIdentity(
@@ -746,7 +809,8 @@ CloudRuntimeIdentity ResolveCloudRuntimeIdentity(
 bool LoginInteractive(AuthSession& session,
                       std::string_view currentVersion,
                       std::string_view deviceCode,
-                      const T3AuthConfig& config) {
+                      const T3AuthConfig& config,
+                      bool startHeartbeat) {
     std::string error;
     std::shared_ptr<AuthGateway> gateway = CreateT3Gateway(config, error);
     if (gateway == nullptr) {
@@ -795,6 +859,7 @@ bool LoginInteractive(AuthSession& session,
 
     AuthSessionOptions options;
     options.cloudVariable = config.cloudVariable;
+    options.startHeartbeat = startHeartbeat;
     if (!session.Login(std::move(gateway), std::move(card.value),
                        std::move(resolvedDeviceCode), options)) {
         const std::string detail = session.LastError();
