@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game/CoordinateDecryptDiagnostics.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -87,6 +89,8 @@ struct CoordinatePoolRuntimeProbe {
     std::uint64_t contextGeneration = 0;
     std::uint64_t attempts = 0;
     std::uint64_t successes = 0;
+    int systemError = 0;
+    CoordinateReadDiagnostic read{};
 };
 
 class CoordinatePoolRuntime final {

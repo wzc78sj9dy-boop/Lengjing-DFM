@@ -85,6 +85,42 @@ void TestMemoryTransportModePolicy() {
     CHECK(IsKernelMemoryTransportMode(MemoryTransportMode::PrivateRpc));
 }
 
+void TestCoordinateReadPolicy() {
+    using lengjing::game::CoordinateReadPath;
+    using lengjing::game::TryCoordinateReadPaths;
+    using lengjing::game::kCoordinateReadPathOrder;
+
+    CHECK(kCoordinateReadPathOrder.size() == 2);
+    CHECK(kCoordinateReadPathOrder[0] == CoordinateReadPath::ProcessVm);
+    CHECK(kCoordinateReadPathOrder[1] == CoordinateReadPath::ProcMem);
+
+    std::vector<CoordinateReadPath> attempted;
+    CHECK(TryCoordinateReadPaths([&](CoordinateReadPath path) {
+        attempted.push_back(path);
+        return path == CoordinateReadPath::ProcMem;
+    }));
+    CHECK((attempted == std::vector<CoordinateReadPath>{
+        CoordinateReadPath::ProcessVm,
+        CoordinateReadPath::ProcMem,
+    }));
+
+    attempted.clear();
+    CHECK(TryCoordinateReadPaths([&](CoordinateReadPath path) {
+        attempted.push_back(path);
+        return true;
+    }));
+    CHECK((attempted == std::vector<CoordinateReadPath>{
+        CoordinateReadPath::ProcessVm,
+    }));
+
+    attempted.clear();
+    CHECK(!TryCoordinateReadPaths([&](CoordinateReadPath path) {
+        attempted.push_back(path);
+        return false;
+    }));
+    CHECK(attempted.size() == 2);
+}
+
 void TestSingleMemoryTransfers() {
     KernelRpcTransport transport(&FakeSyscall);
     std::uint32_t destination = 0;
@@ -347,6 +383,7 @@ void TestBatchReadPartialSuccess() {
 int main() {
     try {
         TestMemoryTransportModePolicy();
+        TestCoordinateReadPolicy();
         TestErrorNormalization();
         TestSingleMemoryTransfers();
         TestMetadataOperations();

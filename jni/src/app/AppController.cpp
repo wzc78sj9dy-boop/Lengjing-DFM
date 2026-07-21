@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cmath>
 #include <iterator>
 #include <limits>
@@ -314,12 +315,17 @@ void AppController::StartRuntime() {
     runtime_.SetAimEnabled(game::aim::IsAimOutputRequested(
         model_.aim.enabled, model_.aim.trajectoryTracking));
     if (!runtime_.Start(BuildRuntimeOptions())) {
-        AppendLog("运行模块无法启动");
+        AppendLog(game::FormatRuntimeDiagnostic(
+            game::RuntimeError::StartRejected,
+            -EBUSY));
         return;
     }
     coordinateDecryptSuccessNotified_ = false;
     lastReportedCoordinateError_ = game::CoordinateDecryptError::None;
     lastReportedCoordinateSystemError_ = 0;
+    lastReportedCoordinateRead_ = {};
+    lastReportedRuntimeError_ = game::RuntimeError::None;
+    lastReportedRuntimeSystemError_ = 0;
     terminalWorkerJoined_ = false;
 }
 
@@ -540,6 +546,9 @@ void AppController::SyncRuntimeStatus() {
     model_.runtime.coordinateErrorCode =
         game::CoordinateDecryptErrorCode(status.coordinateError);
     model_.runtime.coordinateSystemError = status.coordinateSystemError;
+    model_.runtime.runtimeErrorCode =
+        game::RuntimeErrorCode(status.runtimeError);
+    model_.runtime.runtimeSystemError = status.runtimeSystemError;
     const CoordinateDecryptPresentation nextDecryptPresentation =
         ResolveCoordinateDecryptPresentation(
             status.coordinateRequested,
@@ -573,10 +582,6 @@ void AppController::SyncRuntimeStatus() {
             AppendLog("正在停止运行模块");
             break;
         case game::RuntimePhase::Faulted:
-            if (status.coordinateError ==
-                game::CoordinateDecryptError::None) {
-                AppendLog(RuntimeFaultText());
-            }
             break;
         }
     }
@@ -585,25 +590,50 @@ void AppController::SyncRuntimeStatus() {
         status.coordinateError != game::CoordinateDecryptError::None &&
         (status.coordinateError != lastReportedCoordinateError_ ||
          status.coordinateSystemError !=
-             lastReportedCoordinateSystemError_);
+             lastReportedCoordinateSystemError_ ||
+         status.coordinateRead != lastReportedCoordinateRead_);
     if (coordinateDiagnosticChanged) {
         AppendLog(game::FormatCoordinateDecryptDiagnostic(
             status.coordinateError,
-            status.coordinateSystemError));
+            status.coordinateSystemError,
+            status.coordinateRead));
         lastReportedCoordinateError_ = status.coordinateError;
         lastReportedCoordinateSystemError_ =
             status.coordinateSystemError;
+        lastReportedCoordinateRead_ = status.coordinateRead;
     } else if (status.coordinateError ==
-                   game::CoordinateDecryptError::None &&
-               !status.message.empty() && lastStatus_.message.empty()) {
-        AppendLog(RuntimeDataUnavailableText());
-    } else if (status.coordinateError ==
-                   game::CoordinateDecryptError::None &&
-               lastStatus_.coordinateError ==
-                   game::CoordinateDecryptError::None &&
-               status.phase == game::RuntimePhase::Running &&
-               status.message.empty() && !lastStatus_.message.empty()) {
-        AppendLog(RuntimeDataRestoredText());
+               game::CoordinateDecryptError::None) {
+        lastReportedCoordinateError_ = game::CoordinateDecryptError::None;
+        lastReportedCoordinateSystemError_ = 0;
+        lastReportedCoordinateRead_ = {};
+    }
+
+    const game::RuntimeError reportedRuntimeError =
+        status.runtimeError != game::RuntimeError::None
+        ? status.runtimeError
+        : (!status.message.empty() &&
+           status.coordinateError == game::CoordinateDecryptError::None
+            ? game::RuntimeError::FrameDataUnavailable
+            : game::RuntimeError::None);
+    const bool runtimeDiagnosticChanged =
+        reportedRuntimeError != game::RuntimeError::None &&
+        (reportedRuntimeError != lastReportedRuntimeError_ ||
+         status.runtimeSystemError != lastReportedRuntimeSystemError_);
+    if (runtimeDiagnosticChanged) {
+        AppendLog(game::FormatRuntimeDiagnostic(
+            reportedRuntimeError,
+            status.runtimeSystemError));
+        lastReportedRuntimeError_ = reportedRuntimeError;
+        lastReportedRuntimeSystemError_ = status.runtimeSystemError;
+    } else if (reportedRuntimeError == game::RuntimeError::None) {
+        if (status.phase == game::RuntimePhase::Running &&
+            status.message.empty() && !lastStatus_.message.empty() &&
+            lastStatus_.coordinateError ==
+                game::CoordinateDecryptError::None) {
+            AppendLog(RuntimeDataRestoredText());
+        }
+        lastReportedRuntimeError_ = game::RuntimeError::None;
+        lastReportedRuntimeSystemError_ = 0;
     }
 
     lastStatus_ = status;

@@ -71,35 +71,37 @@ bool IsRemoteRangeValid(std::uintptr_t address, std::size_t size) {
         size <= kMaximumRemoteAddress - address;
 }
 
-bool ProcessVmTransferExact(
+struct MemoryTransferResult {
+    int status = 0;
+    std::size_t completed = 0;
+};
+
+MemoryTransferResult ProcessVmTransferExact(
     pid_t processId,
     std::uintptr_t address,
     void* localBuffer,
-    std::size_t size
-#if LENGJING_ENABLE_PROJECTILE_TRACKING
-    ,
+    std::size_t size,
     bool write) {
-#else
-    ) {
-#endif
     auto* bytes = static_cast<std::uint8_t*>(localBuffer);
-    std::size_t completed = 0;
-    while (completed < size) {
+    MemoryTransferResult transfer{};
+    while (transfer.completed < size) {
         iovec local{
-            bytes + completed,
-            size - completed,
+            bytes + transfer.completed,
+            size - transfer.completed,
         };
         iovec remote{
-            reinterpret_cast<void*>(address + completed),
-            size - completed,
+            reinterpret_cast<void*>(address + transfer.completed),
+            size - transfer.completed,
         };
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
         const long callNumber = write
             ? __NR_process_vm_writev
             : __NR_process_vm_readv;
 #else
+        static_cast<void>(write);
         constexpr long callNumber = __NR_process_vm_readv;
 #endif
+        errno = 0;
         const ssize_t result = static_cast<ssize_t>(syscall(
             callNumber,
             processId,
@@ -109,15 +111,60 @@ bool ProcessVmTransferExact(
             1UL,
             0UL));
         if (result > 0) {
-            completed += static_cast<std::size_t>(result);
+            transfer.completed += static_cast<std::size_t>(result);
             continue;
         }
         if (result < 0 && errno == EINTR) {
             continue;
         }
-        return false;
+        transfer.status = result == 0
+            ? -ENODATA
+            : (errno != 0 ? -errno : -EIO);
+        return transfer;
     }
-    return true;
+    return transfer;
+}
+
+MemoryTransferResult ProcessMemReadExact(
+    int descriptor,
+    std::uintptr_t address,
+    void* localBuffer,
+    std::size_t size) {
+    auto* bytes = static_cast<std::uint8_t*>(localBuffer);
+    MemoryTransferResult transfer{};
+    while (transfer.completed < size) {
+        errno = 0;
+        const ssize_t result = ::pread(
+            descriptor,
+            bytes + transfer.completed,
+            size - transfer.completed,
+            static_cast<off_t>(address + transfer.completed));
+        if (result > 0) {
+            transfer.completed += static_cast<std::size_t>(result);
+            continue;
+        }
+        if (result < 0 && errno == EINTR) continue;
+        transfer.status = result == 0
+            ? -ENODATA
+            : (errno != 0 ? -errno : -EIO);
+        return transfer;
+    }
+    return transfer;
+}
+
+CoordinateReadFailure ClassifyCoordinateReadFailure(
+    CoordinateReadFailure fallback,
+    const MemoryTransferResult& transfer) noexcept {
+    if (transfer.status == -EACCES || transfer.status == -EPERM) {
+        return CoordinateReadFailure::PermissionDenied;
+    }
+    if (transfer.status == -EFAULT) {
+        return CoordinateReadFailure::AddressFault;
+    }
+    if (transfer.status == -ENODATA || transfer.completed != 0) {
+        return CoordinateReadFailure::ShortRead;
+    }
+    return fallback;
 }
 
 std::string MutableName(std::string_view value) {
@@ -225,6 +272,7 @@ struct MemoryTransport::Impl {
     std::unique_ptr<KernelRpcTransport> privateRpc;
     kernel_rpc_abi::ProcessHandle privateProcessHandle =
         kernel_rpc_abi::kInvalidProcessHandle;
+    int processMemFd = -1;
     int threadContextFd = -1;
     std::unique_ptr<ThreadContextDeviceTransport> threadContextTransport;
     std::unique_ptr<ThreadExecutionContextProvider> threadContextProvider;
@@ -238,6 +286,7 @@ struct MemoryTransport::Impl {
     bool ptraceOracleOperandsResolved = false;
     CoordinateDecryptError ptraceOracleFailure =
         CoordinateDecryptError::PtraceOracleResolveFailed;
+    int ptraceOracleSystemError = 0;
     std::chrono::steady_clock::time_point nextThreadContextOpen{};
     std::chrono::steady_clock::time_point nextPtraceOracleResolve{};
     CoordinateReplayTransportLayout coordinateReplayLayout{};
@@ -263,6 +312,7 @@ struct MemoryTransport::Impl {
         ptraceOracleOperandsResolved = false;
         ptraceOracleFailure =
             CoordinateDecryptError::PtraceOracleResolveFailed;
+        ptraceOracleSystemError = 0;
         nextThreadContextOpen = {};
         nextPtraceOracleResolve = {};
         coordinateReplayLayout = {};
@@ -273,6 +323,10 @@ struct MemoryTransport::Impl {
         }
         privateRpc.reset();
         privateProcessHandle = kernel_rpc_abi::kInvalidProcessHandle;
+        if (processMemFd >= 0) {
+            ::close(processMemFd);
+            processMemFd = -1;
+        }
         delete kernel;
         kernel = nullptr;
         mode = MemoryTransportMode::ProcessVm;
@@ -350,24 +404,11 @@ struct MemoryTransport::Impl {
         nextPtraceOracleResolve = now + std::chrono::seconds(1);
         ptraceOracleFailure =
             CoordinateDecryptError::PtraceOracleResolveFailed;
+        ptraceOracleSystemError = 0;
         ptraceOracleOperandsResolved = false;
 
-        std::uintptr_t moduleBase = 0;
-        if (mode == MemoryTransportMode::KernelDriver && kernel != nullptr) {
-            moduleBase = kernel->get_module_base("libUE4.so");
-        } else if (mode == MemoryTransportMode::PrivateRpc &&
-                   privateRpc != nullptr &&
-                   privateProcessHandle !=
-                       kernel_rpc_abi::kInvalidProcessHandle) {
-            std::uint64_t resolved = 0;
-            if (privateRpc->FindModuleBase(
-                    privateProcessHandle, "libUE4.so", resolved) == 0) {
-                moduleBase = static_cast<std::uintptr_t>(resolved);
-            }
-        }
-        if (!IsRemoteRangeValid(moduleBase, 4)) {
-            moduleBase = FindMappedModuleBase(processId, "libUE4.so");
-        }
+        const std::uintptr_t moduleBase =
+            FindMappedModuleBase(processId, "libUE4.so");
         if (!IsRemoteRangeValid(moduleBase, 4) ||
             coordinateReplayLayout.rootRva >
                 std::numeric_limits<std::uintptr_t>::max() - moduleBase ||
@@ -376,11 +417,23 @@ struct MemoryTransport::Impl {
                     coordinateReplayLayout.rootRva) {
             ptraceOracleInstruction = {};
             ptraceOracleFailure = CoordinateDecryptError::RootReadFailed;
+            ptraceOracleSystemError = -ERANGE;
             return false;
         }
 
+        const auto readCoordinate = [this](
+                                        std::uintptr_t address,
+                                        void* destination,
+                                        std::size_t size) {
+            CoordinateReadDiagnostic diagnostic{};
+            const bool read = ReadCoordinateMemoryUnlocked(
+                address, destination, size, diagnostic);
+            if (!read) ptraceOracleSystemError = diagnostic.systemError;
+            return read;
+        };
+
         std::uint64_t rawBridge = 0;
-        if (!ReadUnlocked(
+        if (!readCoordinate(
                 moduleBase + coordinateReplayLayout.rootRva +
                     coordinateReplayLayout.bridgeOffset,
                 &rawBridge,
@@ -398,11 +451,12 @@ struct MemoryTransport::Impl {
                 sizeof(std::uint64_t))) {
             ptraceOracleInstruction = {};
             ptraceOracleFailure = CoordinateDecryptError::RootReadFailed;
+            ptraceOracleSystemError = -ERANGE;
             return false;
         }
 
         std::uint64_t rawEntry = 0;
-        if (!ReadUnlocked(
+        if (!readCoordinate(
                 bridge + coordinateReplayLayout.entryOffset,
                 &rawEntry,
                 sizeof(rawEntry))) {
@@ -419,12 +473,13 @@ struct MemoryTransport::Impl {
             ptraceOracleInstruction = {};
             ptraceOracleFailure =
                 CoordinateDecryptError::EntryMappingMissing;
+            ptraceOracleSystemError = -ENOENT;
             return false;
         }
 
-        const auto scan = [this](std::uintptr_t begin,
-                                 std::uintptr_t end,
-                                 std::uintptr_t& found) {
+        const auto scan = [&readCoordinate](std::uintptr_t begin,
+                                            std::uintptr_t end,
+                                            std::uintptr_t& found) {
             found = 0;
             begin = (begin + 3U) & ~std::uintptr_t{3U};
             if (end <= begin) return false;
@@ -433,7 +488,7 @@ struct MemoryTransport::Impl {
                 const std::size_t remaining =
                     static_cast<std::size_t>(end - cursor);
                 const std::size_t size = std::min(bytes.size(), remaining);
-                if (!ReadUnlocked(cursor, bytes.data(), size)) return false;
+                if (!readCoordinate(cursor, bytes.data(), size)) return false;
                 for (std::size_t offset = 0;
                      offset + sizeof(std::uint32_t) <= size;
                      offset += sizeof(std::uint32_t)) {
@@ -480,7 +535,7 @@ struct MemoryTransport::Impl {
             operandInstructions{};
         const bool operandsRead =
             operandInstructionCount <= operandInstructions.size() &&
-            ReadUnlocked(
+            readCoordinate(
                 operandWindowStart,
                 operandInstructions.data(),
                 operandInstructionCount * sizeof(std::uint32_t));
@@ -511,11 +566,17 @@ struct MemoryTransport::Impl {
     bool Open(int modeIndex,
               pid_t targetProcessId,
               std::string_view processName,
+              RuntimeDiagnostic& diagnostic,
               std::string& error) {
         std::lock_guard<std::mutex> lock(ioMutex);
         ResetUnlocked();
+        diagnostic = {};
         if (!IsValidMemoryTransportMode(modeIndex) || targetProcessId <= 0) {
             error = "内存读取模式参数无效";
+            diagnostic = {
+                RuntimeError::MemoryModeInvalid,
+                -EINVAL,
+            };
             return false;
         }
 
@@ -529,12 +590,18 @@ struct MemoryTransport::Impl {
                 break;
             case MemoryTransportMode::KernelDriver:
                 if (!EnsureKernelDriverReady(error)) {
+                    diagnostic.error =
+                        RuntimeError::KernelDriverSetupFailed;
                     ResetUnlocked();
                     return false;
                 }
                 kernel = new (std::nothrow) paradise_driver();
                 if (kernel == nullptr) {
                     error = "无法创建内核读取接口";
+                    diagnostic = {
+                        RuntimeError::KernelInterfaceCreateFailed,
+                        -ENOMEM,
+                    };
                     ResetUnlocked();
                     return false;
                 }
@@ -547,6 +614,10 @@ struct MemoryTransport::Impl {
                 privateRpc.reset(new (std::nothrow) KernelRpcTransport());
                 if (privateRpc == nullptr) {
                     error = "无法创建内核 RPC 接口";
+                    diagnostic = {
+                        RuntimeError::PrivateRpcCreateFailed,
+                        -ENOMEM,
+                    };
                     ResetUnlocked();
                     return false;
                 }
@@ -556,11 +627,19 @@ struct MemoryTransport::Impl {
                 if (result != 0) {
                     error = "内核 RPC 接口不可用: " +
                         RpcFailureText(result);
+                    diagnostic = {
+                        RuntimeError::PrivateRpcProcessLookupFailed,
+                        result,
+                    };
                     ResetUnlocked();
                     return false;
                 }
                 if (resolvedProcessId != processId) {
                     error = "内核 RPC 返回的进程标识不匹配";
+                    diagnostic = {
+                        RuntimeError::PrivateRpcProcessMismatch,
+                        -ESRCH,
+                    };
                     ResetUnlocked();
                     return false;
                 }
@@ -571,6 +650,12 @@ struct MemoryTransport::Impl {
                         ? "内核 RPC 进程附加协议尚未解析"
                         : "内核 RPC 无法附加目标进程: " +
                             RpcFailureText(attachResult);
+                    diagnostic = {
+                        attachResult == -ENOTSUP
+                            ? RuntimeError::PrivateRpcAttachUnsupported
+                            : RuntimeError::PrivateRpcAttachFailed,
+                        attachResult,
+                    };
                     ResetUnlocked();
                     return false;
                 }
@@ -582,14 +667,109 @@ struct MemoryTransport::Impl {
             case MemoryTransportMode::Count:
             default:
                 error = "内存读取模式参数无效";
+                diagnostic = {
+                    RuntimeError::MemoryModeInvalid,
+                    -EINVAL,
+                };
                 ResetUnlocked();
                 return false;
         }
 
         static_cast<void>(OpenThreadContextUnlocked());
         open = true;
+        diagnostic = {};
         error.clear();
         return true;
+    }
+
+    int OpenProcessMemUnlocked() {
+        if (processMemFd >= 0) return 0;
+        const std::string path =
+            "/proc/" + std::to_string(processId) + "/mem";
+        errno = 0;
+        processMemFd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        return processMemFd >= 0
+            ? 0
+            : (errno != 0 ? -errno : -EIO);
+    }
+
+    bool AttemptCoordinateReadUnlocked(
+        CoordinateReadPath path,
+        std::uintptr_t address,
+        void* destination,
+        std::size_t size,
+        CoordinateReadDiagnostic& diagnostic) {
+        const bool primaryAttempt = diagnostic.attemptCount == 0;
+        diagnostic.lastPath = path;
+        diagnostic.attemptedPaths |= CoordinateReadPathMask(path);
+        ++diagnostic.attemptCount;
+
+        MemoryTransferResult transfer{};
+        CoordinateReadFailure fallback =
+            CoordinateReadFailure::TransportUnavailable;
+        switch (path) {
+            case CoordinateReadPath::ProcessVm:
+                fallback = CoordinateReadFailure::ProcessVmReadFailed;
+                transfer = ProcessVmTransferExact(
+                    processId, address, destination, size, false);
+                break;
+            case CoordinateReadPath::ProcMem: {
+                const int openStatus = OpenProcessMemUnlocked();
+                if (openStatus != 0) {
+                    transfer.status = openStatus;
+                    fallback = CoordinateReadFailure::ProcMemOpenFailed;
+                } else {
+                    transfer = ProcessMemReadExact(
+                        processMemFd, address, destination, size);
+                    fallback = CoordinateReadFailure::ProcMemReadFailed;
+                }
+                break;
+            }
+            case CoordinateReadPath::None:
+                transfer.status = -EINVAL;
+                break;
+        }
+
+        if (primaryAttempt) {
+            diagnostic.primaryCompleted = transfer.completed;
+            diagnostic.primarySystemError = transfer.status;
+        }
+        diagnostic.lastCompleted = transfer.completed;
+        diagnostic.lastSystemError = transfer.status;
+        diagnostic.systemError = transfer.status;
+        diagnostic.failure =
+            ClassifyCoordinateReadFailure(fallback, transfer);
+        if (transfer.status != 0 || transfer.completed != size) return false;
+        diagnostic.failure = CoordinateReadFailure::None;
+        diagnostic.systemError = 0;
+        return true;
+    }
+
+    bool ReadCoordinateMemoryUnlocked(
+        std::uintptr_t address,
+        void* destination,
+        std::size_t size,
+        CoordinateReadDiagnostic& diagnostic) {
+        diagnostic = {};
+        diagnostic.address = address;
+        diagnostic.size = size;
+        if (!open) {
+            diagnostic.failure =
+                CoordinateReadFailure::TransportUnavailable;
+            diagnostic.systemError = -ENODEV;
+            return false;
+        }
+        if (destination == nullptr || !IsRemoteRangeValid(address, size)) {
+            diagnostic.failure = CoordinateReadFailure::InvalidRange;
+            diagnostic.systemError = -EINVAL;
+            return false;
+        }
+
+        diagnostic.primaryPath = kCoordinateReadPathOrder.front();
+        return TryCoordinateReadPaths([&](CoordinateReadPath path) {
+            return AttemptCoordinateReadUnlocked(
+                path, address, destination, size, diagnostic);
+        });
     }
 
     bool ReadUnlocked(std::uintptr_t address,
@@ -602,11 +782,7 @@ struct MemoryTransport::Impl {
 
         if (mode == MemoryTransportMode::ProcessVm) {
             return ProcessVmTransferExact(
-                processId, address, destination, size
-#if LENGJING_ENABLE_PROJECTILE_TRACKING
-                , false
-#endif
-            );
+                processId, address, destination, size, false).status == 0;
         }
         if (mode == MemoryTransportMode::KernelDriver) {
             return kernel != nullptr &&
@@ -622,6 +798,16 @@ struct MemoryTransport::Impl {
     bool Read(std::uintptr_t address, void* destination, std::size_t size) {
         std::lock_guard<std::mutex> lock(ioMutex);
         return ReadUnlocked(address, destination, size);
+    }
+
+    bool ReadCoordinateMemory(
+        std::uintptr_t address,
+        void* destination,
+        std::size_t size,
+        CoordinateReadDiagnostic& diagnostic) {
+        std::lock_guard<std::mutex> lock(ioMutex);
+        return ReadCoordinateMemoryUnlocked(
+            address, destination, size, diagnostic);
     }
 
     bool ReadAtGeneration(std::uint64_t expectedGeneration,
@@ -708,7 +894,7 @@ struct MemoryTransport::Impl {
                 address,
                 const_cast<void*>(source),
                 size,
-                true);
+                true).status == 0;
         }
         if (mode == MemoryTransportMode::KernelDriver) {
             return kernel != nullptr &&
@@ -777,6 +963,7 @@ struct MemoryTransport::Impl {
         ptraceOracleOperandsResolved = false;
         ptraceOracleFailure =
             CoordinateDecryptError::PtraceOracleResolveFailed;
+        ptraceOracleSystemError = 0;
         executionContextSource = ProcessExecutionContextSource::None;
         executionContextDiagnostic = {};
         nextPtraceOracleResolve = {};
@@ -869,7 +1056,8 @@ struct MemoryTransport::Impl {
         if (!ResolvePtraceOracleInstructionUnlocked(instruction)) {
             executionContextDiagnostic.pacgaOperandsResolved =
                 ptraceOracleOperandsResolved;
-            setPtraceFailure(ptraceOracleFailure, 0);
+            setPtraceFailure(
+                ptraceOracleFailure, ptraceOracleSystemError);
             return false;
         }
         executionContextDiagnostic.pacgaOperandsResolved =
@@ -953,9 +1141,17 @@ MemoryTransport::~MemoryTransport() = default;
 bool MemoryTransport::Open(int modeIndex,
                            pid_t processId,
                            std::string_view processName,
+                           RuntimeDiagnostic& diagnostic,
                            std::string& error) {
-    return impl_ != nullptr &&
-        impl_->Open(modeIndex, processId, processName, error);
+    if (impl_ == nullptr) {
+        diagnostic = {
+            RuntimeError::BackendUnavailable,
+            -ENODEV,
+        };
+        error.clear();
+        return false;
+    }
+    return impl_->Open(modeIndex, processId, processName, diagnostic, error);
 }
 
 void MemoryTransport::Close() noexcept {
@@ -967,6 +1163,24 @@ bool MemoryTransport::Read(
     void* destination,
     std::size_t size) {
     return impl_ != nullptr && impl_->Read(address, destination, size);
+}
+
+bool MemoryTransport::ReadCoordinateMemory(
+    std::uintptr_t address,
+    void* destination,
+    std::size_t size,
+    CoordinateReadDiagnostic& diagnostic) {
+    if (impl_ == nullptr) {
+        diagnostic = {};
+        diagnostic.address = address;
+        diagnostic.size = size;
+        diagnostic.failure =
+            CoordinateReadFailure::TransportUnavailable;
+        diagnostic.systemError = -ENODEV;
+        return false;
+    }
+    return impl_->ReadCoordinateMemory(
+        address, destination, size, diagnostic);
 }
 
 std::size_t MemoryTransport::ReadBatch(

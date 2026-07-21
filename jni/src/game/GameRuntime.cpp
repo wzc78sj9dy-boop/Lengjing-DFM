@@ -12,6 +12,15 @@ namespace {
 constexpr auto kDataFrameInterval = std::chrono::nanoseconds(
     1'000'000'000LL / 120LL);
 
+void EnsureRuntimeFailure(
+    RuntimeProbe& probe,
+    RuntimeError fallback) noexcept {
+    if (probe.runtimeError == RuntimeError::None) {
+        probe.runtimeError = fallback;
+        probe.runtimeSystemError = 0;
+    }
+}
+
 }  // namespace
 
 GameRuntime::GameRuntime(std::unique_ptr<GameBackend> backend)
@@ -111,6 +120,7 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
     std::string error;
     try {
         if (!backend_->Open(options, probe, error)) {
+            EnsureRuntimeFailure(probe, RuntimeError::BackendOpenFailed);
             SetStatus(RuntimePhase::Stopping, probe, error);
             CloseBackendUntilSafe();
             SetStatus(RuntimePhase::Faulted, probe, std::move(error));
@@ -154,10 +164,17 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
             error.clear();
             if (!backend_->ReadFrame(settings, *frame, probe, error)) {
                 if (stopRequested_.load(std::memory_order_acquire)) break;
+                EnsureRuntimeFailure(
+                    probe, RuntimeError::BackendReadFailed);
                 SetStatus(RuntimePhase::Stopping, probe, error);
                 CloseBackendUntilSafe();
                 SetStatus(RuntimePhase::Faulted, probe, std::move(error));
                 return;
+            }
+            if (!error.empty() &&
+                probe.coordinateError == CoordinateDecryptError::None) {
+                EnsureRuntimeFailure(
+                    probe, RuntimeError::FrameDataUnavailable);
             }
 
             {
@@ -188,6 +205,9 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
                 status_.coordinateError = probe.coordinateError;
                 status_.coordinateSystemError =
                     probe.coordinateSystemError;
+                status_.coordinateRead = probe.coordinateRead;
+                status_.runtimeError = probe.runtimeError;
+                status_.runtimeSystemError = probe.runtimeSystemError;
                 status_.failureKind = probe.failureKind;
                 status_.message = std::move(error);
             }
@@ -203,12 +223,16 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
         }
     } catch (const std::exception& exception) {
         const std::string message = exception.what();
+        probe.runtimeError = RuntimeError::StandardException;
+        probe.runtimeSystemError = 0;
         SetStatus(RuntimePhase::Stopping, probe, message);
         CloseBackendUntilSafe();
         SetStatus(RuntimePhase::Faulted, probe, message);
         return;
     } catch (...) {
         const std::string message = "运行模块发生未知错误";
+        probe.runtimeError = RuntimeError::UnknownException;
+        probe.runtimeSystemError = 0;
         SetStatus(RuntimePhase::Stopping, probe, message);
         CloseBackendUntilSafe();
         SetStatus(RuntimePhase::Faulted, probe, message);
@@ -245,6 +269,9 @@ void GameRuntime::SetStatus(RuntimePhase phase,
     status_.coordinateSuccesses = probe.coordinateSuccesses;
     status_.coordinateError = probe.coordinateError;
     status_.coordinateSystemError = probe.coordinateSystemError;
+    status_.coordinateRead = probe.coordinateRead;
+    status_.runtimeError = probe.runtimeError;
+    status_.runtimeSystemError = probe.runtimeSystemError;
     status_.failureKind = probe.failureKind;
     status_.message = std::move(message);
 }

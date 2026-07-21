@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -15,6 +16,15 @@ enum class CoordinateDecryptError : std::uint16_t {
     EntryMappingMissing = 1003,
     EntryCodeReadFailed = 1004,
     CodeAnalysisFailed = 1005,
+    EntryCodeReadInvalidRange = 1006,
+    EntryCodeReadUnavailable = 1007,
+    EntryCodeReadPermissionDenied = 1008,
+    EntryCodeReadAddressFault = 1009,
+    EntryCodeReadShort = 1010,
+    EntryCodeProcessVmReadFailed = 1011,
+    EntryCodeProcMemOpenFailed = 1012,
+    EntryCodeProcMemReadFailed = 1013,
+    EntryMappingChanged = 1014,
 
     MemoryTransportUnavailable = 2001,
     RootReadFailed = 2002,
@@ -45,9 +55,195 @@ enum class CoordinateDecryptError : std::uint16_t {
     UnhandledException = 9001,
 };
 
+enum class CoordinateReadPath : std::uint8_t {
+    None = 0,
+    ProcessVm = 1,
+    ProcMem = 2,
+};
+
+inline constexpr std::array<CoordinateReadPath, 2>
+    kCoordinateReadPathOrder{
+        CoordinateReadPath::ProcessVm,
+        CoordinateReadPath::ProcMem,
+    };
+
+template <typename Attempt>
+bool TryCoordinateReadPaths(Attempt&& attempt) {
+    for (const CoordinateReadPath path : kCoordinateReadPathOrder) {
+        if (attempt(path)) return true;
+    }
+    return false;
+}
+
+enum class CoordinateReadStage : std::uint8_t {
+    None = 0,
+    Root,
+    Context,
+    Entry,
+    CodePage,
+    DynamicPage,
+    Parameter,
+    PoolPointer,
+    RingIndex,
+    Position,
+};
+
+enum class CoordinateReadFailure : std::uint8_t {
+    None = 0,
+    InvalidRange,
+    TransportUnavailable,
+    PermissionDenied,
+    AddressFault,
+    ShortRead,
+    ProcessVmReadFailed,
+    ProcMemOpenFailed,
+    ProcMemReadFailed,
+    MappingChanged,
+};
+
+constexpr std::uint32_t CoordinateReadPathMask(
+    CoordinateReadPath path) noexcept {
+    const auto value = static_cast<std::uint8_t>(path);
+    return value == 0 ? 0U : (1U << (value - 1U));
+}
+
+struct CoordinateReadDiagnostic {
+    CoordinateReadStage stage = CoordinateReadStage::None;
+    CoordinateReadPath primaryPath = CoordinateReadPath::None;
+    CoordinateReadPath lastPath = CoordinateReadPath::None;
+    CoordinateReadFailure failure = CoordinateReadFailure::None;
+    std::uint32_t attemptedPaths = 0;
+    std::uint32_t attemptCount = 0;
+    std::uintptr_t address = 0;
+    std::size_t size = 0;
+    std::size_t primaryCompleted = 0;
+    std::size_t lastCompleted = 0;
+    int primarySystemError = 0;
+    int lastSystemError = 0;
+    int systemError = 0;
+
+    constexpr bool HasFailure() const noexcept {
+        return failure != CoordinateReadFailure::None;
+    }
+};
+
+constexpr bool operator==(const CoordinateReadDiagnostic& left,
+                          const CoordinateReadDiagnostic& right) noexcept {
+    return left.stage == right.stage &&
+        left.primaryPath == right.primaryPath &&
+        left.lastPath == right.lastPath && left.failure == right.failure &&
+        left.attemptedPaths == right.attemptedPaths &&
+        left.attemptCount == right.attemptCount &&
+        left.address == right.address && left.size == right.size &&
+        left.primaryCompleted == right.primaryCompleted &&
+        left.lastCompleted == right.lastCompleted &&
+        left.primarySystemError == right.primarySystemError &&
+        left.lastSystemError == right.lastSystemError &&
+        left.systemError == right.systemError;
+}
+
+constexpr bool operator!=(const CoordinateReadDiagnostic& left,
+                          const CoordinateReadDiagnostic& right) noexcept {
+    return !(left == right);
+}
+
 constexpr std::uint16_t CoordinateDecryptErrorCode(
     CoordinateDecryptError error) noexcept {
     return static_cast<std::uint16_t>(error);
+}
+
+constexpr CoordinateDecryptError CoordinateReadError(
+    CoordinateReadFailure failure) noexcept {
+    switch (failure) {
+        case CoordinateReadFailure::None:
+            return CoordinateDecryptError::None;
+        case CoordinateReadFailure::InvalidRange:
+            return CoordinateDecryptError::EntryCodeReadInvalidRange;
+        case CoordinateReadFailure::TransportUnavailable:
+            return CoordinateDecryptError::EntryCodeReadUnavailable;
+        case CoordinateReadFailure::PermissionDenied:
+            return CoordinateDecryptError::EntryCodeReadPermissionDenied;
+        case CoordinateReadFailure::AddressFault:
+            return CoordinateDecryptError::EntryCodeReadAddressFault;
+        case CoordinateReadFailure::ShortRead:
+            return CoordinateDecryptError::EntryCodeReadShort;
+        case CoordinateReadFailure::ProcessVmReadFailed:
+            return CoordinateDecryptError::EntryCodeProcessVmReadFailed;
+        case CoordinateReadFailure::ProcMemOpenFailed:
+            return CoordinateDecryptError::EntryCodeProcMemOpenFailed;
+        case CoordinateReadFailure::ProcMemReadFailed:
+            return CoordinateDecryptError::EntryCodeProcMemReadFailed;
+        case CoordinateReadFailure::MappingChanged:
+            return CoordinateDecryptError::EntryMappingChanged;
+    }
+    return CoordinateDecryptError::EntryCodeReadFailed;
+}
+
+constexpr const char* CoordinateReadPathName(
+    CoordinateReadPath path) noexcept {
+    switch (path) {
+        case CoordinateReadPath::None:
+            return "NONE";
+        case CoordinateReadPath::ProcessVm:
+            return "PVM";
+        case CoordinateReadPath::ProcMem:
+            return "PMEM";
+    }
+    return "UNKNOWN";
+}
+
+constexpr const char* CoordinateReadStageName(
+    CoordinateReadStage stage) noexcept {
+    switch (stage) {
+        case CoordinateReadStage::None:
+            return "NONE";
+        case CoordinateReadStage::Root:
+            return "ROOT";
+        case CoordinateReadStage::Context:
+            return "CONTEXT";
+        case CoordinateReadStage::Entry:
+            return "ENTRY";
+        case CoordinateReadStage::CodePage:
+            return "CODE_PAGE";
+        case CoordinateReadStage::DynamicPage:
+            return "DYNAMIC_PAGE";
+        case CoordinateReadStage::Parameter:
+            return "PARAMETER";
+        case CoordinateReadStage::PoolPointer:
+            return "POOL_POINTER";
+        case CoordinateReadStage::RingIndex:
+            return "RING_INDEX";
+        case CoordinateReadStage::Position:
+            return "POSITION";
+    }
+    return "UNKNOWN";
+}
+
+constexpr const char* CoordinateReadFailureName(
+    CoordinateReadFailure failure) noexcept {
+    switch (failure) {
+        case CoordinateReadFailure::None:
+            return "NONE";
+        case CoordinateReadFailure::InvalidRange:
+            return "RANGE";
+        case CoordinateReadFailure::TransportUnavailable:
+            return "UNAVAILABLE";
+        case CoordinateReadFailure::PermissionDenied:
+            return "PERMISSION";
+        case CoordinateReadFailure::AddressFault:
+            return "ADDRESS";
+        case CoordinateReadFailure::ShortRead:
+            return "SHORT";
+        case CoordinateReadFailure::ProcessVmReadFailed:
+            return "PVM";
+        case CoordinateReadFailure::ProcMemOpenFailed:
+            return "PMEM_OPEN";
+        case CoordinateReadFailure::ProcMemReadFailed:
+            return "PMEM_READ";
+        case CoordinateReadFailure::MappingChanged:
+            return "MAPPING_CHANGED";
+    }
+    return "UNKNOWN";
 }
 
 inline std::string FormatCoordinateDecryptDiagnostic(
@@ -60,6 +256,37 @@ inline std::string FormatCoordinateDecryptDiagnostic(
         "COORD CD-%04u SYS=%d",
         static_cast<unsigned int>(CoordinateDecryptErrorCode(error)),
         systemError);
+    return message.data();
+}
+
+inline std::string FormatCoordinateDecryptDiagnostic(
+    CoordinateDecryptError error,
+    int systemError,
+    const CoordinateReadDiagnostic& read) {
+    if (!read.HasFailure()) {
+        return FormatCoordinateDecryptDiagnostic(error, systemError);
+    }
+    std::array<char, 384> message{};
+    std::snprintf(
+        message.data(),
+        message.size(),
+        "COORD CD-%04u SYS=%d READ=%s STAGE=%s "
+        "PRI=%s P_SYS=%d P_DONE=%llu LAST=%s L_SYS=%d L_DONE=%llu "
+        "TRY=0x%X CALLS=%u AT=0x%llX N=%llu",
+        static_cast<unsigned int>(CoordinateDecryptErrorCode(error)),
+        systemError,
+        CoordinateReadFailureName(read.failure),
+        CoordinateReadStageName(read.stage),
+        CoordinateReadPathName(read.primaryPath),
+        read.primarySystemError,
+        static_cast<unsigned long long>(read.primaryCompleted),
+        CoordinateReadPathName(read.lastPath),
+        read.lastSystemError,
+        static_cast<unsigned long long>(read.lastCompleted),
+        static_cast<unsigned int>(read.attemptedPaths),
+        static_cast<unsigned int>(read.attemptCount),
+        static_cast<unsigned long long>(read.address),
+        static_cast<unsigned long long>(read.size));
     return message.data();
 }
 

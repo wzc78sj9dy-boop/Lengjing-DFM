@@ -93,6 +93,10 @@ private:
     game::CoordinateDecryptError lastReportedCoordinateError_ =
         game::CoordinateDecryptError::None;
     int lastReportedCoordinateSystemError_ = 0;
+    game::CoordinateReadDiagnostic lastReportedCoordinateRead_{};
+    game::RuntimeError lastReportedRuntimeError_ =
+        game::RuntimeError::None;
+    int lastReportedRuntimeSystemError_ = 0;
     std::chrono::steady_clock::time_point configSaveDeadline_{};
     std::deque<ToastNotification> toastNotifications_;
     std::mutex toastNotificationsMutex_;

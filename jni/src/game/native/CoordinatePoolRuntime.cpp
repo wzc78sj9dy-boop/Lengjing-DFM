@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cerrno>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -142,14 +143,26 @@ std::uint64_t ReadHostVirtualCounter() noexcept {
 bool FindExecutableMapping(pid_t processId,
                            std::uint64_t address,
                            std::uint64_t& start,
-                           std::uint64_t& end) {
+                           std::uint64_t& end,
+                           int* systemError = nullptr) {
     start = 0;
     end = 0;
-    if (processId <= 0 || !IsRemoteAddress(address)) return false;
+    if (systemError != nullptr) *systemError = 0;
+    if (processId <= 0 || !IsRemoteAddress(address)) {
+        if (systemError != nullptr) *systemError = -EINVAL;
+        return false;
+    }
 
+    errno = 0;
     std::ifstream maps(
         "/proc/" + std::to_string(processId) + "/maps",
         std::ios::binary);
+    if (!maps) {
+        if (systemError != nullptr) {
+            *systemError = errno != 0 ? -errno : -EIO;
+        }
+        return false;
+    }
     std::string line;
     while (std::getline(maps, line)) {
         unsigned long long candidateStart = 0;
@@ -171,11 +184,15 @@ bool FindExecutableMapping(pid_t processId,
         if (size == 0 || size > kMaximumCodeSize ||
             (candidateStart & (kPageSize - 1)) != 0 ||
             (size & (kPageSize - 1)) != 0) {
+            if (systemError != nullptr) *systemError = -ERANGE;
             return false;
         }
         start = candidateStart;
         end = candidateEnd;
         return true;
+    }
+    if (systemError != nullptr) {
+        *systemError = maps.bad() ? -EIO : -ENOENT;
     }
     return false;
 }
@@ -215,6 +232,7 @@ struct CoordinatePoolRuntime::Impl {
                  const ProcessExecutionContext& targetExecutionContext,
                  std::uint64_t targetFrame) {
         std::lock_guard<std::mutex> lock(mutex);
+        ClearReadDiagnosticUnlocked();
         if (!layout.IsValid() || targetProcessId <= 0 ||
             !IsRemoteAddress(targetModuleBase)) {
             SetError(CoordinatePoolRuntimeError::InvalidInput);
@@ -317,6 +335,7 @@ struct CoordinatePoolRuntime::Impl {
                 return false;
             }
         }
+        ClearReadDiagnosticUnlocked();
         probe.error = CoordinatePoolRuntimeError::None;
         probe.stage = CoordinatePoolRuntimeStage::ContextReady;
         return true;
@@ -325,6 +344,7 @@ struct CoordinatePoolRuntime::Impl {
     bool ReadPosition(std::uintptr_t component,
                       CoordinatePoolPosition& position) {
         std::lock_guard<std::mutex> lock(mutex);
+        ClearReadDiagnosticUnlocked();
         position = {};
         ++probe.attempts;
         if (memory == nullptr || finder == nullptr || engine == nullptr ||
@@ -386,7 +406,11 @@ struct CoordinatePoolRuntime::Impl {
         CoordinatePoolPosition candidate{};
         bool stable = false;
         for (int attempt = 0; attempt < 2; ++attempt) {
-            if (!ReadRemoteUnlocked(indexAddress, &index, sizeof(index))) {
+            if (!ReadRemoteUnlocked(
+                    indexAddress,
+                    &index,
+                    sizeof(index),
+                    CoordinateReadStage::RingIndex)) {
                 break;
             }
             const std::uint64_t poolSlot = finder->decode_ring_slot(index);
@@ -403,9 +427,15 @@ struct CoordinatePoolRuntime::Impl {
                 static_cast<std::uint64_t>(layout.entryStride) * poolSlot);
             if (!IsRemoteAddress(coordinateAddress) ||
                 !ReadRemoteUnlocked(
-                    coordinateAddress, &candidate, sizeof(candidate)) ||
+                    coordinateAddress,
+                    &candidate,
+                    sizeof(candidate),
+                    CoordinateReadStage::Position) ||
                 !ReadRemoteUnlocked(
-                    indexAddress, &indexAfter, sizeof(indexAfter))) {
+                    indexAddress,
+                    &indexAfter,
+                    sizeof(indexAfter),
+                    CoordinateReadStage::RingIndex)) {
                 break;
             }
             if (index == indexAfter) {
@@ -416,7 +446,10 @@ struct CoordinatePoolRuntime::Impl {
         if (!stable) {
             selected->ring = 0;
             selected->stamp = frame;
-            SetError(CoordinatePoolRuntimeError::PositionUnstable);
+            SetError(
+                probe.read.HasFailure()
+                    ? CoordinatePoolRuntimeError::PositionReadFailed
+                    : CoordinatePoolRuntimeError::PositionUnstable);
             return false;
         }
         if (!IsFinitePosition(candidate)) {
@@ -428,6 +461,7 @@ struct CoordinatePoolRuntime::Impl {
 
         position = candidate;
         ++probe.successes;
+        ClearReadDiagnosticUnlocked();
         probe.error = CoordinatePoolRuntimeError::None;
         probe.stage = CoordinatePoolRuntimeStage::Active;
         return true;
@@ -519,7 +553,8 @@ private:
         if (!ReadRemoteUnlocked(
                 moduleBase + layout.rootRva + layout.bridgeOffset,
                 &rawBridge,
-                sizeof(rawBridge))) {
+                sizeof(rawBridge),
+                CoordinateReadStage::Root)) {
             return false;
         }
         nextBridge = NormalizePointer(rawBridge);
@@ -533,11 +568,15 @@ private:
                 std::numeric_limits<std::uint64_t>::max() - nextBridge ||
             !IsRemoteAddress(contextAddress) ||
             !ReadRemoteUnlocked(
-                contextAddress, &rawContext, sizeof(rawContext)) ||
+                contextAddress,
+                &rawContext,
+                sizeof(rawContext),
+                CoordinateReadStage::Context) ||
             !ReadRemoteUnlocked(
                 nextBridge + layout.entryOffset,
                 &rawEntry,
-                sizeof(rawEntry))) {
+                sizeof(rawEntry),
+                CoordinateReadStage::Entry)) {
             return false;
         }
         nextContext = rawContext;
@@ -549,9 +588,17 @@ private:
     bool AnalyzeCodeUnlocked() {
         std::uint64_t mappingStart = 0;
         std::uint64_t mappingEnd = 0;
+        int mappingStatus = 0;
         if (!FindExecutableMapping(
-                processId, guestEntry, mappingStart, mappingEnd)) {
-            SetError(CoordinatePoolRuntimeError::EntryMappingMissing);
+                processId,
+                guestEntry,
+                mappingStart,
+                mappingEnd,
+                &mappingStatus)) {
+            SetError(
+                CoordinatePoolRuntimeError::EntryMappingMissing,
+                true,
+                mappingStatus);
             return false;
         }
         const std::size_t mappingSize = static_cast<std::size_t>(
@@ -561,9 +608,57 @@ private:
              offset += kPageSize) {
             const std::size_t count = std::min<std::size_t>(
                 kPageSize, bytes.size() - offset);
+            CoordinateReadDiagnostic firstRead{};
             if (!ReadRemoteUnlocked(
-                    mappingStart + offset, bytes.data() + offset, count)) {
-                SetError(CoordinatePoolRuntimeError::CodeReadFailed);
+                    mappingStart + offset,
+                    bytes.data() + offset,
+                    count,
+                    CoordinateReadStage::CodePage,
+                    &firstRead)) {
+                std::uint64_t refreshedStart = 0;
+                std::uint64_t refreshedEnd = 0;
+                int refreshStatus = 0;
+                const bool mappingFound = FindExecutableMapping(
+                        processId,
+                        guestEntry,
+                        refreshedStart,
+                        refreshedEnd,
+                        &refreshStatus);
+                if (mappingFound &&
+                    (refreshedStart != mappingStart ||
+                     refreshedEnd != mappingEnd)) {
+                    firstRead.failure =
+                        CoordinateReadFailure::MappingChanged;
+                    firstRead.systemError = -ESTALE;
+                } else if (!mappingFound && refreshStatus == -ENOENT) {
+                    firstRead.failure =
+                        CoordinateReadFailure::MappingChanged;
+                    firstRead.systemError = -ESTALE;
+                } else if (mappingFound) {
+                    CoordinateReadDiagnostic retryRead{};
+                    if (ReadRemoteUnlocked(
+                            mappingStart + offset,
+                            bytes.data() + offset,
+                            count,
+                            CoordinateReadStage::CodePage,
+                            &retryRead)) {
+                        ClearReadDiagnosticUnlocked();
+                        continue;
+                    }
+                    retryRead.attemptedPaths |= firstRead.attemptedPaths;
+                    retryRead.attemptCount += firstRead.attemptCount;
+                    retryRead.primaryPath = firstRead.primaryPath;
+                    retryRead.primaryCompleted =
+                        firstRead.primaryCompleted;
+                    retryRead.primarySystemError =
+                        firstRead.primarySystemError;
+                    firstRead = retryRead;
+                }
+                probe.read = firstRead;
+                SetError(
+                    CoordinatePoolRuntimeError::CodeReadFailed,
+                    true,
+                    firstRead.systemError);
                 return false;
             }
         }
@@ -614,6 +709,7 @@ private:
         probe.poolPointerOffset = finder->pool_ptr_offset;
         probe.indexOffset = finder->index_offset;
         probe.ringOffset = finder->get_ring_offset();
+        ClearReadDiagnosticUnlocked();
         probe.error = CoordinatePoolRuntimeError::None;
         probe.stage = CoordinatePoolRuntimeStage::CodeAnalyzed;
         return true;
@@ -920,14 +1016,21 @@ private:
             if (index + 1 == parameter.offset.size()) {
                 std::uint64_t value = 0;
                 if (!ReadRemoteUnlocked(
-                        address, &value, parameter.size)) {
+                        address,
+                        &value,
+                        parameter.size,
+                        CoordinateReadStage::Parameter)) {
                     return false;
                 }
                 parameter.value = value;
                 return true;
             }
             std::uint64_t next = 0;
-            if (!ReadRemoteUnlocked(address, &next, sizeof(next))) {
+            if (!ReadRemoteUnlocked(
+                    address,
+                    &next,
+                    sizeof(next),
+                    CoordinateReadStage::Parameter)) {
                 return false;
             }
             pointer = NormalizePointer(next);
@@ -948,7 +1051,11 @@ private:
             static_cast<std::int64_t>(finder->pool_ptr_offset));
         std::uint64_t pointer = 0;
         if (!IsRemoteAddress(address) ||
-            !ReadRemoteUnlocked(address, &pointer, sizeof(pointer)) ||
+            !ReadRemoteUnlocked(
+                address,
+                &pointer,
+                sizeof(pointer),
+                CoordinateReadStage::PoolPointer) ||
             !IsValidGuestAddress(pointer)) {
             return;
         }
@@ -984,14 +1091,32 @@ private:
         return IsRemoteAddress(ring);
     }
 
-    bool ReadRemoteUnlocked(std::uint64_t address,
-                            void* destination,
-                            std::size_t size) {
+    bool ReadRemoteUnlocked(
+        std::uint64_t address,
+        void* destination,
+        std::size_t size,
+        CoordinateReadStage stage,
+        CoordinateReadDiagnostic* result = nullptr) {
         const std::uint64_t normalized = NormalizePointer(address);
-        return memory != nullptr && destination != nullptr && size != 0 &&
-            IsRemoteAddress(normalized) &&
-            normalized <= kMaximumRemoteAddress - size &&
-            memory->Read(normalized, destination, size);
+        CoordinateReadDiagnostic diagnostic{};
+        bool read = false;
+        if (memory != nullptr) {
+            read = memory->ReadCoordinateMemory(
+                normalized, destination, size, diagnostic);
+        } else {
+            diagnostic.address = normalized;
+            diagnostic.size = size;
+            diagnostic.failure =
+                CoordinateReadFailure::TransportUnavailable;
+            diagnostic.systemError = -ENODEV;
+        }
+        diagnostic.stage = stage;
+        if (result != nullptr) *result = diagnostic;
+        if (!read) {
+            probe.read = diagnostic;
+            probe.systemError = diagnostic.systemError;
+        }
+        return read;
     }
 
     bool LoadRemotePageUnlocked(std::uint64_t faultAddress) {
@@ -1015,9 +1140,20 @@ private:
         std::array<std::uint8_t, kPageSize> data{};
         const bool remoteReadable = IsRemoteAddress(remotePage) &&
             remotePage <= kMaximumRemoteAddress - kPageSize &&
-            memory->Read(remotePage, data.data(), data.size());
+            ReadRemoteUnlocked(
+                remotePage,
+                data.data(),
+                data.size(),
+                CoordinateReadStage::DynamicPage);
         if (!remoteReadable && !allowMissingRemotePages) {
             return false;
+        }
+        if (!remoteReadable) {
+            if (!toleratedReadFailure.HasFailure()) {
+                toleratedReadFailure = probe.read;
+            }
+            probe.systemError = 0;
+            probe.read = {};
         }
         if (uc_mem_map(engine, guestPage, kPageSize, UC_PROT_ALL) != UC_ERR_OK) {
             return false;
@@ -1149,8 +1285,33 @@ private:
 
     void SetError(CoordinatePoolRuntimeError error,
                   bool faulted = true) {
+        RestoreToleratedReadFailureUnlocked();
         probe.error = error;
+        if (!probe.read.HasFailure()) probe.systemError = 0;
         if (faulted) probe.stage = CoordinatePoolRuntimeStage::Faulted;
+    }
+
+    void SetError(CoordinatePoolRuntimeError error,
+                  bool faulted,
+                  int systemError) {
+        RestoreToleratedReadFailureUnlocked();
+        probe.error = error;
+        probe.systemError = systemError;
+        if (faulted) probe.stage = CoordinatePoolRuntimeStage::Faulted;
+    }
+
+    void ClearReadDiagnosticUnlocked() noexcept {
+        probe.systemError = 0;
+        probe.read = {};
+        toleratedReadFailure = {};
+    }
+
+    void RestoreToleratedReadFailureUnlocked() noexcept {
+        if (!probe.read.HasFailure() &&
+            toleratedReadFailure.HasFailure()) {
+            probe.read = toleratedReadFailure;
+            probe.systemError = toleratedReadFailure.systemError;
+        }
     }
 
     void ResetAnalysisUnlocked() {
@@ -1182,6 +1343,7 @@ private:
         probe.poolPointerOffset = 0;
         probe.indexOffset = 0;
         probe.ringOffset = 0;
+        ClearReadDiagnosticUnlocked();
         probe.stage = CoordinatePoolRuntimeStage::Idle;
         probe.error = CoordinatePoolRuntimeError::None;
     }
@@ -1229,6 +1391,7 @@ private:
         ringSlots.clear();
         ringSearchBudget.Reset();
         probe = {};
+        toleratedReadFailure = {};
         layout = configuredLayout;
     }
 
@@ -1254,6 +1417,7 @@ private:
     bool parametersReady = false;
     std::uint64_t frame = 0;
     std::uint64_t lastRootFrame = 0;
+    CoordinateReadDiagnostic toleratedReadFailure{};
     std::uint64_t lastPoolPointer = 0;
     std::uint64_t poolPointerRefreshFrame =
         std::numeric_limits<std::uint64_t>::max();

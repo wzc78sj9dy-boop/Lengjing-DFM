@@ -36,6 +36,9 @@ struct RuntimeStatus {
     std::uint64_t coordinateSuccesses = 0;
     CoordinateDecryptError coordinateError = CoordinateDecryptError::None;
     int coordinateSystemError = 0;
+    CoordinateReadDiagnostic coordinateRead{};
+    RuntimeError runtimeError = RuntimeError::None;
+    int runtimeSystemError = 0;
     RuntimeFailureKind failureKind = RuntimeFailureKind::None;
 };
 

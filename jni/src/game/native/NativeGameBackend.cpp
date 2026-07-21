@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -68,7 +69,8 @@ constexpr std::int32_t kMaximumWorldObjectCount = 65536;
 constexpr std::size_t kMaximumNameLength = 249;
 
 CoordinateDecryptError CoordinatePoolError(
-    native::CoordinatePoolRuntimeError error) noexcept {
+    native::CoordinatePoolRuntimeError error,
+    const CoordinateReadDiagnostic& read) noexcept {
     using native::CoordinatePoolRuntimeError;
     switch (error) {
         case CoordinatePoolRuntimeError::None:
@@ -80,7 +82,9 @@ CoordinateDecryptError CoordinatePoolError(
         case CoordinatePoolRuntimeError::EntryMappingMissing:
             return CoordinateDecryptError::EntryMappingMissing;
         case CoordinatePoolRuntimeError::CodeReadFailed:
-            return CoordinateDecryptError::EntryCodeReadFailed;
+            return read.HasFailure()
+                ? CoordinateReadError(read.failure)
+                : CoordinateDecryptError::EntryCodeReadFailed;
         case CoordinatePoolRuntimeError::AnalysisFailed:
             return CoordinateDecryptError::CodeAnalysisFailed;
         case CoordinatePoolRuntimeError::EngineSetupFailed:
@@ -108,7 +112,16 @@ CoordinateDecryptError CoordinatePoolError(
 struct CoordinateFailure {
     CoordinateDecryptError error = CoordinateDecryptError::None;
     int systemError = 0;
+    CoordinateReadDiagnostic read{};
 };
+
+void SetRuntimeFailure(
+    RuntimeProbe& probe,
+    RuntimeError error,
+    int systemError = 0) noexcept {
+    probe.runtimeError = error;
+    probe.runtimeSystemError = systemError;
+}
 
 struct Vec2 {
     float x = 0.0f;
@@ -796,6 +809,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (!CloseLocked()) {
             probe = RuntimeProbe{};
+            SetRuntimeFailure(
+                probe, RuntimeError::BackendCloseFailed, -EBUSY);
             error.clear();
             return false;
         }
@@ -809,6 +824,8 @@ public:
             inputMode < static_cast<int>(ui::AimInputMode::ReadOnly) ||
             inputMode > static_cast<int>(ui::AimInputMode::KernelGyroscope) ||
             options.screenWidth <= 1 || options.screenHeight <= 1) {
+            SetRuntimeFailure(
+                probe, RuntimeError::InvalidConfiguration, -EINVAL);
             error = "运行参数无效";
             return false;
         }
@@ -821,13 +838,27 @@ public:
         layout_ = kVersionLayouts[static_cast<std::size_t>(options.gameVersionIndex)];
         processId_ = native::FindProcessId(layout_.processName);
         if (processId_ <= 0) {
+            SetRuntimeFailure(
+                probe, RuntimeError::TargetProcessNotFound, -ESRCH);
             error = "未找到目标游戏进程";
             CloseLocked();
             return false;
         }
 
         memory_ = std::make_unique<native::MemoryTransport>();
-        if (!memory_->Open(options.driverIndex, processId_, layout_.processName, error)) {
+        RuntimeDiagnostic memoryDiagnostic{};
+        if (!memory_->Open(
+                options.driverIndex,
+                processId_,
+                layout_.processName,
+                memoryDiagnostic,
+                error)) {
+            SetRuntimeFailure(
+                probe,
+                memoryDiagnostic.error != RuntimeError::None
+                    ? memoryDiagnostic.error
+                    : RuntimeError::BackendOpenFailed,
+                memoryDiagnostic.systemError);
             CloseLocked();
             return false;
         }
@@ -837,6 +868,8 @@ public:
             moduleBase_ = native::FindMappedModuleBase(processId_, "libUE4.so");
         }
         if (!IsValidPointer(moduleBase_)) {
+            SetRuntimeFailure(
+                probe, RuntimeError::ModuleBaseUnavailable, -ENOENT);
             error = "无法定位游戏模块";
             CloseLocked();
             return false;
@@ -846,6 +879,8 @@ public:
         if (!memory_->Read(moduleBase_, signature.data(), signature.size()) ||
             signature[0] != 0x7FU || signature[1] != 'E' ||
             signature[2] != 'L' || signature[3] != 'F') {
+            SetRuntimeFailure(
+                probe, RuntimeError::ModuleReadFailed, -EIO);
             error = "所选内存通道无法读取游戏模块";
             CloseLocked();
             return false;
@@ -860,6 +895,8 @@ public:
                     runtimeBuildId)) {
                 probe.failureKind =
                     RuntimeFailureKind::CloudLayoutRejected;
+                SetRuntimeFailure(
+                    probe, RuntimeError::CloudBuildIdMismatch);
                 error = "cloud layout build id mismatch";
                 CloseLocked();
                 return false;
@@ -874,6 +911,8 @@ public:
                     cloudLayout->coordinatePool)) {
                 probe.failureKind =
                     RuntimeFailureKind::CloudLayoutRejected;
+                SetRuntimeFailure(
+                    probe, RuntimeError::CloudLayoutInvalid, -EINVAL);
                 error = "cloud layout validation failed";
                 CloseLocked();
                 return false;
@@ -927,6 +966,8 @@ public:
         }
 
         if (!aimController_.Start(options.inputMode)) {
+            SetRuntimeFailure(
+                probe, RuntimeError::InputChannelStartFailed);
             error = "输入通道初始化失败";
             CloseLocked();
             return false;
@@ -954,8 +995,12 @@ public:
         frame = GameFrame{};
         frame.sequence = sequence;
         error.clear();
+        probe.runtimeError = RuntimeError::None;
+        probe.runtimeSystemError = 0;
 
         if (!opened_ || memory_ == nullptr || !memory_->IsOpen()) {
+            SetRuntimeFailure(
+                probe, RuntimeError::BackendUnavailable, -ENODEV);
             error = "游戏后端尚未打开";
             return false;
         }
@@ -964,6 +1009,8 @@ public:
         probe.customItemCount = customItems_.Size();
         if (!native::IsProcessAlive(processId_)) {
             probe = RuntimeProbe{};
+            SetRuntimeFailure(
+                probe, RuntimeError::TargetProcessExited, -ESRCH);
             error = "目标游戏进程已结束";
             return false;
         }
@@ -1017,6 +1064,7 @@ public:
         }
 
         FrameContext context{};
+        RuntimeDiagnostic frameDiagnostic{};
         if (!BuildFrameContext(
                 context,
                 frame.sequence,
@@ -1027,7 +1075,14 @@ public:
                     settings.aim.trajectoryTracking),
 #endif
                 settings.visual.antiFlicker,
+                frameDiagnostic,
                 error)) {
+            SetRuntimeFailure(
+                probe,
+                frameDiagnostic.error != RuntimeError::None
+                    ? frameDiagnostic.error
+                    : RuntimeError::FrameDataUnavailable,
+                frameDiagnostic.systemError);
             InvalidateActorRecordSnapshot();
             ResetWorldState();
             UpdateCoordinateProbe(probe);
@@ -1187,6 +1242,8 @@ public:
         std::unordered_set<std::uintptr_t> seenAimActors;
 #endif
         if (actorRecords.empty()) {
+            SetRuntimeFailure(
+                probe, RuntimeError::ActorListUnavailable);
             error = "数据链等待：人物列表暂不可读";
             RefreshCameraView(context, frame.sequence);
             AppendWorldObjectCache(settings, context, frame);
@@ -2047,6 +2104,8 @@ public:
 #endif
         if (requireDecodedNames && validActorCount > 0 &&
             decodedNameCount == 0) {
+            SetRuntimeFailure(
+                probe, RuntimeError::NamePoolUnavailable);
             error = "数据链等待：名称池暂不可读";
             aimController_.ClearTarget();
             lockedAimIdentity_ = 0;
@@ -3391,25 +3450,31 @@ private:
                            bool trajectoryTracking,
 #endif
                            bool antiFlicker,
+                           RuntimeDiagnostic& failure,
                            std::string& diagnostic) {
+        failure = {};
         if (!IsValidPointer(moduleBase_)) {
+            failure.error = RuntimeError::ModuleAddressInvalid;
             diagnostic = "数据链等待：模块地址无效";
             return false;
         }
         context.namePool = moduleBase_ + layout_.namePoolOffset;
         const std::uintptr_t worldAddress = moduleBase_ + layout_.worldOffset;
         if (!IsValidPointer(context.namePool) || !IsValidPointer(worldAddress)) {
+            failure.error = RuntimeError::WorldEntryInvalid;
             diagnostic = "数据链等待：世界入口无效";
             return false;
         }
 
         context.world = ReadPointer(worldAddress);
         if (!IsValidPointer(context.world)) {
+            failure.error = RuntimeError::WorldUnavailable;
             diagnostic = "数据链等待：世界对象暂不可读";
             return false;
         }
         context.level = ReadPointer(context.world + 0xF8);
         if (!IsValidPointer(context.level)) {
+            failure.error = RuntimeError::LevelUnavailable;
             diagnostic = "数据链等待：关卡对象暂不可读";
             return false;
         }
@@ -3440,17 +3505,20 @@ private:
         if (positionMode == native::PositionReadMode::Direct &&
             !context.decodedRecordSourceReady &&
             !ordinaryActorsAvailable) {
-                diagnostic = "数据链等待：人物列表暂不可读";
+            failure.error = RuntimeError::ActorSourceUnavailable;
+            diagnostic = "数据链等待：人物列表暂不可读";
             return false;
         }
         if (!ordinaryActorsAvailable &&
             !context.decodedRecordSourceReady &&
             actorRecordSnapshot_.records.empty()) {
+            failure.error = RuntimeError::ActorSourceUnavailable;
             diagnostic = "数据链等待：人物数组暂不可读";
             return false;
         }
         if (!IsValidPointer(context.localController) || !IsValidPointer(context.localPawn) ||
             !IsValidPointer(context.cameraManager)) {
+            failure.error = RuntimeError::LocalViewUnavailable;
             diagnostic = "数据链等待：本地角色或相机暂不可读";
             return false;
         }
@@ -3500,6 +3568,7 @@ private:
                 context.cameraManager,
                 frameSequence,
                 context.view)) {
+            failure.error = RuntimeError::CameraUnavailable;
             diagnostic = "数据链等待：相机数据暂不可读";
             return false;
         }
@@ -3537,6 +3606,7 @@ private:
         }
         const std::uintptr_t verifiedWorld = ReadPointer(worldAddress);
         if (verifiedWorld != context.world) {
+            failure.error = RuntimeError::WorldTransition;
             diagnostic = "数据链等待：世界对象正在切换";
             return false;
         }
@@ -6222,8 +6292,11 @@ private:
             ? poolProbe.guestEntry != 0 && poolProbe.codeBase != 0 &&
                 poolProbe.codeSize != 0
             : algorithmEntryReady_;
+        const CoordinateReadDiagnostic poolRead =
+            coordinatePoolSelected ? poolProbe.read
+                                   : CoordinateReadDiagnostic{};
         const CoordinateDecryptError poolError = coordinatePoolSelected
-            ? CoordinatePoolError(poolProbe.error)
+            ? CoordinatePoolError(poolProbe.error, poolRead)
             : CoordinateDecryptError::None;
         const native::ProcessExecutionContextDiagnostic contextDiagnostic =
             memory_ != nullptr
@@ -6235,7 +6308,8 @@ private:
                 poolError != CoordinateDecryptError::None
                     ? poolError
                     : CoordinateDecryptError::EntryResolveFailed,
-                0,
+                poolProbe.systemError,
+                poolRead,
             };
         }
         if (!algorithmExecutionContextReady_) {
@@ -6266,7 +6340,7 @@ private:
                     0,
                 };
             }
-            return {poolError, 0};
+            return {poolError, poolProbe.systemError, poolRead};
         }
         if (algorithmFrameAttemptCount_ != 0) {
             return {
@@ -6288,7 +6362,8 @@ private:
         }
         diagnostic = FormatCoordinateDecryptDiagnostic(
             probe.coordinateError,
-            probe.coordinateSystemError);
+            probe.coordinateSystemError,
+            probe.coordinateRead);
     }
 
     void UpdateCoordinateProbe(RuntimeProbe& probe) const {
@@ -6315,6 +6390,7 @@ private:
         probe.coordinateSuccesses = algorithmSuccessCount_;
         probe.coordinateError = failure.error;
         probe.coordinateSystemError = failure.systemError;
+        probe.coordinateRead = failure.read;
     }
 
     bool CloseLocked() noexcept {

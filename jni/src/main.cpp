@@ -134,12 +134,23 @@ int RunCoordinateProbe(
     lengjing::game::GameRuntime runtime(
         lengjing::game::CreateNativeGameBackend());
     runtime.UpdateSettings(settings);
-    if (!runtime.Start(options)) return 10;
+    if (!runtime.Start(options)) {
+        const std::string diagnostic =
+            lengjing::game::FormatRuntimeDiagnostic(
+                lengjing::game::RuntimeError::StartRejected,
+                -EBUSY);
+        std::fprintf(stderr, "%s\n", diagnostic.c_str());
+        return 10;
+    }
 
     lengjing::game::RuntimeStatus last{};
     lengjing::game::CoordinateDecryptError lastReportedError =
         lengjing::game::CoordinateDecryptError::None;
     int lastReportedSystemError = 0;
+    lengjing::game::CoordinateReadDiagnostic lastReportedRead{};
+    lengjing::game::RuntimeError lastReportedRuntimeError =
+        lengjing::game::RuntimeError::None;
+    int lastReportedRuntimeSystemError = 0;
     const auto deadline = std::chrono::steady_clock::now() +
         std::chrono::seconds(seconds);
     while (std::chrono::steady_clock::now() < deadline) {
@@ -147,14 +158,38 @@ int RunCoordinateProbe(
         if (status.coordinateError !=
                 lengjing::game::CoordinateDecryptError::None &&
             (status.coordinateError != lastReportedError ||
-             status.coordinateSystemError != lastReportedSystemError)) {
+             status.coordinateSystemError != lastReportedSystemError ||
+             status.coordinateRead != lastReportedRead)) {
             const std::string diagnostic =
                 lengjing::game::FormatCoordinateDecryptDiagnostic(
                     status.coordinateError,
-                    status.coordinateSystemError);
+                    status.coordinateSystemError,
+                    status.coordinateRead);
             std::fprintf(stderr, "%s\n", diagnostic.c_str());
             lastReportedError = status.coordinateError;
             lastReportedSystemError = status.coordinateSystemError;
+            lastReportedRead = status.coordinateRead;
+        } else if (status.coordinateError ==
+                   lengjing::game::CoordinateDecryptError::None) {
+            lastReportedError =
+                lengjing::game::CoordinateDecryptError::None;
+            lastReportedSystemError = 0;
+            lastReportedRead = {};
+        }
+        if (status.runtimeError != lengjing::game::RuntimeError::None &&
+            (status.runtimeError != lastReportedRuntimeError ||
+             status.runtimeSystemError != lastReportedRuntimeSystemError)) {
+            const std::string diagnostic =
+                lengjing::game::FormatRuntimeDiagnostic(
+                    status.runtimeError,
+                    status.runtimeSystemError);
+            std::fprintf(stderr, "%s\n", diagnostic.c_str());
+            lastReportedRuntimeError = status.runtimeError;
+            lastReportedRuntimeSystemError = status.runtimeSystemError;
+        } else if (status.runtimeError ==
+                   lengjing::game::RuntimeError::None) {
+            lastReportedRuntimeError = lengjing::game::RuntimeError::None;
+            lastReportedRuntimeSystemError = 0;
         }
         last = status;
         if (status.phase == lengjing::game::RuntimePhase::Faulted) break;
@@ -162,16 +197,6 @@ int RunCoordinateProbe(
     }
     runtime.Stop();
     runtime.WaitUntilStopped();
-    const auto decryptPresentation =
-        lengjing::app::ResolveCoordinateDecryptPresentation(
-            last.coordinateRequested,
-            last.coordinateEntryReady,
-            last.coordinateContextReady,
-            last.coordinateSuccesses);
-    std::fprintf(
-        stderr, "%s\n",
-        lengjing::app::CoordinateDecryptPresentationText(
-            decryptPresentation));
     const int runtimeExitCode = lengjing::app::ResolveRuntimeExitCode(
         cloudLayoutActive, last.phase, last.failureKind);
     if (runtimeExitCode != 0) return runtimeExitCode;

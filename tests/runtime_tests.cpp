@@ -31,6 +31,8 @@ struct BackendState {
     std::atomic_bool frameReady{true};
     std::atomic<std::uint16_t> coordinateError{0};
     std::atomic_int coordinateSystemError{0};
+    std::atomic<std::uint16_t> runtimeError{0};
+    std::atomic_int runtimeSystemError{0};
 };
 
 class FakeBackend final : public lengjing::game::GameBackend {
@@ -77,6 +79,26 @@ public:
                 state_->coordinateError.load());
         probe.coordinateSystemError =
             state_->coordinateSystemError.load();
+        probe.coordinateRead = {};
+        if (probe.coordinateError ==
+            lengjing::game::CoordinateDecryptError::
+                EntryCodeReadPermissionDenied) {
+            probe.coordinateRead.stage =
+                lengjing::game::CoordinateReadStage::CodePage;
+            probe.coordinateRead.primaryPath =
+                lengjing::game::CoordinateReadPath::ProcessVm;
+            probe.coordinateRead.lastPath =
+                lengjing::game::CoordinateReadPath::ProcMem;
+            probe.coordinateRead.failure =
+                lengjing::game::CoordinateReadFailure::PermissionDenied;
+            probe.coordinateRead.address = 0x12345000U;
+            probe.coordinateRead.size = 4096;
+            probe.coordinateRead.systemError =
+                probe.coordinateSystemError;
+        }
+        probe.runtimeError = static_cast<lengjing::game::RuntimeError>(
+            state_->runtimeError.load());
+        probe.runtimeSystemError = state_->runtimeSystemError.load();
         ++state_->reads;
         return true;
     }
@@ -181,14 +203,19 @@ void RunRuntimeTests() {
     state->coordinateError.store(
         lengjing::game::CoordinateDecryptErrorCode(
             lengjing::game::CoordinateDecryptError::
-                ContextDeviceProtocolMismatch));
-    state->coordinateSystemError.store(-EPROTO);
+                EntryCodeReadPermissionDenied));
+    state->coordinateSystemError.store(-EACCES);
     REQUIRE(WaitFor([&] {
         const lengjing::game::RuntimeStatus status = runtime.Status();
         return status.coordinateError ==
                 lengjing::game::CoordinateDecryptError::
-                    ContextDeviceProtocolMismatch &&
-            status.coordinateSystemError == -EPROTO;
+                    EntryCodeReadPermissionDenied &&
+            status.coordinateSystemError == -EACCES &&
+            status.coordinateRead.stage ==
+                lengjing::game::CoordinateReadStage::CodePage &&
+            status.coordinateRead.failure ==
+                lengjing::game::CoordinateReadFailure::PermissionDenied &&
+            status.coordinateRead.address == 0x12345000U;
     }));
 
     state->coordinateError.store(0);
@@ -197,13 +224,29 @@ void RunRuntimeTests() {
         const lengjing::game::RuntimeStatus status = runtime.Status();
         return status.coordinateError ==
                 lengjing::game::CoordinateDecryptError::None &&
-            status.coordinateSystemError == 0;
+            status.coordinateSystemError == 0 &&
+            !status.coordinateRead.HasFailure();
     }));
+
+    state->runtimeError.store(
+        lengjing::game::RuntimeErrorCode(
+            lengjing::game::RuntimeError::WorldUnavailable));
+    state->runtimeSystemError.store(-EIO);
+    REQUIRE(WaitFor([&] {
+        const lengjing::game::RuntimeStatus status = runtime.Status();
+        return status.runtimeError ==
+                lengjing::game::RuntimeError::WorldUnavailable &&
+            status.runtimeSystemError == -EIO;
+    }));
+    state->runtimeError.store(0);
+    state->runtimeSystemError.store(0);
 
     state->frameReady.store(false);
     REQUIRE(WaitFor([&] {
         return runtime.Status().message == "waiting";
     }));
+    REQUIRE(runtime.Status().runtimeError ==
+        lengjing::game::RuntimeError::FrameDataUnavailable);
     const auto retainedFrame = runtime.LatestFrame();
     const std::uint64_t retainedSequence = retainedFrame->sequence;
     state->frameReady.store(true);
@@ -246,6 +289,8 @@ void RunRuntimeTests() {
         const lengjing::game::RuntimeStatus status = rejected.Status();
         REQUIRE(status.failureKind ==
                 lengjing::game::RuntimeFailureKind::CloudLayoutRejected);
+        REQUIRE(status.runtimeError ==
+            lengjing::game::RuntimeError::BackendOpenFailed);
         REQUIRE(lengjing::app::ResolveRuntimeExitCode(
                     true, status.phase, status.failureKind) ==
                 lengjing::auth::kCloudLayoutStartupFailureExitCode);
@@ -266,6 +311,8 @@ void RunRuntimeTests() {
         const lengjing::game::RuntimeStatus status = ordinary.Status();
         REQUIRE(status.failureKind ==
                 lengjing::game::RuntimeFailureKind::None);
+        REQUIRE(status.runtimeError ==
+            lengjing::game::RuntimeError::BackendOpenFailed);
         REQUIRE(lengjing::app::ResolveRuntimeExitCode(
                     true, status.phase, status.failureKind) == 0);
         ordinary.WaitUntilStopped();

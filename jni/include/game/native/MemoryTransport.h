@@ -2,6 +2,7 @@
 
 #include "game/CoordinateDecryptDiagnostics.h"
 #include "game/ProjectileTrackingFeature.h"
+#include "game/RuntimeDiagnostics.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -118,10 +119,16 @@ public:
     bool Open(int modeIndex,
               pid_t processId,
               std::string_view processName,
+              RuntimeDiagnostic& diagnostic,
               std::string& error);
     void Close() noexcept;
 
     bool Read(std::uintptr_t address, void* destination, std::size_t size);
+    bool ReadCoordinateMemory(
+        std::uintptr_t address,
+        void* destination,
+        std::size_t size,
+        CoordinateReadDiagnostic& diagnostic);
     std::size_t ReadBatch(const MemoryReadRequest* requests,
                           std::size_t count,
                           std::uint8_t* itemStatus = nullptr);

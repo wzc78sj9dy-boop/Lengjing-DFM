@@ -56,6 +56,8 @@ struct RuntimeModel {
     std::uint64_t coordinateSuccesses = 0;
     std::uint16_t coordinateErrorCode = 0;
     int coordinateSystemError = 0;
+    std::uint16_t runtimeErrorCode = 0;
+    int runtimeSystemError = 0;
     float framesPerSecond = 0.0f;
     int screenWidth = 0;
     int screenHeight = 0;
