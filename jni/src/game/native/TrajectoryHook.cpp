@@ -29,6 +29,10 @@ constexpr std::uintptr_t kSecondStubRva = 0x1D1578C0ULL;
 constexpr std::uintptr_t kFirstPatchRva = 0x0A98C134ULL;
 constexpr std::uintptr_t kSecondPatchRva = 0x0A995EBCULL;
 
+static_assert(
+    (kFirstStubRva & ~std::uintptr_t{0xFFF}) ==
+    (kSecondStubRva & ~std::uintptr_t{0xFFF}));
+
 using StubImage = std::array<std::uint8_t, kStubSize>;
 using JumpImage = std::array<std::uint8_t, kJumpSize>;
 
@@ -209,6 +213,32 @@ bool WriteAndVerify(MemoryTransport& memory,
         std::memcmp(observed.data(), data, size) == 0;
 }
 
+bool ReadBindingPage(void* context,
+                     std::uintptr_t address,
+                     void* destination,
+                     std::size_t size) {
+    return context != nullptr &&
+        static_cast<MemoryTransport*>(context)->Read(
+            address, destination, size);
+}
+
+bool WriteBindingPage(void* context,
+                      std::uintptr_t address,
+                      const void* source,
+                      std::size_t size) {
+    return context != nullptr &&
+        static_cast<MemoryTransport*>(context)->Write(
+            address, source, size);
+}
+
+TrackingPageAccess MakePageAccess(MemoryTransport& memory) {
+    return {
+        &memory,
+        &ReadBindingPage,
+        &WriteBindingPage,
+    };
+}
+
 template <std::size_t Size>
 bool IsZero(const std::array<std::uint8_t, Size>& image) {
     for (const std::uint8_t value : image) {
@@ -281,6 +311,67 @@ bool ForceRestorePatch(MemoryTransport& memory,
         }
     }
     return false;
+}
+
+bool WriteControlledPage(TrackingPageBinding& binding,
+                         pid_t processId,
+                         MemoryTransport& memory,
+                         std::uintptr_t address,
+                         const void* data,
+                         std::size_t size) {
+    if (!binding.BeginPageWrite(processId, address)) return false;
+    const bool written = WriteAndVerify(
+        memory, address, data, size);
+    const bool ended = binding.EndPageWrite(processId, address);
+    return written && ended;
+}
+
+bool WriteControlledStubs(TrackingPageBinding& binding,
+                          pid_t processId,
+                          MemoryTransport& memory,
+                          std::uintptr_t firstAddress,
+                          const StubImage& first,
+                          std::uintptr_t secondAddress,
+                          const StubImage& second) {
+    if (!binding.BeginPageWrite(processId, firstAddress)) return false;
+    const bool firstWritten = WriteAndVerify(
+        memory, firstAddress, first.data(), first.size());
+    const bool secondWritten = firstWritten && WriteAndVerify(
+        memory, secondAddress, second.data(), second.size());
+    const bool ended = binding.EndPageWrite(processId, firstAddress);
+    return firstWritten && secondWritten && ended;
+}
+
+bool WriteAndBindPatch(TrackingPageBinding& binding,
+                       pid_t processId,
+                       MemoryTransport& memory,
+                       std::uintptr_t address,
+                       const JumpImage& jump,
+                       TrackingPageBindingTicket& ticket) {
+    if (!WriteControlledPage(
+            binding,
+            processId,
+            memory,
+            address,
+            jump.data(),
+            jump.size())) {
+        return false;
+    }
+    return binding.CommitPatch(processId, ticket);
+}
+
+bool RestoreControlledPatch(TrackingPageBinding& binding,
+                            pid_t processId,
+                            MemoryTransport& memory,
+                            std::uintptr_t address,
+                            const JumpImage& original) {
+    if (binding.Backend() == TrackingPageBindingBackend::Unknown) {
+        return ForceRestorePatch(memory, address, original);
+    }
+    if (!binding.BeginPageWrite(processId, address)) return false;
+    const bool restored = ForceRestorePatch(memory, address, original);
+    const bool ended = binding.EndPageWrite(processId, address);
+    return restored && ended;
 }
 
 std::chrono::steady_clock::duration InstallRetryDelay(
@@ -419,12 +510,11 @@ TrajectoryHook::InstallResult TrajectoryHook::Install() noexcept {
         firstPatchCurrent == firstJump ||
         secondPatchCurrent == secondJump;
 
-    if (!ClearCommandBuffer()) return InstallResult::RetryableFailure;
-
     if (firstPatchCurrent == firstJump &&
         secondPatchCurrent == secondJump &&
         firstStubCurrent == firstStub &&
-        secondStubCurrent == secondStub) {
+        secondStubCurrent == secondStub &&
+        firstBinding_.committed && secondBinding_.committed) {
         return InstallResult::Installed;
     }
 
@@ -438,22 +528,62 @@ TrajectoryHook::InstallResult TrajectoryHook::Install() noexcept {
     success = RestorePatchIfNeeded(
         *memory_, secondPatchAddress_, secondJump, kSecondOriginal) &&
         success;
+    pageBinding_.Reset();
+    firstBinding_ = {};
+    secondBinding_ = {};
+    const TrackingPageAccess pageAccess = MakePageAccess(*memory_);
+    success = success && pageBinding_.PreparePatch(
+        processId_, firstPatchAddress_, pageAccess, firstBinding_);
+    success = success && pageBinding_.PreparePatch(
+        processId_, secondPatchAddress_, pageAccess, secondBinding_);
+    success = success && pageBinding_.PreparePage(
+        processId_, commandAddress_, pageAccess);
+    success = success && pageBinding_.PreparePage(
+        processId_, firstStubAddress_, pageAccess);
     success = ClearCommandBuffer() && success;
-    success = success && WriteAndVerify(
-        *memory_, firstStubAddress_, firstStub.data(), firstStub.size());
-    success = success && WriteAndVerify(
-        *memory_, secondStubAddress_, secondStub.data(), secondStub.size());
+    success = success && WriteControlledStubs(
+        pageBinding_,
+        processId_,
+        *memory_,
+        firstStubAddress_,
+        firstStub,
+        secondStubAddress_,
+        secondStub);
+    success = success && WriteAndBindPatch(
+        pageBinding_,
+        processId_,
+        *memory_,
+        firstPatchAddress_,
+        firstJump,
+        firstBinding_);
     if (success) cleanupRequired_ = true;
-    success = success && WriteAndVerify(
-        *memory_, firstPatchAddress_, firstJump.data(), firstJump.size());
-    success = success && WriteAndVerify(
-        *memory_, secondPatchAddress_, secondJump.data(), secondJump.size());
+    success = success && WriteAndBindPatch(
+        pageBinding_,
+        processId_,
+        *memory_,
+        secondPatchAddress_,
+        secondJump,
+        secondBinding_);
     if (success) return InstallResult::Installed;
 
-    static_cast<void>(ForceRestorePatch(
-        *memory_, firstPatchAddress_, kFirstOriginal));
-    static_cast<void>(ForceRestorePatch(
-        *memory_, secondPatchAddress_, kSecondOriginal));
+    static_cast<void>(ClearCommandBuffer());
+    if (pageBinding_.HasCommittedPrivateBinding()) {
+        cleanupRequired_ = true;
+        return InstallResult::PermanentFailure;
+    }
+
+    static_cast<void>(RestoreControlledPatch(
+        pageBinding_,
+        processId_,
+        *memory_,
+        firstPatchAddress_,
+        kFirstOriginal));
+    static_cast<void>(RestoreControlledPatch(
+        pageBinding_,
+        processId_,
+        *memory_,
+        secondPatchAddress_,
+        kSecondOriginal));
     JumpImage restoredFirst{};
     JumpImage restoredSecond{};
     const bool restored =
@@ -464,11 +594,17 @@ TrajectoryHook::InstallResult TrajectoryHook::Install() noexcept {
     if (restored) {
         cleanupRequired_ = false;
         const StubImage zeros{};
-        static_cast<void>(WriteAndVerify(
-            *memory_, firstStubAddress_, zeros.data(), zeros.size()));
-        static_cast<void>(WriteAndVerify(
-            *memory_, secondStubAddress_, zeros.data(), zeros.size()));
+        static_cast<void>(WriteControlledStubs(
+            pageBinding_,
+            processId_,
+            *memory_,
+            firstStubAddress_,
+            zeros,
+            secondStubAddress_,
+            zeros));
         static_cast<void>(ClearCommandBuffer());
+        firstBinding_ = {};
+        secondBinding_ = {};
     }
     return restored
         ? InstallResult::RetryableFailure
@@ -553,39 +689,7 @@ bool TrajectoryHook::Shutdown() noexcept {
         return true;
     }
 
-    bool success = ClearCommandBuffer();
-    const JumpImage firstJump = AssembleJump(firstStubAddress_);
-    const JumpImage secondJump = AssembleJump(secondStubAddress_);
-    ProcessStopGuard stop(processId_);
-    if (!stop.Stop() || !stop.Stopped()) {
-        return false;
-    }
-
-    success = RestorePatchIfNeeded(
-        *memory_, firstPatchAddress_, firstJump, kFirstOriginal) && success;
-    success = RestorePatchIfNeeded(
-        *memory_, secondPatchAddress_, secondJump, kSecondOriginal) && success;
-
-    JumpImage firstCurrent{};
-    JumpImage secondCurrent{};
-    const bool restored =
-        ReadImage(*memory_, firstPatchAddress_, firstCurrent) &&
-        ReadImage(*memory_, secondPatchAddress_, secondCurrent) &&
-        firstCurrent == kFirstOriginal &&
-        secondCurrent == kSecondOriginal;
-    if (!restored) {
-        return false;
-    }
-
-    const StubImage zeros{};
-    success = WriteAndVerify(
-        *memory_, firstStubAddress_, zeros.data(), zeros.size()) && success;
-    success = WriteAndVerify(
-        *memory_, secondStubAddress_, zeros.data(), zeros.size()) && success;
-    success = ClearCommandBuffer() && success;
-    if (!success) {
-        return false;
-    }
+    if (!ClearCommandBuffer()) return false;
     ResetLocal();
     return true;
 }
@@ -608,6 +712,9 @@ void TrajectoryHook::ResetLocal() noexcept {
     permanentInstallFailure_ = false;
     cleanupRequired_ = false;
     installed_ = false;
+    pageBinding_.Reset();
+    firstBinding_ = {};
+    secondBinding_ = {};
 }
 
 }  // namespace lengjing::game::native

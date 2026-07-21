@@ -42,6 +42,7 @@ add_executable(lengjing_tests
     runtime_tests.cpp
     threat_catalog_tests.cpp
     tracking_calculator_tests.cpp
+    tracking_page_binding_tests.cpp
     touch_transform_tests.cpp
     world_object_refresh_policy_tests.cpp
     test_main.cpp
@@ -51,6 +52,7 @@ add_executable(lengjing_tests
     ../jni/src/config/LocalConfig.cpp
     ../jni/src/game/GameRuntime.cpp
     ../jni/src/game/native/RemoteElfIdentity.cpp
+    ../jni/src/game/native/TrackingPageBinding.cpp
     ../jni/src/render/PresentationRateTracker.cpp
 )
 

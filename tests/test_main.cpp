@@ -39,6 +39,7 @@ int main() {
         RunRuntimeTests();
         RunThreatCatalogTests();
         RunTrackingCalculatorTests();
+        RunTrackingPageBindingTests();
         RunTouchTransformTests();
         RunWorldObjectRefreshPolicyTests();
         std::cout << "all tests passed\n";

@@ -3,7 +3,7 @@ project(lengjing VERSION 1.0.0 LANGUAGES C CXX)
 
 option(LENGJING_ENABLE_RUNTIME_AUTH "Enable runtime T3 authentication" OFF)
 option(LENGJING_ENABLE_PROJECTILE_TRACKING
-    "Enable projectile tracking runtime and UI" OFF)
+    "Enable projectile tracking runtime and UI" ON)
 set(LENGJING_AUTH_VERSION "1000" CACHE STRING
     "Runtime authentication version number")
 if(NOT LENGJING_AUTH_VERSION MATCHES "^[0-9]+$")

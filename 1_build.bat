@@ -10,7 +10,7 @@ set "NINJA="
 set "TARGET="
 set "PRODUCT="
 set "AUTH_CONFIG="
-set "PROJECTILE_TRACKING=OFF"
+set "PROJECTILE_TRACKING=ON"
 
 if defined LENGJING_AUTH_CONFIG (
     if not exist "%LENGJING_AUTH_CONFIG%" (

@@ -46,5 +46,6 @@ void RunRuntimePresentationPolicyTests();
 void RunRuntimeTests();
 void RunThreatCatalogTests();
 void RunTrackingCalculatorTests();
+void RunTrackingPageBindingTests();
 void RunTouchTransformTests();
 void RunWorldObjectRefreshPolicyTests();

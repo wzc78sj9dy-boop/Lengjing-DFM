@@ -4,6 +4,8 @@
 #include "game/aim/TrackingCalculator.h"
 
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
+#include "game/native/TrackingPageBinding.h"
+
 #include <chrono>
 #endif
 #include <cstdint>
@@ -55,6 +57,9 @@ private:
     bool permanentInstallFailure_ = false;
     bool cleanupRequired_ = false;
     bool installed_ = false;
+    TrackingPageBinding pageBinding_{};
+    TrackingPageBindingTicket firstBinding_{};
+    TrackingPageBindingTicket secondBinding_{};
 };
 #else
 class TrajectoryHook final {
