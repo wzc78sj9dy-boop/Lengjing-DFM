@@ -3991,7 +3991,7 @@ private:
         bool anyVisible = false;
         bool anyOccluded = false;
         for (std::size_t index = 0; index < frame.valid.size(); ++index) {
-            if (!frame.valid[index]) continue;
+            if (!frame.worldValid[index]) continue;
             const native::GeometryVisibility visibility =
                 TraceGeometry(origin, frame.world[index]);
             frame.visibility[index] = visibility;

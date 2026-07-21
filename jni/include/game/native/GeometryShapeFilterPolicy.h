@@ -7,40 +7,31 @@
 namespace lengjing::game::native {
 
 constexpr std::int32_t kSphereShapeGeometry = 0;
-constexpr std::int32_t kBoxShapeGeometry = 3;
-constexpr std::int32_t kConvexMeshShapeGeometry = 4;
 constexpr std::int32_t kTriangleMeshShapeGeometry = 5;
 constexpr std::int32_t kHeightFieldShapeGeometry = 6;
 constexpr std::uint8_t kSimulationShape = 0x01U;
-constexpr std::uint8_t kSceneQueryShape = 0x02U;
 constexpr std::uint8_t kTriggerShape = 0x04U;
+constexpr float kOcclusionHeightFieldRowScale = 200.0f;
 
 constexpr bool ShouldIncludeGeometryShape(
     GeometryBodyType bodyType,
     std::int32_t geometryType,
     std::uint8_t shapeFlags,
-    std::uint16_t materialIndex) noexcept {
-    if (geometryType == kTriangleMeshShapeGeometry) {
-        return bodyType == GeometryBodyType::Static
-            ? materialIndex != 0
-            : materialIndex == 0;
+    std::uint16_t materialIndex,
+    float heightFieldRowScale) noexcept {
+    if (bodyType == GeometryBodyType::Static) {
+        if (geometryType == kTriangleMeshShapeGeometry) {
+            return materialIndex != 0;
+        }
+        return geometryType == kHeightFieldShapeGeometry &&
+            heightFieldRowScale == kOcclusionHeightFieldRowScale;
     }
 
-    const bool physicalShape =
-        (shapeFlags & kTriggerShape) == 0 &&
-        (shapeFlags & (kSimulationShape | kSceneQueryShape)) != 0;
-    if (!physicalShape) {
-        return false;
-    }
-
-    if (bodyType == GeometryBodyType::Dynamic) {
-        return geometryType == kSphereShapeGeometry && materialIndex == 0 &&
-            (shapeFlags & kSimulationShape) != 0;
-    }
-
-    return geometryType == kConvexMeshShapeGeometry ||
-        geometryType == kBoxShapeGeometry ||
-        geometryType == kHeightFieldShapeGeometry;
+    if (materialIndex != 0) return false;
+    if (geometryType == kTriangleMeshShapeGeometry) return true;
+    return geometryType == kSphereShapeGeometry &&
+        (shapeFlags & kSimulationShape) != 0 &&
+        (shapeFlags & kTriggerShape) == 0;
 }
 
 }  // namespace lengjing::game::native

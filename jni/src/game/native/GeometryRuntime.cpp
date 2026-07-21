@@ -2484,11 +2484,20 @@ private:
             geometryType >= kGeometryTypeCount) {
             return ReferenceLoadStatus::Failed;
         }
+        float heightFieldRowScale = 0.0f;
+        if (geometryType == kHeightFieldGeometryType) {
+            RemoteHeightFieldGeometry heightField{};
+            std::memcpy(&heightField,
+                        shape.shapeCore.core.geometry.data.data(),
+                        sizeof(heightField));
+            heightFieldRowScale = heightField.rowScale;
+        }
         if (!ShouldIncludeGeometryShape(
                 bodyType,
                 geometryType,
                 shape.shapeCore.core.shapeFlags,
-                shape.shapeCore.core.materialIndex)) {
+                shape.shapeCore.core.materialIndex,
+                heightFieldRowScale)) {
             return ReferenceLoadStatus::Resolved;
         }
 

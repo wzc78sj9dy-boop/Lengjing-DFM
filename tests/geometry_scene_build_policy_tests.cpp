@@ -138,19 +138,29 @@ void RunGeometrySceneBuildPolicyTests() {
         false));
 
     REQUIRE(ShouldIncludeGeometryShape(
-        GeometryBodyType::Static, 5, 0, 1));
+        GeometryBodyType::Static, 5, 0, 1, 0.0f));
     REQUIRE(!ShouldIncludeGeometryShape(
-        GeometryBodyType::Static, 5, 3, 0));
+        GeometryBodyType::Static, 5, 3, 0, 0.0f));
     REQUIRE(ShouldIncludeGeometryShape(
-        GeometryBodyType::Dynamic, 5, 0, 0));
+        GeometryBodyType::Dynamic, 5, 0, 0, 0.0f));
     REQUIRE(!ShouldIncludeGeometryShape(
-        GeometryBodyType::Dynamic, 5, 3, 1));
+        GeometryBodyType::Dynamic, 5, 3, 1, 0.0f));
+    REQUIRE(!ShouldIncludeGeometryShape(
+        GeometryBodyType::Static, 3, 1, 0, 0.0f));
+    REQUIRE(!ShouldIncludeGeometryShape(
+        GeometryBodyType::Static, 4, 1, 0, 0.0f));
     REQUIRE(ShouldIncludeGeometryShape(
-        GeometryBodyType::Static, 3, 2, 0));
+        GeometryBodyType::Dynamic, 0, 1, 0, 0.0f));
     REQUIRE(!ShouldIncludeGeometryShape(
-        GeometryBodyType::Static, 3, 4, 0));
+        GeometryBodyType::Dynamic, 0, 4, 0, 0.0f));
+    REQUIRE(!ShouldIncludeGeometryShape(
+        GeometryBodyType::Dynamic, 0, 2, 0, 0.0f));
+    REQUIRE(!ShouldIncludeGeometryShape(
+        GeometryBodyType::Dynamic, 0, 1, 1, 0.0f));
     REQUIRE(ShouldIncludeGeometryShape(
-        GeometryBodyType::Dynamic, 0, 1, 0));
+        GeometryBodyType::Static, 6, 0, 0, 200.0f));
     REQUIRE(!ShouldIncludeGeometryShape(
-        GeometryBodyType::Dynamic, 0, 5, 0));
+        GeometryBodyType::Static, 6, 0, 0, 100.0f));
+    REQUIRE(!ShouldIncludeGeometryShape(
+        GeometryBodyType::Dynamic, 6, 0, 0, 200.0f));
 }
