@@ -22,6 +22,8 @@ constexpr ImVec4 kAccentHover{0.153f, 0.804f, 0.620f, 1.00f};
 constexpr ImVec4 kAmber{0.839f, 0.643f, 0.263f, 1.00f};
 constexpr ImVec4 kRed{0.867f, 0.325f, 0.325f, 1.00f};
 constexpr ImVec4 kGreen{0.235f, 0.745f, 0.420f, 1.00f};
+constexpr ImVec4 kButtonText{0.945f, 0.975f, 0.958f, 1.00f};
+constexpr ImVec4 kPrimaryButtonText{0.025f, 0.105f, 0.080f, 1.00f};
 
 constexpr std::array<const char*, 6> kPageNames{
     "运行", "视觉", "物资", "雷达", "瞄准", "系统"};
@@ -504,6 +506,7 @@ bool AnimatedButton(
     const ImVec4& base,
     const ImVec4& hoveredColor,
     const ImVec4& pressedColor,
+    const ImVec4& textColor,
     bool selected = false) {
     ImGui::PushID(label);
     const ImVec2 size(
@@ -574,10 +577,7 @@ bool AnimatedButton(
         ImVec2(
             origin.x + (size.x - textSize.x) * 0.5f,
             origin.y + (size.y - textSize.y) * 0.5f + *pressMotion),
-        ImGui::GetColorU32(Mix(
-            selected ? kText : kMuted,
-            kText,
-            *hoverMotion)),
+        ImGui::GetColorU32(textColor),
         label);
     draw->PopClipRect();
     ImGui::PopID();
@@ -616,6 +616,7 @@ bool SegmentedChoice(
                 base,
                 ImVec4(0.12f, 0.50f, 0.39f, 1.0f),
                 ImVec4(0.14f, 0.56f, 0.43f, 1.0f),
+                active ? kText : kButtonText,
                 active) &&
             !active) {
             selected = static_cast<int>(i);
@@ -635,16 +636,20 @@ bool ActionButton(const char* label, ActionTone tone, const ImVec2& size) {
     ImVec4 base = kAccent;
     ImVec4 hovered = kAccentHover;
     ImVec4 active{0.08f, 0.60f, 0.45f, 1.0f};
+    ImVec4 textColor = kPrimaryButtonText;
     if (tone == ActionTone::Neutral) {
         base = ImVec4(0.18f, 0.22f, 0.21f, 1.0f);
         hovered = ImVec4(0.23f, 0.28f, 0.26f, 1.0f);
         active = ImVec4(0.27f, 0.33f, 0.30f, 1.0f);
+        textColor = kButtonText;
     } else if (tone == ActionTone::Danger) {
         base = ImVec4(0.60f, 0.20f, 0.20f, 1.0f);
-        hovered = kRed;
+        hovered = ImVec4(0.70f, 0.24f, 0.24f, 1.0f);
         active = ImVec4(0.52f, 0.15f, 0.15f, 1.0f);
+        textColor = kButtonText;
     }
-    return AnimatedButton(label, size, base, hovered, active);
+    return AnimatedButton(
+        label, size, base, hovered, active, textColor);
 }
 
 bool NavButton(const char* label, bool active, const ImVec2& size) {
@@ -656,6 +661,7 @@ bool NavButton(const char* label, bool active, const ImVec2& size) {
         active ? ImVec4(0.12f, 0.38f, 0.30f, 1.0f)
                : kPanelRaised,
         ImVec4(0.13f, 0.43f, 0.34f, 1.0f),
+        active ? kText : kButtonText,
         active);
 }
 
