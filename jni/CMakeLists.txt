@@ -3,7 +3,7 @@ project(lengjing VERSION 1.0.0 LANGUAGES C CXX)
 
 option(LENGJING_ENABLE_RUNTIME_AUTH "Enable runtime T3 authentication" OFF)
 option(LENGJING_ENABLE_PROJECTILE_TRACKING
-    "Enable projectile tracking runtime and UI" ON)
+    "Enable projectile tracking runtime and UI" OFF)
 set(LENGJING_AUTH_VERSION "1000" CACHE STRING
     "Runtime authentication version number")
 if(NOT LENGJING_AUTH_VERSION MATCHES "^[0-9]+$")
@@ -135,7 +135,7 @@ list(APPEND LENGJING_SOURCES
 list(FILTER LENGJING_SOURCES EXCLUDE REGEX "/imgui_demo\\.cpp$")
 if(NOT LENGJING_ENABLE_PROJECTILE_TRACKING)
     list(FILTER LENGJING_SOURCES EXCLUDE REGEX
-        "/game/native/TrajectoryHook\\.cpp$")
+        "/game/native/(TrackingPageBinding|TrajectoryHook)\\.cpp$")
 endif()
 
 set_source_files_properties(
