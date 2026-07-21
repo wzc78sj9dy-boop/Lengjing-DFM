@@ -205,21 +205,24 @@ void EndSectionLayout() {
     gSectionLayout = {};
 }
 
-void SectionTitle(const char* title) {
+void SectionTitle(const char* title, float height = 0.0f) {
     if (gSectionLayout.active) {
         CloseSectionCard();
         if (gSectionLayout.tableOpen) {
             ImGui::TableNextColumn();
+        }
+        ImGuiChildFlags childFlags = ImGuiChildFlags_Border;
+        if (height <= 0.0f) {
+            childFlags |= ImGuiChildFlags_AutoResizeY |
+                ImGuiChildFlags_AlwaysAutoResize;
         }
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 12.0f));
         ImGui::PushStyleColor(ImGuiCol_ChildBg, kCard);
         ImGui::PushStyleColor(ImGuiCol_Border, kBorder);
         ImGui::BeginChild(
             title,
-            ImVec2(0.0f, 0.0f),
-            ImGuiChildFlags_Border |
-                ImGuiChildFlags_AutoResizeY |
-                ImGuiChildFlags_AlwaysAutoResize,
+            ImVec2(0.0f, std::max(0.0f, height)),
+            childFlags,
             ImGuiWindowFlags_NoScrollbar |
                 ImGuiWindowFlags_NoScrollWithMouse |
                 ImGuiWindowFlags_NoSavedSettings);
@@ -705,7 +708,7 @@ void RenderRuntime(UiModel& model, UiActions& actions) {
     VisualSettings& visual = model.visual;
     SystemSettings& system = model.system;
 
-    SectionTitle("运行状态");
+    SectionTitle("运行状态", 310.0f);
     const float metricsWidth = ImGui::GetContentRegionAvail().x;
     const int metricColumns =
         metricsWidth >= 420.0f
