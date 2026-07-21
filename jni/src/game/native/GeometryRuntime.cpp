@@ -1,4 +1,6 @@
 #include "game/native/GeometryRuntime.h"
+#include "game/native/GeometrySceneBuildPolicy.h"
+#include "game/native/GeometryShapeFilterPolicy.h"
 
 #include "embree4/rtcore.h"
 #include "embree4/rtcore_ray.h"
@@ -17,6 +19,10 @@
 #include <unordered_set>
 #include <utility>
 
+#if defined(__ANDROID__)
+#include <sys/resource.h>
+#endif
+
 namespace lengjing::game::native {
 namespace {
 
@@ -24,10 +30,17 @@ constexpr std::uintptr_t kMinimumRemoteAddress = 0x10000ULL;
 constexpr std::uintptr_t kMaximumRemoteAddress = 0x0000FFFFFFFFFFFFULL;
 constexpr std::uintptr_t kSceneArrayOffset = 8ULL;
 constexpr std::uintptr_t kActorArrayOffset = 9704ULL;
+constexpr std::uintptr_t kSceneQueryManagerOffset = 0x2430ULL;
+constexpr std::uintptr_t kPruningPoolOffset = 0x1A0ULL;
+constexpr std::size_t kPrunerStride = 0x30;
+constexpr std::size_t kStaticPrunerIndex = 0;
+constexpr std::size_t kDynamicPrunerIndex = 1;
 constexpr std::size_t kMaximumScenes = 64;
-constexpr std::size_t kMaximumActorsPerScene = 65536;
+constexpr std::size_t kMaximumActorsPerScene = 262144;
+constexpr std::size_t kMaximumPrunerObjects = 262144;
 constexpr std::size_t kMaximumShapesPerActor = 4096;
 constexpr std::size_t kMaximumReadChunk = 1024 * 1024;
+constexpr std::size_t kMissingMeshRetentionRounds = 3;
 constexpr std::uint16_t kDynamicActorType = 6;
 constexpr std::uint16_t kStaticActorType = 7;
 constexpr std::uint16_t kTriangleMeshBvh33Type = 3;
@@ -42,8 +55,6 @@ constexpr std::int32_t kConvexMeshGeometryType = 4;
 constexpr std::int32_t kTriangleMeshGeometryType = 5;
 constexpr std::int32_t kHeightFieldGeometryType = 6;
 constexpr std::int32_t kGeometryTypeCount = 7;
-constexpr std::uint8_t kTriggerShapeFlag = 0x04U;
-constexpr std::uint8_t kCollisionShapeFlags = 0x03U;
 constexpr std::uint8_t kMeshHas16BitIndices = 0x02U;
 constexpr std::uint8_t kHeightFieldTessellationFlag = 0x80U;
 constexpr std::uint8_t kHeightFieldMaterialMask = 0x7FU;
@@ -166,6 +177,32 @@ struct RemoteShape {
 static_assert(sizeof(RemoteShape) == 256, "Remote shape layout mismatch");
 static_assert(offsetof(RemoteShape, shapeCore) == 80,
               "Remote shape core offset mismatch");
+
+struct RemotePruningPool {
+    std::uint32_t objectCount;
+    std::uint32_t maximumObjectCount;
+    std::uintptr_t worldBounds;
+    std::uintptr_t objects;
+};
+static_assert(sizeof(RemotePruningPool) == 24,
+              "Remote pruning pool layout mismatch");
+static_assert(offsetof(RemotePruningPool, objects) == 16,
+              "Remote pruning object pointer offset mismatch");
+
+struct RemotePrunerPayload {
+    std::uintptr_t shape;
+    std::uintptr_t actor;
+};
+static_assert(sizeof(RemotePrunerPayload) == 0x10,
+              "Remote pruner payload layout mismatch");
+
+struct GeometryBodyData {
+    RemoteBodyCore rigid{};
+};
+
+struct GeometryShapeData {
+    RemoteShapeCore shapeCore{};
+};
 
 struct RemoteCenterExtents {
     RemoteVec3 center;
@@ -366,6 +403,63 @@ struct ActorShapeHash {
     }
 };
 
+bool ActorShapeLess(const ActorShape& left,
+                    const ActorShape& right) noexcept {
+    if (left.actor != right.actor) {
+        return left.actor < right.actor;
+    }
+    if (left.shape != right.shape) {
+        return left.shape < right.shape;
+    }
+    return false;
+}
+
+bool PrunerPayloadLess(const RemotePrunerPayload& left,
+                       const RemotePrunerPayload& right) noexcept {
+    if (left.actor != right.actor) {
+        return left.actor < right.actor;
+    }
+    return left.shape < right.shape;
+}
+
+bool RemoteArrayEqual(const RemoteArray& left,
+                      const RemoteArray& right) noexcept {
+    return left.data == right.data && left.count == right.count &&
+           left.capacity == right.capacity;
+}
+
+bool PruningPoolEqual(const RemotePruningPool& left,
+                      const RemotePruningPool& right) noexcept {
+    return left.objectCount == right.objectCount &&
+           left.maximumObjectCount == right.maximumObjectCount &&
+           left.worldBounds == right.worldBounds &&
+           left.objects == right.objects;
+}
+
+bool PrunerPayloadsEqual(
+    const std::vector<RemotePrunerPayload>& left,
+    const std::vector<RemotePrunerPayload>& right) noexcept {
+    return left.size() == right.size() &&
+           std::equal(
+               left.begin(), left.end(), right.begin(),
+               [](const RemotePrunerPayload& first,
+                  const RemotePrunerPayload& second) {
+                   return first.actor == second.actor &&
+                          first.shape == second.shape;
+               });
+}
+
+struct CollectionReport {
+    bool sourceAvailable = false;
+    bool complete = false;
+    bool budgetLimited = false;
+    bool partial = false;
+};
+
+using ActorShapeSet = std::unordered_set<ActorShape, ActorShapeHash>;
+using ActorShapeMissMap =
+    std::unordered_map<ActorShape, std::size_t, ActorShapeHash>;
+
 struct Vec3 {
     float x = 0.0f;
     float y = 0.0f;
@@ -557,8 +651,9 @@ bool IsValidExtent(float value) noexcept {
            value <= kMaximumGeometryExtent;
 }
 
-bool BuildWorldTransform(const RemoteBody& body, GeometryBodyType bodyType,
-                         const RemoteShape& shape,
+bool BuildWorldTransform(const GeometryBodyData& body,
+                         GeometryBodyType bodyType,
+                         const GeometryShapeData& shape,
                          Transform& worldTransform) noexcept {
     Transform bodyWorld{};
     Transform shapeLocal{};
@@ -670,6 +765,27 @@ bool FinalizeMesh(const ActorShape& reference, GeometryBodyType bodyType,
     return true;
 }
 
+bool IsSameGeometryMeshContent(const GeometryMesh& left,
+                               const GeometryMesh& right) noexcept {
+    if (left.bodyType != right.bodyType ||
+        left.actorAddress != right.actorAddress ||
+        left.shapeAddress != right.shapeAddress ||
+        left.center.x != right.center.x ||
+        left.center.y != right.center.y ||
+        left.center.z != right.center.z ||
+        left.boundsRadius != right.boundsRadius ||
+        left.vertices.size() != right.vertices.size() ||
+        left.indices != right.indices) {
+        return false;
+    }
+    return std::equal(
+        left.vertices.begin(), left.vertices.end(), right.vertices.begin(),
+        [](const GeometryPoint& first, const GeometryPoint& second) {
+            return first.x == second.x && first.y == second.y &&
+                first.z == second.z;
+        });
+}
+
 GeometryRuntimeConfig Sanitize(GeometryRuntimeConfig config) {
     config.dynamicRefresh =
         std::clamp(config.dynamicRefresh, std::chrono::milliseconds(100),
@@ -723,8 +839,11 @@ private:
 class SceneOwner final {
 public:
     SceneOwner(std::shared_ptr<DeviceOwner> device,
-               std::vector<std::shared_ptr<const GeometryMesh>> meshes)
-        : device_(std::move(device)), meshes_(std::move(meshes)) {}
+               std::vector<std::shared_ptr<const GeometryMesh>> meshes,
+               GeometrySceneKind kind)
+        : device_(std::move(device)),
+          meshes_(std::move(meshes)),
+          buildPolicy_(ResolveGeometrySceneBuildPolicy(kind)) {}
 
     ~SceneOwner() {
         if (scene_ != nullptr) {
@@ -746,11 +865,22 @@ public:
             return false;
         }
 
-        rtcSetSceneBuildQuality(scene_, RTC_BUILD_QUALITY_MEDIUM);
-        rtcSetSceneFlags(
+        rtcSetSceneBuildQuality(
             scene_,
-            static_cast<RTCSceneFlags>(RTC_SCENE_FLAG_ROBUST |
-                                       RTC_SCENE_FLAG_COMPACT));
+            buildPolicy_.lowBuildQuality
+                ? RTC_BUILD_QUALITY_LOW
+                : RTC_BUILD_QUALITY_MEDIUM);
+        unsigned int sceneFlags = RTC_SCENE_FLAG_NONE;
+        if (buildPolicy_.dynamicScene) {
+            sceneFlags |= RTC_SCENE_FLAG_DYNAMIC;
+        }
+        if (buildPolicy_.robust) {
+            sceneFlags |= RTC_SCENE_FLAG_ROBUST;
+        }
+        if (buildPolicy_.compact) {
+            sceneFlags |= RTC_SCENE_FLAG_COMPACT;
+        }
+        rtcSetSceneFlags(scene_, static_cast<RTCSceneFlags>(sceneFlags));
 
         for (const auto& mesh : meshes_) {
             if (!mesh || mesh->vertices.size() < 3 ||
@@ -759,27 +889,65 @@ public:
                 return false;
             }
 
+            rtcGetDeviceError(device_->Get());
             RTCGeometry geometry =
                 rtcNewGeometry(device_->Get(), RTC_GEOMETRY_TYPE_TRIANGLE);
             if (geometry == nullptr) {
+                rtcGetDeviceError(device_->Get());
                 return false;
             }
 
-            rtcSetSharedGeometryBuffer(
-                geometry, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3,
-                mesh->vertices.data(), 0, sizeof(GeometryPoint),
-                mesh->vertices.size());
-            rtcSetSharedGeometryBuffer(
-                geometry, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3,
-                mesh->indices.data(), 0, sizeof(std::uint32_t) * 3,
-                mesh->indices.size() / 3);
-            rtcCommitGeometry(geometry);
-            const unsigned int geometryId = rtcAttachGeometry(scene_, geometry);
-            rtcReleaseGeometry(geometry);
-            if (geometryId == RTC_INVALID_GEOMETRY_ID) {
+            auto* vertexBuffer = static_cast<GeometryPoint*>(
+                rtcSetNewGeometryBuffer(
+                    geometry, RTC_BUFFER_TYPE_VERTEX, 0,
+                    RTC_FORMAT_FLOAT3, sizeof(GeometryPoint),
+                    mesh->vertices.size()));
+            if (vertexBuffer == nullptr) {
+                rtcGetDeviceError(device_->Get());
+                rtcReleaseGeometry(geometry);
                 return false;
             }
-            geometryById_.emplace(geometryId, mesh);
+            std::memcpy(vertexBuffer, mesh->vertices.data(),
+                        mesh->vertices.size() * sizeof(GeometryPoint));
+
+            auto* indexBuffer = static_cast<std::uint32_t*>(
+                rtcSetNewGeometryBuffer(
+                    geometry, RTC_BUFFER_TYPE_INDEX, 0,
+                    RTC_FORMAT_UINT3, sizeof(std::uint32_t) * 3,
+                    mesh->indices.size() / 3));
+            if (indexBuffer == nullptr) {
+                rtcGetDeviceError(device_->Get());
+                rtcReleaseGeometry(geometry);
+                return false;
+            }
+            std::memcpy(indexBuffer, mesh->indices.data(),
+                        mesh->indices.size() * sizeof(std::uint32_t));
+            rtcCommitGeometry(geometry);
+            if (rtcGetDeviceError(device_->Get()) != RTC_ERROR_NONE) {
+                rtcReleaseGeometry(geometry);
+                return false;
+            }
+            const unsigned int geometryId = rtcAttachGeometry(scene_, geometry);
+            rtcReleaseGeometry(geometry);
+            const RTCError attachError = rtcGetDeviceError(device_->Get());
+            if (geometryId == RTC_INVALID_GEOMETRY_ID ||
+                attachError != RTC_ERROR_NONE) {
+                if (geometryId != RTC_INVALID_GEOMETRY_ID) {
+                    rtcDetachGeometry(scene_, geometryId);
+                    rtcGetDeviceError(device_->Get());
+                }
+                return false;
+            }
+            const auto inserted = geometryById_.emplace(geometryId, mesh);
+            if (!inserted.second) {
+                rtcDetachGeometry(scene_, geometryId);
+                rtcGetDeviceError(device_->Get());
+                return false;
+            }
+        }
+
+        if (geometryById_.size() != meshes_.size()) {
+            return false;
         }
 
         rtcCommitScene(scene_);
@@ -795,6 +963,10 @@ public:
         return scene_;
     }
 
+    std::size_t GeometryCount() const noexcept {
+        return geometryById_.size();
+    }
+
     std::shared_ptr<const GeometryMesh> FindMesh(
         unsigned int geometryId) const noexcept {
         const auto iterator = geometryById_.find(geometryId);
@@ -806,6 +978,7 @@ private:
     std::vector<std::shared_ptr<const GeometryMesh>> meshes_;
     std::unordered_map<unsigned int, std::shared_ptr<const GeometryMesh>>
         geometryById_;
+    GeometrySceneBuildPolicy buildPolicy_{};
     RTCScene scene_ = nullptr;
 };
 
@@ -813,6 +986,7 @@ struct PublishedState {
     std::shared_ptr<const GeometrySnapshot> snapshot;
     std::shared_ptr<const SceneOwner> staticScene;
     std::shared_ptr<const SceneOwner> dynamicScene;
+    std::vector<std::uintptr_t> sourceScenes;
 };
 
 enum class PublishResult : std::uint8_t {
@@ -987,6 +1161,67 @@ struct GeometryRuntime::Impl final {
             };
         return occludedBy(state->staticScene) ||
                 occludedBy(state->dynamicScene)
+            ? GeometryVisibility::Occluded
+            : GeometryVisibility::Visible;
+    }
+
+    GeometryVisibility TraceFullSegment(
+        const GeometryPoint& origin,
+        const GeometryPoint& target) const noexcept {
+        if (!IsFinite(origin) || !IsFinite(target)) {
+            return GeometryVisibility::Unavailable;
+        }
+
+        const auto state =
+            std::atomic_load_explicit(&published, std::memory_order_acquire);
+        if (!state || !state->snapshot || !state->snapshot->available ||
+            !state->staticScene || state->staticScene->Get() == nullptr ||
+            !state->dynamicScene || state->dynamicScene->Get() == nullptr) {
+            return GeometryVisibility::Unavailable;
+        }
+
+        const Vec3 start{origin.x, origin.y, origin.z};
+        const Vec3 delta{
+            target.x - origin.x,
+            target.y - origin.y,
+            target.z - origin.z,
+        };
+        const float distanceSquared = LengthSquared(delta);
+        if (!IsFinite(distanceSquared) || distanceSquared <= 1.0e-6f) {
+            return GeometryVisibility::Visible;
+        }
+        const float distance = std::sqrt(distanceSquared);
+        const Vec3 direction = Multiply(delta, 1.0f / distance);
+        if (!IsFinite(direction)) {
+            return GeometryVisibility::Unavailable;
+        }
+
+        const auto intersects =
+            [&](const std::shared_ptr<const SceneOwner>& scene) {
+                RTCRayHit rayHit{};
+                rayHit.ray.org_x = start.x;
+                rayHit.ray.org_y = start.y;
+                rayHit.ray.org_z = start.z;
+                rayHit.ray.dir_x = direction.x;
+                rayHit.ray.dir_y = direction.y;
+                rayHit.ray.dir_z = direction.z;
+                rayHit.ray.tnear = 0.0f;
+                rayHit.ray.tfar = distance;
+                rayHit.ray.mask = 0xFFFFFFFFU;
+                rayHit.ray.flags = 0;
+                rayHit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
+                rayHit.hit.primID = RTC_INVALID_GEOMETRY_ID;
+                for (unsigned int& instanceId : rayHit.hit.instID) {
+                    instanceId = RTC_INVALID_GEOMETRY_ID;
+                }
+
+                RTCIntersectArguments arguments;
+                rtcInitIntersectArguments(&arguments);
+                rtcIntersect1(scene->Get(), &rayHit, &arguments);
+                return rayHit.hit.geomID != RTC_INVALID_GEOMETRY_ID;
+            };
+        return intersects(state->staticScene) ||
+                intersects(state->dynamicScene)
             ? GeometryVisibility::Occluded
             : GeometryVisibility::Visible;
     }
@@ -1171,142 +1406,492 @@ private:
         return true;
     }
 
+    bool ValidatePopulatedInstance(
+        std::uintptr_t instance) const noexcept {
+        RemoteArray scenes{};
+        return ValidateInstance(instance, &scenes) && scenes.count > 0;
+    }
+
+    static void CanonicalizePointerSet(
+        std::vector<std::uintptr_t>& values) {
+        std::sort(values.begin(), values.end());
+        values.erase(std::unique(values.begin(), values.end()),
+                     values.end());
+    }
+
+    bool ReadStablePointerValues(
+        const RemoteArray& array, std::size_t maximumCount,
+        std::vector<std::uintptr_t>& output) const {
+        std::vector<std::uintptr_t> firstPointers;
+        std::vector<std::uintptr_t> secondPointers;
+        if (!ReadPointerArray(array, maximumCount, firstPointers) ||
+            !ReadPointerArray(array, maximumCount, secondPointers)) {
+            output.clear();
+            return false;
+        }
+        CanonicalizePointerSet(firstPointers);
+        CanonicalizePointerSet(secondPointers);
+        if (firstPointers != secondPointers) {
+            output.clear();
+            return false;
+        }
+        output = std::move(secondPointers);
+        return true;
+    }
+
+    bool ReadStableRemotePointerArray(
+        std::uintptr_t headerAddress, std::size_t maximumCount,
+        std::vector<std::uintptr_t>& output) const {
+        RemoteArray firstHeader{};
+        RemoteArray secondHeader{};
+        std::vector<std::uintptr_t> firstPointers;
+        std::vector<std::uintptr_t> secondPointers;
+        if (!ReadObject(headerAddress, firstHeader) ||
+            !ReadPointerArray(firstHeader, maximumCount, firstPointers) ||
+            !ReadObject(headerAddress, secondHeader) ||
+            !RemoteArrayEqual(firstHeader, secondHeader) ||
+            !ReadPointerArray(secondHeader, maximumCount,
+                              secondPointers)) {
+            output.clear();
+            return false;
+        }
+        CanonicalizePointerSet(firstPointers);
+        CanonicalizePointerSet(secondPointers);
+        if (firstPointers != secondPointers) {
+            output.clear();
+            return false;
+        }
+        output = std::move(secondPointers);
+        return true;
+    }
+
+    bool ReadScenePointers(
+        std::uintptr_t instance,
+        std::vector<std::uintptr_t>& scenes) const {
+        RemoteArray firstHeader{};
+        std::vector<std::uintptr_t> firstPointers;
+        if (!ValidateInstance(instance, &firstHeader) ||
+            !ReadPointerArray(firstHeader, kMaximumScenes,
+                              firstPointers)) {
+            scenes.clear();
+            return false;
+        }
+
+        RemoteArray secondHeader{};
+        std::vector<std::uintptr_t> secondPointers;
+        if (!ValidateInstance(instance, &secondHeader) ||
+            !RemoteArrayEqual(firstHeader, secondHeader) ||
+            !ReadPointerArray(secondHeader, kMaximumScenes,
+                              secondPointers)) {
+            scenes.clear();
+            return false;
+        }
+
+        CanonicalizePointerSet(firstPointers);
+        CanonicalizePointerSet(secondPointers);
+        if (firstPointers.empty() || firstPointers != secondPointers) {
+            scenes.clear();
+            return false;
+        }
+        scenes = std::move(secondPointers);
+        return true;
+    }
+
     bool ResolveInstance(std::uintptr_t& output) const noexcept {
         output = 0;
         if (config.instanceAddress != 0) {
-            if (!ValidateInstance(config.instanceAddress)) {
+            if (!ValidatePopulatedInstance(config.instanceAddress)) {
                 return false;
             }
             output = config.instanceAddress;
             return true;
         }
 
+        bool readAnySlot = false;
+        bool allSlotsReadable = true;
         bool sawCandidate = false;
         for (const std::uintptr_t slot : config.instancePointerSlots) {
             std::uintptr_t candidate = 0;
             if (!ReadObject(slot, candidate)) {
-                return false;
+                allSlotsReadable = false;
+                continue;
             }
+            readAnySlot = true;
             if (candidate == 0) {
                 continue;
             }
             sawCandidate = true;
-            if (ValidateInstance(candidate)) {
+            if (ValidatePopulatedInstance(candidate)) {
                 output = candidate;
                 return true;
             }
         }
-        return !sawCandidate;
+        return readAnySlot && allSlotsReadable && !sawCandidate;
     }
 
-    bool CollectActorShapes(std::uintptr_t instance, std::uint16_t actorType,
-                            std::vector<ActorShape>& output,
-                            std::size_t initialShapeCount) const {
+    CollectionReport CollectPrunerActorShapes(
+        std::uintptr_t instance, GeometryBodyType bodyType,
+        std::vector<ActorShape>& output,
+        std::size_t initialShapeCount,
+        const std::vector<std::uintptr_t>* expectedScenes = nullptr) const {
+        CollectionReport report;
         output.clear();
         if (initialShapeCount > config.maxShapes) {
-            return false;
-        }
-        RemoteArray sceneArray{};
-        if (!ValidateInstance(instance, &sceneArray)) {
-            return false;
+            return report;
         }
 
         std::vector<std::uintptr_t> scenes;
-        if (!ReadPointerArray(sceneArray, kMaximumScenes, scenes)) {
-            return false;
+        if (!ReadScenePointers(instance, scenes)) {
+            report.partial = true;
+            return report;
+        }
+        if (expectedScenes != nullptr && scenes != *expectedScenes) {
+            report.partial = true;
+            return report;
         }
 
-        std::unordered_set<ActorShape, ActorShapeHash> uniqueShapes;
-        std::vector<std::uintptr_t> actors;
-        std::vector<std::uintptr_t> shapes;
-        std::size_t totalActors = 0;
+        report.complete = true;
+        std::vector<RemotePrunerPayload> mergedPayloads;
+        const std::size_t prunerIndex =
+            bodyType == GeometryBodyType::Static ? kStaticPrunerIndex
+                                                 : kDynamicPrunerIndex;
+        const bool shapeBudgetExhausted =
+            initialShapeCount == config.maxShapes;
+        if (shapeBudgetExhausted) {
+            report.complete = false;
+            report.budgetLimited = true;
+        }
 
         for (const std::uintptr_t scene : scenes) {
-            if (!IsRemoteRange(scene, kActorArrayOffset + sizeof(RemoteArray), 8)) {
-                return false;
+            if (!IsRemoteRange(
+                    scene,
+                    kSceneQueryManagerOffset +
+                        (kDynamicPrunerIndex + 1) * kPrunerStride,
+                    8)) {
+                report.complete = false;
+                report.partial = true;
+                continue;
+            }
+            const std::uintptr_t prunerSlot =
+                scene + kSceneQueryManagerOffset +
+                prunerIndex * kPrunerStride;
+
+            std::uint32_t timestampBefore = 0;
+            if (!ReadObject(prunerSlot + 0x2C, timestampBefore)) {
+                report.complete = false;
+                report.partial = true;
+                continue;
+            }
+            std::uintptr_t prunerBefore = 0;
+            if (!ReadObject(prunerSlot, prunerBefore) ||
+                !IsRemoteRange(
+                    prunerBefore,
+                    kPruningPoolOffset + sizeof(RemotePruningPool), 8)) {
+                report.complete = false;
+                report.partial = true;
+                continue;
             }
 
-            RemoteArray actorArray{};
-            if (!ReadObject(scene + kActorArrayOffset, actorArray) ||
-                !ReadPointerArray(actorArray, kMaximumActorsPerScene, actors)) {
-                return false;
+            RemotePruningPool poolBefore{};
+            if (!ReadObject(prunerBefore + kPruningPoolOffset,
+                            poolBefore) ||
+                poolBefore.objectCount > poolBefore.maximumObjectCount ||
+                poolBefore.objectCount > kMaximumPrunerObjects ||
+                (poolBefore.objectCount != 0 &&
+                 !IsRemoteRange(
+                      poolBefore.objects,
+                      static_cast<std::size_t>(poolBefore.objectCount) *
+                          sizeof(RemotePrunerPayload),
+                      alignof(RemotePrunerPayload)))) {
+                report.complete = false;
+                report.partial = true;
+                continue;
             }
 
-            if (actors.size() > config.maxActors - totalActors) {
-                return false;
+            std::vector<RemotePrunerPayload> firstPayloads;
+            std::vector<RemotePrunerPayload> secondPayloads;
+            if (!shapeBudgetExhausted &&
+                !ReadVector(
+                    poolBefore.objects,
+                    static_cast<std::size_t>(poolBefore.objectCount),
+                    firstPayloads)) {
+                report.complete = false;
+                report.partial = true;
+                continue;
             }
-            totalActors += actors.size();
+            if (!shapeBudgetExhausted &&
+                bodyType == GeometryBodyType::Dynamic &&
+                (!ReadVector(
+                     poolBefore.objects,
+                     static_cast<std::size_t>(poolBefore.objectCount),
+                     secondPayloads) ||
+                 !PrunerPayloadsEqual(firstPayloads,
+                                      secondPayloads))) {
+                report.complete = false;
+                report.partial = true;
+                continue;
+            }
 
-            for (const std::uintptr_t actor : actors) {
-                if (!IsRemoteRange(actor, 8 + 42, 8)) {
-                    return false;
-                }
+            std::uintptr_t prunerAfter = 0;
+            RemotePruningPool poolAfter{};
+            std::uint32_t timestampAfter = 0;
+            if (!ReadObject(prunerSlot, prunerAfter) ||
+                !IsRemoteRange(
+                    prunerAfter,
+                    kPruningPoolOffset + sizeof(RemotePruningPool), 8) ||
+                !ReadObject(prunerAfter + kPruningPoolOffset,
+                            poolAfter) ||
+                !ReadObject(prunerSlot + 0x2C, timestampAfter) ||
+                prunerAfter != prunerBefore ||
+                !PruningPoolEqual(poolBefore, poolAfter) ||
+                timestampAfter != timestampBefore) {
+                report.complete = false;
+                report.partial = true;
+                continue;
+            }
+            report.sourceAvailable = true;
+            if (shapeBudgetExhausted) {
+                continue;
+            }
 
-                std::array<std::uint8_t, 42> actorHeader{};
-                if (!SafeRead(actor + 8, actorHeader.data(),
-                              actorHeader.size())) {
-                    return false;
-                }
-
-                std::uint16_t concreteType = 0;
-                std::uintptr_t shapeStorage = 0;
-                std::uint16_t shapeCount = 0;
-                std::memcpy(&concreteType, actorHeader.data(),
-                            sizeof(concreteType));
-                std::memcpy(&shapeStorage, actorHeader.data() + 32,
-                            sizeof(shapeStorage));
-                std::memcpy(&shapeCount, actorHeader.data() + 40,
-                            sizeof(shapeCount));
-
-                if (concreteType != actorType) {
+            const auto& acceptedPayloads =
+                bodyType == GeometryBodyType::Dynamic
+                    ? secondPayloads
+                    : firstPayloads;
+            std::vector<RemotePrunerPayload> validPayloads;
+            validPayloads.reserve(acceptedPayloads.size());
+            for (const RemotePrunerPayload& payload : acceptedPayloads) {
+                if (!IsRemoteRange(payload.actor,
+                                   sizeof(RemoteBody), 8) ||
+                    !IsRemoteRange(payload.shape,
+                                   sizeof(RemoteShape), 8)) {
+                    report.complete = false;
+                    report.partial = true;
                     continue;
                 }
-                if (shapeCount == 0) {
-                    continue;
-                }
-                if (shapeCount > kMaximumShapesPerActor) {
-                    return false;
-                }
-                if (uniqueShapes.size() >
-                        config.maxShapes - initialShapeCount ||
-                    shapeCount >
-                        config.maxShapes - initialShapeCount -
-                            uniqueShapes.size()) {
-                    return false;
-                }
+                validPayloads.push_back(payload);
+            }
 
-                if (shapeCount == 1) {
-                    if (!IsRemoteRange(shapeStorage, sizeof(RemoteShape), 8)) {
-                        return false;
-                    }
-                    uniqueShapes.insert(ActorShape{actor, shapeStorage});
-                    continue;
-                }
-
-                RemoteArray shapeArray{shapeStorage,
-                                       static_cast<std::int32_t>(shapeCount),
-                                       static_cast<std::int32_t>(shapeCount)};
-                if (!ReadPointerArray(shapeArray, kMaximumShapesPerActor,
-                                      shapes)) {
-                    return false;
-                }
-                for (const std::uintptr_t shape : shapes) {
-                    if (!IsRemoteRange(shape, sizeof(RemoteShape), 8)) {
-                        return false;
-                    }
-                    uniqueShapes.insert(ActorShape{actor, shape});
-                }
+            mergedPayloads.insert(mergedPayloads.end(),
+                                  validPayloads.begin(),
+                                  validPayloads.end());
+            std::sort(mergedPayloads.begin(), mergedPayloads.end(),
+                      PrunerPayloadLess);
+            mergedPayloads.erase(
+                std::unique(
+                    mergedPayloads.begin(), mergedPayloads.end(),
+                    [](const RemotePrunerPayload& left,
+                       const RemotePrunerPayload& right) {
+                        return left.actor == right.actor &&
+                               left.shape == right.shape;
+                    }),
+                mergedPayloads.end());
+            if (mergedPayloads.size() > kMaximumPrunerObjects) {
+                mergedPayloads.resize(kMaximumPrunerObjects);
+                report.complete = false;
+                report.budgetLimited = true;
             }
         }
 
-        output.assign(uniqueShapes.begin(), uniqueShapes.end());
-        return true;
+        if (!report.sourceAvailable) {
+            report.complete = false;
+        }
+        std::size_t actorCount = 0;
+        std::uintptr_t previousActor = 0;
+        bool havePreviousActor = false;
+        output.reserve(std::min(
+            mergedPayloads.size(), config.maxShapes - initialShapeCount));
+        for (const RemotePrunerPayload& payload : mergedPayloads) {
+            if (!havePreviousActor || payload.actor != previousActor) {
+                if (actorCount >= config.maxActors) {
+                    report.complete = false;
+                    report.budgetLimited = true;
+                    break;
+                }
+                previousActor = payload.actor;
+                havePreviousActor = true;
+                ++actorCount;
+            }
+            if (output.size() >= config.maxShapes - initialShapeCount) {
+                report.complete = false;
+                report.budgetLimited = true;
+                break;
+            }
+            output.push_back(
+                ActorShape{payload.actor, payload.shape});
+        }
+        return report;
+    }
+
+    CollectionReport CollectLegacyActorShapes(
+        std::uintptr_t instance, std::uint16_t actorType,
+        std::vector<ActorShape>& output,
+        std::size_t initialShapeCount,
+        const std::vector<std::uintptr_t>* expectedScenes = nullptr) const {
+        CollectionReport report;
+        output.clear();
+        if (initialShapeCount > config.maxShapes) {
+            return report;
+        }
+        std::vector<std::uintptr_t> scenes;
+        if (!ReadScenePointers(instance, scenes)) {
+            return report;
+        }
+        if (expectedScenes != nullptr && scenes != *expectedScenes) {
+            report.partial = true;
+            return report;
+        }
+
+        report.complete = true;
+        std::vector<std::uintptr_t> mergedActors;
+        bool actorTableAvailable = false;
+        for (const std::uintptr_t scene : scenes) {
+            if (!IsRemoteRange(
+                    scene, kActorArrayOffset + sizeof(RemoteArray), 8)) {
+                report.complete = false;
+                report.partial = true;
+                continue;
+            }
+            std::vector<std::uintptr_t> sceneActors;
+            if (!ReadStableRemotePointerArray(
+                    scene + kActorArrayOffset,
+                    kMaximumActorsPerScene, sceneActors)) {
+                report.complete = false;
+                report.partial = true;
+                continue;
+            }
+            actorTableAvailable = true;
+            mergedActors.insert(mergedActors.end(), sceneActors.begin(),
+                                sceneActors.end());
+            CanonicalizePointerSet(mergedActors);
+            if (mergedActors.size() > kMaximumActorsPerScene) {
+                mergedActors.resize(kMaximumActorsPerScene);
+                report.complete = false;
+                report.budgetLimited = true;
+            }
+        }
+
+        if (initialShapeCount == config.maxShapes) {
+            report.complete = false;
+            report.budgetLimited = true;
+            report.sourceAvailable = actorTableAvailable;
+            return report;
+        }
+        if (mergedActors.size() > config.maxActors) {
+            mergedActors.resize(config.maxActors);
+            report.complete = false;
+            report.budgetLimited = true;
+        }
+
+        std::vector<ActorShape> mergedShapes;
+        for (const std::uintptr_t actor : mergedActors) {
+            if (!IsRemoteRange(actor, 8 + 42, 8)) {
+                report.complete = false;
+                report.partial = true;
+                continue;
+            }
+
+            std::array<std::uint8_t, 42> firstHeader{};
+            std::array<std::uint8_t, 42> secondHeader{};
+            if (!SafeRead(actor + 8, firstHeader.data(),
+                          firstHeader.size()) ||
+                !SafeRead(actor + 8, secondHeader.data(),
+                          secondHeader.size()) ||
+                firstHeader != secondHeader) {
+                report.complete = false;
+                report.partial = true;
+                continue;
+            }
+
+            std::uint16_t concreteType = 0;
+            std::uintptr_t shapeStorage = 0;
+            std::uint16_t shapeCount = 0;
+            std::memcpy(&concreteType, secondHeader.data(),
+                        sizeof(concreteType));
+            std::memcpy(&shapeStorage, secondHeader.data() + 32,
+                        sizeof(shapeStorage));
+            std::memcpy(&shapeCount, secondHeader.data() + 40,
+                        sizeof(shapeCount));
+            if (concreteType != actorType || shapeCount == 0) {
+                continue;
+            }
+            if (shapeCount > kMaximumShapesPerActor) {
+                report.complete = false;
+                report.partial = true;
+                continue;
+            }
+
+            std::vector<std::uintptr_t> actorShapes;
+            if (shapeCount == 1) {
+                actorShapes.push_back(shapeStorage);
+            } else {
+                const RemoteArray shapeArray{
+                    shapeStorage,
+                    static_cast<std::int32_t>(shapeCount),
+                    static_cast<std::int32_t>(shapeCount)};
+                if (!ReadStablePointerValues(
+                        shapeArray, kMaximumShapesPerActor,
+                        actorShapes)) {
+                    report.complete = false;
+                    report.partial = true;
+                    continue;
+                }
+            }
+            for (const std::uintptr_t shape : actorShapes) {
+                if (!IsRemoteRange(shape, sizeof(RemoteShape), 8)) {
+                    report.complete = false;
+                    report.partial = true;
+                    continue;
+                }
+                mergedShapes.push_back(ActorShape{actor, shape});
+            }
+            if (mergedShapes.size() > kMaximumPrunerObjects) {
+                mergedShapes.resize(kMaximumPrunerObjects);
+                report.complete = false;
+                report.budgetLimited = true;
+            }
+        }
+
+        const std::size_t remainingShapes =
+            config.maxShapes - initialShapeCount;
+        if (mergedShapes.size() > remainingShapes) {
+            mergedShapes.resize(remainingShapes);
+            report.complete = false;
+            report.budgetLimited = true;
+        }
+        output = std::move(mergedShapes);
+        if (output.empty()) {
+            report.complete = false;
+            return report;
+        }
+        report.sourceAvailable = true;
+        return report;
+    }
+
+    CollectionReport CollectActorShapes(
+        std::uintptr_t instance, GeometryBodyType bodyType,
+        std::vector<ActorShape>& output,
+        std::size_t initialShapeCount,
+        const std::vector<std::uintptr_t>* expectedScenes = nullptr) const {
+        const std::uint16_t concreteType =
+            bodyType == GeometryBodyType::Static ? kStaticActorType
+                                                 : kDynamicActorType;
+        CollectionReport report = CollectLegacyActorShapes(
+            instance, concreteType, output, initialShapeCount,
+            expectedScenes);
+        if (report.sourceAvailable) {
+            return report;
+        }
+
+        return CollectPrunerActorShapes(
+            instance, bodyType, output, initialShapeCount,
+            expectedScenes);
     }
 
     bool LoadTriangleMesh(const ActorShape& reference,
                           GeometryBodyType bodyType,
-                          const RemoteBody& body,
-                          const RemoteShape& shape,
+                          const GeometryBodyData& body,
+                          const GeometryShapeData& shape,
                           std::shared_ptr<const GeometryMesh>& output) const {
         output.reset();
 
@@ -1469,8 +2054,8 @@ private:
 
     bool LoadPrimitiveMesh(const ActorShape& reference,
                            GeometryBodyType bodyType,
-                           const RemoteBody& body,
-                           const RemoteShape& shape,
+                           const GeometryBodyData& body,
+                           const GeometryShapeData& shape,
                            std::int32_t geometryType,
                            std::shared_ptr<const GeometryMesh>& output) const {
         Transform worldTransform{};
@@ -1621,8 +2206,8 @@ private:
 
     bool LoadConvexMesh(const ActorShape& reference,
                         GeometryBodyType bodyType,
-                        const RemoteBody& body,
-                        const RemoteShape& shape,
+                        const GeometryBodyData& body,
+                        const GeometryShapeData& shape,
                         std::shared_ptr<const GeometryMesh>& output) const {
         RemoteConvexMeshGeometry geometry{};
         std::memcpy(&geometry,
@@ -1757,8 +2342,8 @@ private:
 
     bool LoadHeightField(const ActorShape& reference,
                          GeometryBodyType bodyType,
-                         const RemoteBody& body,
-                         const RemoteShape& shape,
+                         const GeometryBodyData& body,
+                         const GeometryShapeData& shape,
                          std::shared_ptr<const GeometryMesh>& output) const {
         RemoteHeightFieldGeometry geometry{};
         std::memcpy(&geometry,
@@ -1870,114 +2455,252 @@ private:
                             indices, output);
     }
 
-    bool CollectMeshes(
+    enum class ReferenceLoadStatus : std::uint8_t {
+        Failed,
+        Resolved,
+    };
+
+    ReferenceLoadStatus LoadReferenceMesh(
+        const ActorShape& reference, GeometryBodyType bodyType,
+        std::unordered_map<std::uintptr_t, GeometryBodyData>& bodyCache,
+        std::unordered_set<std::uintptr_t>& unreadableBodies,
+        std::shared_ptr<const GeometryMesh>& output) const {
+        output.reset();
+        GeometryShapeData shape{};
+        RemoteShape remoteShape{};
+        if (!ReadObject(reference.shape, remoteShape)) {
+            return ReferenceLoadStatus::Failed;
+        }
+        shape.shapeCore = remoteShape.shapeCore;
+
+        std::int32_t geometryType = -1;
+        std::memcpy(&geometryType,
+                    shape.shapeCore.core.geometry.data.data(),
+                    sizeof(geometryType));
+        if (geometryType == kPlaneGeometryType) {
+            return ReferenceLoadStatus::Resolved;
+        }
+        if (geometryType < kSphereGeometryType ||
+            geometryType >= kGeometryTypeCount) {
+            return ReferenceLoadStatus::Failed;
+        }
+        if (!ShouldIncludeGeometryShape(
+                bodyType,
+                geometryType,
+                shape.shapeCore.core.shapeFlags,
+                shape.shapeCore.core.materialIndex)) {
+            return ReferenceLoadStatus::Resolved;
+        }
+
+        auto bodyIterator = bodyCache.find(reference.actor);
+        if (bodyIterator == bodyCache.end()) {
+            if (unreadableBodies.find(reference.actor) !=
+                unreadableBodies.end()) {
+                return ReferenceLoadStatus::Failed;
+            }
+            GeometryBodyData body{};
+            RemoteBody remoteBody{};
+            if (!ReadObject(reference.actor, remoteBody)) {
+                unreadableBodies.insert(reference.actor);
+                return ReferenceLoadStatus::Failed;
+            }
+            body.rigid = remoteBody.rigid;
+            bodyIterator =
+                bodyCache.emplace(reference.actor, std::move(body)).first;
+        }
+
+        bool loaded = false;
+        if (geometryType == kTriangleMeshGeometryType) {
+            loaded = LoadTriangleMesh(reference, bodyType,
+                                      bodyIterator->second, shape, output);
+        } else if (geometryType == kConvexMeshGeometryType) {
+            loaded = LoadConvexMesh(reference, bodyType,
+                                    bodyIterator->second, shape, output);
+        } else if (geometryType == kHeightFieldGeometryType) {
+            loaded = LoadHeightField(reference, bodyType,
+                                     bodyIterator->second, shape, output);
+        } else {
+            loaded = LoadPrimitiveMesh(reference, bodyType,
+                                       bodyIterator->second, shape,
+                                       geometryType, output);
+        }
+        return loaded ? ReferenceLoadStatus::Resolved
+                      : ReferenceLoadStatus::Failed;
+    }
+
+    CollectionReport CollectMeshes(
         std::uintptr_t instance, GeometryBodyType bodyType,
+        const std::vector<std::shared_ptr<const GeometryMesh>>& previous,
+        ActorShapeMissMap& missingCounts,
         std::vector<std::shared_ptr<const GeometryMesh>>& output,
         std::size_t initialMeshCount = 0,
         std::size_t initialVertexCount = 0,
         std::size_t initialTriangleCount = 0,
         std::size_t initialShapeCount = 0,
-        std::size_t* collectedShapeCount = nullptr) const {
+        std::size_t* selectedShapeCount = nullptr,
+        const std::vector<std::uintptr_t>* expectedScenes = nullptr) const {
+        CollectionReport report;
         output.clear();
+        if (selectedShapeCount != nullptr) {
+            *selectedShapeCount = 0;
+        }
         if (initialMeshCount > config.maxMeshes ||
             initialVertexCount > config.maxTotalVertices ||
             initialTriangleCount > config.maxTotalTriangles ||
             initialShapeCount > config.maxShapes) {
-            return false;
-        }
-        std::vector<ActorShape> references;
-        const std::uint16_t concreteType =
-            bodyType == GeometryBodyType::Static ? kStaticActorType
-                                                 : kDynamicActorType;
-        if (!CollectActorShapes(instance, concreteType, references,
-                                initialShapeCount)) {
-            return false;
-        }
-        if (collectedShapeCount != nullptr) {
-            *collectedShapeCount = references.size();
+            return report;
         }
 
-        std::unordered_map<std::uintptr_t, RemoteBody> bodyCache;
+        std::vector<ActorShape> references;
+        report = CollectActorShapes(instance, bodyType, references,
+                                    initialShapeCount, expectedScenes);
+        if (!report.sourceAvailable && previous.empty()) {
+            return report;
+        }
+        std::stable_sort(references.begin(), references.end(),
+                         ActorShapeLess);
+        references.erase(
+            std::unique(references.begin(), references.end()),
+            references.end());
+        if (references.size() > config.maxShapes - initialShapeCount) {
+            report.complete = false;
+            report.budgetLimited = true;
+            references.resize(config.maxShapes - initialShapeCount);
+        }
+
+        ActorShapeSet observedShapes;
+        observedShapes.reserve(references.size());
+        observedShapes.insert(references.begin(), references.end());
+        using MeshMap = std::unordered_map<
+            ActorShape, std::shared_ptr<const GeometryMesh>, ActorShapeHash>;
+        MeshMap previousByShape;
+        previousByShape.reserve(previous.size());
+        for (const auto& mesh : previous) {
+            if (!mesh || mesh->bodyType != bodyType ||
+                mesh->vertices.size() < 3 || mesh->indices.size() < 3 ||
+                (mesh->indices.size() % 3) != 0) {
+                continue;
+            }
+            previousByShape.emplace(
+                ActorShape{mesh->actorAddress, mesh->shapeAddress}, mesh);
+        }
+
+        const bool retainUnobserved =
+            !report.budgetLimited &&
+            (!report.sourceAvailable || report.partial);
+        if (!retainUnobserved) {
+            missingCounts.clear();
+        } else {
+            for (auto iterator = missingCounts.begin();
+                 iterator != missingCounts.end();) {
+                if (previousByShape.find(iterator->first) ==
+                    previousByShape.end()) {
+                    iterator = missingCounts.erase(iterator);
+                } else {
+                    ++iterator;
+                }
+            }
+        }
+
+        std::vector<ActorShape> candidateKeys = references;
+        if (retainUnobserved) {
+            candidateKeys.reserve(references.size() +
+                                  previousByShape.size());
+            for (const auto& entry : previousByShape) {
+                if (observedShapes.find(entry.first) ==
+                    observedShapes.end()) {
+                    candidateKeys.push_back(entry.first);
+                }
+            }
+        }
+        std::stable_sort(candidateKeys.begin(), candidateKeys.end(),
+                         ActorShapeLess);
+        candidateKeys.erase(
+            std::unique(candidateKeys.begin(), candidateKeys.end()),
+            candidateKeys.end());
+
+        std::unordered_map<std::uintptr_t, GeometryBodyData> bodyCache;
+        std::unordered_set<std::uintptr_t> unreadableBodies;
         std::size_t totalVertices = initialVertexCount;
         std::size_t totalTriangles = initialTriangleCount;
-        output.reserve(std::min(references.size(),
+        std::size_t shapeCount = initialShapeCount + references.size();
+        output.reserve(std::min(candidateKeys.size(),
                                 config.maxMeshes - initialMeshCount));
 
-        for (const auto& reference : references) {
-            RemoteShape shape{};
-            if (!ReadObject(reference.shape, shape)) {
-                return false;
-            }
-            const std::uint8_t shapeFlags =
-                shape.shapeCore.core.shapeFlags;
-            if ((shapeFlags & kTriggerShapeFlag) != 0 ||
-                (shapeFlags & kCollisionShapeFlags) == 0) {
-                continue;
-            }
-
-            std::int32_t geometryType = -1;
-            std::memcpy(&geometryType,
-                        shape.shapeCore.core.geometry.data.data(),
-                        sizeof(geometryType));
-            if (geometryType == kPlaneGeometryType) {
-                continue;
-            }
-            if (geometryType < kSphereGeometryType ||
-                geometryType >= kGeometryTypeCount) {
-                return false;
-            }
-
-            auto bodyIterator = bodyCache.find(reference.actor);
-            if (bodyIterator == bodyCache.end()) {
-                RemoteBody body{};
-                if (!ReadObject(reference.actor, body)) {
-                    return false;
+        for (const ActorShape& reference : candidateKeys) {
+            const bool observed =
+                observedShapes.find(reference) != observedShapes.end();
+            std::shared_ptr<const GeometryMesh> candidate;
+            bool useRetained = !observed;
+            if (observed) {
+                const ReferenceLoadStatus loadStatus =
+                    LoadReferenceMesh(reference, bodyType, bodyCache,
+                                      unreadableBodies, candidate);
+                if (loadStatus == ReferenceLoadStatus::Resolved) {
+                    missingCounts.erase(reference);
+                    if (!candidate) {
+                        continue;
+                    }
+                } else {
+                    report.complete = false;
+                    report.partial = true;
+                    useRetained = true;
                 }
-                bodyIterator =
-                    bodyCache.emplace(reference.actor, std::move(body)).first;
             }
 
-            std::shared_ptr<const GeometryMesh> mesh;
-            bool loaded = false;
-            if (geometryType == kTriangleMeshGeometryType) {
-                loaded =
-                    LoadTriangleMesh(reference, bodyType, bodyIterator->second,
-                                     shape, mesh);
-            } else if (geometryType == kConvexMeshGeometryType) {
-                loaded =
-                    LoadConvexMesh(reference, bodyType, bodyIterator->second,
-                                   shape, mesh);
-            } else if (geometryType == kHeightFieldGeometryType) {
-                loaded =
-                    LoadHeightField(reference, bodyType, bodyIterator->second,
-                                    shape, mesh);
-            } else {
-                loaded =
-                    LoadPrimitiveMesh(reference, bodyType, bodyIterator->second,
-                                      shape, geometryType, mesh);
+            if (useRetained) {
+                const auto previousIterator =
+                    previousByShape.find(reference);
+                if (previousIterator == previousByShape.end()) {
+                    continue;
+                }
+                std::size_t& misses = missingCounts[reference];
+                if (misses < std::numeric_limits<std::size_t>::max()) {
+                    ++misses;
+                }
+                if (misses > kMissingMeshRetentionRounds) {
+                    continue;
+                }
+                if (!observed && shapeCount >= config.maxShapes) {
+                    report.complete = false;
+                    report.budgetLimited = true;
+                    continue;
+                }
+                candidate = previousIterator->second;
             }
-            if (!loaded) {
-                return false;
-            }
-            if (!mesh) {
+
+            if (!candidate) {
                 continue;
             }
-            if (output.size() >= config.maxMeshes - initialMeshCount) {
-                return false;
+            const auto previousIterator = previousByShape.find(reference);
+            if (previousIterator != previousByShape.end()) {
+                ReuseEquivalentGeometryMesh(
+                    previousIterator->second, candidate,
+                    IsSameGeometryMeshContent);
             }
-
-            const std::size_t triangleCount = mesh->indices.size() / 3;
-            if (mesh->vertices.size() >
+            const std::size_t candidateTriangles =
+                candidate->indices.size() / 3;
+            if (output.size() >= config.maxMeshes - initialMeshCount ||
+                candidate->vertices.size() >
                     config.maxTotalVertices - totalVertices ||
-                triangleCount >
+                candidateTriangles >
                     config.maxTotalTriangles - totalTriangles) {
-                return false;
+                report.complete = false;
+                report.budgetLimited = true;
+                break;
             }
-            totalVertices += mesh->vertices.size();
-            totalTriangles += triangleCount;
-            output.push_back(std::move(mesh));
+            if (!observed) {
+                ++shapeCount;
+            }
+            totalVertices += candidate->vertices.size();
+            totalTriangles += candidateTriangles;
+            output.push_back(std::move(candidate));
         }
-        return true;
+
+        if (selectedShapeCount != nullptr) {
+            *selectedShapeCount = shapeCount - initialShapeCount;
+        }
+        return report;
     }
 
     void PublishUnavailable(std::uintptr_t instance,
@@ -2007,7 +2730,11 @@ private:
         const std::vector<std::shared_ptr<const GeometryMesh>>& staticMeshes,
         const std::vector<std::shared_ptr<const GeometryMesh>>& dynamicMeshes,
         bool rebuildStaticScene,
+        const std::vector<std::uintptr_t>& expectedScenes,
         std::uint64_t epoch) {
+        if (staticMeshes.empty() && dynamicMeshes.empty()) {
+            return PublishResult::Failed;
+        }
         if (staticMeshes.size() > config.maxMeshes ||
             dynamicMeshes.size() > config.maxMeshes - staticMeshes.size()) {
             return PublishResult::Failed;
@@ -2024,7 +2751,9 @@ private:
         const auto countMeshes =
             [&](const std::vector<std::shared_ptr<const GeometryMesh>>& meshes) {
                 for (const auto& mesh : meshes) {
-                    if (!mesh) {
+                    if (!mesh || mesh->vertices.size() < 3 ||
+                        mesh->indices.size() < 3 ||
+                        (mesh->indices.size() % 3) != 0) {
                         return false;
                     }
                     const std::size_t triangles = mesh->indices.size() / 3;
@@ -2060,26 +2789,56 @@ private:
         }
         if (!staticScene) {
             auto candidate = std::make_shared<SceneOwner>(
-                device, staticMeshes);
+                device, staticMeshes, GeometrySceneKind::Static);
             if (!candidate->Build()) {
                 return PublishResult::Failed;
             }
             staticScene = std::move(candidate);
         }
 
-        auto dynamicScene = std::make_shared<SceneOwner>(
-            device, dynamicMeshes);
-        if (!dynamicScene->Build()) {
+        std::shared_ptr<const SceneOwner> dynamicScene;
+        const auto current =
+            std::atomic_load_explicit(&published, std::memory_order_acquire);
+        // Mesh identity is conservative because immutable meshes contain
+        // world-space vertices with the source transform already applied.
+        if (current && current->snapshot && current->snapshot->available &&
+            current->dynamicScene &&
+            CanReuseGeometryScene(
+                current->snapshot->instanceAddress,
+                current->sourceScenes,
+                current->snapshot->dynamicMeshes,
+                instance,
+                expectedScenes,
+                dynamicMeshes)) {
+            dynamicScene = current->dynamicScene;
+        }
+        if (!dynamicScene) {
+            auto candidate = std::make_shared<SceneOwner>(
+                device, dynamicMeshes, GeometrySceneKind::Dynamic);
+            if (!candidate->Build()) {
+                return PublishResult::Failed;
+            }
+            dynamicScene = std::move(candidate);
+        }
+        if (staticScene->GeometryCount() +
+                dynamicScene->GeometryCount() ==
+            0) {
             return PublishResult::Failed;
         }
 
         auto state = std::make_shared<PublishedState>();
         state->staticScene = std::move(staticScene);
         state->dynamicScene = std::move(dynamicScene);
+        state->sourceScenes = expectedScenes;
         {
             std::lock_guard<std::mutex> lock(waitMutex);
             if (requestEpoch.load(std::memory_order_acquire) != epoch) {
                 return PublishResult::Stale;
+            }
+            std::vector<std::uintptr_t> verifiedScenes;
+            if (!ReadScenePointers(instance, verifiedScenes) ||
+                verifiedScenes != expectedScenes) {
+                return PublishResult::Failed;
             }
             snapshot->generation = ++generation;
             state->snapshot = std::move(snapshot);
@@ -2103,13 +2862,22 @@ private:
     }
 
     void WorkerMain() noexcept {
+#if defined(__ANDROID__)
+        setpriority(PRIO_PROCESS, 0, 10);
+#endif
         std::vector<std::shared_ptr<const GeometryMesh>> staticMeshes;
+        std::vector<std::shared_ptr<const GeometryMesh>> dynamicMeshes;
+        ActorShapeMissMap staticMissingCounts;
+        ActorShapeMissMap dynamicMissingCounts;
         std::size_t staticShapeCount = 0;
         std::uintptr_t activeInstance = 0;
+        std::vector<std::uintptr_t> activeScenePointers;
         auto nextStaticRefresh = std::chrono::steady_clock::time_point::min();
         auto lastGoodAt = std::chrono::steady_clock::time_point::min();
-        bool staticReady = false;
+        auto lastPublishedAt =
+            std::chrono::steady_clock::time_point::min();
         bool hasLastGood = false;
+        bool hasPublishedScene = false;
         std::size_t consecutiveFailures = 0;
 
         while (running.load(std::memory_order_acquire)) {
@@ -2141,7 +2909,17 @@ private:
                         consecutiveFailures >=
                             config.maxConsecutiveFailures) {
                         EnsureUnavailable(instance, roundEpoch);
+                        staticMeshes.clear();
+                        dynamicMeshes.clear();
+                        staticMissingCounts.clear();
+                        dynamicMissingCounts.clear();
+                        staticShapeCount = 0;
                         hasLastGood = false;
+                        lastGoodAt =
+                            std::chrono::steady_clock::time_point::min();
+                        hasPublishedScene = false;
+                        lastPublishedAt =
+                            std::chrono::steady_clock::time_point::min();
                     }
                     nextStaticRefresh = now + config.dynamicRefresh;
                 };
@@ -2150,101 +2928,179 @@ private:
                 std::uintptr_t instance = 0;
                 const bool instanceResolved = ResolveInstance(instance);
                 const auto now = std::chrono::steady_clock::now();
-                if (!instanceResolved) {
+                std::vector<std::uintptr_t> scenePointers;
+                const bool scenesResolved =
+                    instanceResolved &&
+                    (instance == 0 ||
+                     ReadScenePointers(instance, scenePointers));
+                if (!instanceResolved || !scenesResolved) {
                     recordFailure(now, activeInstance);
                 } else if (instance == 0) {
                     activeInstance = 0;
+                    activeScenePointers.clear();
                     staticMeshes.clear();
+                    dynamicMeshes.clear();
+                    staticMissingCounts.clear();
+                    dynamicMissingCounts.clear();
                     staticShapeCount = 0;
-                    staticReady = false;
                     hasLastGood = false;
+                    hasPublishedScene = false;
                     consecutiveFailures = 0;
                     nextStaticRefresh =
+                        std::chrono::steady_clock::time_point::min();
+                    lastPublishedAt =
                         std::chrono::steady_clock::time_point::min();
                     EnsureUnavailable(0, roundEpoch);
                 } else {
                     const bool instanceChanged = instance != activeInstance;
-                    if (instanceChanged) {
+                    const bool sceneSetChanged =
+                        scenePointers != activeScenePointers;
+                    const bool sourceChanged =
+                        forceRefresh || instanceChanged || sceneSetChanged;
+                    if (sourceChanged) {
                         activeInstance = instance;
+                        activeScenePointers = scenePointers;
                         staticMeshes.clear();
+                        dynamicMeshes.clear();
+                        staticMissingCounts.clear();
+                        dynamicMissingCounts.clear();
                         staticShapeCount = 0;
-                        staticReady = false;
                         hasLastGood = false;
+                        hasPublishedScene = false;
                         consecutiveFailures = 0;
                         nextStaticRefresh =
+                            std::chrono::steady_clock::time_point::min();
+                        lastPublishedAt =
                             std::chrono::steady_clock::time_point::min();
                         EnsureUnavailable(instance, roundEpoch);
                     }
 
                     const bool refreshStatic =
-                        forceRefresh || instanceChanged ||
-                        now >= nextStaticRefresh;
-                    bool collectionFailed = false;
+                        sourceChanged || now >= nextStaticRefresh;
+                    if (!ShouldPublishGeometryUpdate(
+                            hasPublishedScene, lastPublishedAt, now,
+                            sourceChanged || refreshStatic)) {
+                        const auto remaining =
+                            kMinimumGeometryPublishInterval -
+                            std::chrono::duration_cast<
+                                std::chrono::milliseconds>(
+                                now - lastPublishedAt);
+                        std::unique_lock<std::mutex> lock(waitMutex);
+                        waitCondition.wait_for(
+                            lock, remaining, [this] {
+                                return !running.load(
+                                           std::memory_order_acquire) ||
+                                    refreshRequested;
+                            });
+                        continue;
+                    }
                     std::vector<std::shared_ptr<const GeometryMesh>>
                         candidateStatic = staticMeshes;
                     std::size_t candidateStaticShapeCount =
                         staticShapeCount;
-                    std::vector<std::shared_ptr<const GeometryMesh>>
-                        candidateDynamic;
+                    CollectionReport staticReport;
+                    bool rebuildStaticScene = false;
+
                     if (refreshStatic) {
-                        if (!CollectMeshes(instance, GeometryBodyType::Static,
-                                           candidateStatic, 0, 0, 0, 0,
-                                           &candidateStaticShapeCount)) {
-                            collectionFailed = true;
-                            nextStaticRefresh = now + config.dynamicRefresh;
+                        std::vector<std::shared_ptr<const GeometryMesh>>
+                            freshStatic;
+                        std::size_t freshStaticShapeCount = 0;
+                        staticReport = CollectMeshes(
+                            instance, GeometryBodyType::Static, staticMeshes,
+                            staticMissingCounts, freshStatic, 0, 0, 0, 0,
+                            &freshStaticShapeCount,
+                            &scenePointers);
+                        candidateStatic = std::move(freshStatic);
+                        candidateStaticShapeCount = freshStaticShapeCount;
+                        rebuildStaticScene =
+                            staticReport.sourceAvailable ||
+                            candidateStatic.size() != staticMeshes.size();
+                        if (!staticReport.sourceAvailable) {
+                            nextStaticRefresh =
+                                now + config.dynamicRefresh;
                         }
                     }
 
-                    if (!collectionFailed) {
-                        std::size_t staticVertexCount = 0;
-                        std::size_t staticTriangleCount = 0;
-                        for (const auto& mesh : candidateStatic) {
-                            if (!mesh ||
-                                mesh->vertices.size() >
-                                    config.maxTotalVertices -
-                                        staticVertexCount ||
-                                mesh->indices.size() / 3 >
-                                    config.maxTotalTriangles -
-                                        staticTriangleCount) {
-                                collectionFailed = true;
-                                break;
-                            }
-                            staticVertexCount += mesh->vertices.size();
-                            staticTriangleCount += mesh->indices.size() / 3;
+                    bool staticBudgetValid = true;
+                    std::size_t staticVertexCount = 0;
+                    std::size_t staticTriangleCount = 0;
+                    for (const auto& mesh : candidateStatic) {
+                        if (!mesh || mesh->vertices.size() < 3 ||
+                            mesh->indices.size() < 3 ||
+                            (mesh->indices.size() % 3) != 0 ||
+                            mesh->vertices.size() >
+                                config.maxTotalVertices -
+                                    staticVertexCount ||
+                            mesh->indices.size() / 3 >
+                                config.maxTotalTriangles -
+                                    staticTriangleCount) {
+                            staticBudgetValid = false;
+                            break;
                         }
-                        if (!collectionFailed &&
-                            !CollectMeshes(
-                                instance, GeometryBodyType::Dynamic,
-                                candidateDynamic, candidateStatic.size(),
-                                staticVertexCount, staticTriangleCount,
-                                candidateStaticShapeCount)) {
-                            collectionFailed = true;
-                        }
+                        staticVertexCount += mesh->vertices.size();
+                        staticTriangleCount += mesh->indices.size() / 3;
+                    }
+
+                    std::vector<std::shared_ptr<const GeometryMesh>>
+                        candidateDynamic;
+                    CollectionReport dynamicReport;
+                    if (staticBudgetValid) {
+                        dynamicReport = CollectMeshes(
+                            instance, GeometryBodyType::Dynamic,
+                            dynamicMeshes, dynamicMissingCounts,
+                            candidateDynamic, candidateStatic.size(),
+                            staticVertexCount, staticTriangleCount,
+                            candidateStaticShapeCount, nullptr,
+                            &scenePointers);
                     }
 
                     PublishResult publishResult = PublishResult::Failed;
-                    const bool candidateStaticReady =
-                        staticReady || refreshStatic;
+                    const bool anySourceAvailable =
+                        (refreshStatic && staticReport.sourceAvailable) ||
+                        dynamicReport.sourceAvailable;
+                    std::vector<std::uintptr_t> verifiedScenePointers;
+                    const bool sceneSetStable =
+                        ReadScenePointers(instance,
+                                          verifiedScenePointers) &&
+                        verifiedScenePointers == scenePointers;
                     if (requestEpoch.load(std::memory_order_acquire) !=
                         roundEpoch) {
                         publishResult = PublishResult::Stale;
-                    } else if (!collectionFailed && candidateStaticReady) {
+                    } else if (sceneSetStable && staticBudgetValid &&
+                               anySourceAvailable) {
                         publishResult =
                             Publish(instance, candidateStatic,
-                                    candidateDynamic, refreshStatic,
-                                    roundEpoch);
+                                    candidateDynamic, rebuildStaticScene,
+                                    scenePointers, roundEpoch);
                     }
 
                     if (publishResult == PublishResult::Published) {
                         staticMeshes = std::move(candidateStatic);
+                        dynamicMeshes = std::move(candidateDynamic);
                         staticShapeCount = candidateStaticShapeCount;
-                        staticReady = true;
-                        if (refreshStatic) {
-                            nextStaticRefresh = now + config.staticRefresh;
+                        if (refreshStatic &&
+                            staticReport.sourceAvailable) {
+                            nextStaticRefresh =
+                                !staticReport.partial &&
+                                        (staticReport.complete ||
+                                         staticReport.budgetLimited)
+                                    ? now + config.staticRefresh
+                                    : now + config.dynamicRefresh;
                         }
                         hasLastGood = true;
+                        hasPublishedScene = true;
                         lastGoodAt = now;
+                        lastPublishedAt = now;
                         consecutiveFailures = 0;
+                        if ((refreshStatic &&
+                             (!staticReport.complete ||
+                              staticReport.partial)) ||
+                            !dynamicReport.complete ||
+                            dynamicReport.partial) {
+                            nextStaticRefresh = std::min(
+                                nextStaticRefresh,
+                                now + config.dynamicRefresh);
+                        }
                     } else if (publishResult == PublishResult::Failed) {
                         if (refreshStatic) {
                             nextStaticRefresh =
@@ -2312,6 +3168,11 @@ GeometryVisibility GeometryRuntime::Trace(const GeometryPoint& origin,
                                           const GeometryPoint& target) const
     noexcept {
     return impl_->Trace(origin, target);
+}
+
+GeometryVisibility GeometryRuntime::TraceFullSegment(
+    const GeometryPoint& origin, const GeometryPoint& target) const noexcept {
+    return impl_->TraceFullSegment(origin, target);
 }
 
 GeometryRaycastHit GeometryRuntime::Raycast(const GeometryPoint& origin,

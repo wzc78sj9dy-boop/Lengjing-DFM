@@ -41,7 +41,6 @@ extern const unsigned char _binary_kernel_script_612_end[];
 
 constexpr unsigned long kDriverHandshakeA = 0x7A3B9C4DUL;
 constexpr unsigned long kDriverHandshakeB = 0x2F8E1D6BUL;
-constexpr std::size_t kMaximumScriptOutput = 32U * 1024U;
 constexpr std::string_view kPrimaryWorkDirectory = "/data/adb/lengjing";
 constexpr std::string_view kFallbackWorkDirectory =
     "/data/local/tmp/lengjing";
@@ -83,7 +82,6 @@ struct ScriptRunResult final {
     bool started = false;
     int exitCode = -1;
     int systemError = 0;
-    std::string output;
 };
 
 EmbeddedScript FindEmbeddedScript(KernelModuleId module) noexcept {
@@ -137,11 +135,6 @@ std::string CurrentKernelRelease() {
     utsname info{};
     if (uname(&info) != 0) return {};
     return info.release;
-}
-
-std::string ErrnoMessage(int value) {
-    const char* text = std::strerror(value);
-    return text != nullptr ? std::string(text) : std::string("unknown error");
 }
 
 bool EnsureDirectory(std::string_view path) {
@@ -222,10 +215,19 @@ int WaitForChild(pid_t child) {
     return -1;
 }
 
+void SilenceChildOutput() {
+    const int descriptor = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (descriptor < 0) return;
+    static_cast<void>(dup2(descriptor, STDOUT_FILENO));
+    static_cast<void>(dup2(descriptor, STDERR_FILENO));
+    close(descriptor);
+}
+
 int RunChcon(const char* context, const std::string& path) {
     const pid_t child = fork();
     if (child < 0) return -1;
     if (child == 0) {
+        SilenceChildOutput();
         execl(
             "/system/bin/chcon",
             "chcon",
@@ -240,23 +242,6 @@ int RunChcon(const char* context, const std::string& path) {
 void ApplyScriptContext(const std::string& path) {
     if (RunChcon("u:object_r:system_file:s0", path) == 0) return;
     static_cast<void>(RunChcon("u:object_r:magisk_file:s0", path));
-}
-
-void AppendOutputTail(std::string& output,
-                      const char* data,
-                      std::size_t size) {
-    if (size >= kMaximumScriptOutput) {
-        output.assign(
-            data + size - kMaximumScriptOutput,
-            kMaximumScriptOutput);
-        return;
-    }
-    if (output.size() + size > kMaximumScriptOutput) {
-        output.erase(
-            0,
-            output.size() + size - kMaximumScriptOutput);
-    }
-    output.append(data, size);
 }
 
 ScriptRunResult RunScript(const std::string& path) {
@@ -293,10 +278,6 @@ ScriptRunResult RunScript(const std::string& path) {
     while (true) {
         const ssize_t count = read(outputPipe[0], buffer, sizeof(buffer));
         if (count > 0) {
-            AppendOutputTail(
-                result.output,
-                buffer,
-                static_cast<std::size_t>(count));
             continue;
         }
         if (count < 0 && errno == EINTR) continue;
@@ -309,19 +290,6 @@ ScriptRunResult RunScript(const std::string& path) {
         result.systemError = errno;
     }
     return result;
-}
-
-std::string OutputTail(std::string output) {
-    while (!output.empty() &&
-           (output.back() == '\n' || output.back() == '\r' ||
-            output.back() == ' ' || output.back() == '\t')) {
-        output.pop_back();
-    }
-    constexpr std::size_t kMaximumErrorOutput = 1024;
-    if (output.size() > kMaximumErrorOutput) {
-        output.erase(0, output.size() - kMaximumErrorOutput);
-    }
-    return output;
 }
 
 std::mutex& DriverInstallMutex() {
@@ -337,33 +305,32 @@ bool EnsureKernelDriverReady(std::string& error) {
     if (ProbeKernelDriver()) return true;
 
     if (geteuid() != 0) {
-        error = "需要 root 权限加载内核驱动";
+        error = "driver_error: privilege_required";
         return false;
     }
 
     const std::string release = CurrentKernelRelease();
     if (release.empty()) {
-        error = "无法读取设备内核版本";
+        error = "driver_error: platform_query_failed";
         return false;
     }
 
     const KernelModuleVariant* selected =
         FindKernelModuleVariant(release);
     if (selected == nullptr) {
-        error = "没有可用的内核驱动脚本: " + release;
+        error = "driver_error: platform_unsupported";
         return false;
     }
 
     const EmbeddedScript script = FindEmbeddedScript(selected->module);
     if (!script.IsValid()) {
-        error = "内置内核驱动脚本无效: " +
-            std::string(selected->kernelVersion);
+        error = "driver_error: payload_invalid";
         return false;
     }
 
     const std::string workDirectory = ResolveWorkDirectory();
     if (workDirectory.empty()) {
-        error = "无法创建内核驱动工作目录";
+        error = "driver_error: workspace_failed";
         return false;
     }
 
@@ -378,7 +345,7 @@ bool EnsureKernelDriverReady(std::string& error) {
 
     int writeError = 0;
     if (!WriteScriptFile(scriptPath, script, writeError)) {
-        error = "写入内核驱动脚本失败: " + ErrnoMessage(writeError);
+        error = "driver_error: payload_write_failed";
         return false;
     }
     ApplyScriptContext(scriptPath);
@@ -386,20 +353,15 @@ bool EnsureKernelDriverReady(std::string& error) {
     static_cast<void>(unlink(scriptPath.c_str()));
 
     if (!run.started) {
-        error = "无法启动内核驱动脚本: " +
-            ErrnoMessage(run.systemError);
+        error = "driver_error: payload_launch_failed";
         return false;
     }
     if (run.exitCode != 0) {
-        error = "内核驱动脚本执行失败 (" + release + " -> " +
-            std::string(selected->kernelVersion) + ", exit=" +
-            std::to_string(run.exitCode) + ")";
-        const std::string output = OutputTail(run.output);
-        if (!output.empty()) error += ": " + output;
+        error = "driver_error: payload_execution_failed";
         return false;
     }
     if (!ProbeKernelDriver()) {
-        error = "内核驱动脚本执行完成但接口探测失败: " + release;
+        error = "driver_error: endpoint_unavailable";
         return false;
     }
     return true;

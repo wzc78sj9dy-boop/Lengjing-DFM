@@ -46,13 +46,19 @@ public:
         const TrackingPrediction prediction = Predict(
             origin, target, velocity, projectileSpeed, gravity);
         if (!prediction.valid) return {};
-        const float predictedX = prediction.point.x;
-        const float predictedY = prediction.point.y;
-        const float predictedZ = prediction.point.z;
+        return CalculateAngles(enabled, origin, prediction.point);
+    }
 
-        const float aimX = predictedX - origin.x;
-        const float aimY = predictedY - origin.y;
-        const float aimZ = predictedZ - origin.z;
+    static TrackingCommand CalculateAngles(
+        bool enabled,
+        const TrackingPoint& origin,
+        const TrackingPoint& target) noexcept
+    {
+        if (!enabled || !IsFinite(origin) || !IsFinite(target)) return {};
+
+        const float aimX = target.x - origin.x;
+        const float aimY = target.y - origin.y;
+        const float aimZ = target.z - origin.z;
         if (!std::isfinite(aimX)
             || !std::isfinite(aimY)
             || !std::isfinite(aimZ)) {
@@ -94,12 +100,12 @@ public:
             return {};
         }
 
-        const double distanceX =
-            static_cast<double>(target.x) - static_cast<double>(origin.x);
-        const double distanceY =
-            static_cast<double>(target.y) - static_cast<double>(origin.y);
-        const double distanceZ =
-            static_cast<double>(target.z) - static_cast<double>(origin.z);
+        const float distanceXFloat = target.x - origin.x;
+        const float distanceYFloat = target.y - origin.y;
+        const float distanceZFloat = target.z - origin.z;
+        const double distanceX = static_cast<double>(distanceXFloat);
+        const double distanceY = static_cast<double>(distanceYFloat);
+        const double distanceZ = static_cast<double>(distanceZFloat);
         double distanceSquared = distanceX * distanceX;
         distanceSquared = std::fma(
             distanceY, distanceY, distanceSquared);
@@ -186,13 +192,14 @@ public:
         const SeededSelectionCallback& nextValue)
     {
         HitSelectionDecision decision{};
+        if (static_cast<std::uint32_t>(totalCount) > 100U
+            || currentIndex > totalCount) {
+            return decision;
+        }
+
         if (currentIndex == totalCount) {
             decision.validInput = true;
             decision.accepted = true;
-            return decision;
-        }
-        if (static_cast<std::uint32_t>(totalCount) > 100U
-            || currentIndex > totalCount) {
             return decision;
         }
 

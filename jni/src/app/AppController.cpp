@@ -1,11 +1,15 @@
 #include "app/AppController.h"
 
+#include "game/aim/AimModePolicy.h"
+#include "app/RenderBackendSelection.h"
+#include "app/RuntimeExitPolicy.h"
+#include "app/RuntimePresentationPolicy.h"
+
 #include "ImGui/imgui.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdio>
 #include <iterator>
 #include <limits>
 #include <utility>
@@ -123,7 +127,8 @@ AppController::AppController(AppOptions options,
     }
 
     runtime_.UpdateSettings(BuildFeatureSettings());
-    runtime_.SetAimEnabled(model_.aim.enabled);
+    runtime_.SetAimEnabled(game::aim::IsAimOutputRequested(
+        model_.aim.enabled, model_.aim.trajectoryTracking));
     RefreshRenderStyle();
 }
 
@@ -141,7 +146,6 @@ void AppController::RenderFrame(float presentedFramesPerSecond) {
     model_.runtime.screenWidth = std::max(0, static_cast<int>(io.DisplaySize.x));
     model_.runtime.screenHeight = std::max(0, static_cast<int>(io.DisplaySize.y));
 
-    SyncToastSetting();
     SyncRuntimeStatus();
     FlushConfig(false);
 
@@ -185,11 +189,35 @@ bool AppController::ExitRequested() const noexcept {
     return exitRequested_;
 }
 
+int AppController::RuntimeExitCode() const {
+    const game::RuntimeStatus status = runtime_.Status();
+    return ResolveRuntimeExitCode(
+        options_.cloudLayout != nullptr,
+        status.phase,
+        status.failureKind);
+}
+
 int AppController::TargetFrameRate() const noexcept {
     const int index = std::clamp(
         model_.system.frameLimitIndex, 0,
         static_cast<int>(kFrameRates.size()) - 1);
     return kFrameRates[static_cast<std::size_t>(index)];
+}
+
+ui::RenderBackend AppController::DesiredRenderBackend() const noexcept {
+    return NormalizeRenderBackend(model_.system.renderBackend);
+}
+
+void AppController::ReportRenderBackend(
+    ui::RenderBackend activeBackend,
+    bool fallbackApplied) noexcept {
+    const ui::RenderBackend normalized =
+        NormalizeRenderBackend(activeBackend);
+    model_.runtime.activeRenderBackend = normalized;
+    if (fallbackApplied && model_.system.renderBackend != normalized) {
+        model_.system.renderBackend = normalized;
+        ScheduleConfigSave();
+    }
 }
 
 void AppController::SetMenuVisible(bool visible) noexcept {
@@ -207,7 +235,11 @@ void AppController::SetDisplayGeometry(
     }
     const int normalizedOrientation =
         ((orientation % 4) + 4) % 4;
-    if (normalizedOrientation != displayOrientation_) {
+    const bool geometryChanged =
+        width != model_.runtime.screenWidth ||
+        height != model_.runtime.screenHeight ||
+        normalizedOrientation != displayOrientation_;
+    if (geometryChanged) {
         menuView_.RequestRecenter();
         populationBoundsValid_ = false;
         populationPressActive_ = false;
@@ -279,11 +311,13 @@ void AppController::StartRuntime() {
     }
 
     runtime_.UpdateSettings(BuildFeatureSettings());
-    runtime_.SetAimEnabled(model_.aim.enabled);
+    runtime_.SetAimEnabled(game::aim::IsAimOutputRequested(
+        model_.aim.enabled, model_.aim.trajectoryTracking));
     if (!runtime_.Start(BuildRuntimeOptions())) {
         AppendLog("运行模块无法启动");
         return;
     }
+    coordinateDecryptSuccessNotified_ = false;
     terminalWorkerJoined_ = false;
 }
 
@@ -336,13 +370,18 @@ void AppController::ReloadCustomItems() {
     AppendLog("已提交自定义物资重载");
 }
 
-void AppController::AimEnabledChanged(bool enabled) {
-    runtime_.SetAimEnabled(enabled);
+void AppController::AimEnabledChanged(bool) {
+    runtime_.SetAimEnabled(game::aim::IsAimOutputRequested(
+        model_.aim.enabled, model_.aim.trajectoryTracking));
 }
 
 void AppController::SettingsChanged(ui::SettingsDomain domain) {
     SyncToastSetting();
     runtime_.UpdateSettings(BuildFeatureSettings());
+    if (domain == ui::SettingsDomain::Aim) {
+        runtime_.SetAimEnabled(game::aim::IsAimOutputRequested(
+            model_.aim.enabled, model_.aim.trajectoryTracking));
+    }
     if (domain == ui::SettingsDomain::Visual) {
         RefreshRenderStyle();
     }
@@ -454,9 +493,14 @@ void AppController::DrawToastNotifications(ImDrawList* drawList) {
 game::FeatureSettings AppController::BuildFeatureSettings() const {
     game::FeatureSettings settings{};
     settings.visual = model_.visual;
+    settings.visual.debugInfo = false;
+    settings.visual.classNameDebug = false;
     settings.loot = model_.loot;
     settings.radar = model_.radar;
     settings.aim = model_.aim;
+    settings.aim.trajectoryTracking =
+        game::IsProjectileTrackingRequested(
+            model_.aim.trajectoryTracking);
     return settings;
 }
 
@@ -469,6 +513,8 @@ game::RuntimeOptions AppController::BuildRuntimeOptions() const {
     options.screenHeight = model_.runtime.screenHeight;
     options.orientation = displayOrientation_;
     options.programDirectory = options_.programDirectory;
+    options.cloudLayout = options_.cloudLayout;
+    options.algorithmPosition = options_.algorithmPosition;
     return options;
 }
 
@@ -478,8 +524,18 @@ void AppController::SyncRuntimeStatus() {
     model_.runtime.busy = status.phase == game::RuntimePhase::Starting ||
         status.phase == game::RuntimePhase::Stopping;
     model_.runtime.stopping = status.phase == game::RuntimePhase::Stopping;
-    model_.runtime.processId = status.processId;
-    model_.runtime.baseReady = status.baseReady;
+    const CoordinateDecryptPresentation nextDecryptPresentation =
+        ResolveCoordinateDecryptPresentation(
+            status.coordinateRequested,
+            status.coordinateEntryReady,
+            status.coordinateContextReady,
+            status.coordinateSuccesses);
+    if (ShouldNotifyCoordinateDecryptSuccess(
+            nextDecryptPresentation,
+            coordinateDecryptSuccessNotified_)) {
+        coordinateDecryptSuccessNotified_ = true;
+        AppendLog(CoordinateDecryptPresentationText(nextDecryptPresentation));
+    }
     model_.loot.customItemCount = status.customItemCount;
 
     if (status.phase != lastStatus_.phase) {
@@ -494,22 +550,21 @@ void AppController::SyncRuntimeStatus() {
             break;
         case game::RuntimePhase::Running:
             AppendLog("运行模块已启动");
-            runtime_.SetAimEnabled(model_.aim.enabled);
+            runtime_.SetAimEnabled(game::aim::IsAimOutputRequested(
+                model_.aim.enabled, model_.aim.trajectoryTracking));
             break;
         case game::RuntimePhase::Stopping:
             AppendLog("正在停止运行模块");
             break;
         case game::RuntimePhase::Faulted:
-            AppendLog(status.message.empty()
-                ? "运行模块发生错误"
-                : std::string("运行错误: ") + status.message);
+            AppendLog(RuntimeFaultText());
             break;
         }
-    } else if (!status.message.empty() && status.message != lastStatus_.message) {
-        AppendLog(status.message);
+    } else if (!status.message.empty() && lastStatus_.message.empty()) {
+        AppendLog(RuntimeDataUnavailableText());
     } else if (status.phase == game::RuntimePhase::Running &&
                status.message.empty() && !lastStatus_.message.empty()) {
-        AppendLog("数据链已恢复");
+        AppendLog(RuntimeDataRestoredText());
     }
 
     lastStatus_ = status;
@@ -593,9 +648,6 @@ void AppController::DrawGameFrame(const game::GameFrame& frame,
     if (model_.visual.enabled && model_.visual.playerCount) {
         DrawPopulation(frame, ImGui::GetForegroundDrawList());
     }
-    if (model_.visual.enabled && model_.visual.debugInfo) {
-        DrawDebugInfo(frame, drawList);
-    }
 }
 
 void AppController::DrawPopulation(const game::GameFrame& frame,
@@ -656,62 +708,6 @@ void AppController::DrawPopulation(const game::GameFrame& frame,
         Approach(populationWidth_, targetWidth, 10.5f, io.DeltaTime),
         minimumWidth,
         maximumWidth);
-
-    const bool hovered = populationBoundsValid_ && ContainsPoint(
-        io.MousePos.x,
-        io.MousePos.y,
-        populationBoundsMinimumX_,
-        populationBoundsMinimumY_,
-        populationBoundsMaximumX_,
-        populationBoundsMaximumY_);
-    const bool pressedNow =
-        ImGui::IsMouseClicked(ImGuiMouseButton_Left);
-    const bool releasedNow =
-        ImGui::IsMouseReleased(ImGuiMouseButton_Left);
-    if (pressedNow && hovered) {
-        populationPressActive_ = true;
-        populationPressCanceled_ = false;
-        populationPressMinimumX_ = populationBoundsMinimumX_;
-        populationPressMinimumY_ = populationBoundsMinimumY_;
-        populationPressMaximumX_ = populationBoundsMaximumX_;
-        populationPressMaximumY_ = populationBoundsMaximumY_;
-    }
-    if (populationPressActive_) {
-        const bool insidePressBounds = ContainsPoint(
-            io.MousePos.x,
-            io.MousePos.y,
-            populationPressMinimumX_,
-            populationPressMinimumY_,
-            populationPressMaximumX_,
-            populationPressMaximumY_);
-        if (ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
-            !insidePressBounds) {
-            populationPressCanceled_ = true;
-        }
-        if (releasedNow) {
-            if (!populationPressCanceled_ && insidePressBounds) {
-                model_.visible = !model_.visible;
-            }
-            populationPressActive_ = false;
-            populationPressCanceled_ = false;
-        } else if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && !pressedNow) {
-            populationPressActive_ = false;
-            populationPressCanceled_ = false;
-        }
-    }
-    if (hovered || populationPressActive_) {
-        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-    }
-
-    populationAlpha_ = Approach(
-        populationAlpha_, 1.0f, 6.5f, io.DeltaTime);
-    populationPress_ = Approach(
-        populationPress_,
-        populationPressActive_ && !populationPressCanceled_ ? 1.0f : 0.0f,
-        populationPressActive_ ? 26.0f : 14.0f,
-        io.DeltaTime);
-    populationHover_ = Approach(
-        populationHover_, hovered ? 1.0f : 0.0f, 14.0f, io.DeltaTime);
 
     if (lastPlayerCount_ != frame.playerCount ||
         lastBotCount_ != frame.botCount) {
@@ -790,6 +786,62 @@ void AppController::DrawPopulation(const game::GameFrame& frame,
     populationBoundsMaximumX_ = panelMaximum.x;
     populationBoundsMaximumY_ = panelMaximum.y;
     populationBoundsValid_ = true;
+
+    const bool hovered = ContainsPoint(
+        io.MousePos.x,
+        io.MousePos.y,
+        panelMinimum.x,
+        panelMinimum.y,
+        panelMaximum.x,
+        panelMaximum.y);
+    const bool pressedNow =
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    const bool releasedNow =
+        ImGui::IsMouseReleased(ImGuiMouseButton_Left);
+    if (pressedNow && hovered) {
+        populationPressActive_ = true;
+        populationPressCanceled_ = false;
+        populationPressMinimumX_ = panelMinimum.x;
+        populationPressMinimumY_ = panelMinimum.y;
+        populationPressMaximumX_ = panelMaximum.x;
+        populationPressMaximumY_ = panelMaximum.y;
+    }
+    if (populationPressActive_) {
+        const bool insidePressBounds = ContainsPoint(
+            io.MousePos.x,
+            io.MousePos.y,
+            populationPressMinimumX_,
+            populationPressMinimumY_,
+            populationPressMaximumX_,
+            populationPressMaximumY_);
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+            !insidePressBounds) {
+            populationPressCanceled_ = true;
+        }
+        if (releasedNow) {
+            if (!populationPressCanceled_ && insidePressBounds) {
+                model_.visible = !model_.visible;
+            }
+            populationPressActive_ = false;
+            populationPressCanceled_ = false;
+        } else if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && !pressedNow) {
+            populationPressActive_ = false;
+            populationPressCanceled_ = false;
+        }
+    }
+    if (hovered || populationPressActive_) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+
+    populationAlpha_ = Approach(
+        populationAlpha_, 1.0f, 6.5f, io.DeltaTime);
+    populationPress_ = Approach(
+        populationPress_,
+        populationPressActive_ && !populationPressCanceled_ ? 1.0f : 0.0f,
+        populationPressActive_ ? 26.0f : 14.0f,
+        io.DeltaTime);
+    populationHover_ = Approach(
+        populationHover_, hovered ? 1.0f : 0.0f, 14.0f, io.DeltaTime);
 
     const float rounding = panelHeight * 0.5f;
     const float opacity = std::clamp(populationAlpha_, 0.0f, 1.0f);
@@ -896,76 +948,6 @@ void AppController::DrawPopulation(const game::GameFrame& frame,
                        populationHover_ * 0.36f +
                        populationPress_ * 0.16f)),
         std::max(1.0f, 1.4f * scale));
-}
-
-void AppController::DrawDebugInfo(const game::GameFrame& frame,
-                                  ImDrawList* drawList) const {
-    if (drawList == nullptr) return;
-
-    std::array<std::array<char, 112>, 6> buffers{};
-    std::snprintf(
-        buffers[0].data(), buffers[0].size(), "FPS %.1f",
-        model_.runtime.framesPerSecond);
-    std::snprintf(
-        buffers[1].data(), buffers[1].size(), "PID %d  BASE %s",
-        model_.runtime.processId, model_.runtime.baseReady ? "OK" : "--");
-    std::snprintf(
-        buffers[2].data(), buffers[2].size(), "SEQ %llu",
-        static_cast<unsigned long long>(frame.sequence));
-    std::snprintf(
-        buffers[3].data(), buffers[3].size(), "PLAYER %d  BOT %d  NEAR %d",
-        frame.playerCount, frame.botCount, frame.nearbyEnemyCount);
-    std::snprintf(
-        buffers[4].data(), buffers[4].size(), "LABEL %zu  SIGNAL %zu  OBJECT %zu",
-        frame.worldLabels.size(), frame.playerSignals.size(), frame.projectiles.size());
-    std::snprintf(
-        buffers[5].data(), buffers[5].size(),
-        "GEO %s  MESH %zu  TRI %zu  GEN %llu",
-        frame.geometryAvailable ? "OK" : "--",
-        frame.geometryMeshCount,
-        frame.geometryTriangleCount,
-        static_cast<unsigned long long>(frame.geometryGeneration));
-
-    const RenderStyle& style = renderer_.Style();
-    ImFont* font = ImGui::GetFont();
-    const float fontSize = std::max(11.0f, style.metrics.smallFontSize);
-    const float lineHeight = fontSize + 4.0f;
-    float contentWidth = 0.0f;
-    for (const auto& buffer : buffers) {
-        contentWidth = std::max(
-            contentWidth,
-            font->CalcTextSizeA(fontSize, 1000.0f, 0.0f, buffer.data()).x);
-    }
-
-    constexpr float paddingX = 12.0f;
-    constexpr float paddingY = 9.0f;
-    const ImVec2 minimum{18.0f, 18.0f};
-    const ImVec2 maximum{
-        minimum.x + contentWidth + paddingX * 2.0f,
-        minimum.y + paddingY * 2.0f + lineHeight * buffers.size(),
-    };
-    drawList->AddRectFilled(
-        ImVec2(minimum.x + 2.0f, minimum.y + 3.0f),
-        ImVec2(maximum.x + 2.0f, maximum.y + 3.0f),
-        style.colors.shadow, style.metrics.panelRounding);
-    drawList->AddRectFilled(
-        minimum, maximum, style.colors.surfaceRaised, style.metrics.panelRounding);
-    drawList->AddRect(
-        minimum, maximum, style.colors.border, style.metrics.panelRounding,
-        0, 1.0f);
-    drawList->AddLine(
-        ImVec2(minimum.x, minimum.y),
-        ImVec2(minimum.x, maximum.y),
-        style.colors.accent, 3.0f);
-    for (std::size_t index = 0; index < buffers.size(); ++index) {
-        drawList->AddText(
-            font, fontSize,
-            ImVec2(
-                minimum.x + paddingX,
-                minimum.y + paddingY + lineHeight * static_cast<float>(index)),
-            index == 0 ? style.colors.accent : style.colors.textMuted,
-            buffers[index].data());
-    }
 }
 
 void AppController::ScheduleConfigSave() {

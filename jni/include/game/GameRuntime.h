@@ -1,6 +1,6 @@
 #pragma once
 
-#include "game\GameBackend.h"
+#include "game/GameBackend.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -26,6 +26,15 @@ struct RuntimeStatus {
     bool baseReady = false;
     std::size_t customItemCount = 0;
     std::string message;
+    bool coordinateRequested = false;
+    bool coordinateEntryReady = false;
+    bool coordinateContextReady = false;
+    int coordinateThreadId = 0;
+    std::uintptr_t coordinateGuestPc = 0;
+    std::uint64_t coordinateContextGeneration = 0;
+    std::uint64_t coordinateAttempts = 0;
+    std::uint64_t coordinateSuccesses = 0;
+    RuntimeFailureKind failureKind = RuntimeFailureKind::None;
 };
 
 class GameRuntime final {
@@ -50,6 +59,7 @@ public:
 
 private:
     void WorkerMain(RuntimeOptions options);
+    void CloseBackendUntilSafe() noexcept;
     void SetStatus(RuntimePhase phase,
                    const RuntimeProbe& probe,
                    std::string message = {});

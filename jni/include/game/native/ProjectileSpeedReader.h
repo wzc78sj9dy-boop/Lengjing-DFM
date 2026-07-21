@@ -56,7 +56,7 @@ public:
             return std::nullopt;
         }
 
-        std::uint64_t weaponId = 0;
+        std::uint32_t weaponId = 0;
         ReadAt(readBytes, weaponRoot, layout_.weaponIdOffset, weaponId);
         currentWeaponId_ = weaponId;
 

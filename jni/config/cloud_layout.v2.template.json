@@ -1,0 +1,40 @@
+{
+  "schema_version": 2,
+  "package": "com.example.runtime",
+  "module": "libTarget.so",
+  "build_id": "0123456789abcdef0123456789abcdef01234567",
+  "revision": 1,
+  "layout": {
+    "name_pool": "0x12000000",
+    "world": "0x13000000",
+    "coordinate_replay_entry": "0x0",
+    "geometry_instances": [
+      "0x14000000",
+      "0x15000000"
+    ],
+    "actor_records": {
+      "tagged_container": "0x16000000",
+      "plain_array": "0x17000000",
+      "plain_root": "0x180",
+      "plain_mesh": "0x3d0",
+      "encrypted_record_count": 1000,
+      "plain_record_stride": 24,
+      "maximum_plain_count": 10000,
+      "fallback_plain_count": 3000
+    },
+    "tracking_matrix_root": "0x18000000",
+    "component_position_flag": "0x19000000",
+    "coordinate_pool": {
+      "root_rva": "0x1a000000",
+      "bridge_offset": "0xc",
+      "context_offset": -8,
+      "entry_offset": "0xa0",
+      "component_key_offset": "0x210",
+      "pacga_data": "0x11223344",
+      "pacga_modifier": "0x55667788",
+      "entry_stride": 48,
+      "pool_head_skip": 16,
+      "ring_refresh_frames": 60
+    }
+  }
+}

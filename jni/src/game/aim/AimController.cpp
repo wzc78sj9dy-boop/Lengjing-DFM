@@ -1,7 +1,7 @@
 #include "game/aim/AimController.h"
 
+#include "game/aim/AimPrediction.h"
 #include "game/aim/AimInputAdapter.h"
-#include "game/aim/TrackingCalculator.h"
 
 #include <algorithm>
 #include <chrono>
@@ -37,7 +37,8 @@ float ActiveSpeed(const TargetSnapshot& target) {
     const float speed = target.zooming
         ? target.tuning.adsSpeed
         : target.tuning.hipSpeed;
-    return std::clamp(std::isfinite(speed) ? speed : 30.0f, 1.0f, 100.0f);
+    return std::clamp(
+        std::isfinite(speed) ? speed : 30.0f, 1.0f, 100.0f);
 }
 
 bool TargetAllowed(const TargetSnapshot& target) {
@@ -58,79 +59,27 @@ bool TargetAllowed(const TargetSnapshot& target) {
         target.worldDistanceMeters <= std::max(0.0f, distanceLimit);
 }
 
-Vec3 PredictedTarget(const TargetSnapshot& target) {
-    Vec3 predicted = target.world;
-    const float speed = target.projectileSpeedCmPerSecond;
-    if (Finite(target.velocity) && std::isfinite(speed) && speed >= 5000.0f &&
-        speed <= 500000.0f && std::isfinite(target.tuning.prediction)) {
-        const float seconds = target.worldDistanceMeters * 100.0f / speed *
-            std::clamp(target.tuning.prediction, 0.0f, 2.0f);
-        if (std::isfinite(seconds) && seconds >= 0.0f) {
-            predicted.x += target.velocity.x * seconds;
-            predicted.y += target.velocity.y * seconds;
-            predicted.z += target.velocity.z * seconds + 230.0f * seconds * seconds;
-        }
-    }
-    if (target.firing && std::isfinite(target.tuning.recoil) &&
-        target.tuning.recoil > 0.0f) {
-        const float distance = std::clamp(target.worldDistanceMeters, 0.0f, 500.0f);
-        const float decay = 1.0f / (1.0f + std::pow(distance / 45.0f, 1.2f));
-        predicted.z -= distance * ActiveSpeed(target) *
-            std::clamp(target.tuning.recoil, 0.0f, 2.0f) * decay;
-    }
-    return predicted;
-}
-
 struct AimError {
     float pitch = 0.0f;
     float yaw = 0.0f;
 };
 
 bool CalculateAimError(const TargetSnapshot& target, AimError& output) {
-    float targetPitch = 0.0f;
-    float targetYaw = 0.0f;
-    if (target.trajectoryTracking) {
-        const TrackingCommand command = TrackingCalculator::Calculate(
-            true,
-            TrackingPoint{
-                target.view.location.x,
-                target.view.location.y,
-                target.view.location.z,
-            },
-            TrackingPoint{
-                target.world.x,
-                target.world.y,
-                target.world.z,
-            },
-            TrackingPoint{
-                target.velocity.x,
-                target.velocity.y,
-                target.velocity.z,
-            },
-            target.tuning.trackingProjectileSpeed,
-            target.tuning.trackingGravity);
-        if (command.flag == 0) return false;
-        targetPitch = command.pitch;
-        targetYaw = command.yaw;
-    } else {
-        const Vec3 predicted = PredictedTarget(target);
-        const float dx = predicted.x - target.view.location.x;
-        const float dy = predicted.y - target.view.location.y;
-        const float dz = predicted.z - target.view.location.z;
-        const float horizontal = std::hypot(dx, dy);
-        if (!std::isfinite(horizontal) || horizontal <= 0.01f) {
-            return false;
-        }
-        targetPitch = std::atan2(dz, horizontal) * 180.0f / kPi;
-        targetYaw = std::atan2(dy, dx) * 180.0f / kPi;
+    const Vec3 predicted = PredictAimPoint(target);
+    const float dx = predicted.x - target.view.location.x;
+    const float dy = predicted.y - target.view.location.y;
+    const float dz = predicted.z - target.view.location.z;
+    const float horizontal = std::hypot(dx, dy);
+    if (!std::isfinite(horizontal) || horizontal <= 0.01f) {
+        return false;
     }
+    const float targetPitch = std::atan2(dz, horizontal) * 180.0f / kPi;
+    const float targetYaw = std::atan2(dy, dx) * 180.0f / kPi;
     if (target.view.halfWidth <= 0.5f ||
         !std::isfinite(target.view.fieldOfView)) {
         return false;
     }
-    const float smoothing = target.trajectoryTracking
-        ? 1.0f
-        : std::max(0.01f, target.tuning.smoothing);
+    const float smoothing = std::max(0.01f, target.tuning.smoothing);
     const float divisor = smoothing * 100.0f;
     const float scale = (target.view.halfWidth * 2.0f /
         std::clamp(target.view.fieldOfView, 5.0f, 170.0f)) / divisor;
@@ -181,17 +130,20 @@ bool AimController::Start(ui::AimInputMode mode) {
     Stop();
     mode_ = mode;
     if (input_ == nullptr || !input_->Start(mode_)) {
-        mode_ = ui::AimInputMode::WriteTouch;
+        mode_ = ui::AimInputMode::ReadOnly;
         return false;
     }
     stopRequested_.store(false, std::memory_order_release);
     running_.store(true, std::memory_order_release);
+    if (mode_ == ui::AimInputMode::ReadOnly) {
+        return true;
+    }
     try {
         worker_ = std::thread(&AimController::WorkerMain, this);
     } catch (...) {
         running_.store(false, std::memory_order_release);
         input_->Stop();
-        mode_ = ui::AimInputMode::WriteTouch;
+        mode_ = ui::AimInputMode::ReadOnly;
         return false;
     }
     return true;
@@ -203,7 +155,7 @@ void AimController::Stop() {
     running_.store(false, std::memory_order_release);
     enabled_.store(false, std::memory_order_release);
     if (input_ != nullptr) input_->Stop();
-    mode_ = ui::AimInputMode::WriteTouch;
+    mode_ = ui::AimInputMode::ReadOnly;
     ClearTarget();
 }
 
@@ -313,7 +265,7 @@ void AimController::WorkerMain() {
             }
         }
 
-        if (target.curvedMotion && !target.trajectoryTracking) {
+        if (target.curvedMotion) {
             const float length = std::hypot(error.pitch, error.yaw);
             if (length > 0.001f) {
                 const float progress = std::clamp(

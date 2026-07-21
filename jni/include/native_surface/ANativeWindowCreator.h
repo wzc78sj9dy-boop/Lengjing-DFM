@@ -52,7 +52,7 @@
 #endif
 
 #ifndef SURFACE_LOG_ENABLE
-#define SURFACE_LOG_ENABLE 1  // Set to 0 to completely disable logging
+#define SURFACE_LOG_ENABLE 0
 #endif
 
 // Log level control
@@ -1072,7 +1072,8 @@ namespace android {
             // Create Surface
             auto surfaceControl = surfaceComposerClient.CreateSurface(name, width, height, 0, skipScrenshot_);
             if (!surfaceControl.data) {
-                __android_log_print(ANDROID_LOG_ERROR, "ImGui", "[-] Failed to create surface control for: %s", name);
+                SURFACE_LOG_ERROR(
+                    "Failed to create surface control for: %s", name);
                 return nullptr;
             }
 

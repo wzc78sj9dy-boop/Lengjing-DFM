@@ -21,7 +21,9 @@ struct AppOptions {
     std::vector<std::string> driverOptions;
     std::string buildVersion;
     void* menuLogoTexture = nullptr;
-    ui::AimInputMode inputMode = ui::AimInputMode::WriteTouch;
+    ui::AimInputMode inputMode = ui::AimInputMode::ReadOnly;
+    std::shared_ptr<const auth::CloudLayoutDocument> cloudLayout;
+    game::native::AlgorithmPositionRuntimeConfig algorithmPosition;
 };
 
 class AppController final : public ui::UiActions {
@@ -40,7 +42,12 @@ public:
     ui::UiModel& Model() noexcept;
     const ui::UiModel& Model() const noexcept;
     bool ExitRequested() const noexcept;
+    int RuntimeExitCode() const;
     int TargetFrameRate() const noexcept;
+    ui::RenderBackend DesiredRenderBackend() const noexcept;
+    void ReportRenderBackend(
+        ui::RenderBackend activeBackend,
+        bool fallbackApplied = false) noexcept;
     void SetMenuVisible(bool visible) noexcept;
     void SetMenuLogoTexture(void* texture) noexcept;
     void SetDisplayGeometry(int width, int height, int orientation) noexcept;
@@ -71,7 +78,6 @@ private:
     void RefreshRenderStyle();
     void DrawGameFrame(const game::GameFrame& frame, ImDrawList* drawList);
     void DrawPopulation(const game::GameFrame& frame, ImDrawList* drawList);
-    void DrawDebugInfo(const game::GameFrame& frame, ImDrawList* drawList) const;
     void ScheduleConfigSave();
     bool FlushConfig(bool force);
 
@@ -83,6 +89,7 @@ private:
     ui::MenuView menuView_;
     ui::UiModel model_{};
     game::RuntimeStatus lastStatus_{};
+    bool coordinateDecryptSuccessNotified_ = false;
     std::chrono::steady_clock::time_point configSaveDeadline_{};
     std::deque<ToastNotification> toastNotifications_;
     std::mutex toastNotificationsMutex_;

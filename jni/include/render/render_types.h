@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "ImGui/imgui.h"
+#include "game/VisibilityState.h"
 
 namespace lengjing {
 
@@ -37,13 +38,13 @@ struct RenderPalette {
     ImU32 surfaceSoft = IM_COL32(27, 33, 32, 210);
     ImU32 border = IM_COL32(46, 55, 52, 196);
     ImU32 grid = IM_COL32(71, 85, 80, 74);
-    ImU32 text = IM_COL32(232, 238, 234, 255);
-    ImU32 textMuted = IM_COL32(143, 158, 151, 255);
-    ImU32 accent = IM_COL32(27, 181, 137, 255);
-    ImU32 caution = IM_COL32(214, 164, 67, 255);
-    ImU32 danger = IM_COL32(221, 83, 83, 255);
-    ImU32 ally = IM_COL32(66, 153, 220, 255);
-    ImU32 shadow = IM_COL32(0, 0, 0, 202);
+    ImU32 text = IM_COL32(245, 248, 246, 255);
+    ImU32 textMuted = IM_COL32(190, 202, 196, 255);
+    ImU32 accent = IM_COL32(36, 224, 153, 255);
+    ImU32 caution = IM_COL32(244, 190, 72, 255);
+    ImU32 danger = IM_COL32(246, 72, 72, 255);
+    ImU32 ally = IM_COL32(76, 166, 240, 255);
+    ImU32 shadow = IM_COL32(0, 0, 0, 220);
 };
 
 struct RenderMetrics {
@@ -52,8 +53,8 @@ struct RenderMetrics {
     float outlineWidth = 4.0f;
     float cornerLength = 14.0f;
     float panelRounding = 4.0f;
-    float fontSize = 22.0f;
-    float smallFontSize = 19.0f;
+    float fontSize = 24.0f;
+    float smallFontSize = 20.0f;
     float radarRadius = 110.0f;
 };
 
@@ -79,6 +80,7 @@ struct ScreenRect {
 struct BoneJoint {
     ImVec2 position{};
     bool valid = false;
+    game::VisibilityState visibility = game::VisibilityState::Unavailable;
 };
 
 struct BoneLink {
@@ -89,6 +91,8 @@ struct BoneLink {
 struct SkeletonVisual {
     std::vector<BoneJoint> joints;
     std::vector<BoneLink> links;
+    bool colorByVisibility = false;
+    int selectedJoint = -1;
 };
 
 struct VitalState {
@@ -100,6 +104,7 @@ struct VitalState {
 };
 
 struct PlayerVisual {
+    std::uint64_t identity = 0;
     ScreenRect bounds{};
     SkeletonVisual skeleton{};
     VitalState vitals{};
@@ -113,6 +118,7 @@ struct PlayerVisual {
     bool drawVitals = true;
     bool drawTracer = false;
     bool visible = true;
+    bool coverHighlighted = false;
 };
 
 struct OffscreenMarker {
@@ -173,6 +179,7 @@ struct AimGuide {
     bool drawTargetRay = false;
     bool targetValid = false;
     bool locked = false;
+    int selectedBone = -1;
 };
 
 struct TouchRegionVisual {

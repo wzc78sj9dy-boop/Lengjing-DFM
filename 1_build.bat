@@ -9,6 +9,19 @@ set "NDK="
 set "NINJA="
 set "TARGET="
 set "PRODUCT="
+set "AUTH_CONFIG="
+set "PROJECTILE_TRACKING=OFF"
+
+if defined LENGJING_AUTH_CONFIG (
+    if not exist "%LENGJING_AUTH_CONFIG%" (
+        echo [ERROR] LENGJING_AUTH_CONFIG does not exist: %LENGJING_AUTH_CONFIG%
+        exit /b 1
+    )
+    set "AUTH_CONFIG=%LENGJING_AUTH_CONFIG%"
+)
+if not defined AUTH_CONFIG if exist "%SOURCE_DIR%\cmake\AuthConfigPrivate.cmake" (
+    set "AUTH_CONFIG=%SOURCE_DIR%\cmake\AuthConfigPrivate.cmake"
+)
 
 if exist "D:\AAA\android-ndk-r27d\build\cmake\android.toolchain.cmake" set "NDK=D:\AAA\android-ndk-r27d"
 if not defined NDK if defined ANDROID_NDK_HOME if exist "%ANDROID_NDK_HOME%\build\cmake\android.toolchain.cmake" set "NDK=%ANDROID_NDK_HOME%"
@@ -68,13 +81,24 @@ set "NDK_CMAKE=%NDK:\=/%"
 set "NINJA_CMAKE=%NINJA:\=/%"
 echo [NDK] %NDK%
 echo [TARGET] !TARGET!
+echo [PROJECTILE_TRACKING] !PROJECTILE_TRACKING!
+
+set "AUTH_PRELOAD="
+if defined AUTH_CONFIG (
+    set "AUTH_PRELOAD=-C "!AUTH_CONFIG!""
+    echo [AUTH] Private configuration enabled.
+) else (
+    echo [AUTH] Runtime authentication uses the CMake cache/defaults.
+)
 
 cmake -Wno-deprecated --no-warn-unused-cli -S "%SOURCE_DIR%" -B "%BUILD_DIR%" -G Ninja ^
+    !AUTH_PRELOAD! ^
     -DCMAKE_MAKE_PROGRAM="%NINJA_CMAKE%" ^
     -DCMAKE_TOOLCHAIN_FILE="%NDK_CMAKE%/build/cmake/android.toolchain.cmake" ^
     -DANDROID_ABI=arm64-v8a ^
     -DANDROID_PLATFORM=android-21 ^
     -DANDROID_STL=c++_static ^
+    -DLENGJING_ENABLE_PROJECTILE_TRACKING=!PROJECTILE_TRACKING! ^
     -DCMAKE_BUILD_TYPE=Release
 if errorlevel 1 (
     echo [ERROR] Android configuration failed.

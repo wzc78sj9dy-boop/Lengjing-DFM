@@ -74,10 +74,9 @@ constexpr bool ResolveDownedState(
     float health,
     float downedHealth,
     float maximumDownedHealth) noexcept {
-    return explicitlyDowned ||
-        (health <= 0.0f &&
-         downedHealth > 0.0f &&
-         maximumDownedHealth > 0.0f);
+    return health <= 0.0f &&
+        (explicitlyDowned ||
+         (downedHealth > 0.0f && maximumDownedHealth > 0.0f));
 }
 
 }  // namespace lengjing::game::native

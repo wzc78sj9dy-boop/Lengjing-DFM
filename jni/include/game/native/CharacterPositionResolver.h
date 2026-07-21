@@ -1,7 +1,5 @@
 #pragma once
 
-#include "game/native/IndexedCoordinateReader.h"
-
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -16,12 +14,11 @@ namespace lengjing::game::native {
 enum class PositionReadMode : std::uint8_t {
     Standard,
     Direct,
-    Indexed,
 };
 
 class CharacterPositionResolver final {
 public:
-    using Coordinate = IndexedCoordinateReader::Coordinate;
+    using Coordinate = std::array<float, 3>;
 
     template <typename ReadBytes>
     bool Read(std::uintptr_t actor,
@@ -48,27 +45,104 @@ public:
                       bool antiFlicker,
                       Coordinate& coordinate,
                       ReadBytes&& readBytes) {
+        return ReadWithPolicy(
+            actor,
+            decodedRoot,
+            className,
+            mode,
+            antiFlicker,
+            false,
+            coordinate,
+            readBytes);
+    }
+
+    template <typename ReadBytes>
+    bool ReadLocalWithRoot(std::uintptr_t actor,
+                           std::uintptr_t decodedRoot,
+                           std::string_view className,
+                           PositionReadMode mode,
+                           bool antiFlicker,
+                           Coordinate& coordinate,
+                           ReadBytes&& readBytes) {
+        return ReadWithPolicy(
+            actor,
+            decodedRoot,
+            className,
+            mode,
+            antiFlicker,
+            true,
+            coordinate,
+            readBytes);
+    }
+
+    static bool IsRangeTargetCharacter(std::string_view className) noexcept {
+        return
+            className.find("RangeTargetCharacter") !=
+                std::string_view::npos ||
+            className.find("RangeTargeCharacter") !=
+                std::string_view::npos;
+    }
+
+    static bool IsPrimaryCharacter(std::string_view className) noexcept {
+        return className == "NC_BP_DFMCharacter_C" ||
+            className == "NC_BP_DFMCharacter_TutorialPlayerAi_C" ||
+            IsRangeTargetCharacter(className);
+    }
+
+    static bool IsDirectAiCharacter(std::string_view className) noexcept {
+        return className.rfind("NC_BP_DFMCharacter_AI", 0) == 0 ||
+            className.rfind("NC_BP_DFMAICharacter", 0) == 0;
+    }
+
+    static bool IsTargetCharacter(std::string_view className) noexcept {
+        return IsPrimaryCharacter(className) ||
+            IsDirectAiCharacter(className) ||
+            className.find("DFMCharacter") != std::string_view::npos;
+    }
+
+    void Clear() {
+        positionHistory_.clear();
+        lastPruneAt_ = {};
+    }
+
+private:
+    template <typename ReadBytes>
+    bool ReadWithPolicy(std::uintptr_t actor,
+                        std::uintptr_t decodedRoot,
+                        std::string_view className,
+                        PositionReadMode mode,
+                        bool antiFlicker,
+                        bool localActor,
+                        Coordinate& coordinate,
+                        ReadBytes&& readBytes) {
         coordinate = Coordinate{};
         const auto now = std::chrono::steady_clock::now();
         PruneIfDue(now);
-        const bool primary = IsPrimaryCharacter(className);
-        const bool directAi = IsDirectAiCharacter(className);
+        const bool rangeTarget = IsRangeTargetCharacter(className);
 
         if (mode == PositionReadMode::Direct) {
-            return decodedRoot != 0 &&
-                ReadDecodedRoot(decodedRoot, coordinate, readBytes);
+            if (decodedRoot == 0) return false;
+            return localActor
+                ? ReadDecodedLocalRoot(decodedRoot, coordinate, readBytes)
+                : ReadDecodedRoot(decodedRoot, coordinate, readBytes);
         }
 
         bool resolved = false;
-        if (mode == PositionReadMode::Indexed && primary) {
-            resolved = IndexedCoordinateReader::Read(actor, coordinate, readBytes) &&
+        if (rangeTarget) {
+            resolved = decodedRoot != 0 &&
+                ReadDecodedStandardRoot(decodedRoot, coordinate, readBytes) &&
                 IsValid(coordinate);
-            if (resolved) indexedHistory_[actor] = HistoryEntry{coordinate, now};
-            else resolved = Restore(indexedHistory_, actor, now, coordinate);
-        } else if (mode != PositionReadMode::Standard && directAi) {
-            resolved = ReadDirect(actor, coordinate, readBytes);
+            if (!resolved) {
+                resolved = ReadStandard(
+                    actor,
+                    coordinate,
+                    readBytes);
+            }
         } else {
-            resolved = ReadStandard(actor, coordinate, readBytes);
+            resolved = ReadStandard(
+                actor,
+                coordinate,
+                readBytes);
         }
 
         if (resolved) {
@@ -81,35 +155,12 @@ public:
             Restore(positionHistory_, actor, now, coordinate);
     }
 
-    void Clear() {
-        positionHistory_.clear();
-        indexedHistory_.clear();
-        lastPruneAt_ = {};
-    }
-
-    static bool IsPrimaryCharacter(std::string_view className) noexcept {
-        return className == "NC_BP_DFMCharacter_C" ||
-            className == "NC_BP_DFMCharacter_TutorialPlayerAi_C" ||
-            className == "BP_RangeTargetCharacter_C";
-    }
-
-    static bool IsDirectAiCharacter(std::string_view className) noexcept {
-        return className.rfind("NC_BP_DFMCharacter_AI", 0) == 0 ||
-            className.rfind("NC_BP_DFMAICharacter", 0) == 0;
-    }
-
-private:
     static bool IsValid(const Coordinate& coordinate) noexcept {
         return std::isfinite(coordinate[0]) &&
             std::isfinite(coordinate[1]) &&
             std::isfinite(coordinate[2]) &&
             (coordinate[0] != 0.0f || coordinate[1] != 0.0f ||
              coordinate[2] != 0.0f);
-    }
-
-    static bool IsZero(const Coordinate& coordinate) noexcept {
-        return coordinate[0] == 0.0f && coordinate[1] == 0.0f &&
-            coordinate[2] == 0.0f;
     }
 
     template <typename ReadBytes, typename T>
@@ -131,39 +182,51 @@ private:
     }
 
     template <typename ReadBytes>
-    static bool ReadDirect(std::uintptr_t actor,
-                           Coordinate& coordinate,
-                           ReadBytes& readBytes) {
-        std::uintptr_t component = 0;
-        return ReadComponent(actor, component, readBytes) &&
-            component <=
-                std::numeric_limits<std::uintptr_t>::max() - 0x220 &&
-            ReadValue(readBytes, component + 0x220, coordinate) &&
-            IsValid(coordinate);
-    }
-
-    template <typename ReadBytes>
     static bool ReadDecodedRoot(std::uintptr_t root,
                                 Coordinate& coordinate,
                                 ReadBytes& readBytes) {
-        if (root == 0) return false;
-        constexpr std::array<std::uintptr_t, 4> offsets{
-            0x168,
-            0x148,
-            0x220,
-            0x240,
-        };
-        for (std::size_t index = 0; index < offsets.size(); ++index) {
-            if (root > std::numeric_limits<std::uintptr_t>::max() -
-                    offsets[index]) {
-                coordinate = Coordinate{};
-            } else {
-                ReadValue(readBytes, root + offsets[index], coordinate);
+        constexpr std::array<std::uintptr_t, 3> fallbackOffsets{
+            0x168, 0x148, 0x220};
+        for (const std::uintptr_t offset : fallbackOffsets) {
+            coordinate = Coordinate{};
+            bool read = false;
+            if (root <=
+                std::numeric_limits<std::uintptr_t>::max() - offset) {
+                read = ReadValue(readBytes, root + offset, coordinate);
             }
-            if (index + 1 == offsets.size()) return true;
-            if (!IsZero(coordinate)) return true;
+            if (read && IsValid(coordinate)) return true;
         }
+        coordinate = Coordinate{};
+        bool read = false;
+        if (root <=
+            std::numeric_limits<std::uintptr_t>::max() - 0x240) {
+            read = ReadValue(readBytes, root + 0x240, coordinate);
+        }
+        if (read && IsValid(coordinate)) return true;
+        coordinate = Coordinate{};
         return false;
+    }
+
+    template <typename ReadBytes>
+    static bool ReadDecodedLocalRoot(std::uintptr_t root,
+                                     Coordinate& coordinate,
+                                     ReadBytes& readBytes) {
+        coordinate = Coordinate{};
+        const bool read = root <=
+                std::numeric_limits<std::uintptr_t>::max() - 0x168 &&
+            ReadValue(readBytes, root + 0x168, coordinate);
+        if (read && IsValid(coordinate)) return true;
+        coordinate = Coordinate{};
+        return false;
+    }
+
+    template <typename ReadBytes>
+    static bool ReadDecodedStandardRoot(std::uintptr_t root,
+                                        Coordinate& coordinate,
+                                        ReadBytes& readBytes) {
+        return root <=
+                std::numeric_limits<std::uintptr_t>::max() - 0x220 &&
+            ReadValue(readBytes, root + 0x220, coordinate);
     }
 
     template <typename ReadBytes>
@@ -172,16 +235,17 @@ private:
                              ReadBytes& readBytes) {
         std::uintptr_t component = 0;
         if (!ReadComponent(actor, component, readBytes)) return false;
-        if (component <=
-                std::numeric_limits<std::uintptr_t>::max() - 0x168 &&
-            ReadValue(readBytes, component + 0x168, coordinate) &&
-            IsValid(coordinate)) {
-            return true;
+        constexpr std::array<std::uintptr_t, 2> offsets{0x168, 0x220};
+        for (const std::uintptr_t offset : offsets) {
+            if (component <=
+                    std::numeric_limits<std::uintptr_t>::max() - offset &&
+                ReadValue(readBytes, component + offset, coordinate) &&
+                IsValid(coordinate)) {
+                return true;
+            }
         }
-        return component <=
-                std::numeric_limits<std::uintptr_t>::max() - 0x220 &&
-            ReadValue(readBytes, component + 0x220, coordinate) &&
-            IsValid(coordinate);
+        coordinate = Coordinate{};
+        return false;
     }
 
     struct HistoryEntry {
@@ -221,12 +285,10 @@ private:
             }
         };
         prune(positionHistory_);
-        prune(indexedHistory_);
         lastPruneAt_ = now;
     }
 
     std::unordered_map<std::uintptr_t, HistoryEntry> positionHistory_;
-    std::unordered_map<std::uintptr_t, HistoryEntry> indexedHistory_;
     std::chrono::steady_clock::time_point lastPruneAt_{};
 };
 

@@ -54,6 +54,7 @@ void RunPlayerTrackingTests() {
 
     REQUIRE(!ResolveDownedState(false, 100.0f, 80.0f, 100.0f));
     REQUIRE(ResolveDownedState(false, 0.0f, 80.0f, 100.0f));
-    REQUIRE(ResolveDownedState(true, 100.0f, 0.0f, 0.0f));
+    REQUIRE(!ResolveDownedState(true, 100.0f, 0.0f, 0.0f));
+    REQUIRE(ResolveDownedState(true, 0.0f, 0.0f, 0.0f));
     REQUIRE(!ResolveDownedState(false, 0.0f, 0.0f, 100.0f));
 }

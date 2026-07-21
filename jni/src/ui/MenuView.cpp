@@ -1,10 +1,10 @@
 #include "ui/MenuView.h"
 
+#include "game/ProjectileTrackingFeature.h"
 #include "imgui.h"
 
 #include <algorithm>
 #include <array>
-#include <cstdio>
 #include <string>
 
 namespace lengjing::ui {
@@ -38,11 +38,14 @@ constexpr std::array<Page, 6> kPages{
 constexpr std::array<const char*, 3> kGameVersions{
     "国服", "国际服", "台服"};
 
-constexpr std::array<const char*, 4> kInputModes{
-    "写入触摸", "程序陀螺仪", "内核触摸", "内核陀螺仪"};
+constexpr std::array<const char*, 5> kInputModes{
+    "只读", "写入触摸", "程序陀螺仪", "内核触摸", "内核陀螺仪"};
 
 constexpr std::array<const char*, 7> kFrameLimits{
     "30 FPS", "60 FPS", "90 FPS", "120 FPS", "144 FPS", "165 FPS", "无限制"};
+
+constexpr std::array<const char*, 3> kRenderBackends{
+    "CPU", "Vulkan", "OpenGL"};
 
 constexpr std::array<const char*, kWeaponProfileCount> kWeaponProfiles{
     "步枪", "冲锋枪", "霰弹枪", "轻机枪", "射手步枪",
@@ -56,6 +59,9 @@ constexpr std::array<const char*, 2> kTargetAlgorithms{
 
 constexpr std::array<const char*, 8> kAimBones{
     "头部", "胸部", "腰部", "腿部", "膝盖", "脚部", "随机部位", "准星最近"};
+
+constexpr std::array<const char*, 2> kCoverModes{
+    "全身可见部位", "仅指定部位"};
 
 constexpr std::array<const char*, kRandomBoneCount> kRandomBoneNames{
     "头部", "胸部", "腰部", "肩部", "手肘", "手腕", "大腿", "膝盖", "脚踝"};
@@ -384,17 +390,47 @@ bool DriverCombo(RuntimeModel& runtime) {
     return changed;
 }
 
+void SliderCaption(const char* label, const char* value) {
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float availableWidth =
+        std::max(1.0f, ImGui::GetContentRegionAvail().x);
+    const float lineHeight = ImGui::GetTextLineHeight();
+    const ImVec2 valueSize = ImGui::CalcTextSize(value);
+    const float valueX = std::max(
+        origin.x,
+        origin.x + availableWidth - valueSize.x);
+    const float labelMaximumX = std::max(origin.x, valueX - 10.0f);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->PushClipRect(
+        origin,
+        ImVec2(labelMaximumX, origin.y + lineHeight),
+        true);
+    draw->AddText(origin, ImGui::GetColorU32(kMuted), label);
+    draw->PopClipRect();
+    draw->AddText(
+        ImVec2(valueX, origin.y),
+        ImGui::GetColorU32(kText),
+        value);
+    ImGui::Dummy(ImVec2(0.0f, lineHeight));
+}
+
 bool SliderIntRow(
     const char* label,
     int* value,
     int minimum,
     int maximum,
     const char* format) {
-    ImGui::TextColored(kMuted, "%s", label);
+    char formatted[64]{};
+    std::snprintf(formatted, sizeof(formatted), format, *value);
+    SliderCaption(label, formatted);
     ImGui::PushID(label);
     ImGui::SetNextItemWidth(-1.0f);
+    ImVec4 transparentText = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+    transparentText.w = 0.0f;
+    ImGui::PushStyleColor(ImGuiCol_Text, transparentText);
     const bool changed =
         ImGui::SliderInt("##value", value, minimum, maximum, format);
+    ImGui::PopStyleColor();
     ImGui::PopID();
     return changed;
 }
@@ -405,11 +441,17 @@ bool SliderFloatRow(
     float minimum,
     float maximum,
     const char* format) {
-    ImGui::TextColored(kMuted, "%s", label);
+    char formatted[64]{};
+    std::snprintf(formatted, sizeof(formatted), format, *value);
+    SliderCaption(label, formatted);
     ImGui::PushID(label);
     ImGui::SetNextItemWidth(-1.0f);
+    ImVec4 transparentText = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+    transparentText.w = 0.0f;
+    ImGui::PushStyleColor(ImGuiCol_Text, transparentText);
     const bool changed =
         ImGui::SliderFloat("##value", value, minimum, maximum, format);
+    ImGui::PopStyleColor();
     ImGui::PopID();
     return changed;
 }
@@ -664,26 +706,25 @@ void RenderRuntime(UiModel& model, UiActions& actions) {
     SectionTitle("运行状态");
     const float metricsWidth = ImGui::GetContentRegionAvail().x;
     const int metricColumns =
-        metricsWidth >= 740.0f
-            ? 5
-            : (metricsWidth >= 420.0f
-                ? 3
-                : (metricsWidth >= 280.0f ? 2 : 1));
+        metricsWidth >= 420.0f
+            ? 3
+            : (metricsWidth >= 280.0f ? 2 : 1);
     if (ImGui::BeginTable(
             "##runtime_metrics", metricColumns,
             ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoSavedSettings)) {
         const char* state = runtime.stopping ? "停止中" : (runtime.active ? "运行中" : "未运行");
         const ImVec4 stateColor = runtime.stopping ? kAmber : (runtime.active ? kGreen : kMuted);
         StatusMetric("状态", state, stateColor);
-        StatusMetric(
-            "进程",
-            runtime.processId > 0 ? std::to_string(runtime.processId) : "未获取",
-            runtime.processId > 0 ? kText : kMuted);
-        StatusMetric("基址", runtime.baseReady ? "已获取" : "未获取", runtime.baseReady ? kGreen : kMuted);
         char fps[32]{};
         std::snprintf(fps, sizeof(fps), "%.1f", runtime.framesPerSecond);
         StatusMetric("帧率", fps, kAmber);
-        StatusMetric("渲染方式", "CPU", kAccent);
+        const int rendererIndex = std::clamp(
+            static_cast<int>(runtime.activeRenderBackend),
+            static_cast<int>(RenderBackend::Cpu),
+            static_cast<int>(RenderBackend::OpenGl));
+        const char* renderer = kRenderBackends[
+            static_cast<std::size_t>(rendererIndex)];
+        StatusMetric("渲染方式", renderer, kAccent);
         ImGui::EndTable();
     }
 
@@ -697,11 +738,11 @@ void RenderRuntime(UiModel& model, UiActions& actions) {
     Mark(actions, SettingsDomain::Runtime, DriverCombo(runtime));
     ImGui::Dummy(ImVec2(0.0f, 4.0f));
     int inputMode = std::clamp(
-        static_cast<int>(model.aim.inputMode) - 1,
+        static_cast<int>(model.aim.inputMode),
         0,
         static_cast<int>(kInputModes.size()) - 1);
     if (Combo("输入模式", inputMode, kInputModes)) {
-        model.aim.inputMode = static_cast<AimInputMode>(inputMode + 1);
+        model.aim.inputMode = static_cast<AimInputMode>(inputMode);
         actions.SettingsChanged(SettingsDomain::Aim);
     }
     if (runtime.active || runtime.busy || runtime.stopping) ImGui::EndDisabled();
@@ -725,17 +766,6 @@ void RenderVisual(UiModel& model, UiActions& actions) {
         bool coordinateDecrypt = visual.coordinateDecrypt;
         if (GridToggle("坐标解密", coordinateDecrypt)) {
             visual.coordinateDecrypt = coordinateDecrypt;
-            if (coordinateDecrypt) {
-                visual.algorithmDecrypt = false;
-            }
-            actions.SettingsChanged(SettingsDomain::Visual);
-        }
-        bool algorithmDecrypt = visual.algorithmDecrypt;
-        if (GridToggle("算法解密", algorithmDecrypt)) {
-            visual.algorithmDecrypt = algorithmDecrypt;
-            if (algorithmDecrypt) {
-                visual.coordinateDecrypt = false;
-            }
             actions.SettingsChanged(SettingsDomain::Visual);
         }
         ImGui::EndTable();
@@ -793,12 +823,6 @@ void RenderVisual(UiModel& model, UiActions& actions) {
     Mark(actions, SettingsDomain::Visual, SliderFloatRow(
         "字体大小", &visual.fontScale, 0.3f, 3.0f, "%.1f"));
 
-    SectionTitle("调试");
-    if (BeginToggleGrid("##visual_debug")) {
-        Mark(actions, SettingsDomain::Visual, GridToggle("调试信息", visual.debugInfo));
-        Mark(actions, SettingsDomain::Visual, GridToggle("类名调试", visual.classNameDebug));
-        ImGui::EndTable();
-    }
 }
 
 void RenderLoot(UiModel& model, UiActions& actions) {
@@ -929,15 +953,43 @@ void RenderAim(UiModel& model, UiActions& actions) {
         Mark(actions, SettingsDomain::Aim, GridToggle("倒地不瞄", aim.ignoreDowned));
         Mark(actions, SettingsDomain::Aim, GridToggle("持续锁定", aim.persistentLock));
         Mark(actions, SettingsDomain::Aim, GridToggle("曲线瞄准", aim.curvedMotion));
-        Mark(actions, SettingsDomain::Aim, GridToggle("子弹追踪", aim.trajectoryTracking));
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+            Mark(actions, SettingsDomain::Aim,
+                 GridToggle("子弹追踪", aim.trajectoryTracking));
+#endif
         Mark(actions, SettingsDomain::Aim, GridToggle("可见检测", aim.requireVisibility));
-        Mark(actions, SettingsDomain::Aim, GridToggle("目标状态过滤", aim.rejectTargetState));
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+            Mark(actions, SettingsDomain::Aim,
+                 GridToggle("目标状态过滤", aim.rejectTargetState));
+            Mark(actions, SettingsDomain::Aim,
+                 GridToggle("死亡目标过滤", aim.rejectDeadTarget));
+#endif
         Mark(actions, SettingsDomain::Aim, GridToggle("范围限制", aim.enforceFov));
         Mark(actions, SettingsDomain::Aim, GridToggle("距离限制", aim.enforceDistance));
         Mark(actions, SettingsDomain::Aim, GridToggle("范围圆圈", aim.drawRange));
         Mark(actions, SettingsDomain::Aim, GridToggle("目标射线", aim.drawTargetRay));
         ImGui::EndTable();
     }
+    if (aim.missMode) {
+        Mark(actions, SettingsDomain::Aim,
+             Combo("漏打范围", aim.coverMode, kCoverModes));
+    }
+
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+        SectionTitle("真人");
+        if (BeginToggleGrid("##players_tracking")) {
+            Mark(actions, SettingsDomain::Aim,
+                 GridToggle("死亡箱", aim.playerDeadBox));
+            ImGui::EndTable();
+        }
+
+        SectionTitle("人机");
+        if (BeginToggleGrid("##robots_tracking")) {
+            Mark(actions, SettingsDomain::Aim,
+                 GridToggle("死亡箱", aim.robotDeadBox));
+            ImGui::EndTable();
+        }
+#endif
 
     SectionTitle("武器配置");
     Mark(
@@ -953,10 +1005,12 @@ void RenderAim(UiModel& model, UiActions& actions) {
     SectionTitle("目标选择");
     Mark(actions, SettingsDomain::Aim, Combo("触发方式", aim.triggerMode, kTriggerModes));
     Mark(actions, SettingsDomain::Aim, Combo("目标算法", aim.targetAlgorithm, kTargetAlgorithms));
-    Mark(actions, SettingsDomain::Aim, Combo("腰射部位", tuning.hipBone, kAimBones));
-    Mark(actions, SettingsDomain::Aim, Combo("开镜部位", tuning.adsBone, kAimBones));
-    Mark(actions, SettingsDomain::Aim, SliderIntRow(
-        "命中率", &aim.hitPercentage, 0, 100, "%d%%"));
+    Mark(actions, SettingsDomain::Aim, Combo("腰射锁定部位", tuning.hipBone, kAimBones));
+    Mark(actions, SettingsDomain::Aim, Combo("开镜锁定部位", tuning.adsBone, kAimBones));
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+        Mark(actions, SettingsDomain::Aim, SliderIntRow(
+            "命中率", &aim.hitPercentage, 0, 100, "%d%%"));
+#endif
 
     if (tuning.hipBone == 6 || tuning.adsBone == 6) {
         SectionTitle("随机部位");
@@ -975,10 +1029,6 @@ void RenderAim(UiModel& model, UiActions& actions) {
         "腰射距离", &tuning.hipDistanceMeters, 5.0f, 300.0f, "%.0f 米"));
     Mark(actions, SettingsDomain::Aim, SliderFloatRow(
         "开镜距离", &tuning.adsDistanceMeters, 5.0f, 300.0f, "%.0f 米"));
-    Mark(actions, SettingsDomain::Aim, SliderFloatRow(
-        "追踪弹速", &tuning.trackingProjectileSpeed, 1.0f, 5000.0f, "%.0f"));
-    Mark(actions, SettingsDomain::Aim, SliderFloatRow(
-        "重力参数", &tuning.trackingGravity, 0.0f, 100.0f, "%.2f"));
 
     SectionTitle("触摸区域");
     Mark(actions, SettingsDomain::Aim, Toggle("显示触摸范围", aim.showTouchArea));
@@ -1016,6 +1066,14 @@ void RenderSystem(UiModel& model, UiActions& actions) {
 
     SectionTitle("性能");
     Mark(actions, SettingsDomain::System, Combo("帧率上限", system.frameLimitIndex, kFrameLimits));
+    int renderBackend = std::clamp(
+        static_cast<int>(system.renderBackend),
+        static_cast<int>(RenderBackend::Cpu),
+        static_cast<int>(RenderBackend::OpenGl));
+    if (Combo("渲染方式", renderBackend, kRenderBackends)) {
+        system.renderBackend = static_cast<RenderBackend>(renderBackend);
+        actions.SettingsChanged(SettingsDomain::System);
+    }
 
     SectionTitle("运行日志");
     const float logHeight = std::clamp(ImGui::GetContentRegionAvail().y * 0.48f, 160.0f, 360.0f);
@@ -1160,10 +1218,11 @@ void RenderNavigation(UiModel& model, ImTextureID logoTexture) {
                 ImGuiTableFlags_NoSavedSettings)) {
         for (std::size_t i = 0; i < kPages.size(); ++i) {
             ImGui::TableNextColumn();
-            if (NavButton(
-                    kPageNames[i],
-                    model.page == kPages[i],
-                    ImVec2(ImGui::GetContentRegionAvail().x, 40.0f))) {
+            const bool clicked = NavButton(
+                kPageNames[i],
+                model.page == kPages[i],
+                ImVec2(ImGui::GetContentRegionAvail().x, 40.0f));
+            if (clicked) {
                 model.page = kPages[i];
             }
         }
@@ -1228,8 +1287,11 @@ void RenderRuntimeAction(
         if (ActionButton("停止", ActionTone::Danger, size)) {
             actions.StopRuntime();
         }
-    } else if (ActionButton("启动", ActionTone::Primary, size)) {
-        actions.StartRuntime();
+    } else {
+        const bool clicked = ActionButton("启动", ActionTone::Primary, size);
+        if (clicked) {
+            actions.StartRuntime();
+        }
     }
 }
 
@@ -1269,10 +1331,11 @@ void RenderActionDock(UiModel& model, UiActions& actions, float height) {
             actions,
             ImVec2(primaryWidth, 44.0f));
         ImGui::SameLine();
-        if (ActionButton(
-                "隐藏菜单",
-                ActionTone::Neutral,
-                ImVec2(secondaryWidth, 44.0f))) {
+        const bool hideClicked = ActionButton(
+            "隐藏菜单",
+            ActionTone::Neutral,
+            ImVec2(secondaryWidth, 44.0f));
+        if (hideClicked) {
             actions.HideMenu();
         }
         ImGui::SameLine();
@@ -1285,10 +1348,11 @@ void RenderActionDock(UiModel& model, UiActions& actions, float height) {
     } else {
         RenderRuntimeAction(model, actions, ImVec2(width, 40.0f));
         const float halfWidth = (width - spacing) * 0.5f;
-        if (ActionButton(
-                "隐藏菜单",
-                ActionTone::Neutral,
-                ImVec2(halfWidth, 40.0f))) {
+        const bool hideClicked = ActionButton(
+            "隐藏菜单",
+            ActionTone::Neutral,
+            ImVec2(halfWidth, 40.0f));
+        if (hideClicked) {
             actions.HideMenu();
         }
         ImGui::SameLine();
@@ -1368,7 +1432,7 @@ void MenuView::Render(UiModel& model, UiActions& actions) {
 
     constexpr float viewportMargin = 12.0f;
     constexpr float topOverlayGap = 12.0f;
-    constexpr float dragRegionHeight = 56.0f;
+    constexpr float dragRegionHeight = 52.0f;
     const float displayWidth = std::max(1.0f, io.DisplaySize.x);
     const float displayHeight = std::max(1.0f, io.DisplaySize.y);
     const float topInset = topOverlayValid_
@@ -1409,6 +1473,16 @@ void MenuView::Render(UiModel& model, UiActions& actions) {
     }
     windowX_ = std::clamp(windowX_, minimumX, maximumX);
     windowY_ = std::clamp(windowY_, minimumY, maximumY);
+    if (dragActive_) {
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            windowX_ = std::clamp(
+                io.MousePos.x - dragOffsetX_, minimumX, maximumX);
+            windowY_ = std::clamp(
+                io.MousePos.y - dragOffsetY_, minimumY, maximumY);
+        } else {
+            dragActive_ = false;
+        }
+    }
     lastDisplayWidth_ = displayWidth;
     lastDisplayHeight_ = displayHeight;
 
@@ -1493,25 +1567,24 @@ void MenuView::Render(UiModel& model, UiActions& actions) {
     }
 
     const ImVec2 windowPosition = ImGui::GetWindowPos();
-    const ImVec2 mousePosition = io.MousePos;
-    const bool insideDragRegion =
-        mousePosition.x >= windowPosition.x &&
-        mousePosition.x <= windowPosition.x + ImGui::GetWindowWidth() &&
-        mousePosition.y >= windowPosition.y &&
-        mousePosition.y <= windowPosition.y + dragRegionHeight;
-    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && insideDragRegion) {
+    const ImVec2 dragCursor = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton(
+        "##window_drag_region",
+        ImVec2(
+            std::max(1.0f, ImGui::GetContentRegionAvail().x),
+            dragRegionHeight),
+        ImGuiButtonFlags_MouseButtonLeft);
+    const bool dragRegionActivated = ImGui::IsItemActivated();
+    if (dragRegionActivated) {
         dragActive_ = true;
-        dragOffsetX_ = mousePosition.x - windowPosition.x;
-        dragOffsetY_ = mousePosition.y - windowPosition.y;
+        dragOffsetX_ = io.MousePos.x - windowPosition.x;
+        dragOffsetY_ = io.MousePos.y - windowPosition.y;
     }
-    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+    if (dragActive_ && !ImGui::IsItemActive() &&
+        !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         dragActive_ = false;
     }
-    if (dragActive_) {
-        windowX_ = std::clamp(mousePosition.x - dragOffsetX_, minimumX, maximumX);
-        windowY_ = std::clamp(mousePosition.y - dragOffsetY_, minimumY, maximumY);
-        ImGui::SetWindowPos(ImVec2(windowX_, windowY_), ImGuiCond_Always);
-    }
+    ImGui::SetCursorScreenPos(dragCursor);
 
     RenderNavigation(model, static_cast<ImTextureID>(logoTexture_));
     if (model.page != animatedPage_) {

@@ -63,7 +63,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-cmake --build "%BUILD_DIR%" --target "!TARGET!" --parallel 8
+cmake --build "%BUILD_DIR%" --parallel 8
 if errorlevel 1 (
     echo [ERROR] Host test build failed.
     exit /b 1
@@ -81,6 +81,13 @@ set "TEST_RESULT=!errorlevel!"
 if not "!TEST_RESULT!"=="0" (
     echo [ERROR] Host tests failed with exit code !TEST_RESULT!.
     exit /b !TEST_RESULT!
+)
+
+ctest --test-dir "%BUILD_DIR%" --output-on-failure
+set "CTEST_RESULT=!errorlevel!"
+if not "!CTEST_RESULT!"=="0" (
+    echo [ERROR] CTest failed with exit code !CTEST_RESULT!.
+    exit /b !CTEST_RESULT!
 )
 
 echo [DONE] All host tests passed.
