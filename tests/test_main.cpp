@@ -10,6 +10,7 @@ int main() {
         RunActorRecordSourceTests();
         RunActorRecordResolverTests();
         RunAlgorithmPositionPolicyTests();
+        RunAimGuidePolicyTests();
         RunAimModePolicyTests();
         RunAimPredictionTests();
         RunAuthConfigTests();

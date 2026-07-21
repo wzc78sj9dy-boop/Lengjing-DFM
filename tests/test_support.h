@@ -18,6 +18,7 @@ void RunActorRecordRefreshPolicyTests();
 void RunActorRecordSourceTests();
 void RunActorRecordResolverTests();
 void RunAlgorithmPositionPolicyTests();
+void RunAimGuidePolicyTests();
 void RunAimModePolicyTests();
 void RunAimPredictionTests();
 void RunAuthConfigTests();

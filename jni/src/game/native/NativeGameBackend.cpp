@@ -1,5 +1,6 @@
 #include "game/GameBackend.h"
 #include "game/aim/AimController.h"
+#include "game/aim/AimGuidePolicy.h"
 #include "game/aim/AimModePolicy.h"
 #include "game/aim/AimPrediction.h"
 #include "game/aim/CoverSelectionPolicy.h"
@@ -5516,7 +5517,13 @@ private:
             static_cast<float>(options_.screenHeight) * 0.5f);
         guide.radius = tuning.rangePixels;
         guide.drawCircle = settings.drawRange;
-        guide.drawTargetRay = settings.drawTargetRay && selected != nullptr;
+        guide.drawTargetRay = aim::ShouldDrawAimTargetRay(
+            settings.drawTargetRay,
+            selected != nullptr,
+            selected != nullptr
+                ? selected->screenDistancePixels
+                : 0.0f,
+            tuning.rangePixels);
         if (selected != nullptr) {
             guide.target = ImVec2(selected->screen.x, selected->screen.y);
             guide.targetValid = true;
@@ -5706,7 +5713,13 @@ private:
             static_cast<float>(options_.screenHeight) * 0.5f);
         guide.radius = tuning.rangePixels;
         guide.drawCircle = settings.drawRange;
-        guide.drawTargetRay = settings.drawTargetRay && selected != nullptr;
+        guide.drawTargetRay = aim::ShouldDrawAimTargetRay(
+            settings.drawTargetRay,
+            selected != nullptr,
+            selected != nullptr
+                ? selected->screenDistancePixels
+                : 0.0f,
+            tuning.rangePixels);
         if (selected != nullptr) {
             guide.target = ImVec2(selected->screen.x, selected->screen.y);
             guide.targetValid = true;
