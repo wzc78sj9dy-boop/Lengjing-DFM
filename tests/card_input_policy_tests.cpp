@@ -73,6 +73,49 @@ void RunCardInputPolicyTests() {
     }
 
     {
+        std::istringstream input("y\n");
+        std::ostringstream output;
+        const CardInputResult result = ReadCardKeyFromStream(
+            input, output, false, {}, "SAVED_CARD_FOR_TEST");
+        REQUIRE(result.status == CardInputStatus::Accepted);
+        REQUIRE(result.value == "SAVED_CARD_FOR_TEST");
+        REQUIRE(output.str().empty());
+    }
+
+    {
+        std::istringstream input("Y\n");
+        std::ostringstream output;
+        const CardInputResult result = ReadCardKeyFromStream(
+            input, output, true, {}, "SAVED_CARD_FOR_TEST");
+        REQUIRE(result.status == CardInputStatus::Accepted);
+        REQUIRE(result.value == "SAVED_CARD_FOR_TEST");
+        REQUIRE(
+            output.str() ==
+            "请输入卡密，输入 y 复用上次卡密: ");
+    }
+
+    {
+        std::istringstream input("y\n");
+        std::ostringstream output;
+        const CardInputResult result =
+            ReadCardKeyFromStream(input, output, false);
+        REQUIRE(result.status == CardInputStatus::ReuseUnavailable);
+        REQUIRE(result.value.empty());
+    }
+
+    {
+        std::istringstream input("NEW_CARD_FOR_TEST\n");
+        std::ostringstream output;
+        const CardInputResult result = ReadCardKeyFromStream(
+            input, output, true, {}, "SAVED_CARD_FOR_TEST");
+        REQUIRE(result.status == CardInputStatus::Accepted);
+        REQUIRE(result.value == "NEW_CARD_FOR_TEST");
+        REQUIRE(
+            output.str() ==
+            "请输入卡密，输入 y 复用上次卡密: ");
+    }
+
+    {
         std::istringstream input;
         std::ostringstream output;
         const CardInputResult result =

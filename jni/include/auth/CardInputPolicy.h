@@ -5,6 +5,7 @@
 #include <istream>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace lengjing::auth::input {
@@ -14,6 +15,7 @@ enum class CardInputStatus {
     EndOfInput,
     Empty,
     Invalid,
+    ReuseUnavailable,
     TerminalError,
 };
 
@@ -85,13 +87,27 @@ inline void TrimCardKey(std::string& value) {
     value.erase(value.begin(), first);
 }
 
+inline bool IsValidCardKey(std::string_view value) noexcept {
+    constexpr std::size_t kMaximumCardKeyLength = 256;
+    return !value.empty() && value.size() <= kMaximumCardKeyLength &&
+        std::all_of(value.begin(), value.end(), [](char character) {
+            const auto byte = static_cast<unsigned char>(character);
+            return byte >= 0x21U && byte <= 0x7eU;
+        });
+}
+
 inline CardInputResult ReadCardKeyFromStream(
     std::istream& input,
     std::ostream& output,
     bool inputIsTerminal,
-    const TerminalEchoControl& terminalEcho = {}) {
+    const TerminalEchoControl& terminalEcho = {},
+    std::string_view reusableCardKey = {}) {
+    const bool reuseAvailable = IsValidCardKey(reusableCardKey);
     if (inputIsTerminal) {
-        output << "请输入卡密: " << std::flush;
+        output << (reuseAvailable
+                ? "请输入卡密，输入 y 复用上次卡密: "
+                : "请输入卡密: ")
+               << std::flush;
     }
 
     std::string value;
@@ -120,13 +136,15 @@ inline CardInputResult ReadCardKeyFromStream(
     if (value.empty()) {
         return {CardInputStatus::Empty, {}};
     }
-    constexpr std::size_t kMaximumCardKeyLength = 256;
-    const bool valid = value.size() <= kMaximumCardKeyLength &&
-        std::all_of(value.begin(), value.end(), [](char character) {
-            const auto byte = static_cast<unsigned char>(character);
-            return byte >= 0x21U && byte <= 0x7eU;
-        });
-    if (!valid) {
+    if (value == "y" || value == "Y") {
+        if (!reuseAvailable) {
+            return {CardInputStatus::ReuseUnavailable, {}};
+        }
+        return {
+            CardInputStatus::Accepted,
+            std::string(reusableCardKey)};
+    }
+    if (!IsValidCardKey(value)) {
         return {CardInputStatus::Invalid, {}};
     }
     return {CardInputStatus::Accepted, std::move(value)};

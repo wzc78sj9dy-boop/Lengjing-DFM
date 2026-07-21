@@ -61,6 +61,15 @@ std::string CurrentDirectory() {
         : std::string("/data/local/tmp");
 }
 
+std::string LocalConfigPath(const std::string& programDirectory) {
+#if defined(__ANDROID__)
+    static_cast<void>(programDirectory);
+    return "/data/adb/lengjing.json";
+#else
+    return programDirectory + "/lengjing.json";
+#endif
+}
+
 lengjing::game::native::AlgorithmPositionRuntimeConfig
 CoordinateReplayConfiguration() {
     if (const char* guestPc =
@@ -414,7 +423,7 @@ int main() {
     std::signal(SIGTERM, HandleSignal);
 
     const std::string programDirectory = CurrentDirectory();
-    const std::string configPath = programDirectory + "/lengjing.json";
+    const std::string configPath = LocalConfigPath(programDirectory);
 
     lengjing::auth::AuthSession authSession;
     std::shared_ptr<const lengjing::auth::CloudLayoutDocument> cloudLayout;

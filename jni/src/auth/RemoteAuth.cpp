@@ -22,6 +22,7 @@
 #include <utility>
 
 #if defined(__ANDROID__)
+#include <sys/stat.h>
 #include <sys/system_properties.h>
 #endif
 #if defined(_WIN32)
@@ -209,6 +210,7 @@ std::string ReadSystemProperty(const char* name) {
 }
 
 constexpr const char* kDeviceCodePath = "/data/adb/.lengjing_device";
+constexpr const char* kCardKeyPath = "/data/adb/.lengjing_card";
 
 bool IsPersistableDeviceCode(std::string_view value) noexcept {
     return !value.empty() && value.size() <= 256U &&
@@ -246,6 +248,42 @@ void PersistDeviceCode(const std::string& deviceCode) noexcept {
     if (std::rename(temporaryPath.c_str(), kDeviceCodePath) != 0) {
         std::remove(temporaryPath.c_str());
     }
+}
+
+std::string ReadPersistedCardKey() {
+    std::ifstream stream(kCardKeyPath, std::ios::binary);
+    std::string value;
+    if (stream && std::getline(stream, value)) {
+        input::TrimCardKey(value);
+        if (input::IsValidCardKey(value)) return value;
+    }
+    SecureClear(value);
+    return {};
+}
+
+bool PersistCardKey(const std::string& cardKey) noexcept {
+    if (!input::IsValidCardKey(cardKey)) return false;
+    const std::string temporaryPath =
+        std::string(kCardKeyPath) + ".tmp." + std::to_string(getpid());
+    {
+        std::ofstream stream(
+            temporaryPath, std::ios::binary | std::ios::trunc);
+        if (!stream) return false;
+        stream << cardKey << '\n';
+        stream.flush();
+        if (!stream) {
+            stream.close();
+            std::remove(temporaryPath.c_str());
+            return false;
+        }
+    }
+    if (chmod(temporaryPath.c_str(), 0600) != 0 ||
+        std::rename(temporaryPath.c_str(), kCardKeyPath) != 0) {
+        std::remove(temporaryPath.c_str());
+        return false;
+    }
+    static_cast<void>(chmod(kCardKeyPath, 0600));
+    return true;
 }
 #endif
 
@@ -837,8 +875,13 @@ bool LoginInteractive(AuthSession& session,
     }
 
     const bool inputIsTerminal = InputIsTerminal();
+    std::string reusableCardKey;
+#if defined(__ANDROID__)
+    reusableCardKey = ReadPersistedCardKey();
+#endif
     input::CardInputResult card = input::ReadCardKeyFromStream(
-        std::cin, std::cout, inputIsTerminal);
+        std::cin, std::cout, inputIsTerminal, {}, reusableCardKey);
+    SecureClear(reusableCardKey);
     if (!card) {
         std::fprintf(stderr, "[验证] card input status=%u\n",
                      static_cast<unsigned int>(card.status));
@@ -860,9 +903,10 @@ bool LoginInteractive(AuthSession& session,
     AuthSessionOptions options;
     options.cloudVariable = config.cloudVariable;
     options.startHeartbeat = startHeartbeat;
-    if (!session.Login(std::move(gateway), std::move(card.value),
+    if (!session.Login(std::move(gateway), card.value,
                        std::move(resolvedDeviceCode), options)) {
         const std::string detail = session.LastError();
+        SecureClear(card.value);
         if (!detail.empty()) {
             std::fprintf(stderr, "[验证] %s\n", detail.c_str());
         }
@@ -870,6 +914,10 @@ bool LoginInteractive(AuthSession& session,
             stderr, "%s\n", app::VerificationFailureText());
         return false;
     }
+#if defined(__ANDROID__)
+    static_cast<void>(PersistCardKey(card.value));
+#endif
+    SecureClear(card.value);
     return true;
 }
 
