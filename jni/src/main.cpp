@@ -435,21 +435,18 @@ int main() {
         cloudLayout = std::move(cloudFetch.snapshot);
     }
 
-    auto display = android::ANativeWindowCreator::GetDisplayInfo();
-    int surfaceWidth = display.width;
-    int surfaceHeight = display.height;
-    if (surfaceWidth <= 0 || surfaceHeight <= 0) {
-        std::fprintf(stderr, "无法获取屏幕尺寸\n");
-        return 1;
-    }
-
     const auto algorithmPosition = CoordinateReplayConfiguration();
     const int coordinateProbeSeconds = CoordinateProbeSeconds();
     if (coordinateProbeSeconds != 0) {
+        const auto display = android::ANativeWindowCreator::GetDisplayInfo();
+        if (display.width <= 0 || display.height <= 0) {
+            std::fprintf(stderr, "无法获取屏幕尺寸\n");
+            return 1;
+        }
         return RunCoordinateProbe(
             coordinateProbeSeconds,
-            surfaceWidth,
-            surfaceHeight,
+            display.width,
+            display.height,
             programDirectory,
             std::move(cloudLayout),
             algorithmPosition);
@@ -466,6 +463,13 @@ int main() {
         std::system("killall -9 bin.mt.plus >/dev/null 2>&1");
         std::system("killall -9 bin.mt.plus.canary >/dev/null 2>&1");
     }
+    auto display = android::ANativeWindowCreator::GetDisplayInfo();
+    int surfaceWidth = display.width;
+    int surfaceHeight = display.height;
+    if (surfaceWidth <= 0 || surfaceHeight <= 0) {
+        return 1;
+    }
+
     if (kRuntimeAuthEnabled && !authSession.StartHeartbeat()) return 3;
 
     ANativeWindow* window = android::ANativeWindowCreator::Create(
