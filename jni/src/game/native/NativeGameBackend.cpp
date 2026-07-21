@@ -1305,7 +1305,8 @@ public:
                 className,
                 actorPositionMode,
                 settings.visual.antiFlicker,
-                position);
+                position,
+                bot);
             HealthState health{};
             bool healthAvailable = ReadHealth(actor, health);
             if (!healthAvailable && botClass && coordinateAvailable) {
@@ -3526,7 +3527,8 @@ private:
         native::PositionReadMode mode,
         bool antiFlicker,
         Vec3& position,
-        bool localActor = false) {
+        bool localActor = false,
+        bool botCharacter = false) {
         const bool coordinateDecryptRequested =
             algorithmPositionRequested_ &&
             mode == native::PositionReadMode::Direct;
@@ -3536,7 +3538,8 @@ private:
             const auto now = std::chrono::steady_clock::now();
             const auto storeDecoded = [&](const Vec3& decoded) {
                 Vec3 adjusted = decoded;
-                adjusted.z = native::ResolveDecodedCharacterZ(adjusted.z);
+                adjusted.z = native::ResolveDecodedCharacterZ(
+                    adjusted.z, botCharacter);
                 if (antiFlicker) {
                     positionCache_[actor] = PositionCacheEntry{adjusted, now};
                 }
@@ -3666,7 +3669,8 @@ private:
         std::string_view className,
         native::PositionReadMode preferredMode,
         bool antiFlicker,
-        Vec3& position) {
+        Vec3& position,
+        bool botCharacter = false) {
         position = Vec3{};
         return native::ReadActorRecordSourceWithFallback(
             record,
@@ -3678,7 +3682,9 @@ private:
                         className,
                         preferredMode,
                         antiFlicker,
-                        candidate) ||
+                        candidate,
+                        false,
+                        botCharacter) ||
                     !IsFinite(candidate) || !IsNonzero(candidate)) {
                     return false;
                 }
@@ -5232,12 +5238,15 @@ private:
         if (!ReadTrackingMeshType(record, meshType)) return;
 
         Vec3 position{};
+        const bool botCharacter =
+            rangeTargetClass || !IsValidPointer(playerState);
         if (!ReadCharacterPosition(
                 record,
                 std::string_view{},
                 native::PositionReadMode::Direct,
                 antiFlicker,
-                position)) {
+                position,
+                botCharacter)) {
             return;
         }
         const bool playerClass = std::find(

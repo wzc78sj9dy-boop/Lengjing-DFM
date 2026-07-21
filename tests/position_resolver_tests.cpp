@@ -49,6 +49,9 @@ void RunPositionResolverTests() {
     REQUIRE(ResolveDecodedCharacterZ(1000.0f) == 910.0f);
     REQUIRE(ResolveDecodedCharacterZ(90.0f) == 0.0f);
     REQUIRE(ResolveDecodedCharacterZ(-10.0f) == -100.0f);
+    REQUIRE(ResolveDecodedCharacterZ(1000.0f, true) == 820.0f);
+    REQUIRE(ResolveDecodedCharacterZ(180.0f, true) == 0.0f);
+    REQUIRE(ResolveDecodedCharacterZ(90.0f, true) == -90.0f);
 
     REQUIRE(CharacterPositionResolver::IsPrimaryCharacter("NC_BP_DFMCharacter_C"));
     REQUIRE(CharacterPositionResolver::IsPrimaryCharacter(
