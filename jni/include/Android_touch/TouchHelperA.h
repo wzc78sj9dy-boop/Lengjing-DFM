@@ -26,6 +26,7 @@ TouchFinger* getTouchFinger(int slot);
 void setTouchCallback(void (*callback)(TouchFinger*));
 
 bool TouchScreenHandle(int mode);
+bool IsTouchWriteReady();
 void StopTouchScreen();
 void PumpTouchInput();
 void ConfigureTouchDisplay(int width, int height, int orientation);

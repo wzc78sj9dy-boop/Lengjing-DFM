@@ -16,6 +16,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/input.h>
+#include <linux/uinput.h>
 #include <mutex>
 #include <poll.h>
 #include <string>
@@ -29,9 +30,12 @@ constexpr int kFingerCount = 10;
 constexpr int kReadPollMilliseconds = 100;
 constexpr int kRetryDelayMilliseconds = 250;
 constexpr int kAimWriteSlot = 8;
-constexpr int kTrackingIdBase = 2000;
 constexpr std::size_t kUiEventCapacity = 256;
 constexpr const char* kInputDirectory = "/dev/input";
+constexpr const char* kUinputPath = "/dev/uinput";
+constexpr const char* kVirtualDeviceName = "lj-virtual-touch";
+constexpr std::uint16_t kVirtualVendor = 0x4c4a;
+constexpr std::uint16_t kVirtualProduct = 0x0001;
 
 using TouchCallback = void (*)(TouchFinger*);
 
@@ -42,13 +46,6 @@ struct DeviceRange {
     int maximumY = 1;
     int minimumSlot = 0;
     int maximumSlot = kFingerCount - 1;
-    int minimumTrackingId = 0;
-    int maximumTrackingId = 65535;
-    bool hasButtonTouch = false;
-    bool hasButtonToolFinger = false;
-    bool hasWidthMajor = false;
-    bool hasTouchMajor = false;
-    bool hasTouchMinor = false;
 };
 
 struct ScreenPoint {
@@ -81,7 +78,6 @@ std::mutex g_uiEventMutex;
 std::atomic<TouchCallback> g_callback{nullptr};
 std::atomic_bool g_running{false};
 std::atomic_int g_mode{0};
-std::atomic_uint g_trackingSequence{0};
 std::atomic_bool g_ignoreWriteSlot{false};
 
 DeviceRange g_inputRange{};
@@ -163,11 +159,9 @@ bool ReadDeviceRange(int file, DeviceRange& range) {
     input_absinfo xInfo{};
     input_absinfo yInfo{};
     input_absinfo slotInfo{};
-    input_absinfo trackingInfo{};
     if (ioctl(file, EVIOCGABS(ABS_MT_POSITION_X), &xInfo) < 0 ||
         ioctl(file, EVIOCGABS(ABS_MT_POSITION_Y), &yInfo) < 0 ||
         ioctl(file, EVIOCGABS(ABS_MT_SLOT), &slotInfo) < 0 ||
-        ioctl(file, EVIOCGABS(ABS_MT_TRACKING_ID), &trackingInfo) < 0 ||
         xInfo.maximum <= xInfo.minimum || yInfo.maximum <= yInfo.minimum) {
         return false;
     }
@@ -178,22 +172,21 @@ bool ReadDeviceRange(int file, DeviceRange& range) {
     range.maximumY = yInfo.maximum;
     range.minimumSlot = slotInfo.minimum;
     range.maximumSlot = slotInfo.maximum;
-    range.minimumTrackingId = trackingInfo.minimum;
-    range.maximumTrackingId = trackingInfo.maximum;
-    range.hasWidthMajor = TestBit(absBits, ABS_MT_WIDTH_MAJOR);
-    range.hasTouchMajor = TestBit(absBits, ABS_MT_TOUCH_MAJOR);
-    range.hasTouchMinor = TestBit(absBits, ABS_MT_TOUCH_MINOR);
-
-    std::array<unsigned long, (KEY_MAX / (sizeof(unsigned long) * 8)) + 2>
-        keyBits{};
-    if (ioctl(file, EVIOCGBIT(EV_KEY, sizeof(keyBits)), keyBits.data()) >= 0) {
-        range.hasButtonTouch = TestBit(keyBits, BTN_TOUCH);
-        range.hasButtonToolFinger = TestBit(keyBits, BTN_TOOL_FINGER);
-    }
     return true;
 }
 
-int OpenTouchInput(DeviceRange& range, std::string* selectedPath = nullptr) {
+bool IsOwnedVirtualTouch(int file) {
+    input_id id{};
+    std::array<char, UINPUT_MAX_NAME_SIZE> name{};
+    return ioctl(file, EVIOCGID, &id) >= 0 &&
+        ioctl(file, EVIOCGNAME(name.size()), name.data()) >= 0 &&
+        id.bustype == BUS_VIRTUAL &&
+        id.vendor == kVirtualVendor &&
+        id.product == kVirtualProduct &&
+        std::strcmp(name.data(), kVirtualDeviceName) == 0;
+}
+
+int OpenTouchInput(DeviceRange& range) {
     DIR* directory = opendir(kInputDirectory);
     if (directory == nullptr) {
         return -1;
@@ -207,18 +200,16 @@ int OpenTouchInput(DeviceRange& range, std::string* selectedPath = nullptr) {
         }
 
         const std::string path = std::string(kInputDirectory) + "/" + entry->d_name;
-        const int file = open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+        const int file = open(
+            path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
         if (file < 0) {
             continue;
         }
 
         DeviceRange candidate{};
-        if (ReadDeviceRange(file, candidate)) {
+        if (!IsOwnedVirtualTouch(file) && ReadDeviceRange(file, candidate)) {
             selectedFile = file;
             range = candidate;
-            if (selectedPath != nullptr) {
-                *selectedPath = path;
-            }
             break;
         }
         close(file);
@@ -355,89 +346,67 @@ private:
     std::size_t count_ = 0;
 };
 
-bool OpenWriteTouch(const std::string& path, const DeviceRange& fallbackRange) {
-    std::lock_guard<std::mutex> lock(g_outputMutex);
-    if (path.empty()) {
+bool ConfigureVirtualTouch(int file, const DeviceRange& inputRange) {
+    const auto setCapability = [file](unsigned long request, int value) {
+        return ioctl(file, request, value) >= 0;
+    };
+    if (!setCapability(UI_SET_PROPBIT, INPUT_PROP_DIRECT) ||
+        !setCapability(UI_SET_EVBIT, EV_SYN) ||
+        !setCapability(UI_SET_EVBIT, EV_KEY) ||
+        !setCapability(UI_SET_KEYBIT, BTN_TOUCH) ||
+        !setCapability(UI_SET_EVBIT, EV_ABS) ||
+        !setCapability(UI_SET_ABSBIT, ABS_MT_SLOT) ||
+        !setCapability(UI_SET_ABSBIT, ABS_MT_TRACKING_ID) ||
+        !setCapability(UI_SET_ABSBIT, ABS_MT_POSITION_X) ||
+        !setCapability(UI_SET_ABSBIT, ABS_MT_POSITION_Y)) {
         return false;
     }
 
-    const int file = open(path.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    uinput_user_dev device{};
+    std::strncpy(
+        device.name, kVirtualDeviceName, sizeof(device.name) - 1);
+    device.id.bustype = BUS_VIRTUAL;
+    device.id.vendor = kVirtualVendor;
+    device.id.product = kVirtualProduct;
+    device.id.version = 1;
+    device.absmin[ABS_MT_SLOT] = 0;
+    device.absmax[ABS_MT_SLOT] = kFingerCount - 1;
+    device.absmin[ABS_MT_TRACKING_ID] = 0;
+    device.absmax[ABS_MT_TRACKING_ID] = 65535;
+    device.absmin[ABS_MT_POSITION_X] = inputRange.minimumX;
+    device.absmax[ABS_MT_POSITION_X] = inputRange.maximumX;
+    device.absmin[ABS_MT_POSITION_Y] = inputRange.minimumY;
+    device.absmax[ABS_MT_POSITION_Y] = inputRange.maximumY;
+
+    return WriteEventBytes(file, &device, sizeof(device)) &&
+        ioctl(file, UI_DEV_CREATE) >= 0;
+}
+
+bool OpenWriteTouch(const DeviceRange& inputRange) {
+    std::lock_guard<std::mutex> lock(g_outputMutex);
+    const int file = open(
+        kUinputPath, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
     if (file < 0) {
         return false;
     }
 
-    DeviceRange range = fallbackRange;
-    if (!ReadDeviceRange(file, range) ||
-        kAimWriteSlot < range.minimumSlot ||
-        kAimWriteSlot > range.maximumSlot) {
+    if (!ConfigureVirtualTouch(file, inputRange)) {
         close(file);
         return false;
     }
 
+    DeviceRange range = inputRange;
+    range.minimumSlot = 0;
+    range.maximumSlot = kFingerCount - 1;
     g_writeTouchFile = file;
     g_writtenActive.fill(false);
-    g_trackingSequence.store(0, std::memory_order_release);
-    g_ignoreWriteSlot.store(true, std::memory_order_release);
+    g_ignoreWriteSlot.store(false, std::memory_order_release);
     StoreOutputRange(range);
     return true;
 }
 
-int NextTrackingId() {
-    const DeviceRange range = LoadOutputRange();
-    const int minimum = std::min(range.minimumTrackingId, range.maximumTrackingId);
-    const int maximum = std::max(range.minimumTrackingId, range.maximumTrackingId);
-    const int start = std::clamp(kTrackingIdBase, minimum, maximum);
-    const std::uint64_t span =
-        static_cast<std::uint64_t>(
-            static_cast<std::int64_t>(maximum) -
-            static_cast<std::int64_t>(start)) + 1U;
-    const std::uint64_t sequence =
-        g_trackingSequence.fetch_add(1, std::memory_order_relaxed);
-    return start + static_cast<int>(sequence % span);
-}
-
-bool IsWriteSlotAvailableLocked(int slot) {
-    std::array<int, kFingerCount + 1> trackingIds{};
-    trackingIds.fill(-1);
-    trackingIds[0] = ABS_MT_TRACKING_ID;
-    if (ioctl(
-            g_writeTouchFile,
-            EVIOCGMTSLOTS(sizeof(trackingIds)),
-            trackingIds.data()) >= 0) {
-        return trackingIds[static_cast<std::size_t>(slot + 1)] < 0;
-    }
-
-    std::lock_guard<std::recursive_mutex> lock(g_fingerMutex);
-    return g_fingers[static_cast<std::size_t>(slot)].tracking_id < 0;
-}
-
-bool HasUnmanagedActiveTouchLocked() {
-    std::array<int, kFingerCount + 1> trackingIds{};
-    trackingIds.fill(-1);
-    trackingIds[0] = ABS_MT_TRACKING_ID;
-    if (ioctl(
-            g_writeTouchFile,
-            EVIOCGMTSLOTS(sizeof(trackingIds)),
-            trackingIds.data()) >= 0) {
-        for (int slot = 0; slot < kFingerCount; ++slot) {
-            const std::size_t index = static_cast<std::size_t>(slot);
-            if (trackingIds[index + 1] >= 0 &&
-                !g_writtenActive[index]) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    std::lock_guard<std::recursive_mutex> lock(g_fingerMutex);
-    for (int slot = 0; slot < kFingerCount; ++slot) {
-        const std::size_t index = static_cast<std::size_t>(slot);
-        if (g_fingers[index].tracking_id >= 0 &&
-            !g_writtenActive[index]) {
-            return true;
-        }
-    }
-    return false;
+int TrackingIdForSlot(int slot) {
+    return slot;
 }
 
 void ReleaseWrittenTouchesLocked() {
@@ -446,7 +415,7 @@ void ReleaseWrittenTouchesLocked() {
         return;
     }
 
-    EventBatch<kFingerCount * 2 + 4> batch;
+    EventBatch<kFingerCount * 2 + 2> batch;
     bool hadActiveTouch = false;
     for (int slot = 0; slot < kFingerCount; ++slot) {
         if (!g_writtenActive[static_cast<std::size_t>(slot)]) {
@@ -457,17 +426,8 @@ void ReleaseWrittenTouchesLocked() {
         batch.Add(EV_ABS, ABS_MT_TRACKING_ID, -1);
     }
     if (hadActiveTouch) {
-        const DeviceRange outputRange = LoadOutputRange();
-        const bool releaseGlobalButtons =
-            !HasUnmanagedActiveTouchLocked();
-        if (releaseGlobalButtons && outputRange.hasButtonTouch) {
-            batch.Add(EV_KEY, BTN_TOUCH, 0);
-        }
-        if (releaseGlobalButtons && outputRange.hasButtonToolFinger) {
-            batch.Add(EV_KEY, BTN_TOOL_FINGER, 0);
-        }
+        batch.Add(EV_KEY, BTN_TOUCH, 0);
         batch.Add(EV_SYN, SYN_REPORT, 0);
-        batch.Add(EV_ABS, ABS_MT_SLOT, 0);
         batch.Send(g_writeTouchFile);
     }
     g_writtenActive.fill(false);
@@ -481,6 +441,7 @@ void CloseWriteTouch() {
         return;
     }
     ReleaseWrittenTouchesLocked();
+    ioctl(g_writeTouchFile, UI_DEV_DESTROY);
     close(g_writeTouchFile);
     g_writeTouchFile = -1;
     g_ignoreWriteSlot.store(false, std::memory_order_release);
@@ -721,10 +682,13 @@ bool Touch_Down(int slot, int x, int y) {
         }
 
         const std::size_t index = static_cast<std::size_t>(slot);
-        if (g_writtenActive[index] || !IsWriteSlotAvailableLocked(slot)) {
+        if (g_writtenActive[index]) {
             return false;
         }
-        const int trackingId = NextTrackingId();
+        const int trackingId = TrackingIdForSlot(slot);
+        const bool firstWrittenTouch = std::none_of(
+            g_writtenActive.begin(), g_writtenActive.end(),
+            [](bool active) { return active; });
         TouchFinger previous{};
         {
             std::lock_guard<std::recursive_mutex> fingerLock(g_fingerMutex);
@@ -737,28 +701,15 @@ bool Touch_Down(int slot, int x, int y) {
             gettimeofday(&finger.time, nullptr);
         }
 
-        EventBatch<11> batch;
-        batch.Add(EV_ABS, ABS_MT_SLOT, slot);
-        batch.Add(EV_ABS, ABS_MT_TRACKING_ID, trackingId);
-        if (outputRange.hasButtonTouch) {
+        EventBatch<6> batch;
+        if (firstWrittenTouch) {
             batch.Add(EV_KEY, BTN_TOUCH, 1);
         }
-        if (outputRange.hasButtonToolFinger) {
-            batch.Add(EV_KEY, BTN_TOOL_FINGER, 1);
-        }
-        if (outputRange.hasWidthMajor) {
-            batch.Add(EV_ABS, ABS_MT_WIDTH_MAJOR, 9);
-        }
-        if (outputRange.hasTouchMajor) {
-            batch.Add(EV_ABS, ABS_MT_TOUCH_MAJOR, 15);
-        }
-        if (outputRange.hasTouchMinor) {
-            batch.Add(EV_ABS, ABS_MT_TOUCH_MINOR, 15);
-        }
+        batch.Add(EV_ABS, ABS_MT_SLOT, slot);
+        batch.Add(EV_ABS, ABS_MT_TRACKING_ID, trackingId);
         batch.Add(EV_ABS, ABS_MT_POSITION_X, static_cast<int>(mapped.x));
         batch.Add(EV_ABS, ABS_MT_POSITION_Y, static_cast<int>(mapped.y));
         batch.Add(EV_SYN, SYN_REPORT, 0);
-        batch.Add(EV_ABS, ABS_MT_SLOT, 0);
         if (batch.Send(g_writeTouchFile)) {
             g_writtenActive[index] = true;
             notify = true;
@@ -811,15 +762,12 @@ bool Touch_Move(int slot, int x, int y) {
             gettimeofday(&finger.time, nullptr);
         }
 
-        EventBatch<6> batch;
+        EventBatch<5> batch;
         batch.Add(EV_ABS, ABS_MT_SLOT, slot);
-        if (outputRange.hasButtonTouch) {
-            batch.Add(EV_KEY, BTN_TOUCH, 1);
-        }
+        batch.Add(EV_ABS, ABS_MT_TRACKING_ID, TrackingIdForSlot(slot));
         batch.Add(EV_ABS, ABS_MT_POSITION_X, static_cast<int>(mapped.x));
         batch.Add(EV_ABS, ABS_MT_POSITION_Y, static_cast<int>(mapped.y));
         batch.Add(EV_SYN, SYN_REPORT, 0);
-        batch.Add(EV_ABS, ABS_MT_SLOT, 0);
         if (batch.Send(g_writeTouchFile)) {
             notify = true;
         } else {
@@ -857,20 +805,13 @@ bool Touch_Up(int slot) {
 
         const bool lastWrittenTouch =
             std::count(g_writtenActive.begin(), g_writtenActive.end(), true) == 1;
-        const bool releaseGlobalButtons =
-            lastWrittenTouch && !HasUnmanagedActiveTouchLocked();
-        const DeviceRange outputRange = LoadOutputRange();
-        EventBatch<6> batch;
+        EventBatch<4> batch;
         batch.Add(EV_ABS, ABS_MT_SLOT, slot);
         batch.Add(EV_ABS, ABS_MT_TRACKING_ID, -1);
-        if (releaseGlobalButtons && outputRange.hasButtonTouch) {
+        if (lastWrittenTouch) {
             batch.Add(EV_KEY, BTN_TOUCH, 0);
         }
-        if (releaseGlobalButtons && outputRange.hasButtonToolFinger) {
-            batch.Add(EV_KEY, BTN_TOOL_FINGER, 0);
-        }
         batch.Add(EV_SYN, SYN_REPORT, 0);
-        batch.Add(EV_ABS, ABS_MT_SLOT, 0);
         notify = batch.Send(g_writeTouchFile);
 
         if (!notify) {
@@ -919,14 +860,15 @@ bool TouchScreenHandle(int mode) {
     int selectedMode = mode == 1 ? 1 : 0;
 
     DeviceRange range = ConfiguredRange();
-    std::string selectedPath;
-    int inputFile = OpenTouchInput(
-        range, selectedMode == 1 ? &selectedPath : nullptr);
+    int inputFile = OpenTouchInput(range);
     StoreInputRange(range);
     StoreOutputRange(range);
 
-    if (selectedMode == 1 && !OpenWriteTouch(selectedPath, range)) {
-        std::fprintf(stderr, "写入触摸初始化失败，已切换为只读监听\n");
+    if (selectedMode == 1 &&
+        (inputFile < 0 || !OpenWriteTouch(range))) {
+        std::fprintf(
+            stderr,
+            "write touch initialization failed; read-only listener remains active\n");
         selectedMode = 0;
     }
 
@@ -946,6 +888,12 @@ bool TouchScreenHandle(int mode) {
         return false;
     }
     return mode != 1 || selectedMode == 1;
+}
+
+bool IsTouchWriteReady() {
+    std::lock_guard<std::mutex> lock(g_outputMutex);
+    return g_mode.load(std::memory_order_acquire) == 1 &&
+        g_writeTouchFile >= 0;
 }
 
 void StopTouchScreen() {
