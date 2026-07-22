@@ -3905,6 +3905,7 @@ private:
             !IsValidPointer(moduleBase_) || !IsValidPointer(actor)) {
             return false;
         }
+        ++algorithmCoordinateAttemptCount_;
         auto readBytes = [this](std::uintptr_t address,
                                 void* destination,
                                 std::size_t size) {
@@ -3918,7 +3919,9 @@ private:
             return false;
         }
         position = Vec3{candidate.x, candidate.y, candidate.z};
-        return IsFinite(position) && IsNonzero(position);
+        if (!IsFinite(position) || !IsNonzero(position)) return false;
+        ++algorithmCoordinateSuccessCount_;
+        return true;
     }
 
     bool ReadCharacterPosition(
@@ -6562,6 +6565,9 @@ private:
             algorithmExecutionContext_.generation;
         probe.coordinateAttempts = algorithmAttemptCount_;
         probe.coordinateSuccesses = algorithmSuccessCount_;
+        probe.algorithmCoordinateRequested = algorithmDecryptRequested_;
+        probe.algorithmCoordinateAttempts = algorithmCoordinateAttemptCount_;
+        probe.algorithmCoordinateSuccesses = algorithmCoordinateSuccessCount_;
         probe.coordinateError = failure.error;
         probe.coordinateSystemError = failure.systemError;
         probe.coordinateRead = failure.read;
@@ -6601,6 +6607,8 @@ private:
         algorithmExecutionContextRefreshPolicy_.Invalidate();
         algorithmAttemptCount_ = 0;
         algorithmSuccessCount_ = 0;
+        algorithmCoordinateAttemptCount_ = 0;
+        algorithmCoordinateSuccessCount_ = 0;
         algorithmFrameAttemptCount_ = 0;
         algorithmFrameSuccessCount_ = 0;
         algorithmFrameOutputError_ = CoordinateDecryptError::None;
@@ -6647,6 +6655,8 @@ private:
     bool coordinatePoolFallback_ = false;
     std::uint64_t algorithmAttemptCount_ = 0;
     std::uint64_t algorithmSuccessCount_ = 0;
+    std::uint64_t algorithmCoordinateAttemptCount_ = 0;
+    std::uint64_t algorithmCoordinateSuccessCount_ = 0;
     std::uint64_t algorithmFrameAttemptCount_ = 0;
     std::uint64_t algorithmFrameSuccessCount_ = 0;
     CoordinateDecryptError algorithmFrameOutputError_ =

@@ -34,6 +34,9 @@ struct RuntimeStatus {
     std::uint64_t coordinateContextGeneration = 0;
     std::uint64_t coordinateAttempts = 0;
     std::uint64_t coordinateSuccesses = 0;
+    bool algorithmCoordinateRequested = false;
+    std::uint64_t algorithmCoordinateAttempts = 0;
+    std::uint64_t algorithmCoordinateSuccesses = 0;
     CoordinateDecryptError coordinateError = CoordinateDecryptError::None;
     int coordinateSystemError = 0;
     CoordinateReadDiagnostic coordinateRead{};

@@ -30,6 +30,9 @@ struct BackendState {
     std::atomic_bool projectileTrackingSetting{false};
     std::atomic_bool coordinateDecryptSetting{false};
     std::atomic_bool algorithmDecryptSetting{false};
+    std::atomic_bool algorithmCoordinateRequested{false};
+    std::atomic<std::uint64_t> algorithmCoordinateAttempts{0};
+    std::atomic<std::uint64_t> algorithmCoordinateSuccesses{0};
     std::atomic_bool frameReady{true};
     std::atomic<std::uint16_t> coordinateError{0};
     std::atomic_int coordinateSystemError{0};
@@ -85,6 +88,12 @@ public:
                 state_->coordinateError.load());
         probe.coordinateSystemError =
             state_->coordinateSystemError.load();
+        probe.algorithmCoordinateRequested =
+            state_->algorithmCoordinateRequested.load();
+        probe.algorithmCoordinateAttempts =
+            state_->algorithmCoordinateAttempts.load();
+        probe.algorithmCoordinateSuccesses =
+            state_->algorithmCoordinateSuccesses.load();
         probe.coordinateRead = {};
         if (probe.coordinateError ==
             lengjing::game::CoordinateDecryptError::
@@ -137,6 +146,9 @@ public:
               lengjing::game::RuntimeProbe& probe,
               std::string& error) override {
         probe.failureKind = kind_;
+        probe.algorithmCoordinateRequested = true;
+        probe.algorithmCoordinateAttempts = 9;
+        probe.algorithmCoordinateSuccesses = 4;
         error = kind_ == lengjing::game::RuntimeFailureKind::CloudLayoutRejected
             ? "cloud layout rejected"
             : "ordinary open failure";
@@ -207,6 +219,19 @@ void RunRuntimeTests() {
     REQUIRE(!state->projectileTrackingSetting.load());
     REQUIRE(!state->coordinateDecryptSetting.load());
     REQUIRE(!state->algorithmDecryptSetting.load());
+    REQUIRE(!runtime.Status().algorithmCoordinateRequested);
+    REQUIRE(runtime.Status().algorithmCoordinateAttempts == 0);
+    REQUIRE(runtime.Status().algorithmCoordinateSuccesses == 0);
+
+    state->algorithmCoordinateRequested.store(true);
+    state->algorithmCoordinateAttempts.store(7);
+    state->algorithmCoordinateSuccesses.store(3);
+    REQUIRE(WaitFor([&] {
+        const auto status = runtime.Status();
+        return status.algorithmCoordinateRequested &&
+            status.algorithmCoordinateAttempts == 7 &&
+            status.algorithmCoordinateSuccesses == 3;
+    }));
 
     settings.visual.coordinateDecrypt = true;
     runtime.UpdateSettings(settings);
@@ -329,6 +354,9 @@ void RunRuntimeTests() {
                 lengjing::game::RuntimeFailureKind::CloudLayoutRejected);
         REQUIRE(status.runtimeError ==
             lengjing::game::RuntimeError::BackendOpenFailed);
+        REQUIRE(status.algorithmCoordinateRequested);
+        REQUIRE(status.algorithmCoordinateAttempts == 9);
+        REQUIRE(status.algorithmCoordinateSuccesses == 4);
         REQUIRE(lengjing::app::ResolveRuntimeExitCode(
                     true, status.phase, status.failureKind) ==
                 lengjing::auth::kCloudLayoutStartupFailureExitCode);

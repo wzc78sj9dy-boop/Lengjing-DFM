@@ -1,4 +1,5 @@
 #include "app/AppController.h"
+#include "app/CoordinateProbePolicy.h"
 #include "app/RenderBackendSelection.h"
 #include "app/RuntimeExitPolicy.h"
 #include "app/RuntimePresentationPolicy.h"
@@ -97,6 +98,48 @@ int CoordinateProbeSeconds() {
         : 0;
 }
 
+bool AlgorithmCoordinateProbeEnabled() {
+    const char* value =
+        std::getenv("LENGJING_ALGORITHM_COORDINATE_PROBE");
+    return lengjing::app::IsAlgorithmCoordinateProbeEnabled(
+        value != nullptr ? std::string_view(value) : std::string_view{});
+}
+
+const char* RuntimePhaseName(lengjing::game::RuntimePhase phase) noexcept {
+    switch (phase) {
+        case lengjing::game::RuntimePhase::Stopped:
+            return "stopped";
+        case lengjing::game::RuntimePhase::Starting:
+            return "starting";
+        case lengjing::game::RuntimePhase::Running:
+            return "running";
+        case lengjing::game::RuntimePhase::Stopping:
+            return "stopping";
+        case lengjing::game::RuntimePhase::Faulted:
+            return "faulted";
+    }
+    return "unknown";
+}
+
+void PrintAlgorithmCoordinateProbeStatus(
+    const lengjing::game::RuntimeStatus& status,
+    const char* event) {
+    std::fprintf(
+        stderr,
+        "[algorithm-coordinate-probe] event=%s phase=%s pid=%d "
+        "baseReady=%d algorithmRequested=%d algorithmAttempts=%llu "
+        "algorithmSuccesses=%llu\n",
+        event,
+        RuntimePhaseName(status.phase),
+        status.processId,
+        status.baseReady ? 1 : 0,
+        status.algorithmCoordinateRequested ? 1 : 0,
+        static_cast<unsigned long long>(
+            status.algorithmCoordinateAttempts),
+        static_cast<unsigned long long>(
+            status.algorithmCoordinateSuccesses));
+}
+
 int CoordinateProbeDriver() {
     const char* value = std::getenv("LENGJING_COORDINATE_PROBE_DRIVER");
     if (value == nullptr || value[0] == '\0') return 1;
@@ -119,6 +162,9 @@ int RunCoordinateProbe(
         algorithmPosition) {
     using namespace std::chrono_literals;
     const bool cloudLayoutActive = cloudLayout != nullptr;
+    const bool algorithmOnly = AlgorithmCoordinateProbeEnabled();
+    const auto probeSettings =
+        lengjing::app::ResolveCoordinateProbeSettings(algorithmOnly);
     lengjing::game::RuntimeOptions options;
     options.gameVersionIndex = 0;
     options.driverIndex = CoordinateProbeDriver();
@@ -130,7 +176,8 @@ int RunCoordinateProbe(
     options.algorithmPosition = algorithmPosition;
 
     lengjing::game::FeatureSettings settings;
-    settings.visual.coordinateDecrypt = true;
+    settings.visual.coordinateDecrypt = probeSettings.coordinateDecrypt;
+    settings.visual.algorithmDecrypt = probeSettings.algorithmDecrypt;
     lengjing::game::GameRuntime runtime(
         lengjing::game::CreateNativeGameBackend());
     runtime.UpdateSettings(settings);
@@ -144,6 +191,7 @@ int RunCoordinateProbe(
     }
 
     lengjing::game::RuntimeStatus last{};
+    bool hasReportedProbeStatus = false;
     lengjing::game::CoordinateDecryptError lastReportedError =
         lengjing::game::CoordinateDecryptError::None;
     int lastReportedSystemError = 0;
@@ -157,6 +205,19 @@ int RunCoordinateProbe(
         std::chrono::seconds(seconds);
     while (std::chrono::steady_clock::now() < deadline) {
         const lengjing::game::RuntimeStatus status = runtime.Status();
+        const bool probeStatusChanged = !hasReportedProbeStatus ||
+            status.phase != last.phase ||
+            status.processId != last.processId ||
+            status.baseReady != last.baseReady ||
+            status.algorithmCoordinateRequested !=
+                last.algorithmCoordinateRequested ||
+            status.algorithmCoordinateAttempts !=
+                last.algorithmCoordinateAttempts ||
+            status.algorithmCoordinateSuccesses !=
+                last.algorithmCoordinateSuccesses;
+        if (algorithmOnly && probeStatusChanged) {
+            PrintAlgorithmCoordinateProbeStatus(status, "update");
+        }
         if (status.coordinateError !=
                 lengjing::game::CoordinateDecryptError::None &&
             (status.coordinateError != lastReportedError ||
@@ -198,19 +259,24 @@ int RunCoordinateProbe(
             lastReportedRuntimeSystemError = 0;
         }
         last = status;
+        hasReportedProbeStatus = true;
         if (status.phase == lengjing::game::RuntimePhase::Faulted) break;
         std::this_thread::sleep_for(100ms);
     }
     runtime.Stop();
     runtime.WaitUntilStopped();
+    if (algorithmOnly) {
+        PrintAlgorithmCoordinateProbeStatus(last, "final");
+    }
     const int runtimeExitCode = lengjing::app::ResolveRuntimeExitCode(
         cloudLayoutActive, last.phase, last.failureKind);
-    if (runtimeExitCode != 0) return runtimeExitCode;
-    return last.coordinateSuccesses != 0
-        ? 0
-        : (last.coordinateContextReady
-            ? 13
-            : (last.coordinateEntryReady ? 12 : 11));
+    return lengjing::app::ResolveCoordinateProbeExitCode(
+        algorithmOnly,
+        runtimeExitCode,
+        last.coordinateSuccesses,
+        last.coordinateContextReady,
+        last.coordinateEntryReady,
+        last.algorithmCoordinateSuccesses);
 }
 
 struct CloudLayoutFetchResult {

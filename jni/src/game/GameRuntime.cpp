@@ -202,6 +202,12 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
                     probe.coordinateContextGeneration;
                 status_.coordinateAttempts = probe.coordinateAttempts;
                 status_.coordinateSuccesses = probe.coordinateSuccesses;
+                status_.algorithmCoordinateRequested =
+                    probe.algorithmCoordinateRequested;
+                status_.algorithmCoordinateAttempts =
+                    probe.algorithmCoordinateAttempts;
+                status_.algorithmCoordinateSuccesses =
+                    probe.algorithmCoordinateSuccesses;
                 status_.coordinateError = probe.coordinateError;
                 status_.coordinateSystemError =
                     probe.coordinateSystemError;
@@ -269,6 +275,12 @@ void GameRuntime::SetStatus(RuntimePhase phase,
     status_.coordinateContextGeneration = probe.coordinateContextGeneration;
     status_.coordinateAttempts = probe.coordinateAttempts;
     status_.coordinateSuccesses = probe.coordinateSuccesses;
+    status_.algorithmCoordinateRequested =
+        probe.algorithmCoordinateRequested;
+    status_.algorithmCoordinateAttempts =
+        probe.algorithmCoordinateAttempts;
+    status_.algorithmCoordinateSuccesses =
+        probe.algorithmCoordinateSuccesses;
     status_.coordinateError = probe.coordinateError;
     status_.coordinateSystemError = probe.coordinateSystemError;
     status_.coordinateRead = probe.coordinateRead;
