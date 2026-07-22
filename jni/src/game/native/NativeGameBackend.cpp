@@ -2987,8 +2987,8 @@ private:
         std::vector<RuntimeActorRecord> result;
         sourceReady = false;
         encrypted = false;
-        if (layout_.actorRecordLayout.taggedContainerOffset == 0 ||
-            layout_.actorRecordLayout.plainArrayOffset == 0 ||
+        if (!native::HasConfiguredActorRecordSource(
+                layout_.actorRecordLayout) ||
             memory_ == nullptr) {
             return result;
         }
@@ -4434,7 +4434,6 @@ private:
                 if (canReadPosition && coordinatePoolRuntime_.ReadCandidates(
                         coordinateIdentity, candidates)) {
                     ++algorithmSuccessCount_;
-                    ++algorithmFrameSuccessCount_;
 
                     std::uint32_t validMask = 0;
                     for (std::size_t slot = 0;
@@ -4511,6 +4510,7 @@ private:
                             !historyRecovered && readCached();
                         if (!native::ShouldReportCoordinateOutputError(
                                 historyRecovered, cacheRecovered)) {
+                            ++algorithmFrameSuccessCount_;
                             return true;
                         }
                         algorithmFrameOutputError_ =
@@ -4602,21 +4602,25 @@ private:
                         if (observation.decision ==
                             native::AlgorithmPositionOutputDecision::
                                 RetainHistory) {
-                            return readStableHistory();
+                            const bool retained = readStableHistory();
+                            if (retained) ++algorithmFrameSuccessCount_;
+                            return retained;
                         }
                     } else if (trace != nullptr) {
                         trace->stabilityDecision =
                             CoordinateStabilityDecision::FirstNoHistory;
                     }
                     storeDecoded(observedRaw, CoordinateTraceSource::Pool);
+                    ++algorithmFrameSuccessCount_;
                     return true;
-                } else if (canReadPosition) {
+                } else {
                     const native::CoordinatePoolRuntimeProbe failedProbe =
                         coordinatePoolRuntime_.Probe();
                     const CoordinateDecryptError failureError =
                         CoordinatePoolError(
                             failedProbe.error, failedProbe.read);
                     if (readStableHistory() || readCached()) {
+                        ++algorithmFrameSuccessCount_;
                         if (trace != nullptr) {
                             trace->guestPc = failedProbe.guestEntry;
                         }
@@ -4651,19 +4655,6 @@ private:
                         trace->error = failureError;
                         trace->systemError = failedProbe.systemError;
                     }
-                    RecordCoordinateFrameFailure(CoordinateFailure{
-                        failureError != CoordinateDecryptError::None
-                            ? failureError
-                            : CoordinateDecryptError::PositionReadFailed,
-                        failedProbe.systemError,
-                        failedProbe.read,
-                    });
-                } else {
-                    const native::CoordinatePoolRuntimeProbe failedProbe =
-                        coordinatePoolRuntime_.Probe();
-                    const CoordinateDecryptError failureError =
-                        CoordinatePoolError(
-                            failedProbe.error, failedProbe.read);
                     RecordCoordinateFrameFailure(CoordinateFailure{
                         failureError != CoordinateDecryptError::None
                             ? failureError
@@ -8060,7 +8051,10 @@ private:
                 contextDiagnostic.systemError,
             };
         }
-        if (algorithmFrameOutputError_ != CoordinateDecryptError::None) {
+        if (native::ShouldReportCoordinateFrameOutputError(
+                static_cast<std::size_t>(algorithmFrameAttemptCount_),
+                static_cast<std::size_t>(algorithmFrameSuccessCount_),
+                algorithmFrameOutputError_ != CoordinateDecryptError::None)) {
             return {algorithmFrameOutputError_, 0};
         }
         if (native::IsCoordinateFrameHealthy(

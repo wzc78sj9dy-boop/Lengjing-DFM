@@ -24,6 +24,7 @@ void RunCoordinateOutputPolicyTests() {
     using lengjing::game::native::ShouldReadAlgorithmCoordinateForBuild;
     using lengjing::game::native::ShouldEscalateDecodedPositionFailure;
     using lengjing::game::native::ShouldKeepDecodedPositionSource;
+    using lengjing::game::native::ShouldReportCoordinateFrameOutputError;
     using lengjing::game::native::ShouldReportCoordinateOutputError;
     using lengjing::game::native::ResolveCharacterCoordinateDisposition;
 
@@ -44,6 +45,9 @@ void RunCoordinateOutputPolicyTests() {
     REQUIRE(!ShouldReportCoordinateOutputError(true, false));
     REQUIRE(!ShouldReportCoordinateOutputError(false, true));
     REQUIRE(!ShouldReportCoordinateOutputError(true, true));
+    REQUIRE(ShouldReportCoordinateFrameOutputError(8, 0, true));
+    REQUIRE(!ShouldReportCoordinateFrameOutputError(8, 1, true));
+    REQUIRE(!ShouldReportCoordinateFrameOutputError(8, 0, false));
 
     constexpr std::uintptr_t world = 0x1000;
     constexpr std::uintptr_t actor = 0x2000;

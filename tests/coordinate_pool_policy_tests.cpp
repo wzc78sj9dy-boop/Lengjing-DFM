@@ -197,6 +197,49 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(noisyCompactCalibration.ComponentCount(
         CoordinatePoolSlotLayoutKind::Compact) == 2);
 
+    CoordinatePoolSlotLayoutCalibration compactUpgradeCalibration;
+    REQUIRE(compactUpgradeCalibration.ObserveTransition(
+        0x1000, 1, 2, 5, 4, 0x0201).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(compactUpgradeCalibration.ObserveTransition(
+        0x2000, 3, 4, 8, 7, 0x000c).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(compactUpgradeCalibration.ObserveTransition(
+        0x1000, 5, 6, 2, 3, 0x0180).kind ==
+        CoordinatePoolSlotLayoutKind::Compact);
+    REQUIRE(compactUpgradeCalibration.ObserveDecodedSlot(10).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(!compactUpgradeCalibration.CompactPossible());
+    REQUIRE(compactUpgradeCalibration.ObserveTransition(
+        0x1000, 7, 8, 1, 6, 0x0210).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(compactUpgradeCalibration.ObserveTransition(
+        0x2000, 9, 10, 12, 3, 0x0042).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(compactUpgradeCalibration.ObserveTransition(
+        0x1000, 11, 12, 7, 0, 0x0408).kind ==
+        CoordinatePoolSlotLayoutKind::Extended);
+
+    CoordinatePoolSlotLayoutCalibration invalidDecodedCalibration;
+    invalidDecodedCalibration.ObserveDecodedSlot(10);
+    invalidDecodedCalibration.ObserveTransition(
+        0x1000, 1, 2, 1, 6, 0x0210);
+    invalidDecodedCalibration.ObserveTransition(
+        0x2000, 3, 4, 12, 3, 0x0042);
+    REQUIRE(invalidDecodedCalibration.ObserveTransition(
+        0x1000, 5, 6, 7, 0, 0x0408).kind ==
+        CoordinatePoolSlotLayoutKind::Extended);
+    REQUIRE(invalidDecodedCalibration.ObserveDecodedSlot(14).kind ==
+        CoordinatePoolSlotLayoutKind::Extended);
+    REQUIRE(invalidDecodedCalibration.ObserveDecodedSlot(6).kind ==
+        CoordinatePoolSlotLayoutKind::Extended);
+    REQUIRE(invalidDecodedCalibration.ObserveDecodedSlot(14).kind ==
+        CoordinatePoolSlotLayoutKind::Extended);
+    REQUIRE(invalidDecodedCalibration.ObserveDecodedSlot(15).kind ==
+        CoordinatePoolSlotLayoutKind::Extended);
+    REQUIRE(invalidDecodedCalibration.ObserveDecodedSlot(16).kind ==
+        CoordinatePoolSlotLayoutKind::Conflict);
+
     REQUIRE(ShouldRetryCoordinatePoolCompactSnapshot(
         {}, true, 9, 14, false));
     REQUIRE(!ShouldRetryCoordinatePoolCompactSnapshot(

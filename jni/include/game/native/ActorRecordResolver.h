@@ -20,6 +20,11 @@ struct ActorRecordLayout {
     std::int32_t fallbackPlainCount = 3000;
 };
 
+constexpr bool HasConfiguredActorRecordSource(
+    const ActorRecordLayout& layout) noexcept {
+    return layout.taggedContainerOffset != 0 || layout.plainArrayOffset != 0;
+}
+
 struct ActorArrayDescriptor {
     std::uintptr_t data = 0;
     std::uint32_t count = 0;
@@ -178,9 +183,8 @@ public:
         const std::uintptr_t container = ResolveContainer(
             moduleBase, readBytes, validatePointer);
         if (container != 0 && layout_.encryptedRecordCount != 0 &&
-            (ProbeEncryptedArrayWithCompare(
-                 container, moduleBase, readBytes, compare) &
-             1) != 0) {
+            ProbeEncryptedArrayWithCompare(
+                container, moduleBase, readBytes, compare) != 0) {
             const std::uint32_t startOffset =
                 FindArrayStartOffset(container, moduleBase, readBytes)
                     .value_or(0);
@@ -254,7 +258,7 @@ public:
             ReadAt(
                 readBytes, record.actor, layout_.plainMeshOffset, record.mesh);
         }
-        if (record.root == 0 || record.mesh == 0) return std::nullopt;
+        if (record.root == 0) return std::nullopt;
         return record;
     }
 

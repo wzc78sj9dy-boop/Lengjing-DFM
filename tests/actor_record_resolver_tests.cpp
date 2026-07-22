@@ -154,9 +154,9 @@ void TestProbeComparisonContract() {
     bool zeroFirst = false;
     bool blockSecond = false;
     bool sizeMatched = false;
-    const auto oddCompare = [&](const void* left,
-                                const void* right,
-                                std::size_t size) {
+    const auto nonzeroCompare = [&](const void* left,
+                                    const void* right,
+                                    std::size_t size) {
         const auto* first = static_cast<const std::uint8_t*>(left);
         const auto* second = static_cast<const std::uint8_t*>(right);
         zeroFirst = true;
@@ -165,22 +165,21 @@ void TestProbeComparisonContract() {
         }
         blockSecond = size > 17 && second[17] == 0x5A;
         sizeMatched = size == block.size();
-        return 3;
+        return 2;
     };
     REQUIRE(
         resolver.ProbeEncryptedArrayWithCompare(
-            kContainer, kModule, read, oddCompare) == 3);
+            kContainer, kModule, read, nonzeroCompare) == 2);
     REQUIRE(zeroFirst);
     REQUIRE(blockSecond);
     REQUIRE(sizeMatched);
 
-    const auto evenCompare = [](const void*, const void*, std::size_t) {
-        return 2;
+    const auto equalCompare = [](const void*, const void*, std::size_t) {
+        return 0;
     };
     REQUIRE(
-        (resolver.ProbeEncryptedArrayWithCompare(
-             kContainer, kModule, read, evenCompare) &
-         1) == 0);
+        resolver.ProbeEncryptedArrayWithCompare(
+            kContainer, kModule, read, equalCompare) == 0);
 
     ActorMemory unreadableBlock;
     unreadableBlock.Put(kContainer, kModule);
@@ -259,18 +258,20 @@ void TestEncryptedAndPlainLocation() {
 
     auto read = ReaderFor(memory);
     auto validate = ValidContainerEntry();
-    const auto odd = [](const void*, const void*, std::size_t) { return 1; };
+    const auto different = [](const void*, const void*, std::size_t) {
+        return 2;
+    };
     const auto encrypted =
-        resolver.LocateWithCompare(kModule, read, validate, odd);
+        resolver.LocateWithCompare(kModule, read, validate, different);
     REQUIRE(encrypted.has_value());
     REQUIRE(encrypted->data == encryptedData);
     REQUIRE(encrypted->count == layout.encryptedRecordCount);
     REQUIRE(encrypted->stride == 136U + 8U);
     REQUIRE(encrypted->encrypted);
 
-    const auto even = [](const void*, const void*, std::size_t) { return 2; };
+    const auto equal = [](const void*, const void*, std::size_t) { return 0; };
     const auto plain =
-        resolver.LocateWithCompare(kModule, read, validate, even);
+        resolver.LocateWithCompare(kModule, read, validate, equal);
     REQUIRE(plain.has_value());
     REQUIRE(plain->data == plainData);
     REQUIRE(plain->count == 7);
@@ -286,7 +287,7 @@ void TestEncryptedAndPlainLocation() {
     invalidStrideMemory.Put(plainHeader + 8, std::int32_t{9});
     auto invalidStrideRead = ReaderFor(invalidStrideMemory);
     const auto invalidStrideFallback = resolver.LocateWithCompare(
-        kModule, invalidStrideRead, validate, odd);
+        kModule, invalidStrideRead, validate, different);
     REQUIRE(invalidStrideFallback.has_value());
     REQUIRE(!invalidStrideFallback->encrypted);
     REQUIRE(invalidStrideFallback->data == plainData);
@@ -321,6 +322,21 @@ void TestEncryptedAndPlainLocation() {
     disabledLayout.plainArrayOffset = 0;
     const ActorRecordResolver disabled(disabledLayout);
     REQUIRE(!disabled.Locate(kModule, read, validate).has_value());
+
+    using lengjing::game::native::HasConfiguredActorRecordSource;
+    REQUIRE(!HasConfiguredActorRecordSource(disabledLayout));
+    ActorRecordLayout taggedOnlyLayout = layout;
+    taggedOnlyLayout.plainArrayOffset = 0;
+    REQUIRE(HasConfiguredActorRecordSource(taggedOnlyLayout));
+    const ActorRecordResolver taggedOnly(taggedOnlyLayout);
+    REQUIRE(taggedOnly.LocateWithCompare(
+        kModule, read, validate, different).has_value());
+    ActorRecordLayout plainOnlyLayout = layout;
+    plainOnlyLayout.taggedContainerOffset = 0;
+    plainOnlyLayout.encryptedRecordCount = 0;
+    REQUIRE(HasConfiguredActorRecordSource(plainOnlyLayout));
+    const ActorRecordResolver plainOnly(plainOnlyLayout);
+    REQUIRE(plainOnly.Locate(kModule, read, validate).has_value());
 }
 
 void TestRecordReading() {
@@ -371,8 +387,19 @@ void TestRecordReading() {
     incompleteMemory.Put(plainEntry, plainActor);
     incompleteMemory.Put(plainActor + layout.plainRootOffset, plainRoot);
     auto incompleteRead = ReaderFor(incompleteMemory);
-    REQUIRE(
-        !resolver.ReadRecord(plainArray, 2, incompleteRead).has_value());
+    const auto incompleteRecord =
+        resolver.ReadRecord(plainArray, 2, incompleteRead);
+    REQUIRE(incompleteRecord.has_value());
+    REQUIRE(incompleteRecord->actor == plainActor);
+    REQUIRE(incompleteRecord->root == plainRoot);
+    REQUIRE(incompleteRecord->mesh == 0);
+
+    ActorMemory missingRootMemory;
+    missingRootMemory.Put(plainEntry, plainActor);
+    missingRootMemory.Put(plainActor + layout.plainMeshOffset, plainMesh);
+    auto missingRootRead = ReaderFor(missingRootMemory);
+    REQUIRE(!resolver.ReadRecord(
+        plainArray, 2, missingRootRead).has_value());
 
     REQUIRE(!resolver.ReadRecord(plainArray, plainArray.count, plainRead)
                  .has_value());
