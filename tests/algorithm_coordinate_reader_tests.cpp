@@ -72,7 +72,7 @@ bool Read(Memory& memory,
 }
 
 void TestLookupAndStride() {
-    REQUIRE(AlgorithmCoordinateReader::kRecordTableRva == 0x3A2B6E0ULL);
+    REQUIRE(AlgorithmCoordinateReader::kRecordTableRva == 0x1D15B700ULL);
     REQUIRE(AlgorithmCoordinateReader::kRecordStride == 0x20);
     REQUIRE(AlgorithmCoordinateReader::kRecordSize == 0x20);
     REQUIRE(AlgorithmCoordinateReader::kMaximumRecordCount == 5000);

@@ -17,7 +17,8 @@ struct AlgorithmCoordinate {
 
 class AlgorithmCoordinateReader final {
 public:
-    static constexpr std::uintptr_t kRecordTableRva = 0x3A2B6E0ULL;
+    // The MOV/MOVK immediate is a byte RVA; decompiler pointer scaling is not.
+    static constexpr std::uintptr_t kRecordTableRva = 0x1D15B700ULL;
     static constexpr std::size_t kRecordStride = 0x20;
     static constexpr std::size_t kRecordSize = 0x20;
     static constexpr std::size_t kCoordinateOffset = 0x08;

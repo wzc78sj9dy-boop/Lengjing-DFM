@@ -3682,6 +3682,13 @@ private:
         if (positionSource != nullptr) {
             *positionSource = native::CharacterPositionSource::None;
         }
+        if (algorithmDecryptRequested_ &&
+            ReadAlgorithmCoordinate(actor, position)) {
+            if (positionSource != nullptr) {
+                *positionSource = native::CharacterPositionSource::Decoded;
+            }
+            return true;
+        }
         const bool coordinateDecryptRequested =
             algorithmPositionRequested_ &&
             mode == native::PositionReadMode::Direct;
@@ -3924,13 +3931,6 @@ private:
         position = Vec3{};
         if (positionSource != nullptr) {
             *positionSource = native::CharacterPositionSource::None;
-        }
-        if (algorithmDecryptRequested_ &&
-            ReadAlgorithmCoordinate(record.actor, position)) {
-            if (positionSource != nullptr) {
-                *positionSource = native::CharacterPositionSource::Decoded;
-            }
-            return true;
         }
         if (native::ShouldKeepDecodedPositionSource(
                 algorithmPositionRequested_,
