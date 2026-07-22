@@ -6,6 +6,10 @@
 #include <exception>
 #include <utility>
 
+#ifndef LENGJING_ENABLE_ALGORITHM_COORDINATE
+#define LENGJING_ENABLE_ALGORITHM_COORDINATE 0
+#endif
+
 namespace lengjing::game {
 namespace {
 
@@ -209,6 +213,7 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
                 status_.coordinatePoolPointer =
                     probe.coordinatePoolPointer;
                 status_.coordinateEntry = probe.coordinateEntry;
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
                 status_.algorithmCoordinateRequested =
                     probe.algorithmCoordinateRequested;
                 status_.algorithmCoordinateActive =
@@ -242,6 +247,7 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
                 status_.algorithmCoordinate = probe.algorithmCoordinate;
                 status_.algorithmCoordinateRuntime =
                     probe.algorithmCoordinateRuntime;
+#endif
                 status_.runtimeError = probe.runtimeError;
                 status_.runtimeSystemError = probe.runtimeSystemError;
                 status_.failureKind = probe.failureKind;
@@ -308,6 +314,7 @@ void GameRuntime::SetStatus(RuntimePhase phase,
     status_.coordinateRead = probe.coordinateRead;
     status_.coordinatePoolPointer = probe.coordinatePoolPointer;
     status_.coordinateEntry = probe.coordinateEntry;
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
     status_.algorithmCoordinateRequested =
         probe.algorithmCoordinateRequested;
     status_.algorithmCoordinateActive = probe.algorithmCoordinateActive;
@@ -339,6 +346,7 @@ void GameRuntime::SetStatus(RuntimePhase phase,
     status_.algorithmCoordinate = probe.algorithmCoordinate;
     status_.algorithmCoordinateRuntime =
         probe.algorithmCoordinateRuntime;
+#endif
     status_.runtimeError = probe.runtimeError;
     status_.runtimeSystemError = probe.runtimeSystemError;
     status_.failureKind = probe.failureKind;

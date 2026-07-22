@@ -40,15 +40,6 @@ bool ReadBool(const Json& object, const char* key, bool fallback) {
         : fallback;
 }
 
-constexpr bool AlgorithmDecryptSettingForSave(bool requested) noexcept {
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-    return requested;
-#else
-    static_cast<void>(requested);
-    return false;
-#endif
-}
-
 ui::RenderBackend ReadRenderBackend(
     const Json& object,
     const char* key,
@@ -155,7 +146,7 @@ Json Serialize(const ui::UiModel& model) {
         aim["hit_percentage"] = model.aim.hitPercentage;
 #endif
 
-    return Json{
+    Json root{
         {"schema_version", kSchemaVersion},
         {"runtime", {
             {"game_version", model.runtime.gameVersionIndex},
@@ -168,8 +159,6 @@ Json Serialize(const ui::UiModel& model) {
             {"model_geometry", model.visual.modelGeometry},
             {"visibility_color", model.visual.visibilityColor},
             {"coordinate_decrypt", model.visual.coordinateDecrypt},
-            {"algorithm_decrypt", AlgorithmDecryptSettingForSave(
-                model.visual.algorithmDecrypt)},
             {"box", model.visual.box},
             {"snapline", model.visual.snapline},
             {"skeleton", model.visual.skeleton},
@@ -247,6 +236,10 @@ Json Serialize(const ui::UiModel& model) {
             {"toast_notifications", model.system.toastNotifications},
         }},
     };
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
+    root["visual"]["algorithm_decrypt"] = model.visual.algorithmDecrypt;
+#endif
+    return root;
 }
 
 void Apply(const Json& root, ui::UiModel& model) {

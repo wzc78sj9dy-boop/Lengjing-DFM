@@ -11,6 +11,10 @@
 #include <string>
 #include <thread>
 
+#ifndef LENGJING_ENABLE_ALGORITHM_COORDINATE
+#define LENGJING_ENABLE_ALGORITHM_COORDINATE 0
+#endif
+
 namespace {
 
 using namespace std::chrono_literals;
@@ -258,6 +262,7 @@ void RunRuntimeTests() {
         return !state->coordinateDecryptSetting.load() &&
             state->algorithmDecryptSetting.load();
     }));
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
     REQUIRE(WaitFor([&] {
         const lengjing::game::RuntimeStatus status = runtime.Status();
         return status.algorithmCoordinateRequested &&
@@ -277,14 +282,32 @@ void RunRuntimeTests() {
             status.algorithmCoordinateRuntime.object == 0x50000000U &&
             status.algorithmCoordinateRuntime.decodedZ == 3.0f;
     }));
+#else
+    {
+        const lengjing::game::RuntimeStatus status = runtime.Status();
+        REQUIRE(!status.algorithmCoordinateRequested);
+        REQUIRE(!status.algorithmCoordinateActive);
+        REQUIRE(!status.algorithmCoordinateRuntimeReady);
+        REQUIRE(status.algorithmCoordinateRefreshes == 0);
+        REQUIRE(status.algorithmCoordinateAttempts == 0);
+        REQUIRE(status.algorithmCoordinateSuccesses == 0);
+    }
+#endif
 
     settings.visual.coordinateDecrypt = true;
     runtime.UpdateSettings(settings);
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
     REQUIRE(WaitFor([&] {
         return state->coordinateDecryptSetting.load() &&
             state->algorithmDecryptSetting.load() &&
             runtime.Status().algorithmCoordinateActive;
     }));
+#else
+    REQUIRE(WaitFor([&] {
+        return state->coordinateDecryptSetting.load() &&
+            state->algorithmDecryptSetting.load();
+    }));
+#endif
 
     settings.visual.coordinateDecrypt = false;
     settings.visual.algorithmDecrypt = false;

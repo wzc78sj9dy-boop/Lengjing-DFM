@@ -34,6 +34,7 @@ bool IsTerminal(game::RuntimePhase phase) {
         phase == game::RuntimePhase::Faulted;
 }
 
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
 bool SameAlgorithmCoordinateSummary(
     const game::native::AlgorithmCoordinateDiagnostic& left,
     const game::native::AlgorithmCoordinateDiagnostic& right) noexcept {
@@ -56,6 +57,7 @@ bool SameRuntimeCoordinateCodecSummary(
         left.expectedFingerprint == right.expectedFingerprint &&
         left.observedFingerprint == right.observedFingerprint;
 }
+#endif
 
 ImU32 WithOpacity(ImU32 color, float opacity) {
     ImVec4 converted = ImGui::ColorConvertU32ToFloat4(color);
@@ -344,11 +346,15 @@ void AppController::StartRuntime() {
         return;
     }
     coordinateDecryptSuccessNotified_ = false;
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
     algorithmCoordinateSuccessNotified_ = false;
+#endif
     lastReportedCoordinateError_ = game::CoordinateDecryptError::None;
     lastReportedCoordinateSystemError_ = 0;
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
     lastReportedAlgorithmCoordinate_ = {};
     lastReportedRuntimeCoordinateCodec_ = {};
+#endif
     lastReportedRuntimeError_ = game::RuntimeError::None;
     lastReportedRuntimeSystemError_ = 0;
     terminalWorkerJoined_ = false;
@@ -526,6 +532,9 @@ void AppController::DrawToastNotifications(ImDrawList* drawList) {
 game::FeatureSettings AppController::BuildFeatureSettings() const {
     game::FeatureSettings settings{};
     settings.visual = model_.visual;
+#if !LENGJING_ENABLE_ALGORITHM_COORDINATE
+    settings.visual.algorithmDecrypt = false;
+#endif
     settings.visual.debugInfo = false;
     settings.visual.classNameDebug = false;
     settings.loot = model_.loot;
@@ -571,6 +580,7 @@ void AppController::SyncRuntimeStatus() {
     model_.runtime.coordinateErrorCode =
         game::CoordinateDecryptErrorCode(status.coordinateError);
     model_.runtime.coordinateSystemError = status.coordinateSystemError;
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
     model_.runtime.algorithmCoordinateRequested =
         status.algorithmCoordinateRequested;
     model_.runtime.algorithmCoordinateActive =
@@ -615,6 +625,7 @@ void AppController::SyncRuntimeStatus() {
         status.algorithmCoordinate.count;
     model_.runtime.algorithmCoordinateValidCount =
         status.algorithmCoordinate.validCount;
+#endif
     model_.runtime.runtimeErrorCode =
         game::RuntimeErrorCode(status.runtimeError);
     model_.runtime.runtimeSystemError = status.runtimeSystemError;
@@ -630,6 +641,7 @@ void AppController::SyncRuntimeStatus() {
         coordinateDecryptSuccessNotified_ = true;
         AppendLog(CoordinateDecryptPresentationText(nextDecryptPresentation));
     }
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
     if (!status.algorithmCoordinateRequested) {
         algorithmCoordinateSuccessNotified_ = false;
     } else if (!algorithmCoordinateSuccessNotified_ &&
@@ -647,6 +659,7 @@ void AppController::SyncRuntimeStatus() {
                 status.algorithmCoordinate));
         }
     }
+#endif
     model_.loot.customItemCount = status.customItemCount;
 
     if (status.phase != lastStatus_.phase) {
@@ -693,6 +706,7 @@ void AppController::SyncRuntimeStatus() {
         lastReportedCoordinateSystemError_ = 0;
     }
 
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
     const bool algorithmDiagnosticChanged =
         status.algorithmCoordinateRequested &&
         status.algorithmCoordinate.error !=
@@ -727,6 +741,7 @@ void AppController::SyncRuntimeStatus() {
                    game::native::RuntimeCoordinateCodecError::None) {
         lastReportedRuntimeCoordinateCodec_ = {};
     }
+#endif
 
     const game::RuntimeError reportedRuntimeError =
         status.runtimeError != game::RuntimeError::None

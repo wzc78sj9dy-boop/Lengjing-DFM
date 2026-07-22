@@ -1,3 +1,7 @@
+#ifndef LENGJING_ENABLE_ALGORITHM_COORDINATE
+#define LENGJING_ENABLE_ALGORITHM_COORDINATE 0
+#endif
+
 #include "app/AppController.h"
 #include "app/RenderBackendSelection.h"
 #include "app/RuntimeExitPolicy.h"
@@ -5,7 +9,9 @@
 #include "auth/CloudLayoutStartupPolicy.h"
 #include "auth/RemoteAuth.h"
 #include "game/native/MemoryTransport.h"
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
 #include "game/native/AlgorithmCoordinateProbePolicy.h"
+#endif
 #include "platform/BackgroundProcess.h"
 #include "platform/MenuKeyMonitor.h"
 
@@ -110,9 +116,11 @@ int CoordinateProbeSeconds() {
 #endif
 }
 
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
 int AlgorithmCoordinateProbeSeconds() {
     return ProbeSeconds("LENGJING_ALGORITHM_PROBE_SECONDS");
 }
+#endif
 
 int CoordinateProbeDriver() {
     const char* value = std::getenv("LENGJING_COORDINATE_PROBE_DRIVER");
@@ -235,6 +243,7 @@ int RunCoordinateProbe(
             : (last.coordinateEntryReady ? 12 : 11));
 }
 
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
 bool SameRuntimeCodecProbeSummary(
     const lengjing::game::native::RuntimeCoordinateCodecDiagnostic& left,
     const lengjing::game::native::RuntimeCoordinateCodecDiagnostic& right) {
@@ -432,6 +441,7 @@ int RunAlgorithmCoordinateProbe(
     if (!runtimeReady || resolveSuccesses == 0) return 12;
     return 13;
 }
+#endif
 
 struct CloudLayoutFetchResult {
     std::shared_ptr<const lengjing::auth::CloudLayoutDocument> snapshot;
@@ -712,6 +722,7 @@ int main() {
 
     const auto algorithmPosition = CoordinateReplayConfiguration();
     const int coordinateProbeSeconds = CoordinateProbeSeconds();
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
     const int algorithmCoordinateProbeSeconds =
         AlgorithmCoordinateProbeSeconds();
     if (coordinateProbeSeconds != 0 &&
@@ -732,6 +743,7 @@ int main() {
             programDirectory,
             std::move(cloudLayout));
     }
+#endif
     if (coordinateProbeSeconds != 0) {
         const auto display = android::ANativeWindowCreator::GetDisplayInfo();
         if (display.width <= 0 || display.height <= 0) {

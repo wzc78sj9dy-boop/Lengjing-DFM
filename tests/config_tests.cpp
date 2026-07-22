@@ -179,8 +179,7 @@ void RunConfigTests() {
     REQUIRE(config.Save(expected, &error));
     REQUIRE(error.empty());
     const std::string serialized = ReadText(path);
-    REQUIRE(serialized.find("\"algorithm_decrypt\": false") !=
-        std::string::npos);
+    REQUIRE(serialized.find("algorithm_decrypt") == std::string::npos);
     REQUIRE(serialized.find("\"cover\"") != std::string::npos);
     REQUIRE(serialized.find("\"cover_mode\"") != std::string::npos);
     REQUIRE(serialized.find("miss_mode") == std::string::npos);

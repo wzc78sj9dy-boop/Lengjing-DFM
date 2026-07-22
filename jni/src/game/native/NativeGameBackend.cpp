@@ -1,3 +1,7 @@
+#ifndef LENGJING_ENABLE_ALGORITHM_COORDINATE
+#define LENGJING_ENABLE_ALGORITHM_COORDINATE 0
+#endif
+
 #include "game/GameBackend.h"
 #include "game/aim/AimController.h"
 #include "game/aim/AimGuidePolicy.h"
@@ -13,7 +17,9 @@
 #include "game/native/ActorRecordRefreshPolicy.h"
 #include "game/native/ActorRecordResolver.h"
 #include "game/native/ActorRecordSource.h"
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
 #include "game/native/AlgorithmCoordinateReader.h"
+#endif
 #include "game/native/AlgorithmPositionPolicy.h"
 #include "game/native/AlgorithmReplayPolicy.h"
 #include "game/native/BoneFrameSource.h"
@@ -29,7 +35,9 @@
 #include "game/native/PositionReadModePolicy.h"
 #include "game/native/ProjectileSpeedReader.h"
 #include "game/native/RemoteElfIdentity.h"
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
 #include "game/native/RuntimeCoordinateCodec.h"
+#endif
 #include "game/native/RuntimeLayoutOverride.h"
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
 #include "game/native/TrajectoryHook.h"
@@ -337,6 +345,7 @@ bool IsCoordinateTraceEnabled() noexcept {
 #endif
 }
 
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
 bool IsCoordinateTableProbeEnabled() noexcept {
 #if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
     static const bool enabled = [] {
@@ -348,19 +357,18 @@ bool IsCoordinateTableProbeEnabled() noexcept {
     return false;
 #endif
 }
+#endif
 
-bool IsAlgorithmCoordinateValidationRequested() noexcept {
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
+bool IsAlgorithmCoordinateValidationRequested() noexcept {
     static const bool requested = [] {
         const char* value = std::getenv(
             "LENGJING_ALGORITHM_COORDINATE_VALIDATION");
         return value != nullptr && value[0] != '\0' && value[0] != '0';
     }();
     return requested;
-#else
-    return false;
-#endif
 }
+#endif
 
 struct Rotation {
     float pitch = 0.0f;
@@ -1274,16 +1282,17 @@ public:
         }
         UpdateGeometryRuntime(settings);
 
-        const bool requestedAlgorithmCoordinate =
-            native::kAlgorithmCoordinateEnabled &&
-            (settings.visual.algorithmDecrypt ||
-             IsAlgorithmCoordinateValidationRequested());
         const bool coordinateRequestChanged =
             algorithmPositionRequested_ != settings.visual.coordinateDecrypt;
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
+        const bool requestedAlgorithmCoordinate =
+            settings.visual.algorithmDecrypt ||
+            IsAlgorithmCoordinateValidationRequested();
         const bool algorithmCoordinateRequestChanged =
             algorithmDecryptRequested_ != requestedAlgorithmCoordinate;
-        algorithmPositionRequested_ = settings.visual.coordinateDecrypt;
         algorithmDecryptRequested_ = requestedAlgorithmCoordinate;
+#endif
+        algorithmPositionRequested_ = settings.visual.coordinateDecrypt;
         if (coordinateRequestChanged) {
             algorithmReplayBackoffPolicy_.Reset();
             algorithmReplayPagePolicy_.Invalidate();
@@ -1295,12 +1304,18 @@ public:
             coordinatePoolContext_ = 0;
             coordinatePoolEntry_ = 0;
         }
-        if (coordinateRequestChanged || algorithmCoordinateRequestChanged) {
+        bool coordinateSourceChanged = coordinateRequestChanged;
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
+        coordinateSourceChanged =
+            coordinateSourceChanged || algorithmCoordinateRequestChanged;
+#endif
+        if (coordinateSourceChanged) {
             characterPositions_.Clear();
             positionCache_.clear();
             decodedPositionCache_.clear();
             decodedPositionPending_.clear();
             boneCache_.clear();
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
             algorithmCoordinateSnapshot_.clear();
             algorithmCoordinateTableReady_ = false;
             algorithmCoordinateTableDiagnostic_ = {};
@@ -1317,12 +1332,14 @@ public:
             algorithmCoordinateTableAttemptCount_ = 0;
             algorithmCoordinateTableSuccessCount_ = 0;
             algorithmCoordinateFallbackCount_ = 0;
+#endif
         }
         algorithmFrameAttemptCount_ = 0;
         algorithmFrameSuccessCount_ = 0;
         algorithmFrameOutputError_ = CoordinateDecryptError::None;
         algorithmFrameFailure_ = {};
         algorithmFrameAgedDecodedFailure_ = false;
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
         algorithmCoordinateFrameAttemptCount_ = 0;
         algorithmCoordinateFrameSuccessCount_ = 0;
         algorithmCoordinateFrameFailure_ = {};
@@ -1332,6 +1349,7 @@ public:
         algorithmCoordinateFrameSource_ =
             native::AlgorithmCoordinateSource::None;
         algorithmCoordinateObjectCache_.clear();
+#endif
         const bool coordinatePoolSelected = UsesCoordinatePoolRuntime();
         if (!coordinatePoolSelected ||
             ForcedCoordinateProbeComponent() != 0) {
@@ -1376,7 +1394,9 @@ public:
             boneCache_.clear();
             positionReadMode_ = positionMode;
         }
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
         RefreshAlgorithmCoordinateSources();
+#endif
 
         FrameContext context{};
         RuntimeDiagnostic frameDiagnostic{};
@@ -4157,6 +4177,7 @@ private:
         if (positionSource != nullptr) {
             *positionSource = native::CharacterPositionSource::None;
         }
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
         if (IsCoordinateTableProbeEnabled() && algorithmPositionRequested_) {
             Vec3 tableCandidate{};
             const bool tableAvailable =
@@ -4222,6 +4243,7 @@ private:
             ++algorithmCoordinateFallbackCount_;
             return false;
         }
+#endif
         const bool coordinateDecryptRequested =
             algorithmPositionRequested_ &&
             mode == native::PositionReadMode::Direct;
@@ -4841,6 +4863,7 @@ private:
         return true;
     }
 
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
     void RefreshAlgorithmCoordinateSources() {
         algorithmCoordinateSnapshot_.clear();
         algorithmCoordinateTableReady_ = false;
@@ -5199,6 +5222,7 @@ private:
         if (rawPosition != nullptr) *rawPosition = decodedRaw;
         return false;
     }
+#endif
 
     bool ReadCharacterPosition(
         const RuntimeActorRecord& record,
@@ -5211,6 +5235,7 @@ private:
         if (positionSource != nullptr) {
             *positionSource = native::CharacterPositionSource::None;
         }
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
         if (native::ShouldReadAlgorithmCoordinate(
                 algorithmPositionRequested_,
                 algorithmDecryptRequested_)) {
@@ -5228,6 +5253,7 @@ private:
                 false,
                 positionSource);
         }
+#endif
         if (native::ShouldKeepDecodedPositionSource(
                 algorithmPositionRequested_,
                 preferredMode == native::PositionReadMode::Direct)) {
@@ -8053,6 +8079,7 @@ private:
                   0,
                   0,
               };
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
         probe.algorithmCoordinateRequested = algorithmDecryptRequested_;
         probe.algorithmCoordinateActive =
             native::ShouldReadAlgorithmCoordinate(
@@ -8104,6 +8131,7 @@ private:
             probe.algorithmCoordinateRuntime =
                 algorithmCoordinateRuntimeDiagnostic_;
         }
+#endif
     }
 
     bool CloseLocked() noexcept {
@@ -8148,6 +8176,7 @@ private:
         algorithmFrameAgedDecodedFailure_ = false;
         decodedPositionPending_.clear();
         algorithmPositionRequested_ = false;
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
         algorithmDecryptRequested_ = false;
         algorithmCoordinateSnapshot_.clear();
         algorithmCoordinateTableReady_ = false;
@@ -8174,6 +8203,7 @@ private:
         algorithmCoordinateFallbackCount_ = 0;
         algorithmCoordinateFrameAttemptCount_ = 0;
         algorithmCoordinateFrameSuccessCount_ = 0;
+#endif
         algorithmPositionConfig_ = {};
         coordinatePoolFallback_ = false;
         coordinatePoolReady_ = false;
@@ -8193,6 +8223,7 @@ private:
         return true;
     }
 
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
     struct AlgorithmCoordinateObjectCacheEntry {
         std::uintptr_t owner = 0;
         Vec3 raw{};
@@ -8200,6 +8231,7 @@ private:
         native::RuntimeCoordinateCodecDiagnostic diagnostic{};
         bool valid = false;
     };
+#endif
 
     std::mutex mutex_;
     RuntimeOptions options_{};
@@ -8224,9 +8256,11 @@ private:
     bool algorithmEntryReady_ = false;
     bool algorithmReplayAllowedThisFrame_ = true;
     bool algorithmPositionRequested_ = false;
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
     bool algorithmDecryptRequested_ = false;
     bool algorithmCoordinateTableReady_ = false;
     bool algorithmCoordinateRuntimeReady_ = false;
+#endif
     bool coordinatePoolReady_ = false;
     bool coordinatePoolFallback_ = false;
     std::uintptr_t coordinatePoolBridge_ = 0;
@@ -8234,6 +8268,7 @@ private:
     std::uintptr_t coordinatePoolEntry_ = 0;
     std::uint64_t algorithmAttemptCount_ = 0;
     std::uint64_t algorithmSuccessCount_ = 0;
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
     std::uint64_t algorithmCoordinateRefreshCount_ = 0;
     std::uint64_t algorithmCoordinateResolveAttemptCount_ = 0;
     std::uint64_t algorithmCoordinateResolveSuccessCount_ = 0;
@@ -8257,6 +8292,7 @@ private:
         algorithmCoordinateFrameRuntimeSuccess_{};
     native::AlgorithmCoordinateSource algorithmCoordinateFrameSource_ =
         native::AlgorithmCoordinateSource::None;
+#endif
     std::uint64_t algorithmFrameAttemptCount_ = 0;
     std::uint64_t algorithmFrameSuccessCount_ = 0;
     CoordinateDecryptError algorithmFrameOutputError_ =
@@ -8306,12 +8342,14 @@ private:
         std::chrono::steady_clock::time_point> threatFirstSeen_;
     std::unordered_map<std::uintptr_t, AimWarningState> aimWarningStates_;
     native::HudMapCache hudMapCache_{};
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
     native::AlgorithmCoordinateReader algorithmCoordinateReader_{};
     native::RuntimeCoordinateCodec runtimeCoordinateCodec_{};
     std::vector<native::AlgorithmCoordinateRecord>
         algorithmCoordinateSnapshot_;
     std::unordered_map<std::uintptr_t, AlgorithmCoordinateObjectCacheEntry>
         algorithmCoordinateObjectCache_;
+#endif
     native::CharacterPositionResolver characterPositions_{};
     native::PositionReadMode positionReadMode_ = native::PositionReadMode::Standard;
     native::ProjectileSpeedReader projectileSpeedReader_{};
