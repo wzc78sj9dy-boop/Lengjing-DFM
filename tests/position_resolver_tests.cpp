@@ -38,9 +38,11 @@ private:
 }  // namespace
 
 void RunPositionResolverTests() {
+    using lengjing::game::native::AlgorithmCoordinateFinalizeError;
     using lengjing::game::native::CharacterPositionResolver;
     using lengjing::game::native::CharacterPositionSource;
     using lengjing::game::native::PositionReadMode;
+    using lengjing::game::native::FinalizeAlgorithmCharacterCoordinate;
     using lengjing::game::native::ResolveDecodedCharacterZ;
     using lengjing::game::native::ResolvePositionReadMode;
     using lengjing::game::native::ShouldAlignBoneFrameToCharacterPosition;
@@ -51,6 +53,42 @@ void RunPositionResolverTests() {
     REQUIRE(ResolveDecodedCharacterZ(1000.0f) == 910.0f);
     REQUIRE(ResolveDecodedCharacterZ(90.0f) == 0.0f);
     REQUIRE(ResolveDecodedCharacterZ(-10.0f) == -100.0f);
+
+    const auto standing = FinalizeAlgorithmCharacterCoordinate(
+        1200.0f, -3400.0f, 3160.09f, true, 85.99f, true, 85.99f);
+    const auto crouching = FinalizeAlgorithmCharacterCoordinate(
+        1200.0f, -3400.0f, 3134.09f, true, 59.99f, true, 59.99f);
+    REQUIRE(standing.Accepted());
+    REQUIRE(crouching.Accepted());
+    REQUIRE(std::fabs(standing.z - 3074.10f) < 0.01f);
+    REQUIRE(std::fabs(crouching.z - 3074.10f) < 0.01f);
+    REQUIRE(std::fabs(standing.z - crouching.z) < 0.01f);
+
+    const auto missingAdjustment = FinalizeAlgorithmCharacterCoordinate(
+        1.0f, 2.0f, 3.0f, false, 0.0f, true, 90.0f);
+    REQUIRE(!missingAdjustment.Accepted());
+    REQUIRE(missingAdjustment.error ==
+        AlgorithmCoordinateFinalizeError::VerticalAdjustmentReadFailed);
+    const auto invalidAdjustment = FinalizeAlgorithmCharacterCoordinate(
+        1.0f, 2.0f, 3.0f, true, 0.0f, true, 0.0f);
+    REQUIRE(!invalidAdjustment.Accepted());
+    REQUIRE(invalidAdjustment.error ==
+        AlgorithmCoordinateFinalizeError::VerticalAdjustmentInvalid);
+    const auto unstableAdjustment = FinalizeAlgorithmCharacterCoordinate(
+        1.0f, 2.0f, 200.0f, true, 90.0f, true, 59.99f);
+    REQUIRE(!unstableAdjustment.Accepted());
+    REQUIRE(unstableAdjustment.error ==
+        AlgorithmCoordinateFinalizeError::VerticalAdjustmentUnstable);
+    const auto invalidRaw = FinalizeAlgorithmCharacterCoordinate(
+        0.0f, 0.0f, 0.0f, true, 90.0f, true, 90.0f);
+    REQUIRE(!invalidRaw.Accepted());
+    REQUIRE(invalidRaw.error ==
+        AlgorithmCoordinateFinalizeError::RawInvalid);
+    const auto invalidOutput = FinalizeAlgorithmCharacterCoordinate(
+        0.0f, 0.0f, 90.0f, true, 90.0f, true, 90.0f);
+    REQUIRE(!invalidOutput.Accepted());
+    REQUIRE(invalidOutput.error ==
+        AlgorithmCoordinateFinalizeError::OutputInvalid);
     REQUIRE(ShouldAlignBoneFrameToCharacterPosition(
         CharacterPositionSource::Decoded));
     REQUIRE(ShouldAlignBoneFrameToCharacterPosition(

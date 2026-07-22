@@ -2,6 +2,6 @@
 
 namespace lengjing::platform {
 
-bool DetachFromTerminal() noexcept;
+bool DetachFromTerminal(const char* standardErrorPath = nullptr) noexcept;
 
 }  // namespace lengjing::platform

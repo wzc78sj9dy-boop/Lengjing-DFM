@@ -55,6 +55,9 @@ enum class RuntimeCoordinateCodecError : std::uint16_t {
     RecordInactive,
     RecordKeyMismatch,
     OutputInvalid,
+    VerticalAdjustmentReadFailed,
+    VerticalAdjustmentUnstable,
+    VerticalAdjustmentInvalid,
 };
 
 struct RuntimeCoordinateCodecLayout {
@@ -115,6 +118,9 @@ struct RuntimeCoordinateCodecDiagnostic {
     float decodedX = 0.0f;
     float decodedY = 0.0f;
     float decodedZ = 0.0f;
+    float verticalAdjustmentFirst = 0.0f;
+    float verticalAdjustmentSecond = 0.0f;
+    float presentedZ = 0.0f;
 };
 
 constexpr std::uint16_t RuntimeCoordinateCodecErrorCode(
@@ -318,7 +324,7 @@ public:
             }
 
             std::uintptr_t fieldAddress = 0;
-            if (!CheckedAdd(object, 0x210, fieldAddress)) {
+            if (!CheckedAdd(object, 0x168, fieldAddress)) {
                 return FailDecode(
                     diagnostic, RuntimeCoordinateCodecError::ObjectInvalid);
             }
@@ -594,8 +600,8 @@ public:
 private:
     static constexpr std::size_t kRecordSize = 0x568;
     static constexpr std::size_t kFieldKeyOffset = 0x10;
-    static constexpr std::size_t kRingOffset = 0x28;
-    static constexpr std::size_t kRingSlotStride = 0x30;
+    static constexpr std::size_t kRingOffset = 0x18;
+    static constexpr std::size_t kRingSlotStride = 0x0C;
     static constexpr std::uint64_t kRingSlotCount = 14;
     static constexpr std::size_t kObjectKeyOffset = 0x530;
     static constexpr std::size_t kActiveFlagOffset = 0x53D;
@@ -758,19 +764,19 @@ private:
         header = {};
         std::uint64_t rawIndexArray = 0;
         std::uint64_t rawAuxiliary = 0;
-        if (!ReadAt(readBytes, state, 0x00, rawIndexArray) ||
-            !ReadAt(readBytes, state, 0xAB0, rawAuxiliary) ||
+        if (!ReadAt(readBytes, state, 0x10, rawIndexArray) ||
+            !ReadAt(readBytes, state, 0xAC0, rawAuxiliary) ||
             !ReadAt(readBytes, state, 0xC20, header.codecSeed) ||
-            !ReadAt(readBytes, state, 0xC38, header.capacity) ||
-            !ReadAt(readBytes, state, 0x1498, header.count) ||
+            !ReadAt(readBytes, state, 0xC40, header.capacity) ||
+            !ReadAt(readBytes, state, 0x14A0, header.count) ||
             !ReadAt(readBytes, state, 0x186C, header.tableSeed) ||
-            !ReadAt(readBytes, state, 0x450, header.globalRing) ||
-            !ReadAt(readBytes, state, 0x2588, header.tableSalt)) {
+            !ReadAt(readBytes, state, 0x2118, header.globalRing) ||
+            !ReadAt(readBytes, state, 0x2598, header.tableSalt)) {
             return false;
         }
         header.indexArray = StripPointer(rawIndexArray);
         header.auxiliary = StripPointer(rawAuxiliary);
-        const std::uint32_t recordsSeed = header.tableSeed;
+        const std::uint32_t recordsSeed = header.tableSeed + 2U;
         const std::uint64_t recordsRaw = DecodeRecordValue(
             header.tableSalt, recordsSeed);
         if (recordsRaw >

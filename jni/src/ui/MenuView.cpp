@@ -7,6 +7,10 @@
 #include <array>
 #include <string>
 
+#ifndef LENGJING_ENABLE_ALGORITHM_COORDINATE
+#define LENGJING_ENABLE_ALGORITHM_COORDINATE 0
+#endif
+
 namespace lengjing::ui {
 namespace {
 
@@ -787,6 +791,13 @@ void RenderRuntime(UiModel& model, UiActions& actions) {
             actions,
             SettingsDomain::Visual,
             Toggle("坐标解密", visual.coordinateDecrypt));
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
+        ImGui::TableNextColumn();
+        Mark(
+            actions,
+            SettingsDomain::Visual,
+            Toggle("算法解密", visual.algorithmDecrypt));
+#endif
         ImGui::EndTable();
     }
     ImGui::Dummy(ImVec2(0.0f, 4.0f));

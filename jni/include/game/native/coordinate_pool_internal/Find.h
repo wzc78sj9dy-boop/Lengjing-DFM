@@ -908,16 +908,20 @@ namespace lengjing::game::native::coordinate_pool_internal {
             return end_address;
         }
 
-        void reset() {
+        void release_analysis_storage() noexcept {
             if (insn) {
                 cs_free(insn, count);
                 insn = nullptr;
             }
-            methods.clear();
-            method_requests_.clear();
-            patches_.clear();
-            data_ = nullptr;
+            std::unordered_map<std::string, method>().swap(methods);
+            std::vector<uint64_t>().swap(method_requests_);
+            data_.reset();
             count = 0;
+        }
+
+        void reset() {
+            release_analysis_storage();
+            patches_.clear();
             start_address = 0;
             end_address = 0;
             size_ = 0;

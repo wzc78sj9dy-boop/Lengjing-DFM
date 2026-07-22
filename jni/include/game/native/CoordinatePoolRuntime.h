@@ -1,6 +1,7 @@
 #pragma once
 
 #include "game/CoordinateDecryptDiagnostics.h"
+#include "game/native/CoordinatePoolPolicy.h"
 
 #include <array>
 #include <cstddef>
@@ -48,20 +49,6 @@ struct CoordinatePoolPosition {
     float z = 0.0f;
 };
 
-inline constexpr std::size_t kCoordinatePoolLogicalCandidateCount = 7;
-inline constexpr std::size_t kCoordinatePoolBankCount = 2;
-inline constexpr std::size_t kCoordinatePoolPhysicalSlotCount =
-    kCoordinatePoolLogicalCandidateCount * kCoordinatePoolBankCount;
-
-inline constexpr std::size_t MapDecodedCoordinatePoolSlot(
-    std::size_t decodedSlot) noexcept {
-    if (decodedSlot >= kCoordinatePoolPhysicalSlotCount) {
-        return kCoordinatePoolPhysicalSlotCount;
-    }
-    return (decodedSlot + kCoordinatePoolLogicalCandidateCount) %
-        kCoordinatePoolPhysicalSlotCount;
-}
-
 struct CoordinatePoolCandidateSet {
     std::array<CoordinatePoolPosition,
                kCoordinatePoolLogicalCandidateCount> positions{};
@@ -72,7 +59,11 @@ struct CoordinatePoolCandidateSet {
     std::uintptr_t ring = 0;
     std::uint64_t index = 0;
     std::uint16_t changedPhysicalMask = 0;
+    std::uint16_t decodedSlotMask = 0;
     std::uint8_t activeBank = 0;
+    std::uint8_t logicalSlotCount = 0;
+    std::uint8_t physicalSlotCount = 0;
+    std::uint8_t slotPhase = 0;
     std::uint8_t selectedLogicalSlot = 0;
     std::uint8_t selectedPhysicalSlot = 0;
     std::uint8_t decodedPhysicalSlot = 0;
@@ -120,6 +111,8 @@ enum class CoordinatePoolRuntimeError : std::uint8_t {
     PositionReadFailed,
     PositionNotFinite,
     PositionUnstable,
+    SlotLayoutPending,
+    SlotLayoutConflict,
 };
 
 constexpr bool ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
@@ -132,6 +125,8 @@ constexpr bool ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
         case CoordinatePoolRuntimeError::RingSearchFailed:
         case CoordinatePoolRuntimeError::PositionNotFinite:
         case CoordinatePoolRuntimeError::PositionUnstable:
+        case CoordinatePoolRuntimeError::SlotLayoutPending:
+        case CoordinatePoolRuntimeError::SlotLayoutConflict:
             return false;
         case CoordinatePoolRuntimeError::PositionReadFailed:
             return !read.HasFailure() ||
@@ -140,6 +135,15 @@ constexpr bool ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
         default:
             return true;
     }
+}
+
+constexpr bool IsCoordinatePoolRingRemoteReadFailure(
+    CoordinatePoolRuntimeError error,
+    const CoordinateReadDiagnostic& read) noexcept {
+    return error == CoordinatePoolRuntimeError::PositionReadFailed &&
+        read.HasFailure() &&
+        (read.stage == CoordinateReadStage::RingIndex ||
+         read.stage == CoordinateReadStage::Position);
 }
 
 struct CoordinatePoolRuntimeProbe {
@@ -158,6 +162,15 @@ struct CoordinatePoolRuntimeProbe {
     std::int32_t poolPointerOffset = 0;
     std::int64_t indexOffset = 0;
     std::uint32_t ringOffset = 0;
+    std::uint16_t decodedSlotMask = 0;
+    std::uint16_t compactPhaseMask = 0;
+    std::uint16_t extendedPhaseMask = 0;
+    std::uint8_t logicalSlotCount = 0;
+    std::uint8_t physicalSlotCount = 0;
+    std::uint8_t slotPhase = 0;
+    std::uint8_t slotLayoutKind = 0;
+    std::uint8_t compactLayoutEvidence = 0;
+    std::uint8_t extendedLayoutEvidence = 0;
     std::int32_t threadId = 0;
     std::uint64_t contextGeneration = 0;
     std::uint64_t attempts = 0;

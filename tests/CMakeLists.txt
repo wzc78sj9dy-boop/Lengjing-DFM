@@ -118,6 +118,60 @@ add_test(
     COMMAND runtime_coordinate_codec_tests
 )
 
+add_executable(algorithm_coordinate_config_tests
+    algorithm_coordinate_config_tests.cpp
+    ../jni/src/config/LocalConfig.cpp
+)
+
+target_include_directories(algorithm_coordinate_config_tests PRIVATE
+    ../jni/include
+    ../jni/lib
+)
+
+target_compile_definitions(algorithm_coordinate_config_tests PRIVATE
+    LENGJING_ENABLE_ALGORITHM_COORDINATE=1
+    LENGJING_ENABLE_PROJECTILE_TRACKING=0
+)
+
+if(MSVC)
+    target_compile_options(algorithm_coordinate_config_tests PRIVATE
+        /W4 /utf-8
+    )
+else()
+    target_compile_options(algorithm_coordinate_config_tests PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+endif()
+
+add_test(
+    NAME algorithm_coordinate_config_tests
+    COMMAND algorithm_coordinate_config_tests
+)
+
+add_executable(coordinate_pool_runtime_plan_tests
+    coordinate_pool_runtime_plan_tests.cpp
+    ../jni/src/game/native/coordinate_pool_internal/Analyze.cpp
+    ../jni/src/game/native/coordinate_pool_internal/FindDec.cpp
+)
+
+target_include_directories(coordinate_pool_runtime_plan_tests PRIVATE
+    ../jni/include
+    ../jni/lib/capstone/include
+)
+
+if(MSVC)
+    target_compile_options(coordinate_pool_runtime_plan_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(coordinate_pool_runtime_plan_tests PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+endif()
+
+add_test(
+    NAME coordinate_pool_runtime_plan_tests
+    COMMAND coordinate_pool_runtime_plan_tests
+)
+
 add_executable(kernel_rpc_transport_tests
     kernel_rpc_transport_tests.cpp
     ../jni/src/game/native/KernelRpcTransport.cpp

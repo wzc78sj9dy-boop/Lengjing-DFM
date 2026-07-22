@@ -26,6 +26,10 @@
 #include <utility>
 #include <vector>
 
+#ifndef LENGJING_ENABLE_COORDINATE_DEBUG_LOG
+#define LENGJING_ENABLE_COORDINATE_DEBUG_LOG 0
+#endif
+
 namespace lengjing::game::native {
 namespace {
 
@@ -123,15 +127,23 @@ CoordinatePoolRuntimeError CoordinateReplayEntryRuntimeError(
 }
 
 bool IsCoordinatePoolTraceEnabled() noexcept {
+#if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
     static const bool enabled = CoordinatePoolEnvironmentFlagEnabled(
         std::getenv("LENGJING_COORDINATE_TRACE"));
     return enabled;
+#else
+    return false;
+#endif
 }
 
 bool IsCoordinatePoolCandidateTraceFullEnabled() noexcept {
+#if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
     static const bool enabled = CoordinatePoolEnvironmentFlagEnabled(
         std::getenv("LENGJING_COORDINATE_CANDIDATES_FULL"));
     return enabled;
+#else
+    return false;
+#endif
 }
 
 std::uint64_t CoordinatePoolParameterFingerprint(
@@ -572,6 +584,7 @@ struct CoordinatePoolRuntime::Impl {
     struct RingSlot {
         std::uint64_t ring = 0;
         std::uint64_t stamp = 0;
+        CoordinatePoolRingRecoveryState recovery{};
         std::uint64_t candidateTraceFrame =
             std::numeric_limits<std::uint64_t>::max();
         std::uint8_t candidateTracePhysicalSlot = UINT8_MAX;
@@ -579,6 +592,9 @@ struct CoordinatePoolRuntime::Impl {
                    kCoordinatePoolPhysicalSlotCount> previousPositions{};
         std::array<bool,
                    kCoordinatePoolPhysicalSlotCount> previousValid{};
+        std::uint64_t previousIndex = 0;
+        std::uint64_t previousDecodedSlot = 0;
+        std::uint8_t previousPhysicalSlotCount = 0;
         bool hasPreviousPositions = false;
     };
 
@@ -810,25 +826,24 @@ struct CoordinatePoolRuntime::Impl {
 
         RingSlot* selected = nullptr;
         auto found = ringSlots.find(component);
+        const bool hasSlot = found != ringSlots.end();
         const bool hasRing = found != ringSlots.end() &&
             found->second.ring != 0;
-        const bool retryMissing = found == ringSlots.end() ||
-            (!hasRing && ShouldRetryCoordinatePoolRing(
-                found->second.stamp, frame));
-        const bool refreshStale = hasRing &&
-            ShouldRefreshCoordinatePoolRing(
-                component,
-                found->second.stamp,
-                frame,
-                layout.ringRefreshFrames);
-        if ((retryMissing || refreshStale) &&
+        const bool searchMissing = ShouldSearchCoordinatePoolRing(
+            hasSlot,
+            hasRing,
+            hasSlot ? found->second.stamp : 0,
+            frame);
+        if (searchMissing &&
             ringSearchBudget.TryConsume(frame)) {
             std::uint64_t ring = 0;
             CoordinatePoolRuntimeError ringError =
                 CoordinatePoolRuntimeError::RingSearchFailed;
             if (ExecuteRingSearchUnlocked(component, ring, ringError)) {
                 RingSlot& slot = ringSlots[component];
+                const std::uint64_t previousRing = slot.ring;
                 if (slot.ring != ring) {
+                    slot.recovery.Reset();
                     slot.candidateTraceFrame =
                         std::numeric_limits<std::uint64_t>::max();
                     slot.candidateTracePhysicalSlot = UINT8_MAX;
@@ -839,6 +854,18 @@ struct CoordinatePoolRuntime::Impl {
                 slot.ring = ring;
                 slot.stamp = frame;
                 selected = &slot;
+                if (IsCoordinatePoolTraceEnabled()) {
+                    std::fprintf(
+                        stderr,
+                        "[coordinate-pool-ring-event] frame=%llu "
+                        "component=%llx event=search_success "
+                        "previous=%llx ring=%llx failures=%u\n",
+                        static_cast<unsigned long long>(frame),
+                        static_cast<unsigned long long>(component),
+                        static_cast<unsigned long long>(previousRing),
+                        static_cast<unsigned long long>(ring),
+                        static_cast<unsigned int>(slot.recovery.Failures()));
+                }
             } else if (hasRing) {
                 // A transient search failure must not publish a different
                 // source or erase the last known-good ring.
@@ -847,6 +874,19 @@ struct CoordinatePoolRuntime::Impl {
                 RingSlot& slot = ringSlots[component];
                 slot.ring = 0;
                 slot.stamp = frame;
+                if (IsCoordinatePoolTraceEnabled()) {
+                    std::fprintf(
+                        stderr,
+                        "[coordinate-pool-ring-event] frame=%llu "
+                        "component=%llx event=search_failed error=%u "
+                        "sys=%d read_stage=%u read_failure=%u\n",
+                        static_cast<unsigned long long>(frame),
+                        static_cast<unsigned long long>(component),
+                        static_cast<unsigned int>(ringError),
+                        probe.systemError,
+                        static_cast<unsigned int>(probe.read.stage),
+                        static_cast<unsigned int>(probe.read.failure));
+                }
                 SetError(ringError);
                 return false;
             }
@@ -880,14 +920,30 @@ struct CoordinatePoolRuntime::Impl {
         std::uint64_t index = 0;
         std::uint64_t indexAfter = 0;
         std::uint64_t decodedPoolSlot = 0;
-        std::uint64_t poolSlot = 0;
+        std::uint64_t poolSlot = kCoordinatePoolPhysicalSlotCount;
         std::uint64_t snapshotAddress = 0;
         std::uint64_t coordinateAddress = 0;
         CoordinatePoolPosition selectedCandidate{};
+        CoordinatePoolSlotLayout slotLayout = slotLayoutCalibration.Layout();
+        if (slotLayout.kind == CoordinatePoolSlotLayoutKind::Conflict) {
+            SetError(
+                CoordinatePoolRuntimeError::SlotLayoutConflict,
+                false,
+                -EPROTO);
+            return false;
+        }
         const bool capturePhysicalSlots =
-            IsCoordinatePoolCandidateTraceFullEnabled();
+            IsCoordinatePoolCandidateTraceFullEnabled() ||
+            !slotLayout.IsLocked();
+        const std::size_t capturedPhysicalSlotCount = capturePhysicalSlots
+            ? (slotLayout.IsLocked()
+                ? slotLayout.physicalSlotCount
+                : kCoordinatePoolPhysicalSlotCount)
+            : 0;
         const std::size_t snapshotSize =
-            (kCoordinatePoolPhysicalSlotCount - 1) *
+            (capturePhysicalSlots
+                    ? capturedPhysicalSlotCount - 1
+                    : 0) *
                 static_cast<std::size_t>(layout.entryStride) +
             sizeof(CoordinatePoolPosition);
         std::vector<std::uint8_t> snapshot;
@@ -902,13 +958,24 @@ struct CoordinatePoolRuntime::Impl {
                 break;
             }
             decodedPoolSlot = finder->decode_ring_slot(index);
-            poolSlot = MapDecodedCoordinatePoolSlot(decodedPoolSlot);
-            if (poolSlot >= kCoordinatePoolPhysicalSlotCount) {
-                SetError(
-                    CoordinatePoolRuntimeError::PositionReadFailed,
-                    true,
-                    -ERANGE);
-                return false;
+            poolSlot = kCoordinatePoolPhysicalSlotCount;
+            if (slotLayout.IsLocked()) {
+                poolSlot = MapDecodedCoordinatePoolSlot(
+                    decodedPoolSlot, slotLayout);
+                if (poolSlot >= kCoordinatePoolPhysicalSlotCount) {
+                    if (!ReadRemoteUnlocked(
+                            indexAddress,
+                            &indexAfter,
+                            sizeof(indexAfter),
+                            CoordinateReadStage::RingIndex)) {
+                        break;
+                    }
+                    if (index == indexAfter) {
+                        stable = true;
+                        break;
+                    }
+                    continue;
+                }
             }
             std::uint64_t relativeAddress = 0;
             std::uint64_t rawSnapshotAddress = 0;
@@ -951,6 +1018,13 @@ struct CoordinatePoolRuntime::Impl {
                     break;
                 }
             } else {
+                if (!slotLayout.IsLocked()) {
+                    SetError(
+                        CoordinatePoolRuntimeError::SlotLayoutPending,
+                        false,
+                        -EAGAIN);
+                    return false;
+                }
                 const std::uint64_t slotOffset =
                     poolSlot * static_cast<std::uint64_t>(layout.entryStride);
                 if (!AddUnsignedOffset(
@@ -985,24 +1059,88 @@ struct CoordinatePoolRuntime::Impl {
             }
         }
         if (!stable) {
-            SetError(
-                probe.read.HasFailure()
-                    ? CoordinatePoolRuntimeError::PositionReadFailed
-                    : CoordinatePoolRuntimeError::PositionUnstable);
+            const CoordinatePoolRuntimeError error = probe.read.HasFailure()
+                ? CoordinatePoolRuntimeError::PositionReadFailed
+                : CoordinatePoolRuntimeError::PositionUnstable;
+            SetError(error);
+            const CoordinatePoolRingReadEvent event =
+                IsCoordinatePoolRingRemoteReadFailure(error, probe.read)
+                ? CoordinatePoolRingReadEvent::RemoteReadFailure
+                : CoordinatePoolRingReadEvent::OtherFailure;
+            const bool invalidateRing = selected->recovery.Observe(event);
+            if (IsCoordinatePoolTraceEnabled() &&
+                event == CoordinatePoolRingReadEvent::RemoteReadFailure) {
+                std::fprintf(
+                    stderr,
+                    "[coordinate-pool-ring-event] frame=%llu "
+                    "component=%llx event=remote_read_failure ring=%llx "
+                    "failures=%u invalidate=%d sys=%d read_stage=%u "
+                    "read_failure=%u read_path=%u read_at=%llx "
+                    "read_n=%zu\n",
+                    static_cast<unsigned long long>(frame),
+                    static_cast<unsigned long long>(component),
+                    static_cast<unsigned long long>(selected->ring),
+                    static_cast<unsigned int>(selected->recovery.Failures()),
+                    invalidateRing ? 1 : 0,
+                    probe.systemError,
+                    static_cast<unsigned int>(probe.read.stage),
+                    static_cast<unsigned int>(probe.read.failure),
+                    static_cast<unsigned int>(probe.read.lastPath),
+                    static_cast<unsigned long long>(probe.read.address),
+                    probe.read.size);
+            }
+            if (invalidateRing) {
+                ringSlots.erase(component);
+            }
             return false;
+        }
+
+        const CoordinatePoolSlotLayoutKind previousLayoutKind =
+            slotLayout.kind;
+        slotLayout = slotLayoutCalibration.ObserveDecodedSlot(
+            decodedPoolSlot);
+        UpdateSlotLayoutProbeUnlocked();
+        if (slotLayout.kind != previousLayoutKind) {
+            TraceSlotLayoutUnlocked(
+                "decoded",
+                component,
+                decodedPoolSlot,
+                0);
+        }
+        if (slotLayout.kind == CoordinatePoolSlotLayoutKind::Conflict) {
+            SetError(
+                CoordinatePoolRuntimeError::SlotLayoutConflict,
+                false,
+                -EPROTO);
+            return false;
+        }
+        if (slotLayout.IsLocked()) {
+            poolSlot = MapDecodedCoordinatePoolSlot(
+                decodedPoolSlot, slotLayout);
+            if (poolSlot >= kCoordinatePoolPhysicalSlotCount) {
+                SetError(
+                    CoordinatePoolRuntimeError::SlotLayoutConflict,
+                    false,
+                    -ERANGE);
+                return false;
+            }
         }
 
         candidates.ring = selected->ring;
         candidates.index = index;
         candidates.decodedPhysicalSlot =
             static_cast<std::uint8_t>(decodedPoolSlot);
-        candidates.selectedPhysicalSlot =
-            static_cast<std::uint8_t>(poolSlot);
-        candidates.activeBank = static_cast<std::uint8_t>(
-            poolSlot / kCoordinatePoolLogicalCandidateCount);
-        candidates.selectedLogicalSlot = static_cast<std::uint8_t>(
-            poolSlot % kCoordinatePoolLogicalCandidateCount);
+        candidates.decodedSlotMask = slotLayoutCalibration.DecodedMask();
         if (!capturePhysicalSlots) {
+            candidates.logicalSlotCount = slotLayout.logicalSlotCount;
+            candidates.physicalSlotCount = slotLayout.physicalSlotCount;
+            candidates.slotPhase = slotLayout.phase;
+            candidates.selectedPhysicalSlot =
+                static_cast<std::uint8_t>(poolSlot);
+            candidates.activeBank = static_cast<std::uint8_t>(
+                poolSlot / slotLayout.logicalSlotCount);
+            candidates.selectedLogicalSlot = static_cast<std::uint8_t>(
+                poolSlot % slotLayout.logicalSlotCount);
             const std::size_t selectedLogical =
                 candidates.selectedLogicalSlot;
             const bool selectedValid = IsFinitePosition(selectedCandidate);
@@ -1011,9 +1149,13 @@ struct CoordinatePoolRuntime::Impl {
             candidates.physicalPositions[poolSlot] = selectedCandidate;
             candidates.physicalValid[poolSlot] = selectedValid;
             if (!IsCoordinatePoolSelectedCandidateValid(candidates)) {
+                selected->recovery.Observe(
+                    CoordinatePoolRingReadEvent::OtherFailure);
                 SetError(CoordinatePoolRuntimeError::PositionNotFinite);
                 return false;
             }
+            selected->recovery.Observe(
+                CoordinatePoolRingReadEvent::Success);
             if (IsCoordinatePoolTraceEnabled()) {
                 std::fprintf(
                     stderr,
@@ -1047,7 +1189,7 @@ struct CoordinatePoolRuntime::Impl {
             return true;
         }
         for (std::size_t physicalSlot = 0;
-             physicalSlot < kCoordinatePoolPhysicalSlotCount;
+             physicalSlot < capturedPhysicalSlotCount;
              ++physicalSlot) {
             const std::size_t offset =
                 physicalSlot * static_cast<std::size_t>(layout.entryStride);
@@ -1060,6 +1202,8 @@ struct CoordinatePoolRuntime::Impl {
             candidates.physicalValid[physicalSlot] =
                 IsFinitePosition(candidate);
             if (selected->hasPreviousPositions &&
+                selected->previousPhysicalSlotCount ==
+                    capturedPhysicalSlotCount &&
                 (selected->previousValid[physicalSlot] !=
                      candidates.physicalValid[physicalSlot] ||
                  std::memcmp(
@@ -1076,16 +1220,93 @@ struct CoordinatePoolRuntime::Impl {
         if (candidates.changedPhysicalCount != 1) {
             candidates.newestPhysicalSlot = UINT8_MAX;
         }
+
+        const CoordinatePoolSlotLayoutKind previousTransitionLayoutKind =
+            slotLayout.kind;
+        if (selected->hasPreviousPositions &&
+            selected->previousPhysicalSlotCount ==
+                capturedPhysicalSlotCount) {
+            const std::size_t evidenceBefore =
+                slotLayoutCalibration.EvidenceCount(
+                    CoordinatePoolSlotLayoutKind::Compact) +
+                slotLayoutCalibration.EvidenceCount(
+                    CoordinatePoolSlotLayoutKind::Extended);
+            const std::uint16_t compactMaskBefore =
+                slotLayoutCalibration.CompactPhaseMask();
+            const std::uint16_t extendedMaskBefore =
+                slotLayoutCalibration.ExtendedPhaseMask();
+            slotLayout = slotLayoutCalibration.ObserveTransition(
+                component,
+                selected->previousIndex,
+                index,
+                selected->previousDecodedSlot,
+                decodedPoolSlot,
+                candidates.changedPhysicalMask);
+            UpdateSlotLayoutProbeUnlocked();
+            const std::size_t evidenceAfter =
+                slotLayoutCalibration.EvidenceCount(
+                    CoordinatePoolSlotLayoutKind::Compact) +
+                slotLayoutCalibration.EvidenceCount(
+                    CoordinatePoolSlotLayoutKind::Extended);
+            if (slotLayout.kind != previousTransitionLayoutKind ||
+                evidenceAfter != evidenceBefore ||
+                slotLayoutCalibration.CompactPhaseMask() !=
+                    compactMaskBefore ||
+                slotLayoutCalibration.ExtendedPhaseMask() !=
+                    extendedMaskBefore) {
+                TraceSlotLayoutUnlocked(
+                    "transition",
+                    component,
+                    decodedPoolSlot,
+                    candidates.changedPhysicalMask);
+            }
+        }
         selected->previousPositions = candidates.physicalPositions;
         selected->previousValid = candidates.physicalValid;
+        selected->previousIndex = index;
+        selected->previousDecodedSlot = decodedPoolSlot;
+        selected->previousPhysicalSlotCount =
+            static_cast<std::uint8_t>(capturedPhysicalSlotCount);
         selected->hasPreviousPositions = true;
+
+        if (slotLayout.kind == CoordinatePoolSlotLayoutKind::Conflict) {
+            SetError(
+                CoordinatePoolRuntimeError::SlotLayoutConflict,
+                false,
+                -EPROTO);
+            return false;
+        }
+        if (!slotLayout.IsLocked()) {
+            SetError(
+                CoordinatePoolRuntimeError::SlotLayoutPending,
+                false,
+                -EAGAIN);
+            return false;
+        }
+        poolSlot = MapDecodedCoordinatePoolSlot(decodedPoolSlot, slotLayout);
+        if (poolSlot >= slotLayout.physicalSlotCount) {
+            SetError(
+                CoordinatePoolRuntimeError::SlotLayoutConflict,
+                false,
+                -ERANGE);
+            return false;
+        }
+        candidates.logicalSlotCount = slotLayout.logicalSlotCount;
+        candidates.physicalSlotCount = slotLayout.physicalSlotCount;
+        candidates.slotPhase = slotLayout.phase;
+        candidates.selectedPhysicalSlot =
+            static_cast<std::uint8_t>(poolSlot);
+        candidates.activeBank = static_cast<std::uint8_t>(
+            poolSlot / slotLayout.logicalSlotCount);
+        candidates.selectedLogicalSlot = static_cast<std::uint8_t>(
+            poolSlot % slotLayout.logicalSlotCount);
 
         const std::size_t bankFirstSlot =
             static_cast<std::size_t>(candidates.activeBank) *
-            kCoordinatePoolLogicalCandidateCount;
+            slotLayout.logicalSlotCount;
         std::uint32_t validMask = 0;
         for (std::size_t logicalSlot = 0;
-             logicalSlot < kCoordinatePoolLogicalCandidateCount;
+             logicalSlot < slotLayout.logicalSlotCount;
              ++logicalSlot) {
             const CoordinatePoolPosition candidate =
                 candidates.physicalPositions[bankFirstSlot + logicalSlot];
@@ -1097,9 +1318,12 @@ struct CoordinatePoolRuntime::Impl {
             }
         }
         if (!IsCoordinatePoolSelectedCandidateValid(candidates)) {
+            selected->recovery.Observe(
+                CoordinatePoolRingReadEvent::OtherFailure);
             SetError(CoordinatePoolRuntimeError::PositionNotFinite);
             return false;
         }
+        selected->recovery.Observe(CoordinatePoolRingReadEvent::Success);
 
         const std::size_t selectedLogical =
             candidates.selectedLogicalSlot;
@@ -1107,7 +1331,7 @@ struct CoordinatePoolRuntime::Impl {
             candidates.positions[selectedLogical];
         coordinateAddress = snapshotAddress +
             poolSlot * static_cast<std::uint64_t>(layout.entryStride);
-        if (capturePhysicalSlots) {
+        if (capturePhysicalSlots && IsCoordinatePoolTraceEnabled()) {
             std::fprintf(
                 stderr,
                 "[coordinate-pool-trace] frame=%llu component=%llx "
@@ -1234,6 +1458,61 @@ struct CoordinatePoolRuntime::Impl {
         }
 
         return true;
+    }
+
+    void UpdateSlotLayoutProbeUnlocked() noexcept {
+        const CoordinatePoolSlotLayout slotLayout =
+            slotLayoutCalibration.Layout();
+        probe.decodedSlotMask = slotLayoutCalibration.DecodedMask();
+        probe.compactPhaseMask =
+            slotLayoutCalibration.CompactPhaseMask();
+        probe.extendedPhaseMask =
+            slotLayoutCalibration.ExtendedPhaseMask();
+        probe.logicalSlotCount = slotLayout.logicalSlotCount;
+        probe.physicalSlotCount = slotLayout.physicalSlotCount;
+        probe.slotPhase = slotLayout.phase;
+        probe.slotLayoutKind = static_cast<std::uint8_t>(slotLayout.kind);
+        probe.compactLayoutEvidence = static_cast<std::uint8_t>(
+            slotLayoutCalibration.EvidenceCount(
+                CoordinatePoolSlotLayoutKind::Compact));
+        probe.extendedLayoutEvidence = static_cast<std::uint8_t>(
+            slotLayoutCalibration.EvidenceCount(
+                CoordinatePoolSlotLayoutKind::Extended));
+    }
+
+    void TraceSlotLayoutUnlocked(const char* event,
+                                 std::uint64_t component,
+                                 std::uint64_t decodedSlot,
+                                 std::uint16_t changedMask) const noexcept {
+        if (!IsCoordinatePoolTraceEnabled()) return;
+        const CoordinatePoolSlotLayout slotLayout =
+            slotLayoutCalibration.Layout();
+        std::fprintf(
+            stderr,
+            "[coordinate-pool-layout] frame=%llu event=%s "
+            "component=%llx decoded=%llu changed_mask=%04x "
+            "kind=%u logical=%u physical=%u phase=%u "
+            "decoded_mask=%04x compact_phase_mask=%04x "
+            "extended_phase_mask=%04x compact_evidence=%zu "
+            "extended_evidence=%zu\n",
+            static_cast<unsigned long long>(frame),
+            event != nullptr ? event : "unknown",
+            static_cast<unsigned long long>(component),
+            static_cast<unsigned long long>(decodedSlot),
+            static_cast<unsigned int>(changedMask),
+            static_cast<unsigned int>(slotLayout.kind),
+            static_cast<unsigned int>(slotLayout.logicalSlotCount),
+            static_cast<unsigned int>(slotLayout.physicalSlotCount),
+            static_cast<unsigned int>(slotLayout.phase),
+            static_cast<unsigned int>(slotLayoutCalibration.DecodedMask()),
+            static_cast<unsigned int>(
+                slotLayoutCalibration.CompactPhaseMask()),
+            static_cast<unsigned int>(
+                slotLayoutCalibration.ExtendedPhaseMask()),
+            slotLayoutCalibration.EvidenceCount(
+                CoordinatePoolSlotLayoutKind::Compact),
+            slotLayoutCalibration.EvidenceCount(
+                CoordinatePoolSlotLayoutKind::Extended));
     }
 
     void FinishReadUnlocked(bool validationWasRequested) {
@@ -1736,6 +2015,7 @@ private:
         probe.poolPointerOffset = finder->pool_ptr_offset;
         probe.indexOffset = finder->index_offset;
         probe.ringOffset = finder->get_ring_offset();
+        finder->compact_runtime_plan();
         ClearReadDiagnosticUnlocked();
         probe.error = CoordinatePoolRuntimeError::None;
         probe.stage = CoordinatePoolRuntimeStage::CodeAnalyzed;
@@ -2283,6 +2563,8 @@ private:
         lastPoolPointer = 0;
         ringSlots.clear();
         ringSearchBudget.Reset();
+        slotLayoutCalibration.Reset();
+        UpdateSlotLayoutProbeUnlocked();
         probe.poolPointer = {};
     }
 
@@ -2367,6 +2649,17 @@ private:
             : rawPointer;
         if (ShouldClearCoordinatePoolRingsAfterPointerRefresh(
                 true, lastPoolPointer, pointer)) {
+            if (IsCoordinatePoolTraceEnabled()) {
+                std::fprintf(
+                    stderr,
+                    "[coordinate-pool-ring-event] frame=%llu "
+                    "component=0 event=pool_changed previous=%llx "
+                    "pool=%llx cleared=%zu\n",
+                    static_cast<unsigned long long>(frame),
+                    static_cast<unsigned long long>(lastPoolPointer),
+                    static_cast<unsigned long long>(pointer),
+                    ringSlots.size());
+            }
             ringSlots.clear();
             ringSearchBudget.Reset();
         }
@@ -2679,6 +2972,7 @@ private:
             std::numeric_limits<std::uint64_t>::max();
         ringSlots.clear();
         ringSearchBudget.Reset();
+        slotLayoutCalibration.Reset();
         probe.bridge = 0;
         probe.context = 0;
         probe.guestEntry = 0;
@@ -2692,6 +2986,16 @@ private:
         probe.poolPointerOffset = 0;
         probe.indexOffset = 0;
         probe.ringOffset = 0;
+        probe.decodedSlotMask = 0;
+        probe.compactPhaseMask = 0;
+        probe.extendedPhaseMask = 0;
+        probe.logicalSlotCount = 0;
+        probe.physicalSlotCount = 0;
+        probe.slotPhase = 0;
+        probe.slotLayoutKind = 0;
+        probe.compactLayoutEvidence = 0;
+        probe.extendedLayoutEvidence = 0;
+        UpdateSlotLayoutProbeUnlocked();
         analysisInvalidated = false;
         nextCodeValidationFrame = 0;
         codeValidationRequested = false;
@@ -2752,6 +3056,7 @@ private:
             std::numeric_limits<std::uint64_t>::max();
         ringSlots.clear();
         ringSearchBudget.Reset();
+        slotLayoutCalibration.Reset();
         probe = {};
         toleratedReadFailure = {};
         layout = configuredLayout;
@@ -2789,6 +3094,7 @@ private:
         std::numeric_limits<std::uint64_t>::max();
     std::unordered_map<std::uint64_t, RingSlot> ringSlots;
     CoordinatePoolRingSearchBudget ringSearchBudget;
+    CoordinatePoolSlotLayoutCalibration slotLayoutCalibration;
     std::unique_ptr<pool::coord_dec::FindDec> finder;
     std::vector<CodeRangeFingerprint> analysisCodeFingerprints;
     ExecutableMappingIndex executableMappingIndex{};

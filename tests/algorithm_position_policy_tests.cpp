@@ -16,6 +16,7 @@ void RunAlgorithmPositionPolicyTests() {
     using lengjing::game::native::AlgorithmPositionSecondDecision;
     using lengjing::game::native::AlgorithmPositionPendingDecision;
     using lengjing::game::native::AlgorithmPositionPendingSample;
+    using lengjing::game::native::AlgorithmPositionOutputDecision;
     using lengjing::game::native::AlgorithmExecutionContextRefreshKey;
     using lengjing::game::native::AlgorithmExecutionContextRefreshPolicy;
     using lengjing::game::native::AlgorithmReplayBackoffPolicy;
@@ -24,6 +25,7 @@ void RunAlgorithmPositionPolicyTests() {
     using lengjing::game::native::EvaluateAlgorithmPositionFirst;
     using lengjing::game::native::EvaluateAlgorithmPositionSecond;
     using lengjing::game::native::ObserveAlgorithmPositionPending;
+    using lengjing::game::native::ObserveAlgorithmPositionOutput;
     using lengjing::game::native::FormatAlgorithmPacgaResult;
     using lengjing::game::native::MakeAlgorithmPositionRefreshPlan;
     using lengjing::game::native::MakeAlgorithmPositionRefreshPlan;
@@ -166,6 +168,66 @@ void RunAlgorithmPositionPolicyTests() {
             AlgorithmPositionPendingDecision::Pending);
     REQUIRE(pending.count == 1);
 
+    pending.Clear();
+    const auto immediateOutput = ObserveAlgorithmPositionOutput(
+        history,
+        AlgorithmPosition{900.0f, 1200.0f, 0.0f},
+        pending,
+        40,
+        start + 410ms);
+    REQUIRE(immediateOutput.decision ==
+        AlgorithmPositionOutputDecision::AcceptImmediate);
+    REQUIRE(immediateOutput.pendingCount == 0);
+    REQUIRE(immediateOutput.distanceSquared ==
+        lengjing::game::native::kAlgorithmPositionFirstDistanceSquared);
+
+    const auto heldOutput = ObserveAlgorithmPositionOutput(
+        history,
+        AlgorithmPosition{3000.0f, 0.0f, 0.0f},
+        pending,
+        41,
+        start + 420ms);
+    REQUIRE(heldOutput.decision ==
+        AlgorithmPositionOutputDecision::RetainHistory);
+    REQUIRE(heldOutput.pendingCount == 1);
+    const auto confirmedOutput = ObserveAlgorithmPositionOutput(
+        history,
+        AlgorithmPosition{3050.0f, 20.0f, 0.0f},
+        pending,
+        42,
+        start + 430ms);
+    REQUIRE(confirmedOutput.decision ==
+        AlgorithmPositionOutputDecision::AcceptConfirmed);
+    REQUIRE(confirmedOutput.pendingCount == 0);
+
+    const auto falseSample = ObserveAlgorithmPositionOutput(
+        history,
+        AlgorithmPosition{6000.0f, 0.0f, 0.0f},
+        pending,
+        50,
+        start + 500ms);
+    REQUIRE(falseSample.decision ==
+        AlgorithmPositionOutputDecision::RetainHistory);
+    REQUIRE(falseSample.pendingCount == 1);
+    const auto trueSample = ObserveAlgorithmPositionOutput(
+        history,
+        AlgorithmPosition{100.0f, 0.0f, 0.0f},
+        pending,
+        51,
+        start + 510ms);
+    REQUIRE(trueSample.decision ==
+        AlgorithmPositionOutputDecision::AcceptImmediate);
+    REQUIRE(trueSample.pendingCount == 0);
+    const auto repeatedFalseSample = ObserveAlgorithmPositionOutput(
+        history,
+        AlgorithmPosition{6000.0f, 0.0f, 0.0f},
+        pending,
+        52,
+        start + 520ms);
+    REQUIRE(repeatedFalseSample.decision ==
+        AlgorithmPositionOutputDecision::RetainHistory);
+    REQUIRE(repeatedFalseSample.pendingCount == 1);
+
     constexpr auto refreshPlan = MakeAlgorithmPositionRefreshPlan(false);
     static_assert(!refreshPlan.first);
     static_assert(refreshPlan.discarded);
@@ -231,6 +293,13 @@ void RunAlgorithmPositionPolicyTests() {
         contextKey, contextStart + 99ms));
     REQUIRE(contextRefresh.ShouldRefresh(
         contextKey, contextStart + 100ms));
+
+    AlgorithmExecutionContextRefreshPolicy defaultContextRefresh;
+    defaultContextRefresh.MarkSucceeded(contextKey, contextStart);
+    REQUIRE(!defaultContextRefresh.ShouldRefresh(
+        contextKey, contextStart + 999ms));
+    REQUIRE(defaultContextRefresh.ShouldRefresh(
+        contextKey, contextStart + 1000ms));
 
     const auto requireContextRefresh =
         [contextKey, contextStart](

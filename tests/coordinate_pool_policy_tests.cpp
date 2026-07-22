@@ -2,7 +2,6 @@
 #include "game/native/CoordinatePoolRuntime.h"
 #include "test_support.h"
 
-#include <algorithm>
 #include <array>
 
 void RunCoordinatePoolPolicyTests() {
@@ -10,7 +9,8 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::CoordinatePoolCodeIdentityChanged;
     using lengjing::game::native::CoordinatePoolContextIdentityChanged;
     using lengjing::game::native::CoordinatePoolEnvironmentFlagEnabled;
-    using lengjing::game::native::CoordinatePoolRingRefreshPhase;
+    using lengjing::game::native::CoordinatePoolRingReadEvent;
+    using lengjing::game::native::CoordinatePoolRingRecoveryState;
     using lengjing::game::native::CoordinatePoolRingSearchBudget;
     using lengjing::game::native::CoordinatePoolRootSnapshot;
     using lengjing::game::native::CoordinatePoolRootStabilityWindow;
@@ -23,7 +23,7 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::NormalizeCoordinatePoolPointer;
     using lengjing::game::native::
         ShouldClearCoordinatePoolRingsAfterPointerRefresh;
-    using lengjing::game::native::ShouldRefreshCoordinatePoolRing;
+    using lengjing::game::native::ShouldSearchCoordinatePoolRing;
     using lengjing::game::native::
         ShouldRequestCoordinatePoolCodeValidationAfterReadFailure;
     using lengjing::game::native::ShouldRetryCoordinatePoolRing;
@@ -31,6 +31,7 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::kCoordinatePoolCodeValidationIdleFrame;
     using lengjing::game::native::kCoordinatePoolCodeValidationRetryFrames;
     using lengjing::game::native::kCoordinatePoolRingRetryFrames;
+    using lengjing::game::native::kCoordinatePoolRingReadFailureThreshold;
     using lengjing::game::native::kCoordinatePoolRingSearchesPerFrame;
     using lengjing::game::native::kCoordinatePoolMaximumRemoteAddress;
     using lengjing::game::native::kCoordinatePoolMinimumRemoteAddress;
@@ -64,41 +65,144 @@ void RunCoordinatePoolPolicyTests() {
         static_cast<std::uint8_t>(candidates.valid.size());
     REQUIRE(!IsCoordinatePoolSelectedCandidateValid(candidates));
 
-    REQUIRE(MapDecodedCoordinatePoolSlot(0) == 7);
-    REQUIRE(MapDecodedCoordinatePoolSlot(6) == 13);
-    REQUIRE(MapDecodedCoordinatePoolSlot(7) == 0);
-    REQUIRE(MapDecodedCoordinatePoolSlot(13) == 6);
-    REQUIRE(MapDecodedCoordinatePoolSlot(14) == 14);
+    using lengjing::game::native::kCoordinatePoolCompactLayout;
+    using lengjing::game::native::kCoordinatePoolExtendedLayout;
+    REQUIRE(MapDecodedCoordinatePoolSlot(0, kCoordinatePoolCompactLayout) ==
+        5);
+    REQUIRE(MapDecodedCoordinatePoolSlot(4, kCoordinatePoolCompactLayout) ==
+        9);
+    REQUIRE(MapDecodedCoordinatePoolSlot(5, kCoordinatePoolCompactLayout) ==
+        0);
+    REQUIRE(MapDecodedCoordinatePoolSlot(9, kCoordinatePoolCompactLayout) ==
+        4);
+    REQUIRE(MapDecodedCoordinatePoolSlot(10, kCoordinatePoolCompactLayout) ==
+        14);
+    REQUIRE(MapDecodedCoordinatePoolSlot(0, kCoordinatePoolExtendedLayout) ==
+        7);
+    REQUIRE(MapDecodedCoordinatePoolSlot(6, kCoordinatePoolExtendedLayout) ==
+        13);
+    REQUIRE(MapDecodedCoordinatePoolSlot(7, kCoordinatePoolExtendedLayout) ==
+        0);
+    REQUIRE(MapDecodedCoordinatePoolSlot(13, kCoordinatePoolExtendedLayout) ==
+        6);
+    REQUIRE(MapDecodedCoordinatePoolSlot(14, kCoordinatePoolExtendedLayout) ==
+        14);
 
-    constexpr std::uint32_t interval = 60;
-    constexpr std::uintptr_t component = 0x101230;
-    constexpr std::uint64_t stamp = 1;
-    const std::uint64_t phase =
-        CoordinatePoolRingRefreshPhase(component, interval);
-    std::uint64_t scheduled = stamp + interval;
-    while (scheduled % interval != phase) ++scheduled;
+    using lengjing::game::native::CoordinatePoolSlotLayoutCalibration;
+    using lengjing::game::native::CoordinatePoolSlotLayoutKind;
+    CoordinatePoolSlotLayoutCalibration extendedCalibration;
+    REQUIRE(extendedCalibration.ObserveDecodedSlot(10).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(extendedCalibration.CompactPhaseMask() == 0);
+    REQUIRE(extendedCalibration.ObserveTransition(
+        0x1000, 1, 2, 1, 6, 0x0210).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(extendedCalibration.ObserveTransition(
+        0x2000, 3, 4, 12, 3, 0x0042).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(extendedCalibration.ObserveTransition(
+        0x1000, 5, 6, 7, 0, 0x0408).kind ==
+        CoordinatePoolSlotLayoutKind::Extended);
+    REQUIRE(extendedCalibration.Layout().physicalSlotCount == 14);
+    REQUIRE(extendedCalibration.Layout().phase == 3);
+    REQUIRE(MapDecodedCoordinatePoolSlot(
+        10, extendedCalibration.Layout()) == 13);
 
-    REQUIRE(!ShouldRefreshCoordinatePoolRing(
-        component, stamp, stamp + interval - 1, interval));
-    REQUIRE(ShouldRefreshCoordinatePoolRing(
-        component, stamp, scheduled, interval));
-    REQUIRE(!ShouldRefreshCoordinatePoolRing(
-        component, stamp, scheduled + 1, interval));
-    REQUIRE(!ShouldRefreshCoordinatePoolRing(
-        component, stamp, scheduled, 0));
+    CoordinatePoolSlotLayoutCalibration noisyExtendedCalibration;
+    REQUIRE(noisyExtendedCalibration.ObserveDecodedSlot(10).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(noisyExtendedCalibration.ObserveTransition(
+        0x3000, 1, 2, 1, 6, 0x0840).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(noisyExtendedCalibration.ObserveTransition(
+        0x1000, 3, 4, 1, 6, 0x0210).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(noisyExtendedCalibration.ObserveTransition(
+        0x2000, 5, 6, 12, 3, 0x0042).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(noisyExtendedCalibration.ObserveTransition(
+        0x1000, 7, 8, 7, 0, 0x0408).kind ==
+        CoordinatePoolSlotLayoutKind::Extended);
+    REQUIRE(noisyExtendedCalibration.Layout().phase == 3);
 
-    std::array<std::size_t, interval> phases{};
-    for (std::uintptr_t index = 0; index < interval; ++index) {
-        ++phases[CoordinatePoolRingRefreshPhase(
-            0x100000 + index * 0x10, interval)];
+    CoordinatePoolSlotLayoutCalibration singleComponentCalibration;
+    REQUIRE(singleComponentCalibration.ObserveDecodedSlot(10).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    for (std::uint64_t index = 0; index < 5; ++index) {
+        REQUIRE(singleComponentCalibration.ObserveTransition(
+            0x1000,
+            index * 2 + 1,
+            index * 2 + 2,
+            1,
+            6,
+            0x0210).kind == CoordinatePoolSlotLayoutKind::Unknown);
     }
-    REQUIRE(*std::max_element(phases.begin(), phases.end()) <= 2);
+    REQUIRE(singleComponentCalibration.ObserveTransition(
+        0x1000, 11, 12, 12, 3, 0x0042).kind ==
+        CoordinatePoolSlotLayoutKind::Extended);
+    REQUIRE(singleComponentCalibration.Layout().phase == 3);
+
+    CoordinatePoolSlotLayoutCalibration legacyExtendedCalibration;
+    REQUIRE(legacyExtendedCalibration.ObserveDecodedSlot(10).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(legacyExtendedCalibration.ObserveTransition(
+        0x1000, 1, 2, 1, 6, 0x2100).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(legacyExtendedCalibration.ObserveTransition(
+        0x2000, 3, 4, 12, 3, 0x0420).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(legacyExtendedCalibration.ObserveTransition(
+        0x1000, 5, 6, 7, 0, 0x0081).kind ==
+        CoordinatePoolSlotLayoutKind::Extended);
+    REQUIRE(legacyExtendedCalibration.Layout().physicalSlotCount == 14);
+    REQUIRE(legacyExtendedCalibration.Layout().phase == 7);
+    REQUIRE(MapDecodedCoordinatePoolSlot(
+        10, legacyExtendedCalibration.Layout()) == 3);
+
+    CoordinatePoolSlotLayoutCalibration compactCalibration;
+    REQUIRE(compactCalibration.ObserveTransition(
+        0x1000, 1, 2, 5, 4, 0x0201).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(compactCalibration.ObserveTransition(
+        0x2000, 3, 4, 8, 7, 0x000c).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(compactCalibration.ObserveTransition(
+        0x1000, 5, 6, 2, 3, 0x0180).kind ==
+        CoordinatePoolSlotLayoutKind::Compact);
+    REQUIRE(compactCalibration.Layout().physicalSlotCount == 10);
+    REQUIRE(compactCalibration.Layout().logicalSlotCount == 5);
+    REQUIRE(compactCalibration.Layout().phase == 5);
+    REQUIRE(compactCalibration.EvidenceCount(
+        CoordinatePoolSlotLayoutKind::Compact) == 3);
+    REQUIRE(compactCalibration.ComponentCount(
+        CoordinatePoolSlotLayoutKind::Compact) == 2);
 
     REQUIRE(!ShouldRetryCoordinatePoolRing(
         100, 100 + kCoordinatePoolRingRetryFrames - 1));
     REQUIRE(ShouldRetryCoordinatePoolRing(
         100, 100 + kCoordinatePoolRingRetryFrames));
     REQUIRE(ShouldRetryCoordinatePoolRing(100, 99));
+    REQUIRE(ShouldSearchCoordinatePoolRing(false, false, 0, 100));
+    REQUIRE(!ShouldSearchCoordinatePoolRing(true, true, 1, UINT64_MAX));
+    REQUIRE(!ShouldSearchCoordinatePoolRing(
+        true, false, 100, 100 + kCoordinatePoolRingRetryFrames - 1));
+    REQUIRE(ShouldSearchCoordinatePoolRing(
+        true, false, 100, 100 + kCoordinatePoolRingRetryFrames));
+
+    REQUIRE(kCoordinatePoolRingReadFailureThreshold == 2);
+    CoordinatePoolRingRecoveryState recovery;
+    REQUIRE(recovery.Failures() == 0);
+    REQUIRE(!recovery.Observe(CoordinatePoolRingReadEvent::RemoteReadFailure));
+    REQUIRE(recovery.Failures() == 1);
+    REQUIRE(!recovery.Observe(CoordinatePoolRingReadEvent::OtherFailure));
+    REQUIRE(recovery.Failures() == 1);
+    REQUIRE(!recovery.Observe(CoordinatePoolRingReadEvent::Success));
+    REQUIRE(recovery.Failures() == 0);
+    REQUIRE(!recovery.Observe(CoordinatePoolRingReadEvent::RemoteReadFailure));
+    REQUIRE(recovery.Observe(CoordinatePoolRingReadEvent::RemoteReadFailure));
+    REQUIRE(recovery.Failures() == kCoordinatePoolRingReadFailureThreshold);
+    recovery.Reset();
+    REQUIRE(recovery.Failures() == 0);
 
     CoordinatePoolRingSearchBudget budget;
     for (std::size_t index = 0;
@@ -232,18 +336,28 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::CoordinateReadFailure;
     using lengjing::game::CoordinateReadStage;
     using lengjing::game::native::CoordinatePoolRuntimeError;
+    using lengjing::game::native::IsCoordinatePoolRingRemoteReadFailure;
     CoordinateReadDiagnostic positionReadFailure{};
     positionReadFailure.stage = CoordinateReadStage::Position;
     positionReadFailure.failure = CoordinateReadFailure::AddressFault;
     REQUIRE(!ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
         CoordinatePoolRuntimeError::PositionReadFailed,
         positionReadFailure));
+    REQUIRE(IsCoordinatePoolRingRemoteReadFailure(
+        CoordinatePoolRuntimeError::PositionReadFailed,
+        positionReadFailure));
     positionReadFailure.stage = CoordinateReadStage::RingIndex;
     REQUIRE(!ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
         CoordinatePoolRuntimeError::PositionReadFailed,
         positionReadFailure));
+    REQUIRE(IsCoordinatePoolRingRemoteReadFailure(
+        CoordinatePoolRuntimeError::PositionReadFailed,
+        positionReadFailure));
     positionReadFailure.stage = CoordinateReadStage::DynamicPage;
     REQUIRE(ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
+        CoordinatePoolRuntimeError::PositionReadFailed,
+        positionReadFailure));
+    REQUIRE(!IsCoordinatePoolRingRemoteReadFailure(
         CoordinatePoolRuntimeError::PositionReadFailed,
         positionReadFailure));
     REQUIRE(ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
@@ -252,7 +366,13 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(!ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
         CoordinatePoolRuntimeError::PositionUnstable,
         CoordinateReadDiagnostic{}));
+    REQUIRE(!IsCoordinatePoolRingRemoteReadFailure(
+        CoordinatePoolRuntimeError::PositionUnstable,
+        CoordinateReadDiagnostic{}));
     REQUIRE(!ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
+        CoordinatePoolRuntimeError::PositionNotFinite,
+        CoordinateReadDiagnostic{}));
+    REQUIRE(!IsCoordinatePoolRingRemoteReadFailure(
         CoordinatePoolRuntimeError::PositionNotFinite,
         CoordinateReadDiagnostic{}));
     REQUIRE(!ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(

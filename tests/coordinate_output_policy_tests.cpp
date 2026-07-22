@@ -8,6 +8,7 @@ void RunCoordinateOutputPolicyTests() {
     using namespace std::chrono_literals;
     using lengjing::game::native::CanRetainDecodedPosition;
     using lengjing::game::native::CanUseDecodedPositionHistory;
+    using lengjing::game::native::CharacterCoordinateDisposition;
     using lengjing::game::native::ClassifyDecodedPositionCacheIdentity;
     using lengjing::game::native::CoordinateFailureRecoveryDelay;
     using lengjing::game::native::DecodedPositionCacheIdentity;
@@ -18,9 +19,12 @@ void RunCoordinateOutputPolicyTests() {
     using lengjing::game::native::IsCoordinateFrameHealthy;
     using lengjing::game::native::ShouldDiscardDecodedPositionCache;
     using lengjing::game::native::ShouldBlockStandardCoordinateFallback;
+    using lengjing::game::native::ShouldBlockStandardCoordinateFallbackForBuild;
     using lengjing::game::native::ShouldReadAlgorithmCoordinate;
+    using lengjing::game::native::ShouldReadAlgorithmCoordinateForBuild;
     using lengjing::game::native::ShouldEscalateDecodedPositionFailure;
     using lengjing::game::native::ShouldKeepDecodedPositionSource;
+    using lengjing::game::native::ResolveCharacterCoordinateDisposition;
 
     REQUIRE(!ShouldKeepDecodedPositionSource(false, true));
     REQUIRE(!ShouldKeepDecodedPositionSource(true, false));
@@ -104,6 +108,27 @@ void RunCoordinateOutputPolicyTests() {
     REQUIRE(!ShouldBlockStandardCoordinateFallback(true, true, false));
     REQUIRE(!ShouldBlockStandardCoordinateFallback(false, true, true));
     REQUIRE(!ShouldBlockStandardCoordinateFallback(true, false, false));
+    REQUIRE(!ShouldReadAlgorithmCoordinateForBuild(false, false, true));
+    REQUIRE(!ShouldReadAlgorithmCoordinateForBuild(false, true, true));
+    REQUIRE(ShouldReadAlgorithmCoordinateForBuild(true, false, true));
+    REQUIRE(ShouldReadAlgorithmCoordinateForBuild(true, true, true));
+    REQUIRE(!ShouldReadAlgorithmCoordinateForBuild(true, true, false));
+    REQUIRE(ShouldBlockStandardCoordinateFallbackForBuild(
+        true, false, true, false));
+    REQUIRE(ShouldBlockStandardCoordinateFallbackForBuild(
+        true, true, true, false));
+    REQUIRE(!ShouldBlockStandardCoordinateFallbackForBuild(
+        true, true, true, true));
+    REQUIRE(!ShouldBlockStandardCoordinateFallbackForBuild(
+        false, true, true, false));
+    REQUIRE(ResolveCharacterCoordinateDisposition(false, false) ==
+        CharacterCoordinateDisposition::ContinueExisting);
+    REQUIRE(ResolveCharacterCoordinateDisposition(false, true) ==
+        CharacterCoordinateDisposition::ContinueExisting);
+    REQUIRE(ResolveCharacterCoordinateDisposition(true, false) ==
+        CharacterCoordinateDisposition::ReturnUnavailable);
+    REQUIRE(ResolveCharacterCoordinateDisposition(true, true) ==
+        CharacterCoordinateDisposition::ReturnAlgorithm);
     REQUIRE(CanRetainDecodedPosition(
         true,
         cacheIdentity,

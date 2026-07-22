@@ -39,6 +39,21 @@ constexpr std::uint32_t kCapacity = 8;
 constexpr std::uint32_t kTargetPhysicalIndex = 5;
 constexpr std::uint32_t kDecoyPhysicalIndex = 2;
 constexpr std::size_t kRecordSize = 0x568;
+constexpr std::uintptr_t kCapturedObject = UINT64_C(0x7CB9B3E020);
+constexpr std::uintptr_t kCapturedOwner = UINT64_C(0x7B5DA58020);
+constexpr std::uintptr_t kCapturedRecords = UINT64_C(0x7C62B04000);
+constexpr std::uint32_t kCapturedCodecSeed = UINT32_C(0x1894ECA5);
+constexpr std::uint32_t kCapturedTableSeed = UINT32_C(0x7FF5C76C);
+constexpr std::uint64_t kCapturedTableSalt =
+    UINT64_C(0x11C313E3EA1737EF);
+constexpr std::uint64_t kCapturedFieldKey =
+    UINT64_C(0x27B8A9561347C707);
+constexpr std::uint64_t kCapturedObjectKey =
+    UINT64_C(0xE42BC6A9177E1B6F);
+constexpr std::uint64_t kCapturedRingSalt =
+    UINT64_C(0xB658A68DB5F40E0D);
+constexpr std::uint64_t kCapturedOwnerKey =
+    UINT64_C(0xFD8095BF57C07B6F);
 
 class Memory final {
 public:
@@ -73,7 +88,11 @@ public:
             bytes[index] = found->second;
         }
         const std::uintptr_t end = address + size;
-        if (address < kObject + 0x240 && end > kObject + 0x210) {
+        const bool syntheticField =
+            address < kObject + 0x174 && end > kObject + 0x168;
+        const bool capturedField = address < kCapturedObject + 0x174 &&
+            end > kCapturedObject + 0x168;
+        if (syntheticField || capturedField) {
             ordinaryFieldRead_ = true;
         }
         if (address == unstableRecord_ && size == kRecordSize) {
@@ -189,18 +208,18 @@ void PutFixture(Memory& memory,
     };
     memory.Put(kConfig + 0x210, parameters);
 
-    memory.Put(kState + 0x00, kIndexArray);
-    memory.Put(kState + 0xAB0, kAuxiliary);
+    memory.Put(kState + 0x10, kIndexArray);
+    memory.Put(kState + 0xAC0, kAuxiliary);
     memory.Put(kState + 0xC20, kCodecSeed);
-    memory.Put(kState + 0xC38, kCapacity);
+    memory.Put(kState + 0xC40, kCapacity);
     const std::uint32_t count = 2;
-    memory.Put(kState + 0x1498, count);
+    memory.Put(kState + 0x14A0, count);
     memory.Put(kState + 0x186C, kTableSeed);
-    memory.Put(kState + 0x450, options.globalRing);
-    const std::uint32_t recordsSeed = kTableSeed;
+    memory.Put(kState + 0x2118, options.globalRing);
+    const std::uint32_t recordsSeed = kTableSeed + 2U;
     const std::uint64_t tableSalt =
         RuntimeCoordinateCodec::EncodeRecordValue(kRecords, recordsSeed);
-    memory.Put(kState + 0x2588, tableSalt);
+    memory.Put(kState + 0x2598, tableSalt);
 
     memory.Put(kObject + 0xE8, kOwner);
     const RuntimeCoordinateCodec::Coordinate publicValue{
@@ -208,11 +227,11 @@ void PutFixture(Memory& memory,
         20.0f,
         30.0f,
     };
-    memory.Put(kObject + 0x210, publicValue);
+    memory.Put(kObject + 0x168, publicValue);
 
     std::array<std::uint8_t, kRecordSize> target{};
     const std::uintptr_t targetField =
-        kObject + (options.wrongFieldKey ? 0x168 : 0x210);
+        kObject + (options.wrongFieldKey ? 0x210 : 0x168);
     const std::uint64_t targetFieldKey =
         RuntimeCoordinateCodec::EncodeRecordValue(
             targetField, kCodecSeed);
@@ -244,7 +263,7 @@ void PutFixture(Memory& memory,
           };
     Store(
         target,
-        0x28 + static_cast<std::size_t>(ringSlot) * 0x30,
+        0x18 + static_cast<std::size_t>(ringSlot) * 0x0C,
         expected);
     memory.PutBytes(
         RecordAddress(kTargetPhysicalIndex),
@@ -254,7 +273,7 @@ void PutFixture(Memory& memory,
     std::array<std::uint8_t, kRecordSize> decoy{};
     const std::uint64_t decoyFieldKey =
         RuntimeCoordinateCodec::EncodeRecordValue(
-            kObject + 0x168, kCodecSeed);
+            kObject + 0x210, kCodecSeed);
     Store(decoy, 0x10, decoyFieldKey);
     memory.PutBytes(
         RecordAddress(kDecoyPhysicalIndex),
@@ -272,6 +291,37 @@ void PutFixture(Memory& memory,
               kTargetPhysicalIndex,
           };
     memory.Put(kIndexArray, indexes);
+}
+
+void PutRecordedKind2Fixture(
+    Memory& memory,
+    const RuntimeCoordinateCodecLayout& layout) {
+    PutFixture(memory, layout);
+
+    memory.Put(kState + 0xC20, kCapturedCodecSeed);
+    const std::uint32_t one = 1;
+    memory.Put(kState + 0xC40, one);
+    memory.Put(kState + 0x14A0, one);
+    memory.Put(kState + 0x186C, kCapturedTableSeed);
+    memory.Put(kState + 0x2118, one);
+    memory.Put(kState + 0x2598, kCapturedTableSalt);
+    memory.Put(kCapturedObject + 0xE8, kCapturedOwner);
+
+    std::array<std::uint8_t, kRecordSize> record{};
+    Store(record, 0x10, kCapturedFieldKey);
+    Store(record, 0x530, kCapturedObjectKey);
+    record[0x53D] = 0;
+    Store(record, 0x540, kCapturedRingSalt);
+    Store(record, 0x548, kCapturedOwnerKey);
+    const RuntimeCoordinateCodec::Coordinate expected{
+        8174.84375f,
+        -17462.125f,
+        714.033936f,
+    };
+    Store(record, 0x18 + 3 * 0x0C, expected);
+    memory.PutBytes(kCapturedRecords, record.data(), record.size());
+    const std::uint32_t physicalIndex = 0;
+    memory.Put(kIndexArray, physicalIndex);
 }
 
 template <typename Read>
@@ -336,6 +386,35 @@ void TestRefreshAndExactRingDecode() {
     REQUIRE(diagnostic.owner == kOwner);
     REQUIRE(diagnostic.physicalIndex == kTargetPhysicalIndex);
     REQUIRE(diagnostic.ringSlot == 2);
+    REQUIRE(!memory.OrdinaryFieldRead());
+}
+
+void TestRecordedKind2RingDecode() {
+    const RuntimeCoordinateCodecLayout layout = BuildLayout();
+    Memory memory;
+    PutRecordedKind2Fixture(memory, layout);
+    auto read = [&memory](std::uintptr_t address,
+                          void* destination,
+                          std::size_t size) {
+        return memory.Read(address, destination, size);
+    };
+    RuntimeCoordinateCodec codec(layout);
+    REQUIRE(Refresh(codec, read));
+    REQUIRE(codec.Diagnostic().records == kCapturedRecords);
+
+    RuntimeCoordinateCodec::Coordinate coordinate{};
+    RuntimeCoordinateCodecDiagnostic diagnostic{};
+    REQUIRE(codec.Decode(
+        kCapturedObject,
+        kCapturedOwner,
+        coordinate,
+        diagnostic,
+        read));
+    REQUIRE(coordinate.x == 8174.84375f);
+    REQUIRE(coordinate.y == -17462.125f);
+    REQUIRE(coordinate.z == 714.033936f);
+    REQUIRE(diagnostic.ringSlot == 3);
+    REQUIRE(diagnostic.record == kCapturedRecords);
     REQUIRE(!memory.OrdinaryFieldRead());
 }
 
@@ -449,7 +528,7 @@ void TestSnapshotAndBoundsFailures() {
         PutFixture(memory, layout);
         const std::uint32_t count = 1;
         const std::uint32_t invalidPhysical = kCapacity;
-        memory.Put(kState + 0x1498, count);
+        memory.Put(kState + 0x14A0, count);
         memory.Put(kIndexArray, invalidPhysical);
         auto read = [&memory](std::uintptr_t address,
                               void* destination,
@@ -514,6 +593,7 @@ int main() {
     try {
         TestAddressAndCodecPrimitives();
         TestRefreshAndExactRingDecode();
+        TestRecordedKind2RingDecode();
         TestStrictIdentityFailures();
         TestSnapshotAndBoundsFailures();
         TestFingerprintFailure();

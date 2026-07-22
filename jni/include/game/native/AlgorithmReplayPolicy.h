@@ -37,7 +37,7 @@ public:
     using TimePoint = Clock::time_point;
 
     explicit AlgorithmExecutionContextRefreshPolicy(
-        Duration successLifetime = std::chrono::milliseconds(100)) noexcept
+        Duration successLifetime = std::chrono::seconds(1)) noexcept
         : successLifetime_(successLifetime) {}
 
     bool ShouldRefresh(const AlgorithmExecutionContextRefreshKey& key,

@@ -11,6 +11,8 @@ set "TARGET="
 set "PRODUCT="
 set "AUTH_CONFIG="
 set "PROJECTILE_TRACKING=OFF"
+set "ALGORITHM_COORDINATE=OFF"
+set "COORDINATE_DEBUG_LOG=OFF"
 set "BUILD_RESULT=0"
 set "CLEAN_BUILD=0"
 set "PAUSE_ON_EXIT=1"
@@ -30,8 +32,13 @@ if /i "%~1"=="--no-pause" (
     shift
     goto :parse_build_args
 )
+if /i "%~1"=="--algorithm-coordinate" (
+    set "ALGORITHM_COORDINATE=ON"
+    shift
+    goto :parse_build_args
+)
 echo [ERROR] Unsupported option: %~1
-echo [USAGE] 1_build.bat [clean] [--no-pause]
+echo [USAGE] 1_build.bat [clean] [--no-pause] [--algorithm-coordinate]
 set "BUILD_RESULT=1"
 goto :finish
 
@@ -113,6 +120,8 @@ set "NINJA_CMAKE=%NINJA:\=/%"
 echo [NDK] %NDK%
 echo [TARGET] !TARGET!
 echo [PROJECTILE_TRACKING] !PROJECTILE_TRACKING!
+echo [ALGORITHM_COORDINATE] !ALGORITHM_COORDINATE!
+echo [COORDINATE_DEBUG_LOG] !COORDINATE_DEBUG_LOG!
 
 set "AUTH_PRELOAD="
 if defined AUTH_CONFIG (
@@ -130,6 +139,8 @@ cmake -Wno-deprecated --no-warn-unused-cli -S "%SOURCE_DIR%" -B "%BUILD_DIR%" -G
     -DANDROID_PLATFORM=android-21 ^
     -DANDROID_STL=c++_static ^
     -DLENGJING_ENABLE_PROJECTILE_TRACKING=!PROJECTILE_TRACKING! ^
+    -DLENGJING_ENABLE_ALGORITHM_COORDINATE=!ALGORITHM_COORDINATE! ^
+    -DLENGJING_ENABLE_COORDINATE_DEBUG_LOG=!COORDINATE_DEBUG_LOG! ^
     -DCMAKE_BUILD_TYPE=Release
 if errorlevel 1 (
     echo [ERROR] Android configuration failed.

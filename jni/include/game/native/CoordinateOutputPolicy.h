@@ -6,6 +6,10 @@
 
 namespace lengjing::game::native {
 
+#ifndef LENGJING_ENABLE_ALGORITHM_COORDINATE
+#define LENGJING_ENABLE_ALGORITHM_COORDINATE 0
+#endif
+
 using DecodedPositionClock = std::chrono::steady_clock;
 
 struct DecodedPositionCacheIdentity {
@@ -18,6 +22,12 @@ enum class DecodedPositionCacheIdentityState : std::uint8_t {
     Unknown = 0,
     Match,
     Mismatch,
+};
+
+enum class CharacterCoordinateDisposition : std::uint8_t {
+    ContinueExisting,
+    ReturnAlgorithm,
+    ReturnUnavailable,
 };
 
 inline constexpr auto kDecodedPositionRetention = std::chrono::seconds(3);
@@ -34,22 +44,58 @@ constexpr bool ShouldKeepDecodedPositionSource(
     return coordinateDecryptRequested && directMode;
 }
 
-inline constexpr bool kAlgorithmCoordinateEnabled = false;
+inline constexpr bool kAlgorithmCoordinateEnabled =
+    LENGJING_ENABLE_ALGORITHM_COORDINATE != 0;
 
-constexpr bool ShouldReadAlgorithmCoordinate(
+constexpr bool ShouldReadAlgorithmCoordinateForBuild(
+    bool buildEnabled,
     bool,
     bool algorithmDecryptRequested) noexcept {
-    return kAlgorithmCoordinateEnabled && algorithmDecryptRequested;
+    return buildEnabled && algorithmDecryptRequested;
+}
+
+constexpr bool ShouldReadAlgorithmCoordinate(
+    bool coordinateDecryptRequested,
+    bool algorithmDecryptRequested) noexcept {
+    return ShouldReadAlgorithmCoordinateForBuild(
+        kAlgorithmCoordinateEnabled,
+        coordinateDecryptRequested,
+        algorithmDecryptRequested);
+}
+
+constexpr CharacterCoordinateDisposition
+ResolveCharacterCoordinateDisposition(
+    bool algorithmActive,
+    bool finalizedAlgorithmCoordinateAccepted) noexcept {
+    if (!algorithmActive) {
+        return CharacterCoordinateDisposition::ContinueExisting;
+    }
+    return finalizedAlgorithmCoordinateAccepted
+        ? CharacterCoordinateDisposition::ReturnAlgorithm
+        : CharacterCoordinateDisposition::ReturnUnavailable;
+}
+
+constexpr bool ShouldBlockStandardCoordinateFallbackForBuild(
+    bool buildEnabled,
+    bool coordinateDecryptRequested,
+    bool algorithmDecryptRequested,
+    bool algorithmCoordinateAvailable) noexcept {
+    return ShouldReadAlgorithmCoordinateForBuild(
+               buildEnabled,
+               coordinateDecryptRequested,
+               algorithmDecryptRequested) &&
+        !algorithmCoordinateAvailable;
 }
 
 constexpr bool ShouldBlockStandardCoordinateFallback(
     bool coordinateDecryptRequested,
     bool algorithmDecryptRequested,
     bool algorithmCoordinateAvailable) noexcept {
-    return ShouldReadAlgorithmCoordinate(
-               coordinateDecryptRequested,
-               algorithmDecryptRequested) &&
-        !algorithmCoordinateAvailable;
+    return ShouldBlockStandardCoordinateFallbackForBuild(
+        kAlgorithmCoordinateEnabled,
+        coordinateDecryptRequested,
+        algorithmDecryptRequested,
+        algorithmCoordinateAvailable);
 }
 
 constexpr bool IsCoordinateFrameHealthy(

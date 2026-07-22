@@ -246,42 +246,59 @@ void TestProbeSuccessPolicy() {
     successful.y = 2.0f;
     successful.z = 3.0f;
     REQUIRE(lengjing::game::native::
+        IsAlgorithmCoordinateSampleValid(true, true, 1, successful));
+    REQUIRE(!lengjing::game::native::
         IsAlgorithmCoordinateProbeSuccessful(true, true, 1, successful));
     REQUIRE(!lengjing::game::native::
-        IsAlgorithmCoordinateProbeSuccessful(false, true, 1, successful));
+        IsAlgorithmCoordinateSampleValid(false, true, 1, successful));
     REQUIRE(!lengjing::game::native::
-        IsAlgorithmCoordinateProbeSuccessful(true, false, 1, successful));
+        IsAlgorithmCoordinateSampleValid(true, false, 1, successful));
     REQUIRE(!lengjing::game::native::
-        IsAlgorithmCoordinateProbeSuccessful(true, true, 0, successful));
+        IsAlgorithmCoordinateSampleValid(true, true, 0, successful));
     successful.error = AlgorithmCoordinateReadError::ActorNotFound;
     REQUIRE(!lengjing::game::native::
-        IsAlgorithmCoordinateProbeSuccessful(true, true, 1, successful));
+        IsAlgorithmCoordinateSampleValid(true, true, 1, successful));
     successful.error = AlgorithmCoordinateReadError::None;
     successful.x = 0.0f;
     successful.y = 0.0f;
     successful.z = -90.0f;
     REQUIRE(!lengjing::game::native::
-        IsAlgorithmCoordinateProbeSuccessful(true, true, 1, successful));
+        IsAlgorithmCoordinateSampleValid(true, true, 1, successful));
 
     lengjing::game::native::RuntimeCoordinateCodecDiagnostic object{};
     object.stage = lengjing::game::native::
         RuntimeCoordinateCodecStage::RingDecoded;
     object.decodedX = 1.0f;
     object.decodedY = 2.0f;
-    object.decodedZ = 3.0f;
+    object.decodedZ = 93.0f;
+    object.verticalAdjustmentFirst = 90.0f;
+    object.verticalAdjustmentSecond = 90.0f;
+    object.presentedZ = 3.0f;
     REQUIRE(lengjing::game::native::
+        IsAlgorithmCoordinateObjectSampleValid(true, true, 1, 0, object));
+    REQUIRE(!lengjing::game::native::
         IsAlgorithmCoordinateObjectProbeSuccessful(true, true, 1, 0, object));
     REQUIRE(!lengjing::game::native::
-        IsAlgorithmCoordinateObjectProbeSuccessful(true, true, 1, 1, object));
+        kAlgorithmCoordinateVisualAcceptanceCompleted);
+    REQUIRE(!lengjing::game::native::
+        IsAlgorithmCoordinateObjectSampleValid(true, true, 1, 1, object));
     object.stage = lengjing::game::native::
         RuntimeCoordinateCodecStage::Ready;
     REQUIRE(!lengjing::game::native::
-        IsAlgorithmCoordinateObjectProbeSuccessful(true, true, 1, 0, object));
+        IsAlgorithmCoordinateObjectSampleValid(true, true, 1, 0, object));
     object.stage = lengjing::game::native::
         RuntimeCoordinateCodecStage::RingDecoded;
     object.decodedX = std::numeric_limits<float>::quiet_NaN();
     REQUIRE(!lengjing::game::native::
-        IsAlgorithmCoordinateObjectProbeSuccessful(true, true, 1, 0, object));
+        IsAlgorithmCoordinateObjectSampleValid(true, true, 1, 0, object));
+    object.decodedX = 1.0f;
+    object.verticalAdjustmentSecond = 59.99f;
+    REQUIRE(!lengjing::game::native::
+        IsAlgorithmCoordinateObjectSampleValid(true, true, 1, 0, object));
+    object.verticalAdjustmentSecond = 90.0f;
+    object.presentedZ = 93.0f;
+    REQUIRE(!lengjing::game::native::
+        IsAlgorithmCoordinateObjectSampleValid(true, true, 1, 0, object));
 }
 
 }  // namespace

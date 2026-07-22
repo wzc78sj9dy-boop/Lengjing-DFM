@@ -45,6 +45,10 @@
 #define LENGJING_ENABLE_RUNTIME_AUTH 0
 #endif
 
+#ifndef LENGJING_ENABLE_COORDINATE_DEBUG_LOG
+#define LENGJING_ENABLE_COORDINATE_DEBUG_LOG 0
+#endif
+
 namespace {
 
 std::atomic_bool gStopRequested{false};
@@ -99,7 +103,11 @@ int ProbeSeconds(const char* environmentName) {
 }
 
 int CoordinateProbeSeconds() {
+#if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
     return ProbeSeconds("LENGJING_COORDINATE_PROBE_SECONDS");
+#else
+    return 0;
+#endif
 }
 
 int AlgorithmCoordinateProbeSeconds() {
@@ -346,7 +354,7 @@ int RunAlgorithmCoordinateProbe(
         }
         if (status.algorithmCoordinateObjectSuccesses != 0 &&
             lengjing::game::native::
-                IsAlgorithmCoordinateObjectProbeSuccessful(
+                IsAlgorithmCoordinateObjectSampleValid(
                     status.algorithmCoordinateRequested,
                     status.algorithmCoordinateActive,
                     status.algorithmCoordinateObjectSuccesses,
@@ -370,7 +378,8 @@ int RunAlgorithmCoordinateProbe(
         "table_attempts=%llu table_successes=%llu fallbacks=%llu "
         "runtime_error=%u table_error=%u table=%llX records=%llX "
         "count=%u valid=%u object=%llX token=%llX "
-        "xyz=(%.3f,%.3f,%.3f)\n",
+        "raw=(%.3f,%.3f,%.3f) v_adjust=(%.3f,%.3f) "
+        "base_z=%.3f visual_acceptance=%d\n",
         requested ? 1 : 0,
         active ? 1 : 0,
         runtimeReady ? 1 : 0,
@@ -399,7 +408,12 @@ int RunAlgorithmCoordinateProbe(
         static_cast<unsigned long long>(successfulRuntime.token),
         successfulRuntime.decodedX,
         successfulRuntime.decodedY,
-        successfulRuntime.decodedZ);
+        successfulRuntime.decodedZ,
+        successfulRuntime.verticalAdjustmentFirst,
+        successfulRuntime.verticalAdjustmentSecond,
+        successfulRuntime.presentedZ,
+        lengjing::game::native::
+            kAlgorithmCoordinateVisualAcceptanceCompleted ? 1 : 0);
     std::fflush(stderr);
 
     const int runtimeExitCode = lengjing::app::ResolveRuntimeExitCode(
@@ -733,7 +747,32 @@ int main() {
             algorithmPosition);
     }
 
+#if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
+    constexpr char kCoordinateDebugLogPath[] =
+        "/sdcard/Download/lengjing_coordinate_debug.txt";
+    const char* requestedCoordinateDebugLogPath =
+        std::getenv("LENGJING_COORDINATE_DEBUG_LOG_PATH");
+    const char* coordinateDebugLogPath =
+        requestedCoordinateDebugLogPath != nullptr &&
+            requestedCoordinateDebugLogPath[0] == '/'
+        ? requestedCoordinateDebugLogPath
+        : kCoordinateDebugLogPath;
+    setenv("LENGJING_COORDINATE_TRACE", "1", 1);
+    setenv("LENGJING_COORDINATE_CANDIDATES_FULL", "0", 1);
+    if (!lengjing::platform::DetachFromTerminal(
+            coordinateDebugLogPath)) {
+        return 3;
+    }
+    std::fprintf(
+        stderr,
+        "[coordinate-debug-start] schema=3 version=%s pid=%d "
+        "trace=1 candidates_full=0 phase_calibration=1\n",
+        LENGJING_VERSION,
+        static_cast<int>(getpid()));
+    std::fflush(stderr);
+#else
     if (!lengjing::platform::DetachFromTerminal()) return 3;
+#endif
     if constexpr (kRuntimeAuthEnabled) {
         std::system(
             "chmod 000 /sys/class/kgsl/kgsl/pagetables >/dev/null 2>&1");
@@ -802,6 +841,28 @@ int main() {
 
     controller.SetDisplayGeometry(
         surfaceWidth, surfaceHeight, display.orientation);
+
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
+    const char* algorithmVisualAutostart =
+        std::getenv("LENGJING_ALGORITHM_VISUAL_AUTOSTART");
+    if (algorithmVisualAutostart != nullptr &&
+        algorithmVisualAutostart[0] != '\0' &&
+        algorithmVisualAutostart[0] != '0') {
+        controller.Model().visual.coordinateDecrypt = false;
+        controller.Model().visual.algorithmDecrypt = true;
+        controller.StartRuntime();
+        const char* showAlgorithmValidationMenu =
+            std::getenv("LENGJING_ALGORITHM_VISUAL_SHOW_MENU");
+        const bool showValidationMenu =
+            showAlgorithmValidationMenu != nullptr &&
+            showAlgorithmValidationMenu[0] != '\0' &&
+            showAlgorithmValidationMenu[0] != '0';
+        if (showValidationMenu) {
+            controller.Model().page = lengjing::ui::Page::Runtime;
+        }
+        controller.SetMenuVisible(showValidationMenu);
+    }
+#endif
 
     lengjing::platform::MenuKeyMonitor menuKeys;
     menuKeys.Start();

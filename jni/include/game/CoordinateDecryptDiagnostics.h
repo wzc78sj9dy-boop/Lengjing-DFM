@@ -57,6 +57,8 @@ enum class CoordinateDecryptError : std::uint16_t {
     RingExecutionFailed = 5014,
     RingRegisterReadFailed = 5015,
     RingValueInvalid = 5016,
+    PoolSlotLayoutPending = 5017,
+    PoolSlotLayoutConflict = 5018,
 
     ReplayInvalidInput = 5101,
     ReplayEngineSetupFailed = 5102,

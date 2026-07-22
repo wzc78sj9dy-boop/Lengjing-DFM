@@ -117,6 +117,19 @@ enum class AlgorithmPositionPendingDecision {
     Confirmed,
 };
 
+enum class AlgorithmPositionOutputDecision {
+    AcceptImmediate,
+    RetainHistory,
+    AcceptConfirmed,
+};
+
+struct AlgorithmPositionOutputObservation {
+    AlgorithmPositionOutputDecision decision =
+        AlgorithmPositionOutputDecision::RetainHistory;
+    double distanceSquared = 0.0;
+    std::size_t pendingCount = 0;
+};
+
 inline bool IsAlgorithmPositionPendingFresh(
     const AlgorithmPositionPendingSample& sample,
     std::uint64_t frame,
@@ -235,6 +248,33 @@ inline AlgorithmPositionPendingDecision ObserveAlgorithmPositionPending(
     sample.lastAt = now;
     sample.count = 1;
     return AlgorithmPositionPendingDecision::Pending;
+}
+
+inline AlgorithmPositionOutputObservation ObserveAlgorithmPositionOutput(
+    const AlgorithmPosition& history,
+    const AlgorithmPosition& candidate,
+    AlgorithmPositionPendingSample& pending,
+    std::uint64_t frame,
+    std::chrono::steady_clock::time_point now) noexcept {
+    AlgorithmPositionOutputObservation observation{};
+    observation.distanceSquared =
+        AlgorithmPositionDistanceSquared(history, candidate);
+    if (observation.distanceSquared <=
+        kAlgorithmPositionFirstDistanceSquared) {
+        pending.Clear();
+        observation.decision =
+            AlgorithmPositionOutputDecision::AcceptImmediate;
+        return observation;
+    }
+
+    const AlgorithmPositionPendingDecision pendingDecision =
+        ObserveAlgorithmPositionPending(pending, candidate, frame, now);
+    observation.pendingCount = pending.count;
+    observation.decision = pendingDecision ==
+            AlgorithmPositionPendingDecision::Confirmed
+        ? AlgorithmPositionOutputDecision::AcceptConfirmed
+        : AlgorithmPositionOutputDecision::RetainHistory;
+    return observation;
 }
 
 class AlgorithmPositionResultCache final {

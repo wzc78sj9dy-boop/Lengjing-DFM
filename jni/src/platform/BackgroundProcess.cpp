@@ -10,14 +10,33 @@
 namespace lengjing::platform {
 namespace {
 
-bool RedirectStandardStreams() noexcept {
+bool RedirectStandardStreams(const char* standardErrorPath) noexcept {
     const int nullDescriptor = open("/dev/null", O_RDWR);
     if (nullDescriptor < 0) return false;
 
+    int errorDescriptor = nullDescriptor;
+    if (standardErrorPath != nullptr) {
+        if (standardErrorPath[0] != '/') {
+            close(nullDescriptor);
+            return false;
+        }
+        errorDescriptor = open(
+            standardErrorPath,
+            O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+            0644);
+        if (errorDescriptor < 0) {
+            close(nullDescriptor);
+            return false;
+        }
+    }
     const bool redirected =
         dup2(nullDescriptor, STDIN_FILENO) >= 0 &&
         dup2(nullDescriptor, STDOUT_FILENO) >= 0 &&
-        dup2(nullDescriptor, STDERR_FILENO) >= 0;
+        dup2(errorDescriptor, STDERR_FILENO) >= 0;
+    if (errorDescriptor != nullDescriptor &&
+        errorDescriptor > STDERR_FILENO) {
+        close(errorDescriptor);
+    }
     if (nullDescriptor > STDERR_FILENO) close(nullDescriptor);
     return redirected;
 }
@@ -33,7 +52,7 @@ bool WriteReady(int descriptor) noexcept {
 
 }  // namespace
 
-bool DetachFromTerminal() noexcept {
+bool DetachFromTerminal(const char* standardErrorPath) noexcept {
     int readyPipe[2] = {-1, -1};
     if (pipe(readyPipe) != 0) return false;
 
@@ -60,7 +79,9 @@ bool DetachFromTerminal() noexcept {
     std::signal(SIGHUP, SIG_IGN);
     std::signal(SIGPIPE, SIG_IGN);
 
-    if (setsid() < 0 || !RedirectStandardStreams() || chdir("/") != 0) {
+    if (setsid() < 0 ||
+        !RedirectStandardStreams(standardErrorPath) ||
+        chdir("/") != 0) {
         close(readyPipe[1]);
         _exit(1);
     }

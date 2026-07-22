@@ -12,6 +12,10 @@
 #include <limits>
 #include <utility>
 
+#ifndef LENGJING_ENABLE_ALGORITHM_COORDINATE
+#define LENGJING_ENABLE_ALGORITHM_COORDINATE 0
+#endif
+
 namespace lengjing::config {
 namespace {
 
@@ -34,6 +38,15 @@ bool ReadBool(const Json& object, const char* key, bool fallback) {
     return iterator != object.end() && iterator->is_boolean()
         ? iterator->get<bool>()
         : fallback;
+}
+
+constexpr bool AlgorithmDecryptSettingForSave(bool requested) noexcept {
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
+    return requested;
+#else
+    static_cast<void>(requested);
+    return false;
+#endif
 }
 
 ui::RenderBackend ReadRenderBackend(
@@ -155,7 +168,8 @@ Json Serialize(const ui::UiModel& model) {
             {"model_geometry", model.visual.modelGeometry},
             {"visibility_color", model.visual.visibilityColor},
             {"coordinate_decrypt", model.visual.coordinateDecrypt},
-            {"algorithm_decrypt", false},
+            {"algorithm_decrypt", AlgorithmDecryptSettingForSave(
+                model.visual.algorithmDecrypt)},
             {"box", model.visual.box},
             {"snapline", model.visual.snapline},
             {"skeleton", model.visual.skeleton},
@@ -253,6 +267,11 @@ void Apply(const Json& root, ui::UiModel& model) {
     LOAD_VISUAL_BOOL(modelGeometry, "model_geometry");
     LOAD_VISUAL_BOOL(visibilityColor, "visibility_color");
     LOAD_VISUAL_BOOL(coordinateDecrypt, "coordinate_decrypt");
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
+    LOAD_VISUAL_BOOL(algorithmDecrypt, "algorithm_decrypt");
+#else
+    model.visual.algorithmDecrypt = false;
+#endif
     LOAD_VISUAL_BOOL(box, "box");
     LOAD_VISUAL_BOOL(snapline, "snapline");
     LOAD_VISUAL_BOOL(skeleton, "skeleton");
@@ -438,7 +457,9 @@ const std::string& LocalConfig::Path() const noexcept {
 }
 
 bool LocalConfig::Load(ui::UiModel& model, std::string* error) const {
+#if !LENGJING_ENABLE_ALGORITHM_COORDINATE
     model.visual.algorithmDecrypt = false;
+#endif
     std::ifstream stream(path_, std::ios::binary);
     if (!stream.is_open()) {
         if (errno == ENOENT) {

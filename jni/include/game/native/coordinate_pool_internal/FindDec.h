@@ -50,6 +50,12 @@ namespace coord_dec {
 
         int find_dec(uint64_t entry_address);
 
+        void compact_runtime_plan() noexcept {
+            entry = nullptr;
+            analyze.release_analysis_storage();
+            binary_.release_analysis_storage();
+        }
+
         void setup_param() {
             for (const auto &p: mem_param_list) {
                 params[p.name] = p.value;

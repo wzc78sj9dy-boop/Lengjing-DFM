@@ -27,10 +27,15 @@ class Analyze {
 public:
 	std::vector<VarParam> varParams;
 
+    void release_analysis_storage() noexcept
+	{
+		std::unordered_map<arm64_reg, std::shared_ptr<Expr>>().swap(regs);
+	}
+
     void reset()
 	{
 		varParams.clear();
-		regs.clear();
+		release_analysis_storage();
 	}
 	void setVal(arm64_reg reg, const char* name);
 	int parse(cs_insn* insn);
