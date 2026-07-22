@@ -166,12 +166,14 @@ struct CoordinatePoolRuntimeProbe {
     std::uint32_t ringOffset = 0;
     std::uint16_t decodedSlotMask = 0;
     std::uint16_t compactPhaseMask = 0;
+    std::uint16_t intermediatePhaseMask = 0;
     std::uint16_t extendedPhaseMask = 0;
     std::uint8_t logicalSlotCount = 0;
     std::uint8_t physicalSlotCount = 0;
     std::uint8_t slotPhase = 0;
     std::uint8_t slotLayoutKind = 0;
     std::uint8_t compactLayoutEvidence = 0;
+    std::uint8_t intermediateLayoutEvidence = 0;
     std::uint8_t extendedLayoutEvidence = 0;
     std::int32_t threadId = 0;
     std::uint64_t contextGeneration = 0;

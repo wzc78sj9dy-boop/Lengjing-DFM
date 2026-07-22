@@ -1014,14 +1014,20 @@ struct CoordinatePoolRuntime::Impl {
                         snapshot.data(),
                         snapshotSize,
                         CoordinateReadStage::Position);
-                if (ShouldRetryCoordinatePoolCompactSnapshot(
-                        slotLayout,
-                        slotLayoutCalibration.CompactPossible(),
-                        decodedPoolSlot,
-                        capturedPhysicalSlotCount,
-                        snapshotRead)) {
-                    capturedPhysicalSlotCount =
-                        kCoordinatePoolCompactLayout.physicalSlotCount;
+                while (!snapshotRead) {
+                    const std::size_t retryPhysicalSlotCount =
+                        CoordinatePoolSnapshotRetrySlotCount(
+                            slotLayout,
+                            slotLayoutCalibration.CompactPossible(),
+                            slotLayoutCalibration.IntermediatePossible(),
+                            decodedPoolSlot,
+                            capturedPhysicalSlotCount,
+                            snapshotRead);
+                    if (retryPhysicalSlotCount >=
+                        capturedPhysicalSlotCount) {
+                        break;
+                    }
+                    capturedPhysicalSlotCount = retryPhysicalSlotCount;
                     snapshotSize = snapshotSizeFor(
                         capturedPhysicalSlotCount);
                     snapshot.resize(snapshotSize);
@@ -1120,8 +1126,9 @@ struct CoordinatePoolRuntime::Impl {
             return false;
         }
 
+        const CoordinatePoolSlotLayout previousSlotLayout = slotLayout;
         const CoordinatePoolSlotLayoutKind previousLayoutKind =
-            slotLayout.kind;
+            previousSlotLayout.kind;
         slotLayout = slotLayoutCalibration.ObserveDecodedSlot(
             decodedPoolSlot);
         UpdateSlotLayoutProbeUnlocked();
@@ -1131,6 +1138,19 @@ struct CoordinatePoolRuntime::Impl {
                 component,
                 decodedPoolSlot,
                 0);
+        }
+        if (ShouldRestartCoordinatePoolSnapshotAfterLayoutChange(
+                capturePhysicalSlots,
+                previousSlotLayout,
+                slotLayout)) {
+            for (auto& item : ringSlots) {
+                item.second.hasPreviousPositions = false;
+            }
+            SetError(
+                CoordinatePoolRuntimeError::SlotLayoutPending,
+                false,
+                -EAGAIN);
+            return false;
         }
         if (slotLayout.kind == CoordinatePoolSlotLayoutKind::Conflict) {
             SetError(
@@ -1157,6 +1177,13 @@ struct CoordinatePoolRuntime::Impl {
             static_cast<std::uint8_t>(decodedPoolSlot);
         candidates.decodedSlotMask = slotLayoutCalibration.DecodedMask();
         if (!capturePhysicalSlots) {
+            if (!slotLayout.IsLocked()) {
+                SetError(
+                    CoordinatePoolRuntimeError::SlotLayoutPending,
+                    false,
+                    -EAGAIN);
+                return false;
+            }
             candidates.logicalSlotCount = slotLayout.logicalSlotCount;
             candidates.physicalSlotCount = slotLayout.physicalSlotCount;
             candidates.slotPhase = slotLayout.phase;
@@ -1255,9 +1282,13 @@ struct CoordinatePoolRuntime::Impl {
                 slotLayoutCalibration.EvidenceCount(
                     CoordinatePoolSlotLayoutKind::Compact) +
                 slotLayoutCalibration.EvidenceCount(
+                    CoordinatePoolSlotLayoutKind::Intermediate) +
+                slotLayoutCalibration.EvidenceCount(
                     CoordinatePoolSlotLayoutKind::Extended);
             const std::uint16_t compactMaskBefore =
                 slotLayoutCalibration.CompactPhaseMask();
+            const std::uint16_t intermediateMaskBefore =
+                slotLayoutCalibration.IntermediatePhaseMask();
             const std::uint16_t extendedMaskBefore =
                 slotLayoutCalibration.ExtendedPhaseMask();
             slotLayout = slotLayoutCalibration.ObserveTransition(
@@ -1272,11 +1303,15 @@ struct CoordinatePoolRuntime::Impl {
                 slotLayoutCalibration.EvidenceCount(
                     CoordinatePoolSlotLayoutKind::Compact) +
                 slotLayoutCalibration.EvidenceCount(
+                    CoordinatePoolSlotLayoutKind::Intermediate) +
+                slotLayoutCalibration.EvidenceCount(
                     CoordinatePoolSlotLayoutKind::Extended);
             if (slotLayout.kind != previousTransitionLayoutKind ||
                 evidenceAfter != evidenceBefore ||
                 slotLayoutCalibration.CompactPhaseMask() !=
                     compactMaskBefore ||
+                slotLayoutCalibration.IntermediatePhaseMask() !=
+                    intermediateMaskBefore ||
                 slotLayoutCalibration.ExtendedPhaseMask() !=
                     extendedMaskBefore) {
                 TraceSlotLayoutUnlocked(
@@ -1306,11 +1341,20 @@ struct CoordinatePoolRuntime::Impl {
                 slotLayoutCalibration.EvidenceCount(
                     CoordinatePoolSlotLayoutKind::Compact) != 0 ||
                 slotLayoutCalibration.EvidenceCount(
+                    CoordinatePoolSlotLayoutKind::Intermediate) != 0 ||
+                slotLayoutCalibration.EvidenceCount(
                     CoordinatePoolSlotLayoutKind::Extended) != 0;
             SetError(
                 hasLayoutEvidence
                     ? CoordinatePoolRuntimeError::SlotLayoutPending
                     : CoordinatePoolRuntimeError::SlotLayoutEvidenceMissing,
+                false,
+                -EAGAIN);
+            return false;
+        }
+        if (capturedPhysicalSlotCount < slotLayout.physicalSlotCount) {
+            SetError(
+                CoordinatePoolRuntimeError::SlotLayoutPending,
                 false,
                 -EAGAIN);
             return false;
@@ -1498,6 +1542,8 @@ struct CoordinatePoolRuntime::Impl {
         probe.decodedSlotMask = slotLayoutCalibration.DecodedMask();
         probe.compactPhaseMask =
             slotLayoutCalibration.CompactPhaseMask();
+        probe.intermediatePhaseMask =
+            slotLayoutCalibration.IntermediatePhaseMask();
         probe.extendedPhaseMask =
             slotLayoutCalibration.ExtendedPhaseMask();
         probe.logicalSlotCount = slotLayout.logicalSlotCount;
@@ -1507,6 +1553,9 @@ struct CoordinatePoolRuntime::Impl {
         probe.compactLayoutEvidence = static_cast<std::uint8_t>(
             slotLayoutCalibration.EvidenceCount(
                 CoordinatePoolSlotLayoutKind::Compact));
+        probe.intermediateLayoutEvidence = static_cast<std::uint8_t>(
+            slotLayoutCalibration.EvidenceCount(
+                CoordinatePoolSlotLayoutKind::Intermediate));
         probe.extendedLayoutEvidence = static_cast<std::uint8_t>(
             slotLayoutCalibration.EvidenceCount(
                 CoordinatePoolSlotLayoutKind::Extended));
@@ -1525,7 +1574,8 @@ struct CoordinatePoolRuntime::Impl {
             "component=%llx decoded=%llu changed_mask=%04x "
             "kind=%u logical=%u physical=%u phase=%u "
             "decoded_mask=%04x compact_phase_mask=%04x "
-            "extended_phase_mask=%04x compact_evidence=%zu "
+            "intermediate_phase_mask=%04x extended_phase_mask=%04x "
+            "compact_evidence=%zu intermediate_evidence=%zu "
             "extended_evidence=%zu\n",
             static_cast<unsigned long long>(frame),
             event != nullptr ? event : "unknown",
@@ -1540,9 +1590,13 @@ struct CoordinatePoolRuntime::Impl {
             static_cast<unsigned int>(
                 slotLayoutCalibration.CompactPhaseMask()),
             static_cast<unsigned int>(
+                slotLayoutCalibration.IntermediatePhaseMask()),
+            static_cast<unsigned int>(
                 slotLayoutCalibration.ExtendedPhaseMask()),
             slotLayoutCalibration.EvidenceCount(
                 CoordinatePoolSlotLayoutKind::Compact),
+            slotLayoutCalibration.EvidenceCount(
+                CoordinatePoolSlotLayoutKind::Intermediate),
             slotLayoutCalibration.EvidenceCount(
                 CoordinatePoolSlotLayoutKind::Extended));
     }
@@ -3021,12 +3075,14 @@ private:
         probe.ringOffset = 0;
         probe.decodedSlotMask = 0;
         probe.compactPhaseMask = 0;
+        probe.intermediatePhaseMask = 0;
         probe.extendedPhaseMask = 0;
         probe.logicalSlotCount = 0;
         probe.physicalSlotCount = 0;
         probe.slotPhase = 0;
         probe.slotLayoutKind = 0;
         probe.compactLayoutEvidence = 0;
+        probe.intermediateLayoutEvidence = 0;
         probe.extendedLayoutEvidence = 0;
         UpdateSlotLayoutProbeUnlocked();
         analysisInvalidated = false;

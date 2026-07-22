@@ -28,6 +28,9 @@ void RunCoordinatePoolPolicyTests() {
         ShouldRequestCoordinatePoolCodeValidationAfterReadFailure;
     using lengjing::game::native::ShouldRetryCoordinatePoolRing;
     using lengjing::game::native::ShouldRetryCoordinatePoolCompactSnapshot;
+    using lengjing::game::native::CoordinatePoolSnapshotRetrySlotCount;
+    using lengjing::game::native::
+        ShouldRestartCoordinatePoolSnapshotAfterLayoutChange;
     using lengjing::game::native::ShouldValidateCoordinatePoolCode;
     using lengjing::game::native::kCoordinatePoolCodeValidationIdleFrame;
     using lengjing::game::native::kCoordinatePoolCodeValidationRetryFrames;
@@ -67,6 +70,7 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(!IsCoordinatePoolSelectedCandidateValid(candidates));
 
     using lengjing::game::native::kCoordinatePoolCompactLayout;
+    using lengjing::game::native::kCoordinatePoolIntermediateLayout;
     using lengjing::game::native::kCoordinatePoolExtendedLayout;
     REQUIRE(MapDecodedCoordinatePoolSlot(0, kCoordinatePoolCompactLayout) ==
         5);
@@ -78,6 +82,16 @@ void RunCoordinatePoolPolicyTests() {
         4);
     REQUIRE(MapDecodedCoordinatePoolSlot(10, kCoordinatePoolCompactLayout) ==
         14);
+    REQUIRE(MapDecodedCoordinatePoolSlot(
+        0, kCoordinatePoolIntermediateLayout) == 6);
+    REQUIRE(MapDecodedCoordinatePoolSlot(
+        5, kCoordinatePoolIntermediateLayout) == 11);
+    REQUIRE(MapDecodedCoordinatePoolSlot(
+        6, kCoordinatePoolIntermediateLayout) == 0);
+    REQUIRE(MapDecodedCoordinatePoolSlot(
+        11, kCoordinatePoolIntermediateLayout) == 5);
+    REQUIRE(MapDecodedCoordinatePoolSlot(
+        12, kCoordinatePoolIntermediateLayout) == 14);
     REQUIRE(MapDecodedCoordinatePoolSlot(0, kCoordinatePoolExtendedLayout) ==
         7);
     REQUIRE(MapDecodedCoordinatePoolSlot(6, kCoordinatePoolExtendedLayout) ==
@@ -91,10 +105,55 @@ void RunCoordinatePoolPolicyTests() {
 
     using lengjing::game::native::CoordinatePoolSlotLayoutCalibration;
     using lengjing::game::native::CoordinatePoolSlotLayoutKind;
+    REQUIRE(static_cast<std::uint8_t>(
+        CoordinatePoolSlotLayoutKind::Conflict) == 3);
+    REQUIRE(static_cast<std::uint8_t>(
+        CoordinatePoolSlotLayoutKind::Intermediate) == 4);
+
+    CoordinatePoolSlotLayoutCalibration intermediateCalibration;
+    REQUIRE(intermediateCalibration.ObserveDecodedSlot(10).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(!intermediateCalibration.CompactPossible());
+    REQUIRE(intermediateCalibration.IntermediatePossible());
+    REQUIRE(intermediateCalibration.ObserveTransition(
+        0x1000, 1, 2, 5, 0, 0x0810).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(intermediateCalibration.ObserveTransition(
+        0x2000, 3, 4, 9, 4, 0x0108).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(intermediateCalibration.ObserveTransition(
+        0x3000, 5, 6, 2, 9, 0x0102).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(intermediateCalibration.ObserveTransition(
+        0x1000, 7, 8, 0, 7, 0x0840).kind ==
+        CoordinatePoolSlotLayoutKind::Intermediate);
+    REQUIRE(intermediateCalibration.Layout().logicalSlotCount == 6);
+    REQUIRE(intermediateCalibration.Layout().physicalSlotCount == 12);
+    REQUIRE(intermediateCalibration.Layout().phase == 11);
+    REQUIRE(intermediateCalibration.IntermediatePhaseMask() == 0x0800);
+    REQUIRE(intermediateCalibration.EvidenceCount(
+        CoordinatePoolSlotLayoutKind::Intermediate) == 4);
+    REQUIRE(intermediateCalibration.ComponentCount(
+        CoordinatePoolSlotLayoutKind::Intermediate) == 3);
+    REQUIRE(MapDecodedCoordinatePoolSlot(
+        10, intermediateCalibration.Layout()) == 9);
+
+    CoordinatePoolSlotLayoutCalibration tiedCalibration;
+    for (std::uintptr_t component = 1; component <= 6; ++component) {
+        REQUIRE(tiedCalibration.ObserveTransition(
+            component,
+            component * 2,
+            component * 2 + 1,
+            1,
+            2,
+            0x0006).kind == CoordinatePoolSlotLayoutKind::Unknown);
+    }
+
     CoordinatePoolSlotLayoutCalibration extendedCalibration;
-    REQUIRE(extendedCalibration.ObserveDecodedSlot(10).kind ==
+    REQUIRE(extendedCalibration.ObserveDecodedSlot(12).kind ==
         CoordinatePoolSlotLayoutKind::Unknown);
     REQUIRE(extendedCalibration.CompactPhaseMask() == 0);
+    REQUIRE(extendedCalibration.IntermediatePhaseMask() == 0);
     REQUIRE(extendedCalibration.ObserveTransition(
         0x1000, 1, 2, 1, 6, 0x0210).kind ==
         CoordinatePoolSlotLayoutKind::Unknown);
@@ -110,7 +169,7 @@ void RunCoordinatePoolPolicyTests() {
         10, extendedCalibration.Layout()) == 13);
 
     CoordinatePoolSlotLayoutCalibration noisyExtendedCalibration;
-    REQUIRE(noisyExtendedCalibration.ObserveDecodedSlot(10).kind ==
+    REQUIRE(noisyExtendedCalibration.ObserveDecodedSlot(12).kind ==
         CoordinatePoolSlotLayoutKind::Unknown);
     REQUIRE(noisyExtendedCalibration.ObserveTransition(
         0x3000, 1, 2, 1, 6, 0x0840).kind ==
@@ -127,7 +186,7 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(noisyExtendedCalibration.Layout().phase == 3);
 
     CoordinatePoolSlotLayoutCalibration singleComponentCalibration;
-    REQUIRE(singleComponentCalibration.ObserveDecodedSlot(10).kind ==
+    REQUIRE(singleComponentCalibration.ObserveDecodedSlot(12).kind ==
         CoordinatePoolSlotLayoutKind::Unknown);
     for (std::uint64_t index = 0; index < 5; ++index) {
         REQUIRE(singleComponentCalibration.ObserveTransition(
@@ -144,7 +203,7 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(singleComponentCalibration.Layout().phase == 3);
 
     CoordinatePoolSlotLayoutCalibration legacyExtendedCalibration;
-    REQUIRE(legacyExtendedCalibration.ObserveDecodedSlot(10).kind ==
+    REQUIRE(legacyExtendedCalibration.ObserveDecodedSlot(12).kind ==
         CoordinatePoolSlotLayoutKind::Unknown);
     REQUIRE(legacyExtendedCalibration.ObserveTransition(
         0x1000, 1, 2, 1, 6, 0x2100).kind ==
@@ -210,6 +269,10 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(compactUpgradeCalibration.ObserveDecodedSlot(10).kind ==
         CoordinatePoolSlotLayoutKind::Unknown);
     REQUIRE(!compactUpgradeCalibration.CompactPossible());
+    REQUIRE(compactUpgradeCalibration.IntermediatePossible());
+    REQUIRE(compactUpgradeCalibration.ObserveDecodedSlot(12).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(!compactUpgradeCalibration.IntermediatePossible());
     REQUIRE(compactUpgradeCalibration.ObserveTransition(
         0x1000, 7, 8, 1, 6, 0x0210).kind ==
         CoordinatePoolSlotLayoutKind::Unknown);
@@ -220,8 +283,56 @@ void RunCoordinatePoolPolicyTests() {
         0x1000, 11, 12, 7, 0, 0x0408).kind ==
         CoordinatePoolSlotLayoutKind::Extended);
 
+    CoordinatePoolSlotLayoutCalibration compactIntermediateUpgrade;
+    compactIntermediateUpgrade.ObserveTransition(
+        0x1000, 1, 2, 5, 4, 0x0201);
+    compactIntermediateUpgrade.ObserveTransition(
+        0x2000, 3, 4, 8, 7, 0x000c);
+    REQUIRE(compactIntermediateUpgrade.ObserveTransition(
+        0x1000, 5, 6, 2, 3, 0x0180).kind ==
+        CoordinatePoolSlotLayoutKind::Compact);
+    REQUIRE(compactIntermediateUpgrade.ObserveDecodedSlot(10).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(compactIntermediateUpgrade.ObserveTransition(
+        0x1000, 7, 8, 5, 0, 0x0810).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(compactIntermediateUpgrade.ObserveTransition(
+        0x2000, 9, 10, 9, 4, 0x0108).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(compactIntermediateUpgrade.ObserveTransition(
+        0x3000, 11, 12, 2, 9, 0x0102).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(compactIntermediateUpgrade.ObserveTransition(
+        0x1000, 13, 14, 0, 7, 0x0840).kind ==
+        CoordinatePoolSlotLayoutKind::Intermediate);
+
+    CoordinatePoolSlotLayoutCalibration intermediateUpgradeCalibration;
+    intermediateUpgradeCalibration.ObserveDecodedSlot(10);
+    intermediateUpgradeCalibration.ObserveTransition(
+        0x1000, 1, 2, 5, 0, 0x0810);
+    intermediateUpgradeCalibration.ObserveTransition(
+        0x2000, 3, 4, 9, 4, 0x0108);
+    intermediateUpgradeCalibration.ObserveTransition(
+        0x3000, 5, 6, 2, 9, 0x0102);
+    REQUIRE(intermediateUpgradeCalibration.ObserveTransition(
+        0x1000, 7, 8, 0, 7, 0x0840).kind ==
+        CoordinatePoolSlotLayoutKind::Intermediate);
+    REQUIRE(intermediateUpgradeCalibration.ObserveDecodedSlot(12).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(!intermediateUpgradeCalibration.CompactPossible());
+    REQUIRE(!intermediateUpgradeCalibration.IntermediatePossible());
+    REQUIRE(intermediateUpgradeCalibration.ObserveTransition(
+        0x1000, 9, 10, 1, 6, 0x0210).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(intermediateUpgradeCalibration.ObserveTransition(
+        0x2000, 11, 12, 12, 3, 0x0042).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(intermediateUpgradeCalibration.ObserveTransition(
+        0x1000, 13, 14, 7, 0, 0x0408).kind ==
+        CoordinatePoolSlotLayoutKind::Extended);
+
     CoordinatePoolSlotLayoutCalibration invalidDecodedCalibration;
-    invalidDecodedCalibration.ObserveDecodedSlot(10);
+    invalidDecodedCalibration.ObserveDecodedSlot(12);
     invalidDecodedCalibration.ObserveTransition(
         0x1000, 1, 2, 1, 6, 0x0210);
     invalidDecodedCalibration.ObserveTransition(
@@ -252,6 +363,34 @@ void RunCoordinatePoolPolicyTests() {
         {}, true, 9, 14, true));
     REQUIRE(!ShouldRetryCoordinatePoolCompactSnapshot(
         kCoordinatePoolCompactLayout, true, 9, 14, false));
+
+    REQUIRE(CoordinatePoolSnapshotRetrySlotCount(
+        {}, true, true, 9, 14, false) == 12);
+    REQUIRE(CoordinatePoolSnapshotRetrySlotCount(
+        {}, true, true, 9, 12, false) == 10);
+    REQUIRE(CoordinatePoolSnapshotRetrySlotCount(
+        {}, false, true, 11, 14, false) == 12);
+    REQUIRE(CoordinatePoolSnapshotRetrySlotCount(
+        {}, false, false, 12, 14, false) == 14);
+    REQUIRE(CoordinatePoolSnapshotRetrySlotCount(
+        {}, true, true, 9, 14, true) == 14);
+    REQUIRE(CoordinatePoolSnapshotRetrySlotCount(
+        kCoordinatePoolCompactLayout, true, true, 9, 14, false) == 14);
+
+    REQUIRE(ShouldRestartCoordinatePoolSnapshotAfterLayoutChange(
+        false, kCoordinatePoolCompactLayout, {}));
+    REQUIRE(ShouldRestartCoordinatePoolSnapshotAfterLayoutChange(
+        false, kCoordinatePoolIntermediateLayout, {}));
+    REQUIRE(!ShouldRestartCoordinatePoolSnapshotAfterLayoutChange(
+        true, kCoordinatePoolCompactLayout, {}));
+    REQUIRE(!ShouldRestartCoordinatePoolSnapshotAfterLayoutChange(
+        false,
+        kCoordinatePoolExtendedLayout,
+        {CoordinatePoolSlotLayoutKind::Conflict, 0, 0, 0}));
+    REQUIRE(!ShouldRestartCoordinatePoolSnapshotAfterLayoutChange(
+        false,
+        kCoordinatePoolCompactLayout,
+        kCoordinatePoolIntermediateLayout));
 
     REQUIRE(!ShouldRetryCoordinatePoolRing(
         100, 100 + kCoordinatePoolRingRetryFrames - 1));

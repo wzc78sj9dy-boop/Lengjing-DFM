@@ -802,8 +802,8 @@ int main() {
     }
     std::fprintf(
         stderr,
-        "[coordinate-debug-start] schema=3 version=%s pid=%d "
-        "trace=1 candidates_full=0 phase_calibration=1\n",
+        "[coordinate-debug-start] schema=4 version=%s pid=%d "
+        "trace=1 candidates_full=0 slot_family_calibration=1\n",
         LENGJING_VERSION,
         static_cast<int>(getpid()));
     std::fflush(stderr);

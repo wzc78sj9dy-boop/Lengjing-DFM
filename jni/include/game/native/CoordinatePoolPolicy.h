@@ -20,6 +20,7 @@ inline constexpr std::uint64_t kCoordinatePoolMaximumRemoteAddress =
     UINT64_C(0x10000000000);
 
 inline constexpr std::size_t kCoordinatePoolCompactLogicalSlotCount = 5;
+inline constexpr std::size_t kCoordinatePoolIntermediateLogicalSlotCount = 6;
 inline constexpr std::size_t kCoordinatePoolExtendedLogicalSlotCount = 7;
 inline constexpr std::size_t kCoordinatePoolBankCount = 2;
 inline constexpr std::size_t kCoordinatePoolLogicalCandidateCount =
@@ -40,6 +41,7 @@ enum class CoordinatePoolSlotLayoutKind : std::uint8_t {
     Compact,
     Extended,
     Conflict,
+    Intermediate,
 };
 
 struct CoordinatePoolSlotLayout {
@@ -51,6 +53,7 @@ struct CoordinatePoolSlotLayout {
 
     constexpr bool IsLocked() const noexcept {
         return kind == CoordinatePoolSlotLayoutKind::Compact ||
+            kind == CoordinatePoolSlotLayoutKind::Intermediate ||
             kind == CoordinatePoolSlotLayoutKind::Extended;
     }
 };
@@ -63,6 +66,15 @@ inline constexpr CoordinatePoolSlotLayout kCoordinatePoolCompactLayout{
     static_cast<std::uint8_t>(kCoordinatePoolCompactLogicalSlotCount),
 };
 
+inline constexpr CoordinatePoolSlotLayout kCoordinatePoolIntermediateLayout{
+    CoordinatePoolSlotLayoutKind::Intermediate,
+    static_cast<std::uint8_t>(kCoordinatePoolIntermediateLogicalSlotCount),
+    static_cast<std::uint8_t>(
+        kCoordinatePoolIntermediateLogicalSlotCount *
+        kCoordinatePoolBankCount),
+    static_cast<std::uint8_t>(kCoordinatePoolIntermediateLogicalSlotCount),
+};
+
 inline constexpr CoordinatePoolSlotLayout kCoordinatePoolExtendedLayout{
     CoordinatePoolSlotLayoutKind::Extended,
     static_cast<std::uint8_t>(kCoordinatePoolExtendedLogicalSlotCount),
@@ -73,20 +85,31 @@ inline constexpr CoordinatePoolSlotLayout kCoordinatePoolExtendedLayout{
 
 constexpr bool IsCoordinatePoolSlotLayoutSupported(
     const CoordinatePoolSlotLayout& layout) noexcept {
-    return layout.kind == CoordinatePoolSlotLayoutKind::Compact
-        ? layout.logicalSlotCount ==
-                kCoordinatePoolCompactLogicalSlotCount &&
-            layout.physicalSlotCount ==
-                kCoordinatePoolCompactLogicalSlotCount *
-                    kCoordinatePoolBankCount &&
-            layout.phase < layout.physicalSlotCount
-        : layout.kind == CoordinatePoolSlotLayoutKind::Extended &&
-            layout.logicalSlotCount ==
-                kCoordinatePoolExtendedLogicalSlotCount &&
-            layout.physicalSlotCount ==
-                kCoordinatePoolExtendedLogicalSlotCount *
-                    kCoordinatePoolBankCount &&
-            layout.phase < layout.physicalSlotCount;
+    switch (layout.kind) {
+        case CoordinatePoolSlotLayoutKind::Compact:
+            return layout.logicalSlotCount ==
+                    kCoordinatePoolCompactLogicalSlotCount &&
+                layout.physicalSlotCount ==
+                    kCoordinatePoolCompactLogicalSlotCount *
+                        kCoordinatePoolBankCount &&
+                layout.phase < layout.physicalSlotCount;
+        case CoordinatePoolSlotLayoutKind::Intermediate:
+            return layout.logicalSlotCount ==
+                    kCoordinatePoolIntermediateLogicalSlotCount &&
+                layout.physicalSlotCount ==
+                    kCoordinatePoolIntermediateLogicalSlotCount *
+                        kCoordinatePoolBankCount &&
+                layout.phase < layout.physicalSlotCount;
+        case CoordinatePoolSlotLayoutKind::Extended:
+            return layout.logicalSlotCount ==
+                    kCoordinatePoolExtendedLogicalSlotCount &&
+                layout.physicalSlotCount ==
+                    kCoordinatePoolExtendedLogicalSlotCount *
+                        kCoordinatePoolBankCount &&
+                layout.phase < layout.physicalSlotCount;
+        default:
+            return false;
+    }
 }
 
 constexpr std::size_t MapDecodedCoordinatePoolSlot(
@@ -126,6 +149,38 @@ constexpr bool ShouldRetryCoordinatePoolCompactSnapshot(
         attemptedPhysicalSlotCount == kCoordinatePoolPhysicalSlotCount;
 }
 
+constexpr std::size_t CoordinatePoolSnapshotRetrySlotCount(
+    const CoordinatePoolSlotLayout& layout,
+    bool compactPossible,
+    bool intermediatePossible,
+    std::uint64_t decodedSlot,
+    std::size_t attemptedPhysicalSlotCount,
+    bool snapshotRead) noexcept {
+    if (snapshotRead || layout.IsLocked()) {
+        return attemptedPhysicalSlotCount;
+    }
+    if (attemptedPhysicalSlotCount == kCoordinatePoolPhysicalSlotCount &&
+        intermediatePossible &&
+        decodedSlot < kCoordinatePoolIntermediateLayout.physicalSlotCount) {
+        return kCoordinatePoolIntermediateLayout.physicalSlotCount;
+    }
+    if (attemptedPhysicalSlotCount >
+            kCoordinatePoolCompactLayout.physicalSlotCount &&
+        compactPossible &&
+        decodedSlot < kCoordinatePoolCompactLayout.physicalSlotCount) {
+        return kCoordinatePoolCompactLayout.physicalSlotCount;
+    }
+    return attemptedPhysicalSlotCount;
+}
+
+constexpr bool ShouldRestartCoordinatePoolSnapshotAfterLayoutChange(
+    bool capturedPhysicalSlots,
+    const CoordinatePoolSlotLayout& previousLayout,
+    const CoordinatePoolSlotLayout& currentLayout) noexcept {
+    return !capturedPhysicalSlots && previousLayout.IsLocked() &&
+        currentLayout.kind == CoordinatePoolSlotLayoutKind::Unknown;
+}
+
 class CoordinatePoolSlotLayoutCalibration final {
 public:
     CoordinatePoolSlotLayout ObserveDecodedSlot(
@@ -145,21 +200,23 @@ public:
             UINT16_C(1) << decodedSlot);
         if (layout_.IsLocked()) {
             if (decodedSlot >= layout_.physicalSlotCount) {
-                if (layout_.kind == CoordinatePoolSlotLayoutKind::Compact) {
+                if (layout_.kind != CoordinatePoolSlotLayoutKind::Extended) {
                     layout_ = {};
                     evidence_ = {};
                     evidenceCount_ = 0;
                     evidenceWriteIndex_ = 0;
-                    compactPossible_ = false;
                 } else {
                     layout_.kind = CoordinatePoolSlotLayoutKind::Conflict;
                 }
             }
-            return layout_;
         }
         if (decodedSlot >=
             kCoordinatePoolCompactLayout.physicalSlotCount) {
             compactPossible_ = false;
+        }
+        if (decodedSlot >=
+            kCoordinatePoolIntermediateLayout.physicalSlotCount) {
+            intermediatePossible_ = false;
         }
         Resolve();
         return layout_;
@@ -188,6 +245,9 @@ public:
         const std::uint16_t compactChangedMask =
             changedMask & FullPhaseMask(
                 kCoordinatePoolCompactLayout.physicalSlotCount);
+        const std::uint16_t intermediateChangedMask =
+            changedMask & FullPhaseMask(
+                kCoordinatePoolIntermediateLayout.physicalSlotCount);
         const std::uint16_t extendedChangedMask =
             changedMask & FullPhaseMask(
                 kCoordinatePoolExtendedLayout.physicalSlotCount);
@@ -199,6 +259,14 @@ public:
                   compactChangedMask,
                   kCoordinatePoolCompactLayout.physicalSlotCount)
             : 0;
+        const std::uint16_t intermediateMatches =
+            BitCount(intermediateChangedMask) == 2
+            ? MatchingPhases(
+                  previousDecodedSlot,
+                  currentDecodedSlot,
+                  intermediateChangedMask,
+                  kCoordinatePoolIntermediateLayout.physicalSlotCount)
+            : 0;
         const std::uint16_t extendedMatches =
             BitCount(extendedChangedMask) == 2
             ? MatchingPhases(
@@ -207,13 +275,17 @@ public:
                   extendedChangedMask,
                   kCoordinatePoolExtendedLayout.physicalSlotCount)
             : 0;
-        if (compactMatches == 0 && extendedMatches == 0) return layout_;
+        if (compactMatches == 0 && intermediateMatches == 0 &&
+            extendedMatches == 0) {
+            return layout_;
+        }
         evidence_[evidenceWriteIndex_] = Evidence{
             component,
             previousIndex,
             currentIndex,
             changedMask,
             compactMatches,
+            intermediateMatches,
             extendedMatches,
         };
         evidenceWriteIndex_ =
@@ -231,24 +303,27 @@ public:
         return PhaseStatsFor(
             CoordinatePoolSlotLayoutKind::Compact).phaseMask;
     }
+    std::uint16_t IntermediatePhaseMask() const noexcept {
+        return PhaseStatsFor(
+            CoordinatePoolSlotLayoutKind::Intermediate).phaseMask;
+    }
     std::uint16_t ExtendedPhaseMask() const noexcept {
         return PhaseStatsFor(
             CoordinatePoolSlotLayoutKind::Extended).phaseMask;
     }
     bool CompactPossible() const noexcept { return compactPossible_; }
+    bool IntermediatePossible() const noexcept {
+        return intermediatePossible_;
+    }
 
     std::size_t EvidenceCount(
         CoordinatePoolSlotLayoutKind kind) const noexcept {
-        if (kind == CoordinatePoolSlotLayoutKind::Compact &&
-            !compactPossible_) {
+        if (!LayoutPossible(kind)) {
             return 0;
         }
         std::size_t count = 0;
         for (std::size_t index = 0; index < evidenceCount_; ++index) {
-            if ((kind == CoordinatePoolSlotLayoutKind::Compact &&
-                 evidence_[index].compactPhases != 0) ||
-                (kind == CoordinatePoolSlotLayoutKind::Extended &&
-                 evidence_[index].extendedPhases != 0)) {
+            if (EvidencePhases(evidence_[index], kind) != 0) {
                 ++count;
             }
         }
@@ -267,6 +342,7 @@ private:
         std::uint64_t currentIndex = 0;
         std::uint16_t changedMask = 0;
         std::uint16_t compactPhases = 0;
+        std::uint16_t intermediatePhases = 0;
         std::uint16_t extendedPhases = 0;
     };
 
@@ -287,6 +363,49 @@ private:
             ++count;
         }
         return count;
+    }
+
+    static constexpr CoordinatePoolSlotLayout BaseLayout(
+        CoordinatePoolSlotLayoutKind kind) noexcept {
+        switch (kind) {
+            case CoordinatePoolSlotLayoutKind::Compact:
+                return kCoordinatePoolCompactLayout;
+            case CoordinatePoolSlotLayoutKind::Intermediate:
+                return kCoordinatePoolIntermediateLayout;
+            case CoordinatePoolSlotLayoutKind::Extended:
+                return kCoordinatePoolExtendedLayout;
+            default:
+                return {};
+        }
+    }
+
+    bool LayoutPossible(
+        CoordinatePoolSlotLayoutKind kind) const noexcept {
+        switch (kind) {
+            case CoordinatePoolSlotLayoutKind::Compact:
+                return compactPossible_;
+            case CoordinatePoolSlotLayoutKind::Intermediate:
+                return intermediatePossible_;
+            case CoordinatePoolSlotLayoutKind::Extended:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    static constexpr std::uint16_t EvidencePhases(
+        const Evidence& evidence,
+        CoordinatePoolSlotLayoutKind kind) noexcept {
+        switch (kind) {
+            case CoordinatePoolSlotLayoutKind::Compact:
+                return evidence.compactPhases;
+            case CoordinatePoolSlotLayoutKind::Intermediate:
+                return evidence.intermediatePhases;
+            case CoordinatePoolSlotLayoutKind::Extended:
+                return evidence.extendedPhases;
+            default:
+                return 0;
+        }
     }
 
     static constexpr std::uint16_t FullPhaseMask(
@@ -349,10 +468,8 @@ private:
         const std::uint16_t phaseBit = static_cast<std::uint16_t>(
             UINT16_C(1) << phase);
         for (std::size_t index = 0; index < evidenceCount_; ++index) {
-            const std::uint16_t phases =
-                kind == CoordinatePoolSlotLayoutKind::Compact
-                ? evidence_[index].compactPhases
-                : evidence_[index].extendedPhases;
+            const std::uint16_t phases = EvidencePhases(
+                evidence_[index], kind);
             if ((phases & phaseBit) == 0) continue;
             bool found = false;
             for (std::size_t componentIndex = 0;
@@ -372,22 +489,18 @@ private:
     PhaseStats PhaseStatsFor(
         CoordinatePoolSlotLayoutKind kind) const noexcept {
         PhaseStats stats{};
-        const bool compact =
-            kind == CoordinatePoolSlotLayoutKind::Compact;
-        if ((!compact &&
-             kind != CoordinatePoolSlotLayoutKind::Extended) ||
-            (compact && !compactPossible_)) {
+        if (!LayoutPossible(kind)) {
             return stats;
         }
+        const CoordinatePoolSlotLayout baseLayout = BaseLayout(kind);
+        if (!baseLayout.IsLocked()) return stats;
         stats.possible = true;
-        const std::size_t physicalSlotCount = compact
-            ? kCoordinatePoolCompactLayout.physicalSlotCount
-            : kCoordinatePoolExtendedLayout.physicalSlotCount;
+        const std::size_t physicalSlotCount =
+            baseLayout.physicalSlotCount;
         std::array<std::size_t, kCoordinatePoolPhysicalSlotCount> votes{};
         for (std::size_t index = 0; index < evidenceCount_; ++index) {
-            const std::uint16_t phases = compact
-                ? evidence_[index].compactPhases
-                : evidence_[index].extendedPhases;
+            const std::uint16_t phases = EvidencePhases(
+                evidence_[index], kind);
             for (std::size_t phase = 0;
                  phase < physicalSlotCount;
                  ++phase) {
@@ -439,36 +552,49 @@ private:
         }
         const PhaseStats compact = PhaseStatsFor(
             CoordinatePoolSlotLayoutKind::Compact);
+        const PhaseStats intermediate = PhaseStatsFor(
+            CoordinatePoolSlotLayoutKind::Intermediate);
         const PhaseStats extended = PhaseStatsFor(
             CoordinatePoolSlotLayoutKind::Extended);
-        const PhaseStats* winner = nullptr;
-        const PhaseStats* other = nullptr;
-        CoordinatePoolSlotLayout selected{};
-        if (compact.unique &&
-            (!extended.unique ||
-             compact.bestEvidence > extended.bestEvidence)) {
-            winner = &compact;
-            other = &extended;
-            selected = kCoordinatePoolCompactLayout;
-        } else if (extended.unique &&
-            (!compact.unique ||
-             extended.bestEvidence > compact.bestEvidence)) {
-            winner = &extended;
-            other = &compact;
-            selected = kCoordinatePoolExtendedLayout;
-        } else {
-            return;
+        const std::array<CoordinatePoolSlotLayoutKind, 3> kinds{{
+            CoordinatePoolSlotLayoutKind::Compact,
+            CoordinatePoolSlotLayoutKind::Intermediate,
+            CoordinatePoolSlotLayoutKind::Extended,
+        }};
+        const std::array<const PhaseStats*, 3> candidates{{
+            &compact,
+            &intermediate,
+            &extended,
+        }};
+        std::size_t winnerIndex = candidates.size();
+        bool winnerTied = false;
+        for (std::size_t index = 0; index < candidates.size(); ++index) {
+            if (!candidates[index]->unique) continue;
+            if (winnerIndex == candidates.size() ||
+                candidates[index]->bestEvidence >
+                    candidates[winnerIndex]->bestEvidence) {
+                winnerIndex = index;
+                winnerTied = false;
+            } else if (candidates[index]->bestEvidence ==
+                       candidates[winnerIndex]->bestEvidence) {
+                winnerTied = true;
+            }
         }
+        if (winnerIndex == candidates.size() || winnerTied) return;
+        const PhaseStats* winner = candidates[winnerIndex];
         const bool enoughComponents =
             winner->componentCount >=
                 kCoordinatePoolLayoutMinimumComponents ||
             (winner->componentCount >= 1 &&
              winner->bestEvidence >=
                 kCoordinatePoolLayoutSingleComponentEvidence);
-        const std::size_t competingEvidence =
-            winner->runnerUpEvidence > other->bestEvidence
-            ? winner->runnerUpEvidence
-            : other->bestEvidence;
+        std::size_t competingEvidence = winner->runnerUpEvidence;
+        for (std::size_t index = 0; index < candidates.size(); ++index) {
+            if (index != winnerIndex &&
+                candidates[index]->bestEvidence > competingEvidence) {
+                competingEvidence = candidates[index]->bestEvidence;
+            }
+        }
         if (winner->bestEvidence <
                 kCoordinatePoolLayoutMinimumEvidence ||
             !enoughComponents ||
@@ -476,6 +602,8 @@ private:
                 competingEvidence + kCoordinatePoolLayoutMinimumLead) {
             return;
         }
+        CoordinatePoolSlotLayout selected = BaseLayout(
+            kinds[winnerIndex]);
         selected.phase = winner->phase;
         layout_ = selected;
     }
@@ -487,6 +615,7 @@ private:
     std::uint16_t decodedMask_ = 0;
     std::size_t invalidDecodedSlotCount_ = 0;
     bool compactPossible_ = true;
+    bool intermediatePossible_ = true;
 };
 
 constexpr bool CoordinatePoolEnvironmentFlagEnabled(
