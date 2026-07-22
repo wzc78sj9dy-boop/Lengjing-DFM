@@ -7,10 +7,28 @@ namespace lengjing::game::native {
 
 inline constexpr std::size_t kCoordinatePoolRingSearchesPerFrame = 4;
 inline constexpr std::uint64_t kCoordinatePoolRingRetryFrames = 8;
-inline constexpr std::uint64_t kCoordinatePoolCodeValidationFrames = 60;
 inline constexpr std::uint64_t kCoordinatePoolCodeValidationRetryFrames = 8;
+inline constexpr std::uint64_t kCoordinatePoolCodeValidationIdleFrame =
+    UINT64_MAX;
 inline constexpr std::uint64_t kCoordinatePoolPointerPayloadMask =
     UINT64_C(0x0000FFFFFFFFFFFF);
+inline constexpr std::uint64_t kCoordinatePoolMinimumRemoteAddress =
+    UINT64_C(0x10000000);
+inline constexpr std::uint64_t kCoordinatePoolMaximumRemoteAddress =
+    UINT64_C(0x10000000000);
+
+constexpr bool CoordinatePoolEnvironmentFlagEnabled(
+    const char* value) noexcept {
+    return value != nullptr && value[0] == '1';
+}
+
+constexpr bool IsCoordinatePoolReadRangeValid(
+    std::uint64_t address,
+    std::size_t size) noexcept {
+    return size != 0 && address >= kCoordinatePoolMinimumRemoteAddress &&
+        address < kCoordinatePoolMaximumRemoteAddress &&
+        size <= kCoordinatePoolMaximumRemoteAddress - address;
+}
 
 struct CoordinatePoolRootSnapshot {
     std::uint64_t bridge = 0;
@@ -81,18 +99,24 @@ constexpr bool ShouldValidateCoordinatePoolCode(
     std::uint64_t frame,
     std::uint64_t nextValidationFrame,
     bool requested) noexcept {
-    return requested || (frame < nextValidationFrame &&
-        nextValidationFrame - frame > kCoordinatePoolCodeValidationFrames) ||
-        frame >= nextValidationFrame;
+    if (requested) return true;
+    if (nextValidationFrame == kCoordinatePoolCodeValidationIdleFrame) {
+        return false;
+    }
+    return frame >= nextValidationFrame ||
+        nextValidationFrame - frame >
+            kCoordinatePoolCodeValidationRetryFrames;
 }
 
 constexpr std::uint64_t NextCoordinatePoolCodeValidationFrame(
     std::uint64_t frame,
     bool validationSucceeded) noexcept {
-    const std::uint64_t interval = validationSucceeded
-        ? kCoordinatePoolCodeValidationFrames
-        : kCoordinatePoolCodeValidationRetryFrames;
-    return frame > UINT64_MAX - interval ? UINT64_MAX : frame + interval;
+    if (validationSucceeded) {
+        return kCoordinatePoolCodeValidationIdleFrame;
+    }
+    return frame > UINT64_MAX - kCoordinatePoolCodeValidationRetryFrames
+        ? UINT64_MAX
+        : frame + kCoordinatePoolCodeValidationRetryFrames;
 }
 
 constexpr bool ShouldClearCoordinatePoolRingsAfterPointerRefresh(

@@ -1,11 +1,15 @@
 #pragma once
 
-#include <array>
+#include "game/native/AlgorithmCoordinateDiagnostics.h"
+
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <new>
+#include <utility>
+#include <vector>
 
 namespace lengjing::game::native {
 
@@ -13,6 +17,12 @@ struct AlgorithmCoordinate {
     float x = 0.0f;
     float y = 0.0f;
     float z = 0.0f;
+};
+
+struct AlgorithmCoordinateRecord {
+    std::uintptr_t actor = 0;
+    AlgorithmCoordinate coordinate{};
+    bool valid = false;
 };
 
 class AlgorithmCoordinateReader final {
@@ -29,61 +39,184 @@ public:
               std::uintptr_t actor,
               AlgorithmCoordinate& coordinate,
               ReadBytes&& readBytes) const {
+        AlgorithmCoordinateDiagnostic diagnostic{};
+        return Read(
+            moduleBase,
+            actor,
+            coordinate,
+            diagnostic,
+            std::forward<ReadBytes>(readBytes));
+    }
+
+    template <typename ReadBytes>
+    bool Read(std::uintptr_t moduleBase,
+              std::uintptr_t actor,
+              AlgorithmCoordinate& coordinate,
+              AlgorithmCoordinateDiagnostic& diagnostic,
+              ReadBytes&& readBytes) const {
         coordinate = AlgorithmCoordinate{};
-        if (moduleBase == 0 || actor == 0) return false;
+        diagnostic = AlgorithmCoordinateDiagnostic{};
+        diagnostic.actor = actor;
+        if (moduleBase == 0 || actor == 0) {
+            diagnostic.error = AlgorithmCoordinateReadError::InvalidInput;
+            return false;
+        }
+
+        std::vector<AlgorithmCoordinateRecord> snapshot;
+        if (!ReadTable(
+                moduleBase,
+                snapshot,
+                diagnostic,
+                std::forward<ReadBytes>(readBytes))) {
+            diagnostic.actor = actor;
+            return false;
+        }
+
+        diagnostic.actor = actor;
+        for (std::uint32_t index = 0;
+             index < static_cast<std::uint32_t>(snapshot.size());
+             ++index) {
+            const AlgorithmCoordinateRecord& record = snapshot[index];
+            if (record.actor != actor) continue;
+            diagnostic.recordIndex = index;
+            diagnostic.x = record.coordinate.x;
+            diagnostic.y = record.coordinate.y;
+            diagnostic.z = record.coordinate.z;
+            if (!record.valid) {
+                diagnostic.error =
+                    AlgorithmCoordinateReadError::CoordinateInvalid;
+                return false;
+            }
+            coordinate = record.coordinate;
+            diagnostic.error = AlgorithmCoordinateReadError::None;
+            return true;
+        }
+        diagnostic.error = AlgorithmCoordinateReadError::ActorNotFound;
+        return false;
+    }
+
+    template <typename ReadBytes>
+    bool ReadTable(
+        std::uintptr_t moduleBase,
+        std::vector<AlgorithmCoordinateRecord>& snapshot,
+        AlgorithmCoordinateDiagnostic& diagnostic,
+        ReadBytes&& readBytes) const {
+        snapshot.clear();
+        diagnostic = AlgorithmCoordinateDiagnostic{};
+        if (moduleBase == 0) {
+            diagnostic.error = AlgorithmCoordinateReadError::InvalidInput;
+            return false;
+        }
 
         std::uintptr_t tableAddress = 0;
         if (!CheckedAdd(moduleBase, kRecordTableRva, tableAddress)) {
+            diagnostic.error =
+                AlgorithmCoordinateReadError::TableAddressOverflow;
             return false;
         }
+        diagnostic.tableAddress = tableAddress;
 
         std::uintptr_t table = 0;
         std::uintptr_t records = 0;
         std::uint32_t count = 0;
-        if (!ReadValue(readBytes, tableAddress, table) || table == 0 ||
-            !ReadValue(readBytes, table, records) || records == 0 ||
-            !ReadAt(readBytes, table, sizeof(std::uintptr_t), count) ||
-            count == 0 || count > kMaximumRecordCount) {
+        if (!ReadValue(readBytes, tableAddress, table)) {
+            diagnostic.error =
+                AlgorithmCoordinateReadError::TablePointerReadFailed;
+            return false;
+        }
+        diagnostic.table = table;
+        if (table == 0) {
+            diagnostic.error = AlgorithmCoordinateReadError::TableUnavailable;
+            return false;
+        }
+        if (!ReadValue(readBytes, table, records)) {
+            diagnostic.error =
+                AlgorithmCoordinateReadError::RecordsPointerReadFailed;
+            return false;
+        }
+        diagnostic.records = records;
+        if (records == 0) {
+            diagnostic.error =
+                AlgorithmCoordinateReadError::RecordsUnavailable;
+            return false;
+        }
+        if (!ReadAt(readBytes, table, sizeof(std::uintptr_t), count)) {
+            diagnostic.error = AlgorithmCoordinateReadError::CountReadFailed;
+            return false;
+        }
+        diagnostic.count = count;
+        if (count == 0 || count > kMaximumRecordCount) {
+            diagnostic.error = AlgorithmCoordinateReadError::CountInvalid;
             return false;
         }
 
-        std::array<std::uint8_t, kRecordSize> record{};
-        for (std::uint32_t index = 0; index < count; ++index) {
-            std::uintptr_t offset = 0;
-            std::uintptr_t address = 0;
-            if (!CheckedMultiply(index, kRecordStride, offset) ||
-                !CheckedAdd(records, offset, address) ||
-                !CanRead(address, record.size())) {
-                return false;
-            }
-            record.fill(0);
-            if (!readBytes(address, record.data(), record.size())) {
-                return false;
-            }
-
-            std::uintptr_t recordActor = 0;
-            std::memcpy(&recordActor, record.data(), sizeof(recordActor));
-            if (recordActor != actor) continue;
-
-            AlgorithmCoordinate candidate{};
-            std::memcpy(
-                &candidate, record.data() + kCoordinateOffset,
-                sizeof(candidate));
-            if (!IsValid(candidate)) return false;
-            coordinate = candidate;
-            return true;
+        std::uintptr_t snapshotSize = 0;
+        if (!CheckedMultiply(count, kRecordStride, snapshotSize) ||
+            snapshotSize > std::numeric_limits<std::size_t>::max() ||
+            !CanRead(records, static_cast<std::size_t>(snapshotSize))) {
+            diagnostic.error =
+                AlgorithmCoordinateReadError::SnapshotRangeInvalid;
+            return false;
         }
-        return false;
+
+        std::vector<std::uint8_t> bytes;
+        try {
+            bytes.resize(static_cast<std::size_t>(snapshotSize));
+            snapshot.reserve(count);
+        } catch (const std::bad_alloc&) {
+            diagnostic.error =
+                AlgorithmCoordinateReadError::SnapshotAllocationFailed;
+            return false;
+        }
+        if (!readBytes(records, bytes.data(), bytes.size())) {
+            diagnostic.error =
+                AlgorithmCoordinateReadError::SnapshotReadFailed;
+            return false;
+        }
+
+        std::uintptr_t verifiedTable = 0;
+        std::uintptr_t verifiedRecords = 0;
+        std::uint32_t verifiedCount = 0;
+        if (!ReadValue(readBytes, tableAddress, verifiedTable) ||
+            verifiedTable != table ||
+            !ReadValue(readBytes, table, verifiedRecords) ||
+            verifiedRecords != records ||
+            !ReadAt(
+                readBytes,
+                table,
+                sizeof(std::uintptr_t),
+                verifiedCount) ||
+            verifiedCount != count) {
+            diagnostic.error = AlgorithmCoordinateReadError::SnapshotChanged;
+            return false;
+        }
+
+        for (std::uint32_t index = 0; index < count; ++index) {
+            const std::size_t offset =
+                static_cast<std::size_t>(index) * kRecordStride;
+            AlgorithmCoordinateRecord record{};
+            std::memcpy(
+                &record.actor,
+                bytes.data() + offset,
+                sizeof(record.actor));
+            std::memcpy(
+                &record.coordinate,
+                bytes.data() + offset + kCoordinateOffset,
+                sizeof(record.coordinate));
+            record.valid = IsValid(record.coordinate);
+            if (record.actor != 0 && record.valid) {
+                ++diagnostic.validCount;
+            }
+            snapshot.push_back(record);
+        }
+        diagnostic.error = AlgorithmCoordinateReadError::None;
+        return true;
     }
 
 private:
     static bool IsValid(const AlgorithmCoordinate& coordinate) noexcept {
-        if (!std::isfinite(coordinate.x) || !std::isfinite(coordinate.y) ||
-            !std::isfinite(coordinate.z)) {
-            return false;
-        }
-        if (coordinate.x != 0.0f || coordinate.y != 0.0f) return true;
-        return coordinate.z != 0.0f && coordinate.z != -90.0f;
+        return IsValidAlgorithmCoordinateValue(
+            coordinate.x, coordinate.y, coordinate.z);
     }
 
     static bool CheckedAdd(std::uintptr_t base,

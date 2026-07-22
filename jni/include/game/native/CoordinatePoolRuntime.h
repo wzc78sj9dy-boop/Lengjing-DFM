@@ -2,6 +2,7 @@
 
 #include "game/CoordinateDecryptDiagnostics.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -47,6 +48,44 @@ struct CoordinatePoolPosition {
     float z = 0.0f;
 };
 
+inline constexpr std::size_t kCoordinatePoolLogicalCandidateCount = 7;
+inline constexpr std::size_t kCoordinatePoolBankCount = 2;
+inline constexpr std::size_t kCoordinatePoolPhysicalSlotCount =
+    kCoordinatePoolLogicalCandidateCount * kCoordinatePoolBankCount;
+
+inline constexpr std::size_t MapDecodedCoordinatePoolSlot(
+    std::size_t decodedSlot) noexcept {
+    if (decodedSlot >= kCoordinatePoolPhysicalSlotCount) {
+        return kCoordinatePoolPhysicalSlotCount;
+    }
+    return (decodedSlot + kCoordinatePoolLogicalCandidateCount) %
+        kCoordinatePoolPhysicalSlotCount;
+}
+
+struct CoordinatePoolCandidateSet {
+    std::array<CoordinatePoolPosition,
+               kCoordinatePoolLogicalCandidateCount> positions{};
+    std::array<bool, kCoordinatePoolLogicalCandidateCount> valid{};
+    std::array<CoordinatePoolPosition,
+               kCoordinatePoolPhysicalSlotCount> physicalPositions{};
+    std::array<bool, kCoordinatePoolPhysicalSlotCount> physicalValid{};
+    std::uintptr_t ring = 0;
+    std::uint64_t index = 0;
+    std::uint16_t changedPhysicalMask = 0;
+    std::uint8_t activeBank = 0;
+    std::uint8_t selectedLogicalSlot = 0;
+    std::uint8_t selectedPhysicalSlot = 0;
+    std::uint8_t decodedPhysicalSlot = 0;
+    std::uint8_t changedPhysicalCount = 0;
+    std::uint8_t newestPhysicalSlot = UINT8_MAX;
+};
+
+constexpr bool IsCoordinatePoolSelectedCandidateValid(
+    const CoordinatePoolCandidateSet& candidates) noexcept {
+    return candidates.selectedLogicalSlot < candidates.valid.size() &&
+        candidates.valid[candidates.selectedLogicalSlot];
+}
+
 enum class CoordinatePoolRuntimeStage : std::uint8_t {
     Idle,
     RootResolved,
@@ -60,7 +99,12 @@ enum class CoordinatePoolRuntimeError : std::uint8_t {
     None,
     InvalidInput,
     RootReadFailed,
+    EntryResolveFailed,
     EntryMappingMissing,
+    EntryMappingFragmented,
+    EntryMappingChanged,
+    EntryPageReadFailed,
+    EntryCodeReadFailed,
     CodeReadFailed,
     AnalysisFailed,
     EngineSetupFailed,
@@ -78,14 +122,39 @@ enum class CoordinatePoolRuntimeError : std::uint8_t {
     PositionUnstable,
 };
 
+constexpr bool ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
+    CoordinatePoolRuntimeError error,
+    const CoordinateReadDiagnostic& read) noexcept {
+    switch (error) {
+        case CoordinatePoolRuntimeError::None:
+        case CoordinatePoolRuntimeError::InvalidInput:
+        case CoordinatePoolRuntimeError::PoolPointerReadFailed:
+        case CoordinatePoolRuntimeError::RingSearchFailed:
+        case CoordinatePoolRuntimeError::PositionNotFinite:
+        case CoordinatePoolRuntimeError::PositionUnstable:
+            return false;
+        case CoordinatePoolRuntimeError::PositionReadFailed:
+            return !read.HasFailure() ||
+                (read.stage != CoordinateReadStage::RingIndex &&
+                 read.stage != CoordinateReadStage::Position);
+        default:
+            return true;
+    }
+}
+
 struct CoordinatePoolRuntimeProbe {
     CoordinatePoolRuntimeStage stage = CoordinatePoolRuntimeStage::Idle;
     CoordinatePoolRuntimeError error = CoordinatePoolRuntimeError::None;
     std::uintptr_t bridge = 0;
     std::uintptr_t context = 0;
     std::uintptr_t guestEntry = 0;
+    std::uint32_t entryInstruction = 0;
     std::uintptr_t codeBase = 0;
     std::size_t codeSize = 0;
+    std::uint32_t executableMappingFragments = 0;
+    std::uintptr_t executableMappingStart = 0;
+    std::uintptr_t executableMappingEnd = 0;
+    std::uintptr_t failedMethod = 0;
     std::int32_t poolPointerOffset = 0;
     std::int64_t indexOffset = 0;
     std::uint32_t ringOffset = 0;
@@ -115,7 +184,11 @@ public:
                  const ProcessExecutionContext& executionContext,
                  std::uint64_t frame) noexcept;
     bool ReadPosition(std::uintptr_t component,
-                      CoordinatePoolPosition& position) noexcept;
+                      CoordinatePoolPosition& position,
+                      bool refresh = false) noexcept;
+    bool ReadCandidates(std::uintptr_t component,
+                        CoordinatePoolCandidateSet& candidates,
+                        bool refresh = false) noexcept;
     CoordinatePoolRuntimeProbe Probe() const noexcept;
     void Reset() noexcept;
 

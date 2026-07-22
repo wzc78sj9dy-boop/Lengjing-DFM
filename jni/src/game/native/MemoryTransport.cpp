@@ -1214,6 +1214,173 @@ struct MemoryTransport::Impl {
         return true;
     }
 
+    bool ResolveCoordinateReplayEntry(
+        std::uintptr_t moduleBase,
+        CoordinateReplayEntrySnapshot& snapshot,
+        CoordinateReplayEntryDiagnostic& diagnostic) {
+        std::lock_guard<std::mutex> lock(ioMutex);
+        snapshot = {};
+        diagnostic = {};
+        if (!open || !coordinateReplayLayout.IsValid()) {
+            diagnostic.error = CoordinateDecryptError::MemoryTransportUnavailable;
+            diagnostic.systemError = -ENODEV;
+            return false;
+        }
+        if (!IsRemoteRangeValid(moduleBase, sizeof(std::uint32_t)) ||
+            coordinateReplayLayout.rootRva >
+                std::numeric_limits<std::uintptr_t>::max() - moduleBase ||
+            coordinateReplayLayout.bridgeOffset >
+                std::numeric_limits<std::uintptr_t>::max() - moduleBase -
+                    coordinateReplayLayout.rootRva) {
+            diagnostic.error = CoordinateDecryptError::InvalidConfiguration;
+            diagnostic.systemError = -ERANGE;
+            return false;
+        }
+
+        const std::uintptr_t rootAddress = moduleBase +
+            coordinateReplayLayout.rootRva +
+            coordinateReplayLayout.bridgeOffset;
+        const auto read = [this, &diagnostic](
+                              std::uintptr_t address,
+                              void* destination,
+                              std::size_t size,
+                              CoordinateReadStage stage) {
+            CoordinateReadDiagnostic current{};
+            const bool succeeded = ReadCoordinateMemoryUnlocked(
+                address, destination, size, current);
+            current.stage = stage;
+            if (!succeeded) {
+                diagnostic.read = current;
+                diagnostic.systemError = current.systemError;
+            }
+            return succeeded;
+        };
+        const auto readPointers = [&](std::uintptr_t& bridge,
+                                      std::uintptr_t& entry) {
+            bridge = 0;
+            entry = 0;
+            std::uint64_t rawBridge = 0;
+            if (!read(
+                    rootAddress,
+                    &rawBridge,
+                    sizeof(rawBridge),
+                    CoordinateReadStage::Root)) {
+                diagnostic.error = CoordinateDecryptError::RootReadFailed;
+                return false;
+            }
+            bridge = static_cast<std::uintptr_t>(
+                rawBridge & kPointerPayloadMask);
+            if (!IsRemoteRangeValid(bridge, sizeof(std::uint64_t)) ||
+                coordinateReplayLayout.entryOffset >
+                    std::numeric_limits<std::uintptr_t>::max() - bridge ||
+                !IsRemoteRangeValid(
+                    bridge + coordinateReplayLayout.entryOffset,
+                    sizeof(std::uint64_t))) {
+                diagnostic.error = CoordinateDecryptError::EntryResolveFailed;
+                diagnostic.systemError = -ERANGE;
+                return false;
+            }
+
+            std::uint64_t rawEntry = 0;
+            if (!read(
+                    bridge + coordinateReplayLayout.entryOffset,
+                    &rawEntry,
+                    sizeof(rawEntry),
+                    CoordinateReadStage::Entry)) {
+                diagnostic.error = CoordinateDecryptError::EntryResolveFailed;
+                return false;
+            }
+            entry = static_cast<std::uintptr_t>(
+                rawEntry & kPointerPayloadMask);
+            if (!IsRemoteRangeValid(entry, sizeof(std::uint32_t)) ||
+                (entry & 3U) != 0) {
+                diagnostic.error = CoordinateDecryptError::EntryResolveFailed;
+                diagnostic.systemError = -ERANGE;
+                return false;
+            }
+            return true;
+        };
+
+        constexpr int kStableSnapshotAttempts = 3;
+        for (int attempt = 0; attempt < kStableSnapshotAttempts; ++attempt) {
+            std::uintptr_t bridgeBefore = 0;
+            std::uintptr_t entryBefore = 0;
+            if (!readPointers(bridgeBefore, entryBefore)) return false;
+
+            std::uintptr_t mappingStart = 0;
+            std::uintptr_t mappingEnd = 0;
+            if (!FindExecutableMapping(
+                    processId,
+                    entryBefore,
+                    mappingStart,
+                    mappingEnd)) {
+                diagnostic.error = CoordinateDecryptError::EntryMappingMissing;
+                diagnostic.systemError = -ENOENT;
+                diagnostic.snapshot.bridge = bridgeBefore;
+                diagnostic.snapshot.entry = entryBefore;
+                return false;
+            }
+
+            std::uint32_t instruction = 0;
+            if (!read(
+                    entryBefore,
+                    &instruction,
+                    sizeof(instruction),
+                    CoordinateReadStage::CodePage)) {
+                diagnostic.error = CoordinateReadError(
+                    diagnostic.read.failure);
+                if (diagnostic.error == CoordinateDecryptError::None) {
+                    diagnostic.error =
+                        CoordinateDecryptError::EntryCodeReadFailed;
+                }
+                diagnostic.snapshot = {
+                    bridgeBefore,
+                    entryBefore,
+                    mappingStart,
+                    mappingEnd,
+                    0,
+                };
+                return false;
+            }
+            if (instruction == 0 || instruction == UINT32_MAX) {
+                diagnostic.error = CoordinateDecryptError::EntryCodeReadFailed;
+                diagnostic.systemError = -ENODATA;
+                diagnostic.snapshot = {
+                    bridgeBefore,
+                    entryBefore,
+                    mappingStart,
+                    mappingEnd,
+                    instruction,
+                };
+                return false;
+            }
+
+            std::uintptr_t bridgeAfter = 0;
+            std::uintptr_t entryAfter = 0;
+            if (!readPointers(bridgeAfter, entryAfter)) return false;
+            if (bridgeBefore != bridgeAfter || entryBefore != entryAfter) {
+                diagnostic.error = CoordinateDecryptError::EntryMappingChanged;
+                diagnostic.systemError = -EAGAIN;
+                continue;
+            }
+
+            snapshot = {
+                bridgeBefore,
+                entryBefore,
+                mappingStart,
+                mappingEnd,
+                instruction,
+            };
+            diagnostic = {};
+            diagnostic.snapshot = snapshot;
+            return true;
+        }
+
+        diagnostic.error = CoordinateDecryptError::EntryMappingChanged;
+        diagnostic.systemError = -EAGAIN;
+        return false;
+    }
+
     bool ReadProcessExecutionContext(ProcessExecutionContext& context) {
         std::lock_guard<std::mutex> lock(ioMutex);
         context = {};
@@ -1468,6 +1635,22 @@ bool MemoryTransport::ConfigureCoordinateReplay(
     try {
         return impl_ != nullptr && impl_->ConfigureCoordinateReplay(layout);
     } catch (...) {
+        return false;
+    }
+}
+
+bool MemoryTransport::ResolveCoordinateReplayEntry(
+    std::uintptr_t moduleBase,
+    CoordinateReplayEntrySnapshot& snapshot,
+    CoordinateReplayEntryDiagnostic& diagnostic) {
+    try {
+        return impl_ != nullptr && impl_->ResolveCoordinateReplayEntry(
+            moduleBase, snapshot, diagnostic);
+    } catch (...) {
+        snapshot = {};
+        diagnostic = {};
+        diagnostic.error = CoordinateDecryptError::UnhandledException;
+        diagnostic.systemError = -EFAULT;
         return false;
     }
 }

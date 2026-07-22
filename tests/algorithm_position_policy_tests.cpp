@@ -12,7 +12,10 @@ void RunAlgorithmPositionPolicyTests() {
     using lengjing::game::native::AlgorithmPositionHistorySample;
     using lengjing::game::native::AlgorithmPositionResultCache;
     using lengjing::game::native::AlgorithmPositionRuntimeConfig;
+    using lengjing::game::native::AlgorithmPositionRefreshPlan;
     using lengjing::game::native::AlgorithmPositionSecondDecision;
+    using lengjing::game::native::AlgorithmPositionPendingDecision;
+    using lengjing::game::native::AlgorithmPositionPendingSample;
     using lengjing::game::native::AlgorithmExecutionContextRefreshKey;
     using lengjing::game::native::AlgorithmExecutionContextRefreshPolicy;
     using lengjing::game::native::AlgorithmReplayBackoffPolicy;
@@ -20,7 +23,10 @@ void RunAlgorithmPositionPolicyTests() {
     using lengjing::game::native::AlgorithmReplayPagePolicy;
     using lengjing::game::native::EvaluateAlgorithmPositionFirst;
     using lengjing::game::native::EvaluateAlgorithmPositionSecond;
+    using lengjing::game::native::ObserveAlgorithmPositionPending;
     using lengjing::game::native::FormatAlgorithmPacgaResult;
+    using lengjing::game::native::MakeAlgorithmPositionRefreshPlan;
+    using lengjing::game::native::MakeAlgorithmPositionRefreshPlan;
     using lengjing::game::native::ParseAlgorithmPositionDecryptRva;
     using lengjing::game::native::ProcessExecutionContext;
     using lengjing::game::native::ShouldAttemptAlgorithmPosition;
@@ -31,6 +37,12 @@ void RunAlgorithmPositionPolicyTests() {
     constexpr std::uintptr_t otherEntity = 0x200000;
     const AlgorithmPositionResultCache::TimePoint start{};
     const AlgorithmPosition history{0.0f, 0.0f, 0.0f};
+
+    constexpr AlgorithmPositionRefreshPlan poolRefresh =
+        MakeAlgorithmPositionRefreshPlan(false);
+    REQUIRE(!poolRefresh.first);
+    REQUIRE(poolRefresh.discarded);
+    REQUIRE(!poolRefresh.candidate);
 
     static_assert(FormatAlgorithmPacgaResult(
                       UINT64_C(0x123456789ABCDEF0)) ==
@@ -74,7 +86,7 @@ void RunAlgorithmPositionPolicyTests() {
     const AlgorithmPosition secondNearFirst{1700.0f, 400.0f, 0.0f};
     REQUIRE(EvaluateAlgorithmPositionSecond(
                 history, first, &secondNearFirst) ==
-            AlgorithmPositionSecondDecision::AcceptSecond);
+            AlgorithmPositionSecondDecision::NeedsCrossFrameConfirmation);
 
     const AlgorithmPosition inconsistentSecond{1000.0f, 1000.0f, 0.0f};
     REQUIRE(EvaluateAlgorithmPositionSecond(
@@ -82,6 +94,82 @@ void RunAlgorithmPositionPolicyTests() {
             AlgorithmPositionSecondDecision::FallbackHistory);
     REQUIRE(EvaluateAlgorithmPositionSecond(history, first, nullptr) ==
             AlgorithmPositionSecondDecision::FallbackHistory);
+
+    AlgorithmPositionPendingSample pending;
+    REQUIRE(ObserveAlgorithmPositionPending(
+                pending,
+                AlgorithmPosition{2000.0f, 0.0f, 0.0f},
+                10,
+                start + 10ms) ==
+            AlgorithmPositionPendingDecision::Pending);
+    REQUIRE(pending.count == 1);
+    REQUIRE(ObserveAlgorithmPositionPending(
+                pending,
+                AlgorithmPosition{2000.0f, 0.0f, 0.0f},
+                10,
+                start + 11ms) ==
+            AlgorithmPositionPendingDecision::Pending);
+    REQUIRE(pending.count == 1);
+    REQUIRE(ObserveAlgorithmPositionPending(
+                pending,
+                AlgorithmPosition{2050.0f, 20.0f, 0.0f},
+                11,
+                start + 20ms) ==
+            AlgorithmPositionPendingDecision::Confirmed);
+    REQUIRE(pending.count == 0);
+
+    REQUIRE(ObserveAlgorithmPositionPending(
+                pending,
+                AlgorithmPosition{4000.0f, 0.0f, 0.0f},
+                20,
+                start + 30ms) ==
+            AlgorithmPositionPendingDecision::Pending);
+    REQUIRE(ObserveAlgorithmPositionPending(
+                pending,
+                AlgorithmPosition{5000.0f, 0.0f, 0.0f},
+                21,
+                start + 40ms) ==
+            AlgorithmPositionPendingDecision::Pending);
+    REQUIRE(ObserveAlgorithmPositionPending(
+                pending,
+                AlgorithmPosition{7000.0f, 0.0f, 0.0f},
+                23,
+                start + 50ms) ==
+            AlgorithmPositionPendingDecision::Confirmed);
+    REQUIRE(pending.count == 0);
+
+    REQUIRE(ObserveAlgorithmPositionPending(
+                pending,
+                AlgorithmPosition{8000.0f, 0.0f, 0.0f},
+                30,
+                start + 60ms) ==
+            AlgorithmPositionPendingDecision::Pending);
+    REQUIRE(ObserveAlgorithmPositionPending(
+                pending,
+                AlgorithmPosition{12000.0f, 0.0f, 0.0f},
+                31,
+                start + 70ms) ==
+            AlgorithmPositionPendingDecision::Pending);
+    REQUIRE(ObserveAlgorithmPositionPending(
+                pending,
+                AlgorithmPosition{8000.0f, 0.0f, 0.0f},
+                32,
+                start + 80ms) ==
+            AlgorithmPositionPendingDecision::Pending);
+    REQUIRE(pending.count == 1);
+
+    REQUIRE(ObserveAlgorithmPositionPending(
+                pending,
+                AlgorithmPosition{9000.0f, 0.0f, 0.0f},
+                33,
+                start + 400ms) ==
+            AlgorithmPositionPendingDecision::Pending);
+    REQUIRE(pending.count == 1);
+
+    constexpr auto refreshPlan = MakeAlgorithmPositionRefreshPlan(false);
+    static_assert(!refreshPlan.first);
+    static_assert(refreshPlan.discarded);
+    static_assert(!refreshPlan.candidate);
 
     const AlgorithmPositionRuntimeConfig configured{0x1234};
     REQUIRE(configured.IsConfigured());

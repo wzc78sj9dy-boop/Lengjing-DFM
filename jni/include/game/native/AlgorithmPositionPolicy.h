@@ -53,6 +53,7 @@ enum class AlgorithmPositionFirstDecision {
 
 enum class AlgorithmPositionSecondDecision {
     AcceptSecond,
+    NeedsCrossFrameConfirmation,
     FallbackHistory,
 };
 
@@ -81,12 +82,159 @@ inline AlgorithmPositionSecondDecision EvaluateAlgorithmPositionSecond(
     if (second == nullptr) {
         return AlgorithmPositionSecondDecision::FallbackHistory;
     }
-    return AlgorithmPositionDistanceSquared(history, *second) <=
-                kAlgorithmPositionSecondDistanceSquared ||
-            AlgorithmPositionDistanceSquared(first, *second) <=
-                kAlgorithmPositionSecondDistanceSquared
-        ? AlgorithmPositionSecondDecision::AcceptSecond
-        : AlgorithmPositionSecondDecision::FallbackHistory;
+    if (AlgorithmPositionDistanceSquared(history, *second) <=
+        kAlgorithmPositionSecondDistanceSquared) {
+        return AlgorithmPositionSecondDecision::AcceptSecond;
+    }
+    if (AlgorithmPositionDistanceSquared(first, *second) <=
+        kAlgorithmPositionSecondDistanceSquared) {
+        return AlgorithmPositionSecondDecision::NeedsCrossFrameConfirmation;
+    }
+    return AlgorithmPositionSecondDecision::FallbackHistory;
+}
+
+inline constexpr auto kAlgorithmPositionPendingMaximumAge =
+    std::chrono::milliseconds(250);
+inline constexpr std::uint64_t kAlgorithmPositionPendingMaximumFrameGap = 2;
+inline constexpr double kAlgorithmPositionPendingDirectionCosine = 0.75;
+inline constexpr double kAlgorithmPositionPendingMinimumStepRatio = 0.5;
+inline constexpr double kAlgorithmPositionPendingMaximumStepRatio = 2.0;
+
+struct AlgorithmPositionPendingSample {
+    AlgorithmPosition first{};
+    AlgorithmPosition last{};
+    std::uint64_t firstFrame = 0;
+    std::uint64_t lastFrame = 0;
+    std::chrono::steady_clock::time_point firstAt{};
+    std::chrono::steady_clock::time_point lastAt{};
+    std::size_t count = 0;
+
+    void Clear() noexcept { *this = {}; }
+};
+
+enum class AlgorithmPositionPendingDecision {
+    Pending,
+    Confirmed,
+};
+
+inline bool IsAlgorithmPositionPendingFresh(
+    const AlgorithmPositionPendingSample& sample,
+    std::uint64_t frame,
+    std::chrono::steady_clock::time_point now) noexcept {
+    return sample.count != 0 && frame > sample.lastFrame &&
+        frame - sample.lastFrame <= kAlgorithmPositionPendingMaximumFrameGap &&
+        now >= sample.lastAt &&
+        now - sample.lastAt <= kAlgorithmPositionPendingMaximumAge;
+}
+
+inline double AlgorithmPositionLengthSquared(
+    const AlgorithmPosition& value) noexcept {
+    return std::fma(
+        static_cast<double>(value.z), static_cast<double>(value.z),
+        std::fma(
+            static_cast<double>(value.x), static_cast<double>(value.x),
+            static_cast<double>(value.y) * static_cast<double>(value.y)));
+}
+
+inline double AlgorithmPositionDirectionCosine(
+    const AlgorithmPosition& left,
+    const AlgorithmPosition& right) noexcept {
+    const double leftLength = AlgorithmPositionLengthSquared(left);
+    const double rightLength = AlgorithmPositionLengthSquared(right);
+    if (leftLength <= 0.0 || rightLength <= 0.0) return -1.0;
+    const double dot =
+        static_cast<double>(left.x) * right.x +
+        static_cast<double>(left.y) * right.y +
+        static_cast<double>(left.z) * right.z;
+    return dot / std::sqrt(leftLength * rightLength);
+}
+
+inline AlgorithmPositionPendingDecision ObserveAlgorithmPositionPending(
+    AlgorithmPositionPendingSample& sample,
+    const AlgorithmPosition& candidate,
+    std::uint64_t frame,
+    std::chrono::steady_clock::time_point now) noexcept {
+    if (!IsAlgorithmPositionPendingFresh(sample, frame, now)) {
+        sample.Clear();
+    }
+    if (sample.count == 0) {
+        sample.first = candidate;
+        sample.last = candidate;
+        sample.firstFrame = frame;
+        sample.lastFrame = frame;
+        sample.firstAt = now;
+        sample.lastAt = now;
+        sample.count = 1;
+        return AlgorithmPositionPendingDecision::Pending;
+    }
+
+    const double distanceFromLast =
+        AlgorithmPositionDistanceSquared(sample.last, candidate);
+    if (distanceFromLast <= kAlgorithmPositionSecondDistanceSquared) {
+        sample.Clear();
+        return AlgorithmPositionPendingDecision::Confirmed;
+    }
+
+    if (sample.count == 1) {
+        sample.last = candidate;
+        sample.lastFrame = frame;
+        sample.lastAt = now;
+        sample.count = 2;
+        return AlgorithmPositionPendingDecision::Pending;
+    }
+
+    const AlgorithmPosition step{
+        sample.last.x - sample.first.x,
+        sample.last.y - sample.first.y,
+        sample.last.z - sample.first.z,
+    };
+    const AlgorithmPosition currentStep{
+        candidate.x - sample.last.x,
+        candidate.y - sample.last.y,
+        candidate.z - sample.last.z,
+    };
+    const double previousStepLength = std::sqrt(
+        AlgorithmPositionLengthSquared(step));
+    const double currentStepLength = std::sqrt(
+        AlgorithmPositionLengthSquared(currentStep));
+    const double ratio = previousStepLength > 0.0
+        ? currentStepLength / previousStepLength
+        : 0.0;
+    const double direction = AlgorithmPositionDirectionCosine(
+        step, currentStep);
+    const std::uint64_t frameSpan =
+        sample.lastFrame > sample.firstFrame
+        ? sample.lastFrame - sample.firstFrame
+        : 1;
+    const std::uint64_t currentSpan = frame > sample.lastFrame
+        ? frame - sample.lastFrame
+        : 1;
+    const double scale = static_cast<double>(currentSpan) /
+        static_cast<double>(frameSpan);
+    const AlgorithmPosition expected{
+        sample.last.x + step.x * static_cast<float>(scale),
+        sample.last.y + step.y * static_cast<float>(scale),
+        sample.last.z + step.z * static_cast<float>(scale),
+    };
+    const bool linear =
+        AlgorithmPositionDistanceSquared(expected, candidate) <=
+            kAlgorithmPositionSecondDistanceSquared &&
+        direction >= kAlgorithmPositionPendingDirectionCosine &&
+        ratio >= kAlgorithmPositionPendingMinimumStepRatio &&
+        ratio <= kAlgorithmPositionPendingMaximumStepRatio;
+    if (linear) {
+        sample.Clear();
+        return AlgorithmPositionPendingDecision::Confirmed;
+    }
+
+    sample.first = candidate;
+    sample.last = candidate;
+    sample.firstFrame = frame;
+    sample.lastFrame = frame;
+    sample.firstAt = now;
+    sample.lastAt = now;
+    sample.count = 1;
+    return AlgorithmPositionPendingDecision::Pending;
 }
 
 class AlgorithmPositionResultCache final {

@@ -1,5 +1,8 @@
 #pragma once
 
+#include "game/CoordinateDecryptDiagnostics.h"
+
+#include <array>
 #include <charconv>
 #include <cstdint>
 #include <limits>
@@ -10,10 +13,121 @@
 namespace lengjing::game::native {
 
 class MemoryTransport;
+struct ProcessExecutionContext;
 
 struct AlgorithmPacgaKey {
     std::uint64_t low = 0;
     std::uint64_t high = 0;
+};
+
+struct AlgorithmPacgaOracle {
+    std::uint64_t data = 0;
+    std::uint64_t modifier = 0;
+    std::uint64_t result = 0;
+    bool available = false;
+
+    constexpr bool Matches(std::uint64_t candidateData,
+                           std::uint64_t candidateModifier) const noexcept {
+        return available && data == candidateData &&
+            modifier == candidateModifier;
+    }
+};
+
+enum class AlgorithmPositionRuntimeStage : std::uint8_t {
+    Idle,
+    Queued,
+    Preparing,
+    RefreshingPages,
+    Executing,
+    ReadingResult,
+    Completed,
+    Failed,
+};
+
+enum class AlgorithmPositionRuntimeError : std::uint16_t {
+    None = 0,
+    InvalidInput,
+    EngineSetupFailed,
+    PageRefreshFailed,
+    RegisterSetupFailed,
+    EmulationFailed,
+    MemoryHookFailed,
+    Timeout,
+    ReturnPcMismatch,
+    ResultReadFailed,
+    ResultInvalid,
+    PacgaUnavailable,
+    UnsupportedSvc,
+    ContextStale,
+    FaultAddressInvalid,
+    GuestPageMapFailed,
+    RemotePageReadFailed,
+    GuestPageWriteFailed,
+    InstructionHookSetupFailed,
+};
+
+enum class AlgorithmPositionPacgaSource : std::uint8_t {
+    None,
+    Oracle,
+    Key,
+};
+
+// A submission is asynchronous.  Pending means that no new result is
+// available for this entity yet; a completed result is consumed once.
+enum class AlgorithmPositionRuntimeResult : std::uint8_t {
+    Pending,
+    Ready,
+    Failed,
+};
+
+struct AlgorithmPositionRuntimeProbe {
+    static constexpr std::size_t kInstructionTraceCapacity = 64;
+
+    AlgorithmPositionRuntimeStage stage =
+        AlgorithmPositionRuntimeStage::Idle;
+    AlgorithmPositionRuntimeError error =
+        AlgorithmPositionRuntimeError::None;
+    std::uintptr_t guestPc = 0;
+    std::uintptr_t entityAddress = 0;
+    std::uintptr_t faultAddress = 0;
+    std::uintptr_t finalPc = 0;
+    std::uintptr_t expectedPc = 0;
+    std::uint64_t requestId = 0;
+    std::uint64_t completedRequestId = 0;
+    std::uint64_t generation = 0;
+    std::uint64_t attempts = 0;
+    std::uint64_t successes = 0;
+    int unicornError = 0;
+    CoordinateReadDiagnostic read{};
+    int faultType = 0;
+    int faultSize = 0;
+    std::int64_t faultValue = 0;
+    std::uint64_t stackPointer = 0;
+    std::uint64_t x8 = 0;
+    std::uint64_t x9 = 0;
+    std::uint64_t x10 = 0;
+    std::uint64_t x23 = 0;
+    std::uint64_t x26 = 0;
+    std::uint64_t x27 = 0;
+    std::uint64_t pacgaAddress = 0;
+    std::uint64_t pacgaData = 0;
+    std::uint64_t pacgaModifier = 0;
+    std::uint64_t pacgaResult = 0;
+    std::uint64_t pacgaCount = 0;
+    AlgorithmPositionPacgaSource pacgaSource =
+        AlgorithmPositionPacgaSource::None;
+    std::uint64_t tpidrEl0 = 0;
+    std::uint64_t ctrEl0 = 0;
+    std::uint64_t cntfrqEl0 = 0;
+    std::uint64_t counterFirst = 0;
+    std::uint64_t counterLast = 0;
+    std::uint64_t ctrReadCount = 0;
+    std::uint64_t tpidrReadCount = 0;
+    std::uint64_t cntfrqReadCount = 0;
+    std::uint64_t counterReadCount = 0;
+    std::array<std::uint64_t, kInstructionTraceCapacity>
+        instructionTrace{};
+    std::size_t instructionTraceCount = 0;
 };
 
 std::uint64_t ComputeAlgorithmPositionPacga(
@@ -162,6 +276,31 @@ public:
                           const AlgorithmPacgaKey& pacgaKey,
                           AlgorithmPosition& position,
                           bool refreshCachedPages = true) noexcept;
+    AlgorithmPositionRuntimeResult ExecuteAtGuestPcResult(
+        MemoryTransport& memory,
+        std::uintptr_t guestPc,
+        std::uintptr_t entityAddress,
+        std::uint64_t tpidrEl0,
+        const AlgorithmPacgaKey& pacgaKey,
+        const AlgorithmPacgaOracle& pacgaOracle,
+        AlgorithmPosition& position,
+        bool refreshCachedPages = true) noexcept;
+    AlgorithmPositionRuntimeResult ExecuteAtGuestPcResult(
+        MemoryTransport& memory,
+        std::uintptr_t guestPc,
+        std::uintptr_t entityAddress,
+        const ProcessExecutionContext& executionContext,
+        AlgorithmPosition& position,
+        bool refreshCachedPages = true) noexcept;
+    bool ExecuteAtGuestPc(MemoryTransport& memory,
+                          std::uintptr_t guestPc,
+                          std::uintptr_t entityAddress,
+                          std::uint64_t tpidrEl0,
+                          const AlgorithmPacgaKey& pacgaKey,
+                          const AlgorithmPacgaOracle& pacgaOracle,
+                          AlgorithmPosition& position,
+                          bool refreshCachedPages = true) noexcept;
+    AlgorithmPositionRuntimeProbe Probe() const noexcept;
     void Invalidate() noexcept;
     void Reset() noexcept;
 

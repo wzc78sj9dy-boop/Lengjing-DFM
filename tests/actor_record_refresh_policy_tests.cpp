@@ -5,7 +5,10 @@
 
 void RunActorRecordRefreshPolicyTests() {
     using Key = lengjing::game::native::ActorRecordSnapshotKey;
+    using Identity = lengjing::game::native::ActorRecordSnapshotIdentity;
     using Policy = lengjing::game::native::ActorRecordRefreshPolicy;
+    using lengjing::game::native::ActorRecordIdentity;
+    using lengjing::game::native::CanRetainDecodedActorSnapshot;
     using namespace std::chrono_literals;
 
     const Key base{
@@ -65,4 +68,24 @@ void RunActorRecordRefreshPolicyTests() {
 
     policy.Invalidate();
     REQUIRE(policy.ShouldRefresh(base, start + 2ms));
+
+    const Identity identity = ActorRecordIdentity(base);
+    const auto capturedAt = start + 1ms;
+    REQUIRE(CanRetainDecodedActorSnapshot(
+        identity, identity, true, false, capturedAt, capturedAt + 1500ms));
+    REQUIRE(!CanRetainDecodedActorSnapshot(
+        identity, identity, true, false, capturedAt, capturedAt + 1501ms));
+    REQUIRE(!CanRetainDecodedActorSnapshot(
+        identity, identity, true, true, capturedAt, capturedAt + 1ms));
+    REQUIRE(!CanRetainDecodedActorSnapshot(
+        identity, identity, false, false, capturedAt, capturedAt + 1ms));
+    Identity changedIdentity = identity;
+    changedIdentity.world += 0x1000;
+    REQUIRE(!CanRetainDecodedActorSnapshot(
+        identity,
+        changedIdentity,
+        true,
+        false,
+        capturedAt,
+        capturedAt + 1ms));
 }

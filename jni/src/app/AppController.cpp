@@ -34,6 +34,29 @@ bool IsTerminal(game::RuntimePhase phase) {
         phase == game::RuntimePhase::Faulted;
 }
 
+bool SameAlgorithmCoordinateSummary(
+    const game::native::AlgorithmCoordinateDiagnostic& left,
+    const game::native::AlgorithmCoordinateDiagnostic& right) noexcept {
+    return left.error == right.error &&
+        left.tableAddress == right.tableAddress &&
+        left.table == right.table && left.records == right.records &&
+        left.count == right.count && left.validCount == right.validCount;
+}
+
+bool SameRuntimeCoordinateCodecSummary(
+    const game::native::RuntimeCoordinateCodecDiagnostic& left,
+    const game::native::RuntimeCoordinateCodecDiagnostic& right) noexcept {
+    return left.stage == right.stage && left.error == right.error &&
+        left.hook == right.hook && left.trampoline == right.trampoline &&
+        left.callback == right.callback && left.context == right.context &&
+        left.state == right.state && left.config == right.config &&
+        left.divisor == right.divisor && left.mask == right.mask &&
+        left.zBias == right.zBias &&
+        left.fingerprintWindow == right.fingerprintWindow &&
+        left.expectedFingerprint == right.expectedFingerprint &&
+        left.observedFingerprint == right.observedFingerprint;
+}
+
 ImU32 WithOpacity(ImU32 color, float opacity) {
     ImVec4 converted = ImGui::ColorConvertU32ToFloat4(color);
     converted.w *= std::clamp(opacity, 0.0f, 1.0f);
@@ -321,9 +344,11 @@ void AppController::StartRuntime() {
         return;
     }
     coordinateDecryptSuccessNotified_ = false;
+    algorithmCoordinateSuccessNotified_ = false;
     lastReportedCoordinateError_ = game::CoordinateDecryptError::None;
     lastReportedCoordinateSystemError_ = 0;
-    lastReportedCoordinateRead_ = {};
+    lastReportedAlgorithmCoordinate_ = {};
+    lastReportedRuntimeCoordinateCodec_ = {};
     lastReportedRuntimeError_ = game::RuntimeError::None;
     lastReportedRuntimeSystemError_ = 0;
     terminalWorkerJoined_ = false;
@@ -546,6 +571,50 @@ void AppController::SyncRuntimeStatus() {
     model_.runtime.coordinateErrorCode =
         game::CoordinateDecryptErrorCode(status.coordinateError);
     model_.runtime.coordinateSystemError = status.coordinateSystemError;
+    model_.runtime.algorithmCoordinateRequested =
+        status.algorithmCoordinateRequested;
+    model_.runtime.algorithmCoordinateActive =
+        status.algorithmCoordinateActive;
+    model_.runtime.algorithmCoordinateTableReady =
+        status.algorithmCoordinateTableReady;
+    model_.runtime.algorithmCoordinateRuntimeReady =
+        status.algorithmCoordinateRuntimeReady;
+    model_.runtime.algorithmCoordinateRefreshes =
+        status.algorithmCoordinateRefreshes;
+    model_.runtime.algorithmCoordinateResolveAttempts =
+        status.algorithmCoordinateResolveAttempts;
+    model_.runtime.algorithmCoordinateResolveSuccesses =
+        status.algorithmCoordinateResolveSuccesses;
+    model_.runtime.algorithmCoordinateAttempts =
+        status.algorithmCoordinateAttempts;
+    model_.runtime.algorithmCoordinateSuccesses =
+        status.algorithmCoordinateSuccesses;
+    model_.runtime.algorithmCoordinateObjectAttempts =
+        status.algorithmCoordinateObjectAttempts;
+    model_.runtime.algorithmCoordinateObjectSuccesses =
+        status.algorithmCoordinateObjectSuccesses;
+    model_.runtime.algorithmCoordinateTableAttempts =
+        status.algorithmCoordinateTableAttempts;
+    model_.runtime.algorithmCoordinateTableSuccesses =
+        status.algorithmCoordinateTableSuccesses;
+    model_.runtime.algorithmCoordinateFallbacks =
+        status.algorithmCoordinateFallbacks;
+    model_.runtime.algorithmCoordinateSource =
+        static_cast<std::uint8_t>(status.algorithmCoordinateSource);
+    model_.runtime.algorithmCoordinateErrorCode =
+        game::native::AlgorithmCoordinateReadErrorCode(
+            status.algorithmCoordinate.error);
+    model_.runtime.algorithmCoordinateRuntimeErrorCode =
+        game::native::RuntimeCoordinateCodecErrorCode(
+            status.algorithmCoordinateRuntime.error);
+    model_.runtime.algorithmCoordinateTable =
+        status.algorithmCoordinate.table;
+    model_.runtime.algorithmCoordinateRecords =
+        status.algorithmCoordinate.records;
+    model_.runtime.algorithmCoordinateCount =
+        status.algorithmCoordinate.count;
+    model_.runtime.algorithmCoordinateValidCount =
+        status.algorithmCoordinate.validCount;
     model_.runtime.runtimeErrorCode =
         game::RuntimeErrorCode(status.runtimeError);
     model_.runtime.runtimeSystemError = status.runtimeSystemError;
@@ -560,6 +629,23 @@ void AppController::SyncRuntimeStatus() {
             coordinateDecryptSuccessNotified_)) {
         coordinateDecryptSuccessNotified_ = true;
         AppendLog(CoordinateDecryptPresentationText(nextDecryptPresentation));
+    }
+    if (!status.algorithmCoordinateRequested) {
+        algorithmCoordinateSuccessNotified_ = false;
+    } else if (!algorithmCoordinateSuccessNotified_ &&
+               status.algorithmCoordinateSuccesses != 0) {
+        algorithmCoordinateSuccessNotified_ = true;
+        if (status.algorithmCoordinateObjectSuccesses != 0 &&
+            status.algorithmCoordinateRuntime.error ==
+                game::native::RuntimeCoordinateCodecError::None &&
+            status.algorithmCoordinateRuntime.stage ==
+                game::native::RuntimeCoordinateCodecStage::RingDecoded) {
+            AppendLog(game::native::FormatRuntimeCoordinateCodecDiagnostic(
+                status.algorithmCoordinateRuntime));
+        } else {
+            AppendLog(game::native::FormatAlgorithmCoordinateDiagnostic(
+                status.algorithmCoordinate));
+        }
     }
     model_.loot.customItemCount = status.customItemCount;
 
@@ -590,28 +676,56 @@ void AppController::SyncRuntimeStatus() {
         status.coordinateError != game::CoordinateDecryptError::None &&
         (status.coordinateError != lastReportedCoordinateError_ ||
          status.coordinateSystemError !=
-             lastReportedCoordinateSystemError_ ||
-         status.coordinateRead != lastReportedCoordinateRead_ ||
-         status.coordinatePoolPointer !=
-             lastReportedCoordinatePoolPointer_);
+             lastReportedCoordinateSystemError_);
     if (coordinateDiagnosticChanged) {
         AppendLog(game::FormatCoordinateDecryptDiagnostic(
             status.coordinateError,
             status.coordinateSystemError,
             status.coordinateRead,
-            status.coordinatePoolPointer));
+            status.coordinatePoolPointer,
+            status.coordinateEntry));
         lastReportedCoordinateError_ = status.coordinateError;
         lastReportedCoordinateSystemError_ =
             status.coordinateSystemError;
-        lastReportedCoordinateRead_ = status.coordinateRead;
-        lastReportedCoordinatePoolPointer_ =
-            status.coordinatePoolPointer;
     } else if (status.coordinateError ==
                game::CoordinateDecryptError::None) {
         lastReportedCoordinateError_ = game::CoordinateDecryptError::None;
         lastReportedCoordinateSystemError_ = 0;
-        lastReportedCoordinateRead_ = {};
-        lastReportedCoordinatePoolPointer_ = {};
+    }
+
+    const bool algorithmDiagnosticChanged =
+        status.algorithmCoordinateRequested &&
+        status.algorithmCoordinate.error !=
+            game::native::AlgorithmCoordinateReadError::None &&
+        !SameAlgorithmCoordinateSummary(
+            status.algorithmCoordinate,
+            lastReportedAlgorithmCoordinate_);
+    if (algorithmDiagnosticChanged) {
+        AppendLog(game::native::FormatAlgorithmCoordinateDiagnostic(
+            status.algorithmCoordinate));
+        lastReportedAlgorithmCoordinate_ = status.algorithmCoordinate;
+    } else if (!status.algorithmCoordinateRequested ||
+               status.algorithmCoordinate.error ==
+                   game::native::AlgorithmCoordinateReadError::None) {
+        lastReportedAlgorithmCoordinate_ = {};
+    }
+
+    const bool runtimeCodecDiagnosticChanged =
+        status.algorithmCoordinateRequested &&
+        status.algorithmCoordinateRuntime.error !=
+            game::native::RuntimeCoordinateCodecError::None &&
+        !SameRuntimeCoordinateCodecSummary(
+            status.algorithmCoordinateRuntime,
+            lastReportedRuntimeCoordinateCodec_);
+    if (runtimeCodecDiagnosticChanged) {
+        AppendLog(game::native::FormatRuntimeCoordinateCodecDiagnostic(
+            status.algorithmCoordinateRuntime));
+        lastReportedRuntimeCoordinateCodec_ =
+            status.algorithmCoordinateRuntime;
+    } else if (!status.algorithmCoordinateRequested ||
+               status.algorithmCoordinateRuntime.error ==
+                   game::native::RuntimeCoordinateCodecError::None) {
+        lastReportedRuntimeCoordinateCodec_ = {};
     }
 
     const game::RuntimeError reportedRuntimeError =

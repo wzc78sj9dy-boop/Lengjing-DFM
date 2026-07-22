@@ -34,6 +34,24 @@ constexpr bool ShouldKeepDecodedPositionSource(
     return coordinateDecryptRequested && directMode;
 }
 
+inline constexpr bool kAlgorithmCoordinateEnabled = false;
+
+constexpr bool ShouldReadAlgorithmCoordinate(
+    bool,
+    bool algorithmDecryptRequested) noexcept {
+    return kAlgorithmCoordinateEnabled && algorithmDecryptRequested;
+}
+
+constexpr bool ShouldBlockStandardCoordinateFallback(
+    bool coordinateDecryptRequested,
+    bool algorithmDecryptRequested,
+    bool algorithmCoordinateAvailable) noexcept {
+    return ShouldReadAlgorithmCoordinate(
+               coordinateDecryptRequested,
+               algorithmDecryptRequested) &&
+        !algorithmCoordinateAvailable;
+}
+
 constexpr bool IsCoordinateFrameHealthy(
     std::size_t attempts,
     std::size_t successes,
@@ -69,6 +87,14 @@ constexpr bool IsDecodedPositionCacheOwnerMatch(
 constexpr bool ShouldDiscardDecodedPositionCache(
     DecodedPositionCacheIdentityState identityState) noexcept {
     return identityState == DecodedPositionCacheIdentityState::Mismatch;
+}
+
+inline bool CanUseDecodedPositionHistory(
+    DecodedPositionCacheIdentityState identityState,
+    DecodedPositionClock::time_point capturedAt,
+    DecodedPositionClock::time_point now) noexcept {
+    return identityState == DecodedPositionCacheIdentityState::Match &&
+        now >= capturedAt && now - capturedAt <= kDecodedPositionRetention;
 }
 
 inline bool CanRetainDecodedPosition(

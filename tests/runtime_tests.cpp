@@ -79,6 +79,42 @@ public:
             settings.visual.coordinateDecrypt);
         state_->algorithmDecryptSetting.store(
             settings.visual.algorithmDecrypt);
+        probe.algorithmCoordinateRequested =
+            settings.visual.algorithmDecrypt;
+        probe.algorithmCoordinateActive =
+            settings.visual.algorithmDecrypt;
+        probe.algorithmCoordinateRuntimeReady =
+            probe.algorithmCoordinateActive;
+        probe.algorithmCoordinateTableReady = false;
+        probe.algorithmCoordinateRefreshes =
+            probe.algorithmCoordinateActive ? 7 : 0;
+        probe.algorithmCoordinateResolveAttempts =
+            probe.algorithmCoordinateActive ? 7 : 0;
+        probe.algorithmCoordinateResolveSuccesses =
+            probe.algorithmCoordinateActive ? 7 : 0;
+        probe.algorithmCoordinateAttempts =
+            probe.algorithmCoordinateActive ? 11 : 0;
+        probe.algorithmCoordinateSuccesses =
+            probe.algorithmCoordinateActive ? 5 : 0;
+        probe.algorithmCoordinateObjectAttempts =
+            probe.algorithmCoordinateActive ? 6 : 0;
+        probe.algorithmCoordinateObjectSuccesses =
+            probe.algorithmCoordinateActive ? 5 : 0;
+        probe.algorithmCoordinateFallbacks =
+            probe.algorithmCoordinateActive ? 1 : 0;
+        probe.algorithmCoordinateSource = probe.algorithmCoordinateActive
+            ? lengjing::game::native::AlgorithmCoordinateSource::RuntimeObject
+            : lengjing::game::native::AlgorithmCoordinateSource::None;
+        probe.algorithmCoordinateRuntime = {};
+        if (probe.algorithmCoordinateActive) {
+            probe.algorithmCoordinateRuntime.stage =
+                lengjing::game::native::
+                    RuntimeCoordinateCodecStage::RingDecoded;
+            probe.algorithmCoordinateRuntime.object = 0x50000000U;
+            probe.algorithmCoordinateRuntime.decodedX = 1.0f;
+            probe.algorithmCoordinateRuntime.decodedY = 2.0f;
+            probe.algorithmCoordinateRuntime.decodedZ = 3.0f;
+        }
         error = frame.ready ? std::string{} : "waiting";
         probe.coordinateError =
             static_cast<lengjing::game::CoordinateDecryptError>(
@@ -222,12 +258,32 @@ void RunRuntimeTests() {
         return !state->coordinateDecryptSetting.load() &&
             state->algorithmDecryptSetting.load();
     }));
+    REQUIRE(WaitFor([&] {
+        const lengjing::game::RuntimeStatus status = runtime.Status();
+        return status.algorithmCoordinateRequested &&
+            status.algorithmCoordinateActive &&
+            status.algorithmCoordinateRuntimeReady &&
+            status.algorithmCoordinateRefreshes == 7 &&
+            status.algorithmCoordinateResolveAttempts == 7 &&
+            status.algorithmCoordinateResolveSuccesses == 7 &&
+            status.algorithmCoordinateAttempts == 11 &&
+            status.algorithmCoordinateSuccesses == 5 &&
+            status.algorithmCoordinateObjectAttempts == 6 &&
+            status.algorithmCoordinateObjectSuccesses == 5 &&
+            status.algorithmCoordinateFallbacks == 1 &&
+            status.algorithmCoordinateSource ==
+                lengjing::game::native::
+                    AlgorithmCoordinateSource::RuntimeObject &&
+            status.algorithmCoordinateRuntime.object == 0x50000000U &&
+            status.algorithmCoordinateRuntime.decodedZ == 3.0f;
+    }));
 
     settings.visual.coordinateDecrypt = true;
     runtime.UpdateSettings(settings);
     REQUIRE(WaitFor([&] {
         return state->coordinateDecryptSetting.load() &&
-            state->algorithmDecryptSetting.load();
+            state->algorithmDecryptSetting.load() &&
+            runtime.Status().algorithmCoordinateActive;
     }));
 
     settings.visual.coordinateDecrypt = false;

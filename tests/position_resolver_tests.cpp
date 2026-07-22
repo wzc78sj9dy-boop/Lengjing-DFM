@@ -53,6 +53,10 @@ void RunPositionResolverTests() {
     REQUIRE(ResolveDecodedCharacterZ(-10.0f) == -100.0f);
     REQUIRE(ShouldAlignBoneFrameToCharacterPosition(
         CharacterPositionSource::Decoded));
+    REQUIRE(ShouldAlignBoneFrameToCharacterPosition(
+        CharacterPositionSource::AlgorithmObject));
+    REQUIRE(ShouldAlignBoneFrameToCharacterPosition(
+        CharacterPositionSource::AlgorithmTable));
     REQUIRE(!ShouldAlignBoneFrameToCharacterPosition(
         CharacterPositionSource::Standard));
     REQUIRE(!ShouldAlignBoneFrameToCharacterPosition(

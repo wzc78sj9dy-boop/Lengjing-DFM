@@ -25,6 +25,8 @@ enum class CoordinateDecryptError : std::uint16_t {
     EntryCodeProcMemOpenFailed = 1012,
     EntryCodeProcMemReadFailed = 1013,
     EntryMappingChanged = 1014,
+    EntryMappingFragmented = 1015,
+    EntryCodePageReadFailed = 1016,
 
     MemoryTransportUnavailable = 2001,
     RootReadFailed = 2002,
@@ -55,6 +57,25 @@ enum class CoordinateDecryptError : std::uint16_t {
     RingExecutionFailed = 5014,
     RingRegisterReadFailed = 5015,
     RingValueInvalid = 5016,
+
+    ReplayInvalidInput = 5101,
+    ReplayEngineSetupFailed = 5102,
+    ReplayPageRefreshFailed = 5103,
+    ReplayRegisterSetupFailed = 5104,
+    ReplayEmulationFailed = 5105,
+    ReplayMemoryHookFailed = 5106,
+    ReplayTimeout = 5107,
+    ReplayReturnPcMismatch = 5108,
+    ReplayResultReadFailed = 5109,
+    ReplayResultInvalid = 5110,
+    ReplayPacgaUnavailable = 5111,
+    ReplayUnsupportedSvc = 5112,
+    ReplayContextStale = 5113,
+    ReplayFaultAddressInvalid = 5114,
+    ReplayGuestPageMapFailed = 5115,
+    ReplayRemotePageReadFailed = 5116,
+    ReplayGuestPageWriteFailed = 5117,
+    ReplayInstructionHookSetupFailed = 5118,
 
     OutputNotFinite = 6002,
     OutputZero = 6003,
@@ -151,6 +172,19 @@ struct CoordinatePoolPointerDiagnostic {
     }
 };
 
+struct CoordinateEntryDiagnostic {
+    std::uintptr_t entry = 0;
+    std::uintptr_t mappingStart = 0;
+    std::uintptr_t mappingEnd = 0;
+    std::uintptr_t failedMethod = 0;
+    std::uint32_t mappingFragments = 0;
+
+    constexpr bool HasData() const noexcept {
+        return entry != 0 || mappingStart != 0 || mappingEnd != 0 ||
+            failedMethod != 0 || mappingFragments != 0;
+    }
+};
+
 constexpr bool operator==(const CoordinateReadDiagnostic& left,
                           const CoordinateReadDiagnostic& right) noexcept {
     return left.stage == right.stage &&
@@ -185,6 +219,20 @@ constexpr bool operator==(
 constexpr bool operator!=(
     const CoordinatePoolPointerDiagnostic& left,
     const CoordinatePoolPointerDiagnostic& right) noexcept {
+    return !(left == right);
+}
+
+constexpr bool operator==(const CoordinateEntryDiagnostic& left,
+                          const CoordinateEntryDiagnostic& right) noexcept {
+    return left.entry == right.entry &&
+        left.mappingStart == right.mappingStart &&
+        left.mappingEnd == right.mappingEnd &&
+        left.failedMethod == right.failedMethod &&
+        left.mappingFragments == right.mappingFragments;
+}
+
+constexpr bool operator!=(const CoordinateEntryDiagnostic& left,
+                          const CoordinateEntryDiagnostic& right) noexcept {
     return !(left == right);
 }
 
@@ -308,86 +356,30 @@ inline std::string FormatCoordinateDecryptDiagnostic(
 inline std::string FormatCoordinateDecryptDiagnostic(
     CoordinateDecryptError error,
     int systemError,
-    const CoordinateReadDiagnostic& read,
-    const CoordinatePoolPointerDiagnostic& poolPointer) {
+    const CoordinateReadDiagnostic&,
+    const CoordinatePoolPointerDiagnostic& poolPointer,
+    const CoordinateEntryDiagnostic& = {}) {
     std::string message =
-        FormatCoordinateDecryptDiagnostic(error, systemError, read);
-    if (!poolPointer.HasFailure()) return message;
-
-    std::array<char, 512> suffix{};
-    if (poolPointer.read.HasFailure()) {
+        FormatCoordinateDecryptDiagnostic(error, systemError);
+    if (poolPointer.HasFailure()) {
+        std::array<char, 48> detail{};
         std::snprintf(
-            suffix.data(),
-            suffix.size(),
-            " POOL=CD-%04u P_SYS=%d P_STATE=0x%X P_OFF=%d "
-            "P_CTX=0x%llX P_AT=0x%llX P_RAW=0x%llX P_VALUE=0x%llX "
-            "P_READ=%s P_PRI=%s P_PSYS=%d P_LAST=%s P_LSYS=%d "
-            "P_TRY=0x%X P_CALLS=%u",
+            detail.data(),
+            detail.size(),
+            " DETAIL=CD-%04u D_SYS=%d",
             static_cast<unsigned int>(
                 CoordinateDecryptErrorCode(poolPointer.error)),
-            poolPointer.systemError,
-            static_cast<unsigned int>(poolPointer.stateFlags),
-            poolPointer.offset,
-            static_cast<unsigned long long>(poolPointer.computedContext),
-            static_cast<unsigned long long>(poolPointer.address),
-            static_cast<unsigned long long>(poolPointer.rawValue),
-            static_cast<unsigned long long>(poolPointer.normalizedValue),
-            CoordinateReadFailureName(poolPointer.read.failure),
-            CoordinateReadPathName(poolPointer.read.primaryPath),
-            poolPointer.read.primarySystemError,
-            CoordinateReadPathName(poolPointer.read.lastPath),
-            poolPointer.read.lastSystemError,
-            static_cast<unsigned int>(poolPointer.read.attemptedPaths),
-            static_cast<unsigned int>(poolPointer.read.attemptCount));
-    } else {
-        std::snprintf(
-            suffix.data(),
-            suffix.size(),
-            " POOL=CD-%04u P_SYS=%d P_STATE=0x%X P_OFF=%d "
-            "P_CTX=0x%llX P_AT=0x%llX P_RAW=0x%llX P_VALUE=0x%llX",
-            static_cast<unsigned int>(
-                CoordinateDecryptErrorCode(poolPointer.error)),
-            poolPointer.systemError,
-            static_cast<unsigned int>(poolPointer.stateFlags),
-            poolPointer.offset,
-            static_cast<unsigned long long>(poolPointer.computedContext),
-            static_cast<unsigned long long>(poolPointer.address),
-            static_cast<unsigned long long>(poolPointer.rawValue),
-            static_cast<unsigned long long>(poolPointer.normalizedValue));
+            poolPointer.systemError);
+        message.append(detail.data());
     }
-    message.append(suffix.data());
     return message;
 }
 
 inline std::string FormatCoordinateDecryptDiagnostic(
     CoordinateDecryptError error,
     int systemError,
-    const CoordinateReadDiagnostic& read) {
-    if (!read.HasFailure()) {
-        return FormatCoordinateDecryptDiagnostic(error, systemError);
-    }
-    std::array<char, 384> message{};
-    std::snprintf(
-        message.data(),
-        message.size(),
-        "COORD CD-%04u SYS=%d READ=%s STAGE=%s "
-        "PRI=%s P_SYS=%d P_DONE=%llu LAST=%s L_SYS=%d L_DONE=%llu "
-        "TRY=0x%X CALLS=%u AT=0x%llX N=%llu",
-        static_cast<unsigned int>(CoordinateDecryptErrorCode(error)),
-        systemError,
-        CoordinateReadFailureName(read.failure),
-        CoordinateReadStageName(read.stage),
-        CoordinateReadPathName(read.primaryPath),
-        read.primarySystemError,
-        static_cast<unsigned long long>(read.primaryCompleted),
-        CoordinateReadPathName(read.lastPath),
-        read.lastSystemError,
-        static_cast<unsigned long long>(read.lastCompleted),
-        static_cast<unsigned int>(read.attemptedPaths),
-        static_cast<unsigned int>(read.attemptCount),
-        static_cast<unsigned long long>(read.address),
-        static_cast<unsigned long long>(read.size));
-    return message.data();
+    const CoordinateReadDiagnostic&) {
+    return FormatCoordinateDecryptDiagnostic(error, systemError);
 }
 
 }  // namespace lengjing::game

@@ -322,6 +322,12 @@ std::uint64_t ReadHostVirtualCounter() {
 #endif
 }
 
+bool IsInstructionTraceEnabled() noexcept {
+    const char* value = std::getenv(
+        "LENGJING_COORDINATE_INSTRUCTION_TRACE");
+    return value != nullptr && value[0] == '1' && value[1] == '\0';
+}
+
 bool IsFinitePosition(const AlgorithmPosition& position) {
     return std::isfinite(position.x) && std::isfinite(position.y) &&
         std::isfinite(position.z) &&
@@ -349,14 +355,20 @@ struct AlgorithmPositionRuntime::Impl {
         MemoryTransport* memory = nullptr;
         std::uintptr_t guestPc = 0;
         std::uintptr_t entityAddress = 0;
+        std::uint64_t requestId = 0;
         std::uint64_t tpidrEl0 = 0;
         AlgorithmPacgaKey pacgaKey{};
+        AlgorithmPacgaOracle pacgaOracle{};
         std::uint64_t generation = 0;
         bool refreshCachedPages = true;
     };
 
     struct CompletedExecution {
+        std::uint64_t requestId = 0;
+        std::uint64_t generation = 0;
+        bool succeeded = false;
         AlgorithmPosition position{};
+        AlgorithmPositionRuntimeProbe probe{};
         std::chrono::steady_clock::time_point updatedAt{};
     };
 
@@ -383,6 +395,7 @@ struct AlgorithmPositionRuntime::Impl {
             entityAddress,
             tpidrEl0,
             pacgaKey,
+            AlgorithmPacgaOracle{},
             position,
             refreshCachedPages);
     }
@@ -394,57 +407,152 @@ struct AlgorithmPositionRuntime::Impl {
                           const AlgorithmPacgaKey& pacgaKey,
                           AlgorithmPosition& position,
                           bool refreshCachedPages) noexcept {
+        return ExecuteAtGuestPcResult(
+            memory,
+            guestPc,
+            entityAddress,
+            tpidrEl0,
+            pacgaKey,
+            AlgorithmPacgaOracle{},
+            position,
+            refreshCachedPages) == AlgorithmPositionRuntimeResult::Ready;
+    }
+
+    AlgorithmPositionRuntimeResult ExecuteAtGuestPcResult(
+        MemoryTransport& memory,
+        std::uintptr_t guestPc,
+        std::uintptr_t entityAddress,
+        std::uint64_t tpidrEl0,
+        const AlgorithmPacgaKey& pacgaKey,
+        const AlgorithmPacgaOracle& pacgaOracle,
+        AlgorithmPosition& position,
+        bool refreshCachedPages) noexcept {
         position = {};
         try {
             if (!memory.IsOpen() ||
                 !ValidateExecutionTarget(guestPc, entityAddress)) {
-                return false;
+                SetImmediateProbeFailure(
+                    guestPc,
+                    entityAddress,
+                    AlgorithmPositionRuntimeError::InvalidInput);
+                return AlgorithmPositionRuntimeResult::Failed;
             }
 
             const auto now = std::chrono::steady_clock::now();
             std::lock_guard<std::mutex> lock(queueMutex_);
-            if (stopping_) return false;
+            if (stopping_) {
+                SetImmediateProbeFailure(
+                    guestPc,
+                    entityAddress,
+                    AlgorithmPositionRuntimeError::ContextStale);
+                return AlgorithmPositionRuntimeResult::Failed;
+            }
             EnsureWorkerLocked();
             UpdateExecutionContextLocked(
-                memory, guestPc, tpidrEl0, pacgaKey);
+                memory, guestPc, tpidrEl0, pacgaKey, pacgaOracle);
             if (refreshCachedPages) pageRefreshRequested_ = true;
 
-            PendingExecution execution{
-                &memory,
-                guestPc,
-                entityAddress,
-                tpidrEl0,
-                pacgaKey,
-                generation_,
-                false,
-            };
             const auto pending = pendingExecutions_.find(entityAddress);
+            std::uint64_t requestId = 0;
             if (pending == pendingExecutions_.end()) {
+                requestId = NextRequestIdLocked();
                 if (pendingExecutions_.size() >=
                     kAlgorithmPositionMaximumCachedPages) {
                     DropOldestPendingLocked();
                 }
                 pendingOrder_.push_back(entityAddress);
-                pendingExecutions_.emplace(entityAddress, execution);
+                pendingExecutions_.emplace(
+                    entityAddress,
+                    PendingExecution{
+                        &memory,
+                        guestPc,
+                        entityAddress,
+                        requestId,
+                        tpidrEl0,
+                        pacgaKey,
+                        pacgaOracle,
+                        generation_,
+                        false,
+                    });
             } else {
-                pending->second = execution;
+                requestId = pending->second.requestId;
             }
             queueReady_.notify_one();
 
+            PruneCompletedLocked(now);
             const auto completed = completedExecutions_.find(entityAddress);
-            if (completed == completedExecutions_.end()) {
-                return false;
+            if (completed != completedExecutions_.end() &&
+                completed->second.generation == generation_ &&
+                now - completed->second.updatedAt <= kAsyncResultLifetime) {
+                const auto consumed = lastConsumedRequestIds_.find(
+                    entityAddress);
+                if (consumed == lastConsumedRequestIds_.end() ||
+                    completed->second.requestId > consumed->second) {
+                    lastConsumedRequestIds_[entityAddress] =
+                        completed->second.requestId;
+                    position = completed->second.position;
+                    PublishProbeSnapshot(completed->second.probe);
+                    return completed->second.succeeded
+                        ? AlgorithmPositionRuntimeResult::Ready
+                        : AlgorithmPositionRuntimeResult::Failed;
+                }
             }
-            if (now - completed->second.updatedAt > kAsyncResultLifetime) {
-                completedExecutions_.erase(completed);
-                return false;
-            }
-            position = completed->second.position;
-            return true;
+            SetProbeQueued(
+                guestPc, entityAddress, requestId, generation_);
+            return AlgorithmPositionRuntimeResult::Pending;
         } catch (...) {
             position = {};
-            return false;
+            SetImmediateProbeFailure(
+                guestPc,
+                entityAddress,
+                AlgorithmPositionRuntimeError::EmulationFailed);
+            return AlgorithmPositionRuntimeResult::Failed;
         }
+    }
+
+    bool ExecuteAtGuestPc(MemoryTransport& memory,
+                          std::uintptr_t guestPc,
+                          std::uintptr_t entityAddress,
+                          std::uint64_t tpidrEl0,
+                          const AlgorithmPacgaKey& pacgaKey,
+                          const AlgorithmPacgaOracle& pacgaOracle,
+                          AlgorithmPosition& position,
+                          bool refreshCachedPages) noexcept {
+        return ExecuteAtGuestPcResult(
+            memory,
+            guestPc,
+            entityAddress,
+            tpidrEl0,
+            pacgaKey,
+            pacgaOracle,
+            position,
+            refreshCachedPages) == AlgorithmPositionRuntimeResult::Ready;
+    }
+
+    AlgorithmPositionRuntimeResult ExecuteAtGuestPcResult(
+        MemoryTransport& memory,
+        std::uintptr_t guestPc,
+        std::uintptr_t entityAddress,
+        const ProcessExecutionContext& executionContext,
+        AlgorithmPosition& position,
+        bool refreshCachedPages) noexcept {
+        return ExecuteAtGuestPcResult(
+            memory,
+            guestPc,
+            entityAddress,
+            executionContext.tpidrEl0,
+            AlgorithmPacgaKey{
+                executionContext.pacgaLow,
+                executionContext.pacgaHigh,
+            },
+            AlgorithmPacgaOracle{
+                executionContext.pacgaOracle.data,
+                executionContext.pacgaOracle.modifier,
+                executionContext.pacgaOracle.result,
+                executionContext.pacgaOracle.available,
+            },
+            position,
+            refreshCachedPages);
     }
 
     void Reset() noexcept {
@@ -458,6 +566,7 @@ struct AlgorithmPositionRuntime::Impl {
             pendingExecutions_.clear();
             completedOrder_.clear();
             completedExecutions_.clear();
+            lastConsumedRequestIds_.clear();
             pageRefreshRequested_ = false;
             ClearExecutionContextLocked();
             StopActiveEmulationLocked();
@@ -481,12 +590,133 @@ struct AlgorithmPositionRuntime::Impl {
         pendingExecutions_.clear();
         completedOrder_.clear();
         completedExecutions_.clear();
+        lastConsumedRequestIds_.clear();
         pageRefreshRequested_ = false;
         ClearExecutionContextLocked();
         StopActiveEmulationLocked();
     }
 
+    AlgorithmPositionRuntimeProbe Probe() const noexcept {
+        std::lock_guard<std::mutex> lock(probeMutex_);
+        return probe_;
+    }
+
 private:
+    void BeginProbe(std::uintptr_t guestPc,
+                    std::uintptr_t entityAddress,
+        std::uint64_t requestId,
+        std::uint64_t generation) noexcept {
+        std::lock_guard<std::mutex> lock(probeMutex_);
+        workerProbe_ = {};
+        workerProbe_.stage = AlgorithmPositionRuntimeStage::Preparing;
+        workerProbe_.error = AlgorithmPositionRuntimeError::None;
+        workerProbe_.guestPc = guestPc;
+        workerProbe_.entityAddress = entityAddress;
+        workerProbe_.faultAddress = 0;
+        workerProbe_.finalPc = 0;
+        workerProbe_.expectedPc = kStopPc;
+        workerProbe_.requestId = requestId;
+        workerProbe_.completedRequestId = 0;
+        workerProbe_.generation = generation;
+        workerProbe_.unicornError = 0;
+        workerProbe_.read = {};
+        workerProbe_.attempts = ++probeAttempts_;
+        workerProbe_.successes = probeSuccesses_;
+    }
+
+    void SetImmediateProbeFailure(
+        std::uintptr_t guestPc,
+        std::uintptr_t entityAddress,
+        AlgorithmPositionRuntimeError error) noexcept {
+        std::lock_guard<std::mutex> lock(probeMutex_);
+        probe_ = {};
+        probe_.stage = AlgorithmPositionRuntimeStage::Failed;
+        probe_.error = error;
+        probe_.guestPc = guestPc;
+        probe_.entityAddress = entityAddress;
+        probe_.faultAddress = 0;
+        probe_.finalPc = 0;
+        probe_.expectedPc = kStopPc;
+        probe_.requestId = 0;
+        probe_.completedRequestId = 0;
+        probe_.generation = publishedGeneration_.load(
+            std::memory_order_acquire);
+        probe_.unicornError = 0;
+        probe_.read = {};
+        probe_.attempts = probeAttempts_;
+        probe_.successes = probeSuccesses_;
+    }
+
+    void SetProbeQueued(std::uintptr_t guestPc,
+                        std::uintptr_t entityAddress,
+                        std::uint64_t requestId,
+                        std::uint64_t generation) noexcept {
+        std::lock_guard<std::mutex> lock(probeMutex_);
+        probe_ = {};
+        probe_.stage = AlgorithmPositionRuntimeStage::Queued;
+        probe_.error = AlgorithmPositionRuntimeError::None;
+        probe_.guestPc = guestPc;
+        probe_.entityAddress = entityAddress;
+        probe_.faultAddress = 0;
+        probe_.finalPc = 0;
+        probe_.expectedPc = kStopPc;
+        probe_.requestId = requestId;
+        probe_.completedRequestId = 0;
+        probe_.generation = generation;
+        probe_.unicornError = 0;
+        probe_.read = {};
+        probe_.attempts = probeAttempts_;
+        probe_.successes = probeSuccesses_;
+    }
+
+    void PublishProbeSnapshot(
+        const AlgorithmPositionRuntimeProbe& snapshot) noexcept {
+        std::lock_guard<std::mutex> lock(probeMutex_);
+        probe_ = snapshot;
+        probe_.completedRequestId = snapshot.requestId;
+    }
+
+    std::uint64_t NextRequestIdLocked() noexcept {
+        ++nextRequestId_;
+        if (nextRequestId_ == 0) ++nextRequestId_;
+        return nextRequestId_;
+    }
+
+    void SetProbeFailure(AlgorithmPositionRuntimeError error,
+                         int unicornError = 0,
+                         std::uintptr_t finalPc = 0) noexcept {
+        std::lock_guard<std::mutex> lock(probeMutex_);
+        workerProbe_.stage = AlgorithmPositionRuntimeStage::Failed;
+        workerProbe_.error = error;
+        workerProbe_.unicornError = unicornError;
+        workerProbe_.finalPc = finalPc;
+        workerProbe_.faultAddress = hookFailureAddress_;
+        workerProbe_.read = activeReadDiagnostic_;
+        workerProbe_.attempts = probeAttempts_;
+        workerProbe_.successes = probeSuccesses_;
+    }
+
+    void SetProbeStage(AlgorithmPositionRuntimeStage stage) noexcept {
+        std::lock_guard<std::mutex> lock(probeMutex_);
+        workerProbe_.stage = stage;
+    }
+
+    void SetProbeSuccess(std::uintptr_t finalPc) noexcept {
+        std::lock_guard<std::mutex> lock(probeMutex_);
+        workerProbe_.stage = AlgorithmPositionRuntimeStage::Completed;
+        workerProbe_.error = AlgorithmPositionRuntimeError::None;
+        workerProbe_.finalPc = finalPc;
+        workerProbe_.faultAddress = 0;
+        workerProbe_.unicornError = 0;
+        workerProbe_.read = {};
+        workerProbe_.successes = ++probeSuccesses_;
+    }
+
+    AlgorithmPositionRuntimeProbe WorkerProbe() const noexcept {
+        std::lock_guard<std::mutex> lock(probeMutex_);
+        return workerProbe_;
+    }
+
     void AdvanceGenerationLocked() noexcept {
         ++generation_;
         publishedGeneration_.store(generation_, std::memory_order_release);
@@ -497,6 +727,7 @@ private:
         executionContextGuestPc_ = 0;
         executionContextTpidrEl0_ = 0;
         executionContextPacgaKey_ = {};
+        executionContextPacgaOracle_ = {};
     }
 
     bool IsExecutionCurrent(std::uint64_t generation) const noexcept {
@@ -521,23 +752,30 @@ private:
         MemoryTransport& memory,
         std::uintptr_t guestPc,
         std::uint64_t tpidrEl0,
-        const AlgorithmPacgaKey& pacgaKey) {
+        const AlgorithmPacgaKey& pacgaKey,
+        const AlgorithmPacgaOracle& pacgaOracle) {
         const bool changed = executionContextMemory_ != &memory ||
             executionContextGuestPc_ != guestPc ||
             executionContextTpidrEl0_ != tpidrEl0 ||
             executionContextPacgaKey_.low != pacgaKey.low ||
-            executionContextPacgaKey_.high != pacgaKey.high;
+            executionContextPacgaKey_.high != pacgaKey.high ||
+            executionContextPacgaOracle_.available != pacgaOracle.available ||
+            executionContextPacgaOracle_.data != pacgaOracle.data ||
+            executionContextPacgaOracle_.modifier != pacgaOracle.modifier ||
+            executionContextPacgaOracle_.result != pacgaOracle.result;
         if (!changed) return;
 
         executionContextMemory_ = &memory;
         executionContextGuestPc_ = guestPc;
         executionContextTpidrEl0_ = tpidrEl0;
         executionContextPacgaKey_ = pacgaKey;
+        executionContextPacgaOracle_ = pacgaOracle;
         AdvanceGenerationLocked();
         pendingOrder_.clear();
         pendingExecutions_.clear();
         completedOrder_.clear();
         completedExecutions_.clear();
+        lastConsumedRequestIds_.clear();
         pageRefreshRequested_ = false;
     }
 
@@ -599,10 +837,13 @@ private:
                 execution.entityAddress,
                 execution.tpidrEl0,
                 execution.pacgaKey,
+                execution.pacgaOracle,
+                execution.requestId,
                 execution.generation,
                 execution.refreshCachedPages,
                 candidate);
-            if (!succeeded) continue;
+            const AlgorithmPositionRuntimeProbe completedProbe =
+                WorkerProbe();
 
             const auto now = std::chrono::steady_clock::now();
             std::lock_guard<std::mutex> lock(queueMutex_);
@@ -610,7 +851,14 @@ private:
                 try {
                     PruneCompletedLocked(now);
                     completedExecutions_[execution.entityAddress] =
-                        CompletedExecution{candidate, now};
+                        CompletedExecution{
+                            execution.requestId,
+                            execution.generation,
+                            succeeded,
+                            candidate,
+                            completedProbe,
+                            now,
+                        };
                     completedOrder_.emplace_back(
                         execution.entityAddress, now);
                 } catch (...) {
@@ -626,23 +874,40 @@ private:
         std::uintptr_t entityAddress,
         std::uint64_t tpidrEl0,
         const AlgorithmPacgaKey& pacgaKey,
+        const AlgorithmPacgaOracle& pacgaOracle,
+        std::uint64_t requestId,
         std::uint64_t generation,
         bool refreshCachedPages,
         AlgorithmPosition& position) noexcept {
         position = {};
+        BeginProbe(guestPc, entityAddress, requestId, generation);
         try {
-            if (!IsExecutionCurrent(generation)) return false;
+            if (!IsExecutionCurrent(generation)) {
+                SetProbeFailure(AlgorithmPositionRuntimeError::ContextStale);
+                return false;
+            }
             if (workerGeneration_ != generation) {
                 positionCache_.Clear();
                 workerGeneration_ = generation;
             }
             if (!memory.IsOpen() ||
-                !ValidateExecutionTarget(guestPc, entityAddress) ||
-                !EnsureEngine(memory) ||
-                !ClearCoordinatePagesIfOverLimit()) {
+                !ValidateExecutionTarget(guestPc, entityAddress)) {
+                SetProbeFailure(AlgorithmPositionRuntimeError::InvalidInput);
                 return false;
             }
-            if (!IsExecutionCurrent(generation)) return false;
+            if (!EnsureEngine(memory)) {
+                SetProbeFailure(AlgorithmPositionRuntimeError::EngineSetupFailed);
+                return false;
+            }
+            if (!ClearCoordinatePagesIfOverLimit()) {
+                SetProbeFailure(
+                    AlgorithmPositionRuntimeError::EngineSetupFailed);
+                return false;
+            }
+            if (!IsExecutionCurrent(generation)) {
+                SetProbeFailure(AlgorithmPositionRuntimeError::ContextStale);
+                return false;
+            }
 
             AlgorithmPosition first{};
             const AlgorithmPositionRefreshPlan refreshPlan =
@@ -650,10 +915,11 @@ private:
             if (!ExecuteOnce(
                     memory,
                     guestPc,
-                    entityAddress,
-                    tpidrEl0,
-                    pacgaKey,
-                    generation,
+                     entityAddress,
+                     tpidrEl0,
+                     pacgaKey,
+                     pacgaOracle,
+                     generation,
                     refreshPlan.first,
                     first)) {
                 return false;
@@ -673,10 +939,11 @@ private:
                 if (!ExecuteOnce(
                     memory,
                     guestPc,
-                    entityAddress,
-                    tpidrEl0,
-                    pacgaKey,
-                    generation,
+                     entityAddress,
+                     tpidrEl0,
+                     pacgaKey,
+                     pacgaOracle,
+                     generation,
                     refreshPlan.discarded,
                     discarded)) {
                     return false;
@@ -685,10 +952,11 @@ private:
                 const bool hasCandidate = ExecuteOnce(
                     memory,
                     guestPc,
-                    entityAddress,
-                    tpidrEl0,
-                    pacgaKey,
-                    generation,
+                     entityAddress,
+                     tpidrEl0,
+                     pacgaKey,
+                     pacgaOracle,
+                     generation,
                     refreshPlan.candidate,
                     candidate);
                 if (EvaluateAlgorithmPositionSecond(
@@ -707,9 +975,11 @@ private:
                 entityAddress,
                 selected,
                 AlgorithmPositionResultCache::Clock::now());
+            SetProbeSuccess(kStopPc);
             return true;
         } catch (...) {
             ClearActiveExecution();
+            SetProbeFailure(AlgorithmPositionRuntimeError::EmulationFailed);
             position = {};
             return false;
         }
@@ -720,6 +990,7 @@ private:
                      std::uint64_t entityAddress,
                      std::uint64_t tpidrEl0,
                      const AlgorithmPacgaKey& pacgaKey,
+                     const AlgorithmPacgaOracle& pacgaOracle,
                      std::uint64_t generation,
                      bool refreshCachedPages,
                      AlgorithmPosition& position) {
@@ -728,18 +999,36 @@ private:
         const auto startedAt = std::chrono::steady_clock::now();
         activeMemory_ = &memory;
         activePacgaKey_ = pacgaKey;
+        activePacgaOracle_ = pacgaOracle;
         activeTpidrEl0_ = tpidrEl0;
+        workerProbe_.tpidrEl0 = tpidrEl0;
         activeExecutionGeneration_ = generation;
+        instructionTraceCount_ = 0;
+        instructionTrace_.fill(0);
         hookFailed_ = false;
+        hookRuntimeError_ = AlgorithmPositionRuntimeError::MemoryHookFailed;
+        hookFailureAddress_ = 0;
+        activeReadDiagnostic_ = {};
 
-        if ((refreshCachedPages &&
-             !RefreshCachedPages(memory, generation)) ||
-            !PrepareRegisters(entry, entityAddress, tpidrEl0)) {
+        if (refreshCachedPages) {
+            SetProbeStage(AlgorithmPositionRuntimeStage::RefreshingPages);
+            if (!RefreshCachedPages(memory, generation)) {
+                ClearActiveExecution();
+                SetProbeFailure(
+                    AlgorithmPositionRuntimeError::PageRefreshFailed);
+                return false;
+            }
+        }
+        SetProbeStage(AlgorithmPositionRuntimeStage::Preparing);
+        if (!PrepareRegisters(entry, entityAddress, tpidrEl0)) {
             ClearActiveExecution();
+            SetProbeFailure(
+                AlgorithmPositionRuntimeError::RegisterSetupFailed);
             return false;
         }
         if (!IsExecutionCurrent(generation)) {
             ClearActiveExecution();
+            SetProbeFailure(AlgorithmPositionRuntimeError::ContextStale);
             return false;
         }
 
@@ -747,6 +1036,7 @@ private:
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline) {
             ClearActiveExecution();
+            SetProbeFailure(AlgorithmPositionRuntimeError::Timeout);
             return false;
         }
         const auto remaining =
@@ -758,12 +1048,18 @@ private:
             std::lock_guard<std::mutex> lock(executionControlMutex_);
             if (!IsExecutionCurrent(generation)) {
                 ClearActiveExecution();
+                SetProbeFailure(AlgorithmPositionRuntimeError::ContextStale);
                 return false;
             }
             emulationRunning_ = true;
         }
+        SetProbeStage(AlgorithmPositionRuntimeStage::Executing);
         const uc_err error = uc_emu_start(
             engine_, entry, kStopPc, timeout, kInstructionBudget);
+        std::size_t timedOut = 0;
+        const bool unicornTimedOut =
+            uc_query(engine_, UC_QUERY_TIMEOUT, &timedOut) == UC_ERR_OK &&
+            timedOut != 0;
         {
             std::lock_guard<std::mutex> lock(executionControlMutex_);
             emulationRunning_ = false;
@@ -775,35 +1071,74 @@ private:
             pc == kStopPc;
         const bool finishedInTime =
             std::chrono::steady_clock::now() <= deadline;
-        if (error != UC_ERR_OK || hookFailed_ || !stoppedAtReturn ||
-            !finishedInTime) {
+        if (hookFailed_) {
             ClearActiveExecution();
+            SetProbeFailure(
+                hookRuntimeError_,
+                static_cast<int>(error),
+                pc);
+            return false;
+        }
+        if (unicornTimedOut || !finishedInTime) {
+            ClearActiveExecution();
+            SetProbeFailure(
+                AlgorithmPositionRuntimeError::Timeout,
+                static_cast<int>(error),
+                pc);
+            return false;
+        }
+        if (error != UC_ERR_OK) {
+            ClearActiveExecution();
+            SetProbeFailure(
+                AlgorithmPositionRuntimeError::EmulationFailed,
+                static_cast<int>(error),
+                pc);
+            return false;
+        }
+        if (!stoppedAtReturn) {
+            ClearActiveExecution();
+            SetProbeFailure(
+                AlgorithmPositionRuntimeError::ReturnPcMismatch,
+                static_cast<int>(error),
+                pc);
             return false;
         }
 
+        SetProbeStage(AlgorithmPositionRuntimeStage::ReadingResult);
         AlgorithmPosition candidate{};
-        const bool valid =
-            ReadPosition(candidate) && IsFinitePosition(candidate);
+        const bool readable = ReadPosition(candidate);
+        const bool valid = readable && IsFinitePosition(candidate);
         ClearActiveExecution();
-        if (!valid) return false;
+        if (!readable) {
+            SetProbeFailure(AlgorithmPositionRuntimeError::ResultReadFailed,
+                            0,
+                            pc);
+            return false;
+        }
+        if (!valid) {
+            SetProbeFailure(AlgorithmPositionRuntimeError::ResultInvalid,
+                            0,
+                            pc);
+            return false;
+        }
         position = candidate;
         return true;
     }
 
     static bool MemoryFaultHook(uc_engine*,
-                                uc_mem_type,
+                                uc_mem_type type,
                                 std::uint64_t address,
-                                int,
-                                std::int64_t,
+                                int size,
+                                std::int64_t value,
                                 void* userData) {
         auto* self = static_cast<Impl*>(userData);
         if (self == nullptr) return false;
         try {
+            self->CaptureFaultContext(type, address, size, value);
             const bool loaded = self->LoadRemotePage(address);
-            if (!loaded) self->hookFailed_ = true;
             return loaded;
         } catch (...) {
-            self->hookFailed_ = true;
+            self->FailHook(address);
             return false;
         }
     }
@@ -815,10 +1150,23 @@ private:
         auto* self = static_cast<Impl*>(userData);
         if (self == nullptr || self->hookFailed_) return;
         if (!self->IsExecutionCurrent(self->activeExecutionGeneration_)) {
-            self->FailHook();
+            self->FailHook(
+                address, AlgorithmPositionRuntimeError::ContextStale);
             return;
         }
         self->HandleInstruction(address);
+    }
+
+    static void TraceCodeHook(uc_engine*,
+                              std::uint64_t address,
+                              std::uint32_t,
+                              void* userData) {
+        auto* self = static_cast<Impl*>(userData);
+        if (self == nullptr) return;
+        self->instructionTrace_[
+            self->instructionTraceCount_ %
+            self->instructionTrace_.size()] = address;
+        ++self->instructionTraceCount_;
     }
 
     static std::uint32_t MrsHook(uc_engine* engine,
@@ -834,18 +1182,28 @@ private:
         if (systemRegister->crn == 0 && systemRegister->crm == 0 &&
             systemRegister->op2 == 1) {
             value = ReadHostCtrEl0();
+            self->workerProbe_.ctrEl0 = value;
+            ++self->workerProbe_.ctrReadCount;
         } else if (systemRegister->crn == 13 &&
                    systemRegister->crm == 0 &&
                    systemRegister->op2 == 2) {
             value = self->activeTpidrEl0_;
+            ++self->workerProbe_.tpidrReadCount;
         } else if (systemRegister->crn == 14 &&
                    systemRegister->crm == 0 &&
                    systemRegister->op2 == 0) {
             value = ReadHostCounterFrequency();
+            self->workerProbe_.cntfrqEl0 = value;
+            ++self->workerProbe_.cntfrqReadCount;
         } else if (systemRegister->crn == 14 &&
                    systemRegister->crm == 0 &&
                    (systemRegister->op2 == 2 || systemRegister->op2 == 6)) {
             value = ReadHostVirtualCounter();
+            if (self->workerProbe_.counterReadCount == 0) {
+                self->workerProbe_.counterFirst = value;
+            }
+            self->workerProbe_.counterLast = value;
+            ++self->workerProbe_.counterReadCount;
         } else {
             return 0;
         }
@@ -975,9 +1333,19 @@ private:
                 this,
                 1,
                 0,
-                UC_ARM64_INS_MRS) != UC_ERR_OK ||
-            uc_context_alloc(engine_, &baseline_) != UC_ERR_OK ||
-            uc_context_save(engine_, baseline_) != UC_ERR_OK) {
+                UC_ARM64_INS_MRS) != UC_ERR_OK) {
+            CloseEngine();
+            return false;
+        }
+        if (IsInstructionTraceEnabled() &&
+            uc_hook_add(
+                engine_,
+                &traceHook_,
+                UC_HOOK_CODE,
+                reinterpret_cast<void*>(TraceCodeHook),
+                this,
+                1,
+                0) != UC_ERR_OK) {
             CloseEngine();
             return false;
         }
@@ -989,10 +1357,6 @@ private:
         ClearActiveExecution();
         cachedPages_.clear();
         positionCache_.Clear();
-        if (baseline_ != nullptr) {
-            static_cast<void>(uc_context_free(baseline_));
-            baseline_ = nullptr;
-        }
         if (engine_ != nullptr) {
             static_cast<void>(uc_close(engine_));
             engine_ = nullptr;
@@ -1000,18 +1364,14 @@ private:
         activeContextMemory_ = nullptr;
         memoryHook_ = 0;
         mrsHook_ = 0;
+        traceHook_ = 0;
     }
 
     bool PrepareRegisters(std::uint64_t entry,
                           std::uint64_t entityAddress,
                           std::uint64_t tpidrEl0) {
-        if (baseline_ == nullptr ||
-            uc_context_restore(engine_, baseline_) != UC_ERR_OK) {
-            return false;
-        }
-
         const std::uint64_t zero = 0;
-        for (std::uint32_t index = 0; index <= 29; ++index) {
+        for (std::uint32_t index = 0; index <= 7; ++index) {
             const std::uint64_t value = index == 0 ? entityAddress : zero;
             if (uc_reg_write(engine_, XRegisterId(index), &value) !=
                 UC_ERR_OK) {
@@ -1022,15 +1382,12 @@ private:
             uc_reg_write(engine_, UC_ARM64_REG_SP, &kGuestStackPointer) !=
                 UC_ERR_OK ||
             uc_reg_write(engine_, UC_ARM64_REG_TPIDR_EL0, &tpidrEl0) !=
-                UC_ERR_OK ||
-            uc_reg_write(engine_, UC_ARM64_REG_NZCV, &zero) != UC_ERR_OK ||
-            uc_reg_write(engine_, UC_ARM64_REG_FPCR, &zero) != UC_ERR_OK ||
-            uc_reg_write(engine_, UC_ARM64_REG_FPSR, &zero) != UC_ERR_OK) {
+                UC_ERR_OK) {
             return false;
         }
 
         const std::array<std::uint8_t, 16> zeroVector{};
-        for (int index = 0; index < 32; ++index) {
+        for (int index = 0; index < 8; ++index) {
             if (uc_reg_write(
                     engine_,
                     UC_ARM64_REG_V0 + index,
@@ -1038,19 +1395,13 @@ private:
                 return false;
             }
         }
-        if (uc_mem_write(
-                engine_,
-                kGuestStackPointer,
-                zeroVector.data(),
-                zeroVector.size()) != UC_ERR_OK) {
-            return false;
-        }
         return uc_reg_write(engine_, UC_ARM64_REG_PC, &entry) == UC_ERR_OK;
     }
 
     bool LoadRemotePage(std::uint64_t faultAddress) {
         if (activeMemory_ == nullptr || engine_ == nullptr ||
             !IsExecutionCurrent(activeExecutionGeneration_)) {
+            FailHook(faultAddress);
             return false;
         }
         const std::uint64_t guestPage = faultAddress & kPageMask;
@@ -1064,22 +1415,45 @@ private:
             NormalizeAlgorithmPositionRemoteAddress(guestPage) & kPageMask;
         if (!IsRemoteAddress(remotePage) ||
             remotePage > kMaximumRemoteAddress - kPageSize) {
+            FailHook(
+                faultAddress,
+                AlgorithmPositionRuntimeError::FaultAddressInvalid);
             return false;
         }
 
         std::array<std::uint8_t, kPageSize> data{};
         if (uc_mem_map(engine_, guestPage, kPageSize, UC_PROT_ALL) !=
             UC_ERR_OK) {
+            FailHook(
+                faultAddress,
+                AlgorithmPositionRuntimeError::GuestPageMapFailed);
             return false;
         }
-        if (!activeMemory_->Read(remotePage, data.data(), data.size()) ||
-            uc_mem_write(engine_, guestPage, data.data(), data.size()) !=
+        CoordinateReadDiagnostic diagnostic{};
+        if (!activeMemory_->ReadCoordinateMemory(
+                remotePage, data.data(), data.size(), diagnostic)) {
+            activeReadDiagnostic_ = diagnostic;
+            hookFailureAddress_ = faultAddress;
+            hookFailed_ = true;
+            hookRuntimeError_ =
+                AlgorithmPositionRuntimeError::RemotePageReadFailed;
+            static_cast<void>(uc_mem_unmap(engine_, guestPage, kPageSize));
+            static_cast<void>(uc_emu_stop(engine_));
+            return false;
+        }
+        if (uc_mem_write(engine_, guestPage, data.data(), data.size()) !=
                 UC_ERR_OK) {
+            FailHook(
+                faultAddress,
+                AlgorithmPositionRuntimeError::GuestPageWriteFailed);
             static_cast<void>(uc_mem_unmap(engine_, guestPage, kPageSize));
             return false;
         }
         CachedPage page{guestPage, remotePage, {}};
         if (!InstallPageInstructionHooks(page, data.data(), data.size())) {
+            FailHook(
+                faultAddress,
+                AlgorithmPositionRuntimeError::InstructionHookSetupFailed);
             static_cast<void>(uc_mem_unmap(engine_, guestPage, kPageSize));
             return false;
         }
@@ -1129,43 +1503,26 @@ private:
 
     bool RefreshCachedPages(MemoryTransport& memory,
                             std::uint64_t generation) {
-        std::vector<std::uint8_t> data;
-        std::vector<MemoryReadRequest> requests;
-        std::vector<std::uint8_t> status;
-        data.reserve(kAlgorithmPositionRefreshBatchSize * kPageSize);
-        requests.reserve(kAlgorithmPositionRefreshBatchSize);
-        status.reserve(kAlgorithmPositionRefreshBatchSize);
-        for (std::size_t begin = 0; begin < cachedPages_.size();
-             begin += kAlgorithmPositionRefreshBatchSize) {
+        std::array<std::uint8_t, kPageSize> data{};
+        for (CachedPage& page : cachedPages_) {
             if (!IsExecutionCurrent(generation)) return false;
-            const std::size_t end = std::min(
-                cachedPages_.size(),
-                begin + kAlgorithmPositionRefreshBatchSize);
-            const std::size_t count = end - begin;
-            data.resize(count * kPageSize);
-            requests.clear();
-            status.assign(count, 0);
-            for (std::size_t index = begin; index < end; ++index) {
-                const CachedPage& page = cachedPages_[index];
-                requests.push_back(MemoryReadRequest{
+            CoordinateReadDiagnostic diagnostic{};
+            if (!memory.ReadCoordinateMemory(
                     static_cast<std::uintptr_t>(page.remoteAddress),
-                    data.data() + (index - begin) * kPageSize,
-                    kPageSize,
-                });
+                    data.data(),
+                    data.size(),
+                    diagnostic)) {
+                activeReadDiagnostic_ = diagnostic;
+                hookFailureAddress_ = page.remoteAddress;
+                return false;
             }
-            const std::size_t refreshed = memory.ReadBatch(
-                requests.data(), requests.size(), status.data());
-            if (refreshed != requests.size()) return false;
-            for (std::size_t index = begin; index < end; ++index) {
-                if (status[index - begin] == 0) return false;
-                const CachedPage& page = cachedPages_[index];
-                if (uc_mem_write(
-                        engine_,
-                        page.guestAddress,
-                        data.data() + (index - begin) * kPageSize,
-                        kPageSize) != UC_ERR_OK) {
-                    return false;
-                }
+            if (uc_mem_write(
+                    engine_,
+                    page.guestAddress,
+                    data.data(),
+                    data.size()) != UC_ERR_OK) {
+                hookFailureAddress_ = page.guestAddress;
+                return false;
             }
         }
         return true;
@@ -1218,7 +1575,7 @@ private:
         if (uc_mem_read(
                 engine_, address, &instruction, sizeof(instruction)) !=
             UC_ERR_OK) {
-            FailHook();
+            FailHook(address);
             return;
         }
         if ((instruction & kPacgaMask) == kPacgaOpcode) {
@@ -1237,25 +1594,45 @@ private:
         std::uint64_t modifierValue = 0;
         if (!ReadXRegister(source, sourceValue) ||
             !ReadXRegister(modifier, modifierValue)) {
-            FailHook();
+            FailHook(address);
             return;
         }
-        const std::uint64_t result = FormatAlgorithmPacgaResult(
-            ComputePacga(sourceValue, modifierValue, activePacgaKey_));
+        std::uint64_t result = 0;
+        AlgorithmPositionPacgaSource sourceKind =
+            AlgorithmPositionPacgaSource::None;
+        if (activePacgaOracle_.Matches(sourceValue, modifierValue)) {
+            result = activePacgaOracle_.result;
+            sourceKind = AlgorithmPositionPacgaSource::Oracle;
+        } else if (activePacgaKey_.low != 0 || activePacgaKey_.high != 0) {
+            result = FormatAlgorithmPacgaResult(
+                ComputePacga(sourceValue, modifierValue, activePacgaKey_));
+            sourceKind = AlgorithmPositionPacgaSource::Key;
+        } else {
+            FailHook(
+                address, AlgorithmPositionRuntimeError::PacgaUnavailable);
+            return;
+        }
+        RecordPacga(
+            address,
+            sourceValue,
+            modifierValue,
+            result,
+            sourceKind);
         if (!WriteXRegister(destination, result) ||
             !SkipInstruction(address)) {
-            FailHook();
+            FailHook(address);
         }
     }
 
     void HandleSvc(std::uint64_t address) noexcept {
         std::uint64_t number = 0;
         if (!ReadXRegister(8, number)) {
-            FailHook();
+            FailHook(address);
             return;
         }
         if (!IsSupportedAlgorithmPositionSvc(number)) {
-            FailHook();
+            FailHook(
+                address, AlgorithmPositionRuntimeError::UnsupportedSvc);
             return;
         }
 
@@ -1300,7 +1677,7 @@ private:
 
         if (!success || !WriteXRegister(0, result) ||
             !SkipInstruction(address)) {
-            FailHook();
+            FailHook(address);
         }
     }
 
@@ -1324,11 +1701,65 @@ private:
         return uc_reg_write(engine_, UC_ARM64_REG_PC, &next) == UC_ERR_OK;
     }
 
-    void FailHook() noexcept {
+    void FailHook(
+        std::uintptr_t address = 0,
+        AlgorithmPositionRuntimeError error =
+            AlgorithmPositionRuntimeError::MemoryHookFailed) noexcept {
         hookFailed_ = true;
+        hookRuntimeError_ = error;
+        if (address != 0) hookFailureAddress_ = address;
         if (engine_ != nullptr) {
             static_cast<void>(uc_emu_stop(engine_));
         }
+    }
+
+    void CaptureFaultContext(uc_mem_type type,
+                             std::uint64_t address,
+                             int size,
+                             std::int64_t value) noexcept {
+        workerProbe_.faultAddress = address;
+        workerProbe_.faultType = static_cast<int>(type);
+        workerProbe_.faultSize = size;
+        workerProbe_.faultValue = value;
+        static_cast<void>(uc_reg_read(
+            engine_, UC_ARM64_REG_SP, &workerProbe_.stackPointer));
+        static_cast<void>(uc_reg_read(
+            engine_, UC_ARM64_REG_X8, &workerProbe_.x8));
+        static_cast<void>(uc_reg_read(
+            engine_, UC_ARM64_REG_X9, &workerProbe_.x9));
+        static_cast<void>(uc_reg_read(
+            engine_, UC_ARM64_REG_X10, &workerProbe_.x10));
+        static_cast<void>(uc_reg_read(
+            engine_, UC_ARM64_REG_X23, &workerProbe_.x23));
+        static_cast<void>(uc_reg_read(
+            engine_, UC_ARM64_REG_X26, &workerProbe_.x26));
+        static_cast<void>(uc_reg_read(
+            engine_, UC_ARM64_REG_X27, &workerProbe_.x27));
+        const std::size_t available = std::min(
+            instructionTraceCount_, instructionTrace_.size());
+        const std::size_t start = instructionTraceCount_ >=
+                instructionTrace_.size()
+            ? instructionTraceCount_ % instructionTrace_.size()
+            : 0;
+        workerProbe_.instructionTraceCount = available;
+        for (std::size_t index = 0; index < available; ++index) {
+            workerProbe_.instructionTrace[index] =
+                instructionTrace_[
+                    (start + index) % instructionTrace_.size()];
+        }
+    }
+
+    void RecordPacga(std::uint64_t address,
+                     std::uint64_t data,
+                     std::uint64_t modifier,
+                     std::uint64_t result,
+                     AlgorithmPositionPacgaSource source) noexcept {
+        workerProbe_.pacgaAddress = address;
+        workerProbe_.pacgaData = data;
+        workerProbe_.pacgaModifier = modifier;
+        workerProbe_.pacgaResult = result;
+        ++workerProbe_.pacgaCount;
+        workerProbe_.pacgaSource = source;
     }
 
     bool ReadPosition(AlgorithmPosition& position) const {
@@ -1354,6 +1785,7 @@ private:
     void ClearActiveExecution() noexcept {
         activeMemory_ = nullptr;
         activePacgaKey_ = {};
+        activePacgaOracle_ = {};
         activeTpidrEl0_ = 0;
         activeExecutionGeneration_ = 0;
         hookFailed_ = false;
@@ -1362,6 +1794,7 @@ private:
     std::mutex resetMutex_;
     std::mutex queueMutex_;
     std::mutex executionControlMutex_;
+    mutable std::mutex probeMutex_;
     std::condition_variable queueReady_;
     std::thread worker_;
     std::deque<std::uintptr_t> pendingOrder_;
@@ -1372,10 +1805,14 @@ private:
         std::chrono::steady_clock::time_point>> completedOrder_;
     std::unordered_map<std::uintptr_t, CompletedExecution>
         completedExecutions_;
+    std::unordered_map<std::uintptr_t, std::uint64_t>
+        lastConsumedRequestIds_;
+    std::uint64_t nextRequestId_ = 0;
     MemoryTransport* executionContextMemory_ = nullptr;
     std::uintptr_t executionContextGuestPc_ = 0;
     std::uint64_t executionContextTpidrEl0_ = 0;
     AlgorithmPacgaKey executionContextPacgaKey_{};
+    AlgorithmPacgaOracle executionContextPacgaOracle_{};
     std::uint64_t generation_ = 0;
     std::atomic<std::uint64_t> publishedGeneration_{0};
     std::atomic_bool resetRequested_{false};
@@ -1383,17 +1820,31 @@ private:
     bool stopping_ = false;
     bool emulationRunning_ = false;
     uc_engine* engine_ = nullptr;
-    uc_context* baseline_ = nullptr;
     uc_hook memoryHook_ = 0;
     uc_hook mrsHook_ = 0;
+    uc_hook traceHook_ = 0;
     std::deque<CachedPage> cachedPages_;
     AlgorithmPositionResultCache positionCache_;
     MemoryTransport* activeContextMemory_ = nullptr;
     MemoryTransport* activeMemory_ = nullptr;
     AlgorithmPacgaKey activePacgaKey_{};
+    AlgorithmPacgaOracle activePacgaOracle_{};
     std::uint64_t activeTpidrEl0_ = 0;
     std::uint64_t activeExecutionGeneration_ = 0;
+    std::array<
+        std::uint64_t,
+        AlgorithmPositionRuntimeProbe::kInstructionTraceCapacity>
+        instructionTrace_{};
+    std::size_t instructionTraceCount_ = 0;
     bool hookFailed_ = false;
+    AlgorithmPositionRuntimeError hookRuntimeError_ =
+        AlgorithmPositionRuntimeError::MemoryHookFailed;
+    std::uintptr_t hookFailureAddress_ = 0;
+    CoordinateReadDiagnostic activeReadDiagnostic_{};
+    AlgorithmPositionRuntimeProbe probe_{};
+    AlgorithmPositionRuntimeProbe workerProbe_{};
+    std::uint64_t probeAttempts_ = 0;
+    std::uint64_t probeSuccesses_ = 0;
 };
 
 AlgorithmPositionRuntime::AlgorithmPositionRuntime()
@@ -1437,6 +1888,77 @@ bool AlgorithmPositionRuntime::ExecuteAtGuestPc(
         pacgaKey,
         position,
         refreshCachedPages);
+}
+
+bool AlgorithmPositionRuntime::ExecuteAtGuestPc(
+    MemoryTransport& memory,
+    std::uintptr_t guestPc,
+    std::uintptr_t entityAddress,
+    std::uint64_t tpidrEl0,
+    const AlgorithmPacgaKey& pacgaKey,
+    const AlgorithmPacgaOracle& pacgaOracle,
+    AlgorithmPosition& position,
+    bool refreshCachedPages) noexcept {
+    return impl_ != nullptr && impl_->ExecuteAtGuestPc(
+        memory,
+        guestPc,
+        entityAddress,
+        tpidrEl0,
+        pacgaKey,
+        pacgaOracle,
+        position,
+        refreshCachedPages);
+}
+
+AlgorithmPositionRuntimeResult
+AlgorithmPositionRuntime::ExecuteAtGuestPcResult(
+    MemoryTransport& memory,
+    std::uintptr_t guestPc,
+    std::uintptr_t entityAddress,
+    std::uint64_t tpidrEl0,
+    const AlgorithmPacgaKey& pacgaKey,
+    const AlgorithmPacgaOracle& pacgaOracle,
+    AlgorithmPosition& position,
+    bool refreshCachedPages) noexcept {
+    if (impl_ == nullptr) {
+        position = {};
+        return AlgorithmPositionRuntimeResult::Failed;
+    }
+    return impl_->ExecuteAtGuestPcResult(
+        memory,
+        guestPc,
+        entityAddress,
+        tpidrEl0,
+        pacgaKey,
+        pacgaOracle,
+        position,
+        refreshCachedPages);
+}
+
+AlgorithmPositionRuntimeResult
+AlgorithmPositionRuntime::ExecuteAtGuestPcResult(
+    MemoryTransport& memory,
+    std::uintptr_t guestPc,
+    std::uintptr_t entityAddress,
+    const ProcessExecutionContext& executionContext,
+    AlgorithmPosition& position,
+    bool refreshCachedPages) noexcept {
+    if (impl_ == nullptr) {
+        position = {};
+        return AlgorithmPositionRuntimeResult::Failed;
+    }
+    return impl_->ExecuteAtGuestPcResult(
+        memory,
+        guestPc,
+        entityAddress,
+        executionContext,
+        position,
+        refreshCachedPages);
+}
+
+AlgorithmPositionRuntimeProbe AlgorithmPositionRuntime::Probe() const
+    noexcept {
+    return impl_ != nullptr ? impl_->Probe() : AlgorithmPositionRuntimeProbe{};
 }
 
 void AlgorithmPositionRuntime::Reset() noexcept {

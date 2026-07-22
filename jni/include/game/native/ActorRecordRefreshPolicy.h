@@ -15,6 +15,44 @@ struct ActorRecordSnapshotKey {
     bool decodedRequired = false;
 };
 
+struct ActorRecordSnapshotIdentity {
+    std::uintptr_t moduleBase = 0;
+    std::uintptr_t world = 0;
+    std::uintptr_t level = 0;
+    std::uintptr_t localPawn = 0;
+};
+
+constexpr ActorRecordSnapshotIdentity ActorRecordIdentity(
+    const ActorRecordSnapshotKey& key) noexcept {
+    return {
+        key.moduleBase,
+        key.world,
+        key.level,
+        key.localPawn,
+    };
+}
+
+constexpr bool operator==(const ActorRecordSnapshotIdentity& left,
+                          const ActorRecordSnapshotIdentity& right) noexcept {
+    return left.moduleBase == right.moduleBase &&
+        left.world == right.world && left.level == right.level &&
+        left.localPawn == right.localPawn;
+}
+
+inline bool CanRetainDecodedActorSnapshot(
+    const ActorRecordSnapshotIdentity& cached,
+    const ActorRecordSnapshotIdentity& current,
+    bool cachedReady,
+    bool currentReady,
+    std::chrono::steady_clock::time_point capturedAt,
+    std::chrono::steady_clock::time_point now,
+    std::chrono::steady_clock::duration retention =
+        std::chrono::milliseconds(1500)) noexcept {
+    return !currentReady && cachedReady && cached == current &&
+        capturedAt.time_since_epoch().count() != 0 && now >= capturedAt &&
+        now - capturedAt <= retention;
+}
+
 constexpr bool operator==(const ActorRecordSnapshotKey& left,
                           const ActorRecordSnapshotKey& right) noexcept {
     return left.moduleBase == right.moduleBase &&

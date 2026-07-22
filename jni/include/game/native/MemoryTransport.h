@@ -52,6 +52,21 @@ struct CoordinateReplayTransportLayout {
     }
 };
 
+struct CoordinateReplayEntrySnapshot {
+    std::uintptr_t bridge = 0;
+    std::uintptr_t entry = 0;
+    std::uintptr_t mappingStart = 0;
+    std::uintptr_t mappingEnd = 0;
+    std::uint32_t instruction = 0;
+};
+
+struct CoordinateReplayEntryDiagnostic {
+    CoordinateDecryptError error = CoordinateDecryptError::None;
+    int systemError = 0;
+    CoordinateReadDiagnostic read{};
+    CoordinateReplayEntrySnapshot snapshot{};
+};
+
 struct ProcessExecutionContext {
     struct PacgaOracle {
         std::uint64_t data = 0;
@@ -143,6 +158,10 @@ public:
 #endif
     bool ConfigureCoordinateReplay(
         const CoordinateReplayTransportLayout& layout) noexcept;
+    bool ResolveCoordinateReplayEntry(
+        std::uintptr_t moduleBase,
+        CoordinateReplayEntrySnapshot& snapshot,
+        CoordinateReplayEntryDiagnostic& diagnostic);
     bool ReadProcessExecutionContext(ProcessExecutionContext& context);
     ProcessExecutionContextDiagnostic ExecutionContextDiagnostic()
         const noexcept;

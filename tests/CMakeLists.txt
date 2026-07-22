@@ -97,6 +97,27 @@ add_test(
     COMMAND algorithm_coordinate_reader_tests
 )
 
+add_executable(runtime_coordinate_codec_tests
+    runtime_coordinate_codec_tests.cpp
+)
+
+target_include_directories(runtime_coordinate_codec_tests PRIVATE
+    ../jni/include
+)
+
+if(MSVC)
+    target_compile_options(runtime_coordinate_codec_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(runtime_coordinate_codec_tests PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+endif()
+
+add_test(
+    NAME runtime_coordinate_codec_tests
+    COMMAND runtime_coordinate_codec_tests
+)
+
 add_executable(kernel_rpc_transport_tests
     kernel_rpc_transport_tests.cpp
     ../jni/src/game/native/KernelRpcTransport.cpp

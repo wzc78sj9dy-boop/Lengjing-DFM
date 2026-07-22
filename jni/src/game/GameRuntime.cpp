@@ -208,6 +208,40 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
                 status_.coordinateRead = probe.coordinateRead;
                 status_.coordinatePoolPointer =
                     probe.coordinatePoolPointer;
+                status_.coordinateEntry = probe.coordinateEntry;
+                status_.algorithmCoordinateRequested =
+                    probe.algorithmCoordinateRequested;
+                status_.algorithmCoordinateActive =
+                    probe.algorithmCoordinateActive;
+                status_.algorithmCoordinateTableReady =
+                    probe.algorithmCoordinateTableReady;
+                status_.algorithmCoordinateRuntimeReady =
+                    probe.algorithmCoordinateRuntimeReady;
+                status_.algorithmCoordinateRefreshes =
+                    probe.algorithmCoordinateRefreshes;
+                status_.algorithmCoordinateResolveAttempts =
+                    probe.algorithmCoordinateResolveAttempts;
+                status_.algorithmCoordinateResolveSuccesses =
+                    probe.algorithmCoordinateResolveSuccesses;
+                status_.algorithmCoordinateAttempts =
+                    probe.algorithmCoordinateAttempts;
+                status_.algorithmCoordinateSuccesses =
+                    probe.algorithmCoordinateSuccesses;
+                status_.algorithmCoordinateObjectAttempts =
+                    probe.algorithmCoordinateObjectAttempts;
+                status_.algorithmCoordinateObjectSuccesses =
+                    probe.algorithmCoordinateObjectSuccesses;
+                status_.algorithmCoordinateTableAttempts =
+                    probe.algorithmCoordinateTableAttempts;
+                status_.algorithmCoordinateTableSuccesses =
+                    probe.algorithmCoordinateTableSuccesses;
+                status_.algorithmCoordinateFallbacks =
+                    probe.algorithmCoordinateFallbacks;
+                status_.algorithmCoordinateSource =
+                    probe.algorithmCoordinateSource;
+                status_.algorithmCoordinate = probe.algorithmCoordinate;
+                status_.algorithmCoordinateRuntime =
+                    probe.algorithmCoordinateRuntime;
                 status_.runtimeError = probe.runtimeError;
                 status_.runtimeSystemError = probe.runtimeSystemError;
                 status_.failureKind = probe.failureKind;
@@ -273,6 +307,38 @@ void GameRuntime::SetStatus(RuntimePhase phase,
     status_.coordinateSystemError = probe.coordinateSystemError;
     status_.coordinateRead = probe.coordinateRead;
     status_.coordinatePoolPointer = probe.coordinatePoolPointer;
+    status_.coordinateEntry = probe.coordinateEntry;
+    status_.algorithmCoordinateRequested =
+        probe.algorithmCoordinateRequested;
+    status_.algorithmCoordinateActive = probe.algorithmCoordinateActive;
+    status_.algorithmCoordinateTableReady =
+        probe.algorithmCoordinateTableReady;
+    status_.algorithmCoordinateRuntimeReady =
+        probe.algorithmCoordinateRuntimeReady;
+    status_.algorithmCoordinateRefreshes =
+        probe.algorithmCoordinateRefreshes;
+    status_.algorithmCoordinateResolveAttempts =
+        probe.algorithmCoordinateResolveAttempts;
+    status_.algorithmCoordinateResolveSuccesses =
+        probe.algorithmCoordinateResolveSuccesses;
+    status_.algorithmCoordinateAttempts =
+        probe.algorithmCoordinateAttempts;
+    status_.algorithmCoordinateSuccesses =
+        probe.algorithmCoordinateSuccesses;
+    status_.algorithmCoordinateObjectAttempts =
+        probe.algorithmCoordinateObjectAttempts;
+    status_.algorithmCoordinateObjectSuccesses =
+        probe.algorithmCoordinateObjectSuccesses;
+    status_.algorithmCoordinateTableAttempts =
+        probe.algorithmCoordinateTableAttempts;
+    status_.algorithmCoordinateTableSuccesses =
+        probe.algorithmCoordinateTableSuccesses;
+    status_.algorithmCoordinateFallbacks =
+        probe.algorithmCoordinateFallbacks;
+    status_.algorithmCoordinateSource = probe.algorithmCoordinateSource;
+    status_.algorithmCoordinate = probe.algorithmCoordinate;
+    status_.algorithmCoordinateRuntime =
+        probe.algorithmCoordinateRuntime;
     status_.runtimeError = probe.runtimeError;
     status_.runtimeSystemError = probe.runtimeSystemError;
     status_.failureKind = probe.failureKind;

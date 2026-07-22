@@ -5,7 +5,9 @@
 #include "game/FeatureSettings.h"
 #include "game/GameFrame.h"
 #include "game/RuntimeDiagnostics.h"
+#include "game/native/AlgorithmCoordinateDiagnostics.h"
 #include "game/native/AlgorithmPositionRuntime.h"
+#include "game/native/RuntimeCoordinateCodec.h"
 
 #include <cstdint>
 #include <memory>
@@ -46,6 +48,25 @@ struct RuntimeProbe {
     int coordinateSystemError = 0;
     CoordinateReadDiagnostic coordinateRead{};
     CoordinatePoolPointerDiagnostic coordinatePoolPointer{};
+    CoordinateEntryDiagnostic coordinateEntry{};
+    bool algorithmCoordinateRequested = false;
+    bool algorithmCoordinateActive = false;
+    bool algorithmCoordinateTableReady = false;
+    bool algorithmCoordinateRuntimeReady = false;
+    std::uint64_t algorithmCoordinateRefreshes = 0;
+    std::uint64_t algorithmCoordinateResolveAttempts = 0;
+    std::uint64_t algorithmCoordinateResolveSuccesses = 0;
+    std::uint64_t algorithmCoordinateAttempts = 0;
+    std::uint64_t algorithmCoordinateSuccesses = 0;
+    std::uint64_t algorithmCoordinateObjectAttempts = 0;
+    std::uint64_t algorithmCoordinateObjectSuccesses = 0;
+    std::uint64_t algorithmCoordinateTableAttempts = 0;
+    std::uint64_t algorithmCoordinateTableSuccesses = 0;
+    std::uint64_t algorithmCoordinateFallbacks = 0;
+    native::AlgorithmCoordinateSource algorithmCoordinateSource =
+        native::AlgorithmCoordinateSource::None;
+    native::AlgorithmCoordinateDiagnostic algorithmCoordinate{};
+    native::RuntimeCoordinateCodecDiagnostic algorithmCoordinateRuntime{};
     RuntimeError runtimeError = RuntimeError::None;
     int runtimeSystemError = 0;
     RuntimeFailureKind failureKind = RuntimeFailureKind::None;

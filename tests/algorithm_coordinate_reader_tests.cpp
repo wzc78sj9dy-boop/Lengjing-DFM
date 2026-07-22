@@ -1,6 +1,8 @@
 #include "game/native/AlgorithmCoordinateReader.h"
+#include "game/native/AlgorithmCoordinateProbePolicy.h"
 #include "test_support.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -14,7 +16,10 @@
 namespace {
 
 using lengjing::game::native::AlgorithmCoordinate;
+using lengjing::game::native::AlgorithmCoordinateDiagnostic;
+using lengjing::game::native::AlgorithmCoordinateReadError;
 using lengjing::game::native::AlgorithmCoordinateReader;
+using lengjing::game::native::AlgorithmCoordinateRecord;
 
 constexpr std::uintptr_t kModule = 0x10000000;
 constexpr std::uintptr_t kTable = 0x20000000;
@@ -25,9 +30,10 @@ class Memory final {
 public:
     template <typename T>
     void Put(std::uintptr_t address, const T& value) {
-        std::vector<std::uint8_t> bytes(sizeof(T));
-        std::memcpy(bytes.data(), &value, sizeof(T));
-        values_[address] = std::move(bytes);
+        const auto* bytes = reinterpret_cast<const std::uint8_t*>(&value);
+        for (std::size_t index = 0; index < sizeof(T); ++index) {
+            values_[address + index] = bytes[index];
+        }
     }
 
     void PutRecord(std::uintptr_t address,
@@ -39,18 +45,35 @@ public:
         std::memcpy(
             bytes.data() + AlgorithmCoordinateReader::kCoordinateOffset,
             &coordinate, sizeof(coordinate));
-        values_[address] = std::vector<std::uint8_t>(bytes.begin(), bytes.end());
+        for (std::size_t index = 0; index < bytes.size(); ++index) {
+            values_[address + index] = bytes[index];
+        }
     }
 
     bool Read(std::uintptr_t address, void* destination, std::size_t size) {
-        const auto found = values_.find(address);
-        if (found == values_.end() || found->second.size() != size) return false;
-        std::memcpy(destination, found->second.data(), size);
+        ++readCount_;
+        largestRead_ = std::max(largestRead_, size);
+        auto* bytes = static_cast<std::uint8_t*>(destination);
+        for (std::size_t index = 0; index < size; ++index) {
+            const auto found = values_.find(address + index);
+            if (found == values_.end()) return false;
+            bytes[index] = found->second;
+        }
         return true;
     }
 
+    std::size_t ReadCount() const noexcept {
+        return readCount_;
+    }
+
+    std::size_t LargestRead() const noexcept {
+        return largestRead_;
+    }
+
 private:
-    std::unordered_map<std::uintptr_t, std::vector<std::uint8_t>> values_;
+    std::unordered_map<std::uintptr_t, std::uint8_t> values_;
+    std::size_t readCount_ = 0;
+    std::size_t largestRead_ = 0;
 };
 
 void PutTable(Memory& memory, std::uint32_t count) {
@@ -85,6 +108,9 @@ void TestLookupAndStride() {
     REQUIRE(Read(memory, coordinate));
     REQUIRE(coordinate.x == 4.0f && coordinate.y == 5.0f &&
         coordinate.z == 6.0f);
+    REQUIRE(memory.LargestRead() ==
+        3 * AlgorithmCoordinateReader::kRecordStride);
+    REQUIRE(memory.ReadCount() == 7);
 }
 
 void TestBoundsAndFailure() {
@@ -123,6 +149,62 @@ void TestBoundsAndFailure() {
         coordinate.z == 0.0f);
 }
 
+void TestSnapshotAndDiagnostics() {
+    Memory memory;
+    PutTable(memory, 3);
+    memory.PutRecord(kRecords, 0x50000000, {1.0f, 2.0f, 3.0f});
+    memory.PutRecord(kRecords + 0x20, kActor, {4.0f, 5.0f, 6.0f});
+    memory.PutRecord(kRecords + 0x40, 0x50000002, {});
+    auto callback = [&memory](std::uintptr_t address,
+                              void* destination,
+                              std::size_t size) {
+        return memory.Read(address, destination, size);
+    };
+
+    std::vector<AlgorithmCoordinateRecord> snapshot;
+    AlgorithmCoordinateDiagnostic diagnostic{};
+    REQUIRE(AlgorithmCoordinateReader{}.ReadTable(
+        kModule, snapshot, diagnostic, callback));
+    REQUIRE(snapshot.size() == 3);
+    REQUIRE(snapshot[1].actor == kActor);
+    REQUIRE(snapshot[1].valid);
+    REQUIRE(!snapshot[2].valid);
+    REQUIRE(diagnostic.error == AlgorithmCoordinateReadError::None);
+    REQUIRE(diagnostic.tableAddress ==
+        kModule + AlgorithmCoordinateReader::kRecordTableRva);
+    REQUIRE(diagnostic.table == kTable);
+    REQUIRE(diagnostic.records == kRecords);
+    REQUIRE(diagnostic.count == 3);
+    REQUIRE(diagnostic.validCount == 2);
+
+    AlgorithmCoordinate coordinate{};
+    REQUIRE(!AlgorithmCoordinateReader{}.Read(
+        kModule, 0x60000000, coordinate, diagnostic, callback));
+    REQUIRE(diagnostic.error ==
+        AlgorithmCoordinateReadError::ActorNotFound);
+    REQUIRE(diagnostic.actor == 0x60000000);
+
+    REQUIRE(!AlgorithmCoordinateReader{}.Read(
+        kModule, 0x50000002, coordinate, diagnostic, callback));
+    REQUIRE(diagnostic.error ==
+        AlgorithmCoordinateReadError::CoordinateInvalid);
+    REQUIRE(diagnostic.recordIndex == 2);
+
+    Memory unavailable;
+    const std::uintptr_t zero = 0;
+    unavailable.Put(
+        kModule + AlgorithmCoordinateReader::kRecordTableRva, zero);
+    auto unavailableRead = [&unavailable](std::uintptr_t address,
+                                         void* destination,
+                                         std::size_t size) {
+        return unavailable.Read(address, destination, size);
+    };
+    REQUIRE(!AlgorithmCoordinateReader{}.ReadTable(
+        kModule, snapshot, diagnostic, unavailableRead));
+    REQUIRE(diagnostic.error ==
+        AlgorithmCoordinateReadError::TableUnavailable);
+}
+
 void TestInvalidValuesAndOverflow() {
     const std::array<AlgorithmCoordinate, 4> invalid{{
         {},
@@ -140,14 +222,66 @@ void TestInvalidValuesAndOverflow() {
             coordinate.z == 0.0f);
     }
     AlgorithmCoordinate coordinate{3.0f, 3.0f, 3.0f};
+    AlgorithmCoordinateDiagnostic diagnostic{};
     auto noRead = [](std::uintptr_t, void*, std::size_t) { return false; };
     const std::uintptr_t maximum =
         std::numeric_limits<std::uintptr_t>::max();
     REQUIRE(!AlgorithmCoordinateReader{}.Read(
         maximum - AlgorithmCoordinateReader::kRecordTableRva + 1,
-        kActor, coordinate, noRead));
+        kActor, coordinate, diagnostic, noRead));
+    REQUIRE(diagnostic.error ==
+        AlgorithmCoordinateReadError::TableAddressOverflow);
     REQUIRE(coordinate.x == 0.0f && coordinate.y == 0.0f &&
         coordinate.z == 0.0f);
+
+    REQUIRE(!AlgorithmCoordinateReader{}.Read(
+        kModule, 0, coordinate, diagnostic, noRead));
+    REQUIRE(diagnostic.error == AlgorithmCoordinateReadError::InvalidInput);
+    REQUIRE(diagnostic.actor == 0);
+}
+
+void TestProbeSuccessPolicy() {
+    AlgorithmCoordinateDiagnostic successful{};
+    successful.x = 1.0f;
+    successful.y = 2.0f;
+    successful.z = 3.0f;
+    REQUIRE(lengjing::game::native::
+        IsAlgorithmCoordinateProbeSuccessful(true, true, 1, successful));
+    REQUIRE(!lengjing::game::native::
+        IsAlgorithmCoordinateProbeSuccessful(false, true, 1, successful));
+    REQUIRE(!lengjing::game::native::
+        IsAlgorithmCoordinateProbeSuccessful(true, false, 1, successful));
+    REQUIRE(!lengjing::game::native::
+        IsAlgorithmCoordinateProbeSuccessful(true, true, 0, successful));
+    successful.error = AlgorithmCoordinateReadError::ActorNotFound;
+    REQUIRE(!lengjing::game::native::
+        IsAlgorithmCoordinateProbeSuccessful(true, true, 1, successful));
+    successful.error = AlgorithmCoordinateReadError::None;
+    successful.x = 0.0f;
+    successful.y = 0.0f;
+    successful.z = -90.0f;
+    REQUIRE(!lengjing::game::native::
+        IsAlgorithmCoordinateProbeSuccessful(true, true, 1, successful));
+
+    lengjing::game::native::RuntimeCoordinateCodecDiagnostic object{};
+    object.stage = lengjing::game::native::
+        RuntimeCoordinateCodecStage::RingDecoded;
+    object.decodedX = 1.0f;
+    object.decodedY = 2.0f;
+    object.decodedZ = 3.0f;
+    REQUIRE(lengjing::game::native::
+        IsAlgorithmCoordinateObjectProbeSuccessful(true, true, 1, 0, object));
+    REQUIRE(!lengjing::game::native::
+        IsAlgorithmCoordinateObjectProbeSuccessful(true, true, 1, 1, object));
+    object.stage = lengjing::game::native::
+        RuntimeCoordinateCodecStage::Ready;
+    REQUIRE(!lengjing::game::native::
+        IsAlgorithmCoordinateObjectProbeSuccessful(true, true, 1, 0, object));
+    object.stage = lengjing::game::native::
+        RuntimeCoordinateCodecStage::RingDecoded;
+    object.decodedX = std::numeric_limits<float>::quiet_NaN();
+    REQUIRE(!lengjing::game::native::
+        IsAlgorithmCoordinateObjectProbeSuccessful(true, true, 1, 0, object));
 }
 
 }  // namespace
@@ -156,7 +290,9 @@ int main() {
     try {
         TestLookupAndStride();
         TestBoundsAndFailure();
+        TestSnapshotAndDiagnostics();
         TestInvalidValuesAndOverflow();
+        TestProbeSuccessPolicy();
         return 0;
     } catch (const std::exception& exception) {
         std::fprintf(stderr, "%s\n", exception.what());

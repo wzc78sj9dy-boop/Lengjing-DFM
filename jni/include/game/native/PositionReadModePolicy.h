@@ -12,6 +12,8 @@ enum class CharacterPositionSource : std::uint8_t {
     None,
     Standard,
     Decoded,
+    AlgorithmObject,
+    AlgorithmTable,
 };
 
 constexpr PositionReadMode ResolvePositionReadMode(
@@ -27,7 +29,9 @@ constexpr float ResolveDecodedCharacterZ(float decodedZ) noexcept {
 
 constexpr bool ShouldAlignBoneFrameToCharacterPosition(
     CharacterPositionSource source) noexcept {
-    return source == CharacterPositionSource::Decoded;
+    return source == CharacterPositionSource::Decoded ||
+        source == CharacterPositionSource::AlgorithmObject ||
+        source == CharacterPositionSource::AlgorithmTable;
 }
 
 }  // namespace lengjing::game::native

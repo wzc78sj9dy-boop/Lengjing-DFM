@@ -90,12 +90,14 @@ private:
     ui::UiModel model_{};
     game::RuntimeStatus lastStatus_{};
     bool coordinateDecryptSuccessNotified_ = false;
+    bool algorithmCoordinateSuccessNotified_ = false;
     game::CoordinateDecryptError lastReportedCoordinateError_ =
         game::CoordinateDecryptError::None;
     int lastReportedCoordinateSystemError_ = 0;
-    game::CoordinateReadDiagnostic lastReportedCoordinateRead_{};
-    game::CoordinatePoolPointerDiagnostic
-        lastReportedCoordinatePoolPointer_{};
+    game::native::AlgorithmCoordinateDiagnostic
+        lastReportedAlgorithmCoordinate_{};
+    game::native::RuntimeCoordinateCodecDiagnostic
+        lastReportedRuntimeCoordinateCodec_{};
     game::RuntimeError lastReportedRuntimeError_ =
         game::RuntimeError::None;
     int lastReportedRuntimeSystemError_ = 0;

@@ -7,6 +7,7 @@
 void RunCoordinateOutputPolicyTests() {
     using namespace std::chrono_literals;
     using lengjing::game::native::CanRetainDecodedPosition;
+    using lengjing::game::native::CanUseDecodedPositionHistory;
     using lengjing::game::native::ClassifyDecodedPositionCacheIdentity;
     using lengjing::game::native::CoordinateFailureRecoveryDelay;
     using lengjing::game::native::DecodedPositionCacheIdentity;
@@ -16,6 +17,8 @@ void RunCoordinateOutputPolicyTests() {
     using lengjing::game::native::IsDecodedPositionCacheOwnerMatch;
     using lengjing::game::native::IsCoordinateFrameHealthy;
     using lengjing::game::native::ShouldDiscardDecodedPositionCache;
+    using lengjing::game::native::ShouldBlockStandardCoordinateFallback;
+    using lengjing::game::native::ShouldReadAlgorithmCoordinate;
     using lengjing::game::native::ShouldEscalateDecodedPositionFailure;
     using lengjing::game::native::ShouldKeepDecodedPositionSource;
 
@@ -77,6 +80,30 @@ void RunCoordinateOutputPolicyTests() {
         DecodedPositionCacheIdentityState::Match));
     REQUIRE(ShouldDiscardDecodedPositionCache(
         DecodedPositionCacheIdentityState::Mismatch));
+    REQUIRE(CanUseDecodedPositionHistory(
+        DecodedPositionCacheIdentityState::Match,
+        capturedAt,
+        capturedAt + 2s));
+    REQUIRE(!CanUseDecodedPositionHistory(
+        DecodedPositionCacheIdentityState::Match,
+        capturedAt,
+        capturedAt + 24h));
+    REQUIRE(!CanUseDecodedPositionHistory(
+        DecodedPositionCacheIdentityState::Mismatch,
+        capturedAt,
+        capturedAt + 24h));
+    REQUIRE(!CanUseDecodedPositionHistory(
+        DecodedPositionCacheIdentityState::Match,
+        capturedAt + 1s,
+        capturedAt));
+    REQUIRE(!ShouldReadAlgorithmCoordinate(false, true));
+    REQUIRE(!ShouldReadAlgorithmCoordinate(true, true));
+    REQUIRE(!ShouldReadAlgorithmCoordinate(true, false));
+    REQUIRE(!ShouldReadAlgorithmCoordinate(false, false));
+    REQUIRE(!ShouldBlockStandardCoordinateFallback(false, true, false));
+    REQUIRE(!ShouldBlockStandardCoordinateFallback(true, true, false));
+    REQUIRE(!ShouldBlockStandardCoordinateFallback(false, true, true));
+    REQUIRE(!ShouldBlockStandardCoordinateFallback(true, false, false));
     REQUIRE(CanRetainDecodedPosition(
         true,
         cacheIdentity,
