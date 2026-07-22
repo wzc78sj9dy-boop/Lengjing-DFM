@@ -28,6 +28,8 @@ struct BackendState {
     std::atomic_bool aimEnabled{false};
     std::atomic_bool selfAimSetting{false};
     std::atomic_bool projectileTrackingSetting{false};
+    std::atomic_bool coordinateDecryptSetting{false};
+    std::atomic_bool algorithmDecryptSetting{false};
     std::atomic_bool frameReady{true};
     std::atomic<std::uint16_t> coordinateError{0};
     std::atomic_int coordinateSystemError{0};
@@ -73,6 +75,10 @@ public:
         state_->selfAimSetting.store(settings.aim.enabled);
         state_->projectileTrackingSetting.store(
             settings.aim.trajectoryTracking);
+        state_->coordinateDecryptSetting.store(
+            settings.visual.coordinateDecrypt);
+        state_->algorithmDecryptSetting.store(
+            settings.visual.algorithmDecrypt);
         error = frame.ready ? std::string{} : "waiting";
         probe.coordinateError =
             static_cast<lengjing::game::CoordinateDecryptError>(
@@ -199,6 +205,38 @@ void RunRuntimeTests() {
     REQUIRE(state->algorithmDecryptRva.load() == 0x1234);
     REQUIRE(state->selfAimSetting.load());
     REQUIRE(!state->projectileTrackingSetting.load());
+    REQUIRE(!state->coordinateDecryptSetting.load());
+    REQUIRE(!state->algorithmDecryptSetting.load());
+
+    settings.visual.coordinateDecrypt = true;
+    runtime.UpdateSettings(settings);
+    REQUIRE(WaitFor([&] {
+        return state->coordinateDecryptSetting.load() &&
+            !state->algorithmDecryptSetting.load();
+    }));
+
+    settings.visual.coordinateDecrypt = false;
+    settings.visual.algorithmDecrypt = true;
+    runtime.UpdateSettings(settings);
+    REQUIRE(WaitFor([&] {
+        return !state->coordinateDecryptSetting.load() &&
+            state->algorithmDecryptSetting.load();
+    }));
+
+    settings.visual.coordinateDecrypt = true;
+    runtime.UpdateSettings(settings);
+    REQUIRE(WaitFor([&] {
+        return state->coordinateDecryptSetting.load() &&
+            state->algorithmDecryptSetting.load();
+    }));
+
+    settings.visual.coordinateDecrypt = false;
+    settings.visual.algorithmDecrypt = false;
+    runtime.UpdateSettings(settings);
+    REQUIRE(WaitFor([&] {
+        return !state->coordinateDecryptSetting.load() &&
+            !state->algorithmDecryptSetting.load();
+    }));
 
     state->coordinateError.store(
         lengjing::game::CoordinateDecryptErrorCode(

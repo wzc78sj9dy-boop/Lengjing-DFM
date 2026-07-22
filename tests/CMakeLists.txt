@@ -76,6 +76,27 @@ endif()
 
 add_test(NAME lengjing_tests COMMAND lengjing_tests)
 
+add_executable(algorithm_coordinate_reader_tests
+    algorithm_coordinate_reader_tests.cpp
+)
+
+target_include_directories(algorithm_coordinate_reader_tests PRIVATE
+    ../jni/include
+)
+
+if(MSVC)
+    target_compile_options(algorithm_coordinate_reader_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(algorithm_coordinate_reader_tests PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+endif()
+
+add_test(
+    NAME algorithm_coordinate_reader_tests
+    COMMAND algorithm_coordinate_reader_tests
+)
+
 add_executable(kernel_rpc_transport_tests
     kernel_rpc_transport_tests.cpp
     ../jni/src/game/native/KernelRpcTransport.cpp
