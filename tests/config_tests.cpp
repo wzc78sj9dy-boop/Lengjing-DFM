@@ -132,6 +132,7 @@ void RunConfigTests() {
     expected.runtime.driverIndex = 1;
     expected.visual.modelGeometry = true;
     expected.visual.coordinateDecrypt = true;
+    expected.visual.algorithmDecrypt = true;
     expected.visual.crosshair = true;
     expected.visual.playerViewRay = true;
     expected.visual.drawDistanceMeters = 873;
@@ -178,7 +179,7 @@ void RunConfigTests() {
     REQUIRE(config.Save(expected, &error));
     REQUIRE(error.empty());
     const std::string serialized = ReadText(path);
-    REQUIRE(serialized.find("algorithm_decrypt") == std::string::npos);
+    REQUIRE(serialized.find("algorithm_decrypt") != std::string::npos);
     REQUIRE(serialized.find("\"cover\"") != std::string::npos);
     REQUIRE(serialized.find("\"cover_mode\"") != std::string::npos);
     REQUIRE(serialized.find("miss_mode") == std::string::npos);
@@ -198,6 +199,7 @@ void RunConfigTests() {
     REQUIRE(actual.runtime.driverIndex == expected.runtime.driverIndex);
     REQUIRE(actual.visual.modelGeometry == expected.visual.modelGeometry);
     REQUIRE(actual.visual.coordinateDecrypt);
+    REQUIRE(actual.visual.algorithmDecrypt);
     REQUIRE(actual.visual.crosshair == expected.visual.crosshair);
     REQUIRE(actual.visual.playerViewRay == expected.visual.playerViewRay);
     REQUIRE(actual.visual.drawDistanceMeters == expected.visual.drawDistanceMeters);
@@ -316,6 +318,7 @@ void RunConfigTests() {
     REQUIRE(config.Load(actual, &error));
     REQUIRE(error.empty());
     REQUIRE(actual.visual.coordinateDecrypt);
+    REQUIRE(actual.visual.algorithmDecrypt);
     REQUIRE(actual.visual.warningSize == 1000.0f);
     REQUIRE(actual.runtime.driverIndex == 2);
     REQUIRE(actual.aim.inputMode == lengjing::ui::AimInputMode::ReadOnly);

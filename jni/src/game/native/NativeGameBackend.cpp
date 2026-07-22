@@ -13,6 +13,7 @@
 #include "game/native/ActorRecordRefreshPolicy.h"
 #include "game/native/ActorRecordResolver.h"
 #include "game/native/ActorRecordSource.h"
+#include "game/native/AlgorithmCoordinateReader.h"
 #include "game/native/AlgorithmReplayPolicy.h"
 #include "game/native/BoneFrameSource.h"
 #include "game/native/CharacterPositionResolver.h"
@@ -1030,11 +1031,20 @@ public:
 
         const bool coordinateRequestChanged =
             algorithmPositionRequested_ != settings.visual.coordinateDecrypt;
+        const bool algorithmCoordinateRequestChanged =
+            algorithmDecryptRequested_ != settings.visual.algorithmDecrypt;
         algorithmPositionRequested_ = settings.visual.coordinateDecrypt;
+        algorithmDecryptRequested_ = settings.visual.algorithmDecrypt;
         if (coordinateRequestChanged) {
             algorithmReplayBackoffPolicy_.Reset();
             algorithmReplayPagePolicy_.Invalidate();
             algorithmFailureSince_ = {};
+        }
+        if (coordinateRequestChanged || algorithmCoordinateRequestChanged) {
+            characterPositions_.Clear();
+            positionCache_.clear();
+            decodedPositionCache_.clear();
+            boneCache_.clear();
         }
         algorithmFrameAttemptCount_ = 0;
         algorithmFrameSuccessCount_ = 0;
@@ -3882,6 +3892,28 @@ private:
         return true;
     }
 
+    bool ReadAlgorithmCoordinate(std::uintptr_t actor, Vec3& position) {
+        position = Vec3{};
+        if (!algorithmDecryptRequested_ || memory_ == nullptr ||
+            !IsValidPointer(moduleBase_) || !IsValidPointer(actor)) {
+            return false;
+        }
+        auto readBytes = [this](std::uintptr_t address,
+                                void* destination,
+                                std::size_t size) {
+            return memory_ != nullptr && IsValidReadAddress(address) &&
+                size != 0 && size <= kMaximumRemoteAddress - address &&
+                memory_->Read(address, destination, size);
+        };
+        native::AlgorithmCoordinate candidate{};
+        if (!algorithmCoordinateReader_.Read(
+                moduleBase_, actor, candidate, readBytes)) {
+            return false;
+        }
+        position = Vec3{candidate.x, candidate.y, candidate.z};
+        return IsFinite(position) && IsNonzero(position);
+    }
+
     bool ReadCharacterPosition(
         const RuntimeActorRecord& record,
         std::string_view className,
@@ -3892,6 +3924,13 @@ private:
         position = Vec3{};
         if (positionSource != nullptr) {
             *positionSource = native::CharacterPositionSource::None;
+        }
+        if (algorithmDecryptRequested_ &&
+            ReadAlgorithmCoordinate(record.actor, position)) {
+            if (positionSource != nullptr) {
+                *positionSource = native::CharacterPositionSource::Decoded;
+            }
+            return true;
         }
         if (native::ShouldKeepDecodedPositionSource(
                 algorithmPositionRequested_,
@@ -6568,6 +6607,7 @@ private:
         algorithmFrameFailure_ = {};
         algorithmFrameAgedDecodedFailure_ = false;
         algorithmPositionRequested_ = false;
+        algorithmDecryptRequested_ = false;
         algorithmPositionConfig_ = {};
         coordinatePoolFallback_ = false;
         coordinatePoolReady_ = false;
@@ -6602,6 +6642,7 @@ private:
     bool algorithmEntryReady_ = false;
     bool algorithmReplayAllowedThisFrame_ = true;
     bool algorithmPositionRequested_ = false;
+    bool algorithmDecryptRequested_ = false;
     bool coordinatePoolReady_ = false;
     bool coordinatePoolFallback_ = false;
     std::uint64_t algorithmAttemptCount_ = 0;
@@ -6650,6 +6691,7 @@ private:
         std::chrono::steady_clock::time_point> threatFirstSeen_;
     std::unordered_map<std::uintptr_t, AimWarningState> aimWarningStates_;
     native::HudMapCache hudMapCache_{};
+    native::AlgorithmCoordinateReader algorithmCoordinateReader_{};
     native::CharacterPositionResolver characterPositions_{};
     native::PositionReadMode positionReadMode_ = native::PositionReadMode::Standard;
     native::ProjectileSpeedReader projectileSpeedReader_{};

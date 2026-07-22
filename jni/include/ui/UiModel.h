@@ -76,6 +76,7 @@ struct VisualSettings {
     bool modelGeometry = false;
     bool visibilityColor = false;
     bool coordinateDecrypt = false;
+    bool algorithmDecrypt = false;
 
     bool box = true;
     bool snapline = true;

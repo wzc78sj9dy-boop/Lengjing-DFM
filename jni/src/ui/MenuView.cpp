@@ -778,10 +778,22 @@ void RenderRuntime(UiModel& model, UiActions& actions) {
         ImGui::EndTable();
     }
     ImGui::Dummy(ImVec2(0.0f, 8.0f));
-    Mark(
-        actions,
-        SettingsDomain::Visual,
-        Toggle("坐标解密", visual.coordinateDecrypt));
+    if (ImGui::BeginTable(
+            "##coordinate_decrypt_modes", 2,
+            ImGuiTableFlags_SizingStretchSame |
+                ImGuiTableFlags_NoSavedSettings)) {
+        ImGui::TableNextColumn();
+        Mark(
+            actions,
+            SettingsDomain::Visual,
+            Toggle("坐标解密", visual.coordinateDecrypt));
+        ImGui::TableNextColumn();
+        Mark(
+            actions,
+            SettingsDomain::Visual,
+            Toggle("算法解密", visual.algorithmDecrypt));
+        ImGui::EndTable();
+    }
     ImGui::Dummy(ImVec2(0.0f, 4.0f));
     int renderBackend = std::clamp(
         static_cast<int>(system.renderBackend),
