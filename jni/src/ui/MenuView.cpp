@@ -787,11 +787,6 @@ void RenderRuntime(UiModel& model, UiActions& actions) {
             actions,
             SettingsDomain::Visual,
             Toggle("坐标解密", visual.coordinateDecrypt));
-        ImGui::TableNextColumn();
-        Mark(
-            actions,
-            SettingsDomain::Visual,
-            Toggle("算法解密", visual.algorithmDecrypt));
         ImGui::EndTable();
     }
     ImGui::Dummy(ImVec2(0.0f, 4.0f));

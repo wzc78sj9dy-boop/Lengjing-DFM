@@ -199,7 +199,7 @@ void RunConfigTests() {
     REQUIRE(actual.runtime.driverIndex == expected.runtime.driverIndex);
     REQUIRE(actual.visual.modelGeometry == expected.visual.modelGeometry);
     REQUIRE(actual.visual.coordinateDecrypt);
-    REQUIRE(actual.visual.algorithmDecrypt);
+    REQUIRE(!actual.visual.algorithmDecrypt);
     REQUIRE(actual.visual.crosshair == expected.visual.crosshair);
     REQUIRE(actual.visual.playerViewRay == expected.visual.playerViewRay);
     REQUIRE(actual.visual.drawDistanceMeters == expected.visual.drawDistanceMeters);
@@ -318,7 +318,7 @@ void RunConfigTests() {
     REQUIRE(config.Load(actual, &error));
     REQUIRE(error.empty());
     REQUIRE(actual.visual.coordinateDecrypt);
-    REQUIRE(actual.visual.algorithmDecrypt);
+    REQUIRE(!actual.visual.algorithmDecrypt);
     REQUIRE(actual.visual.warningSize == 1000.0f);
     REQUIRE(actual.runtime.driverIndex == 2);
     REQUIRE(actual.aim.inputMode == lengjing::ui::AimInputMode::ReadOnly);

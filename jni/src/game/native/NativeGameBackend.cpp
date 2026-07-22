@@ -1032,9 +1032,9 @@ public:
         const bool coordinateRequestChanged =
             algorithmPositionRequested_ != settings.visual.coordinateDecrypt;
         const bool algorithmCoordinateRequestChanged =
-            algorithmDecryptRequested_ != settings.visual.algorithmDecrypt;
+            algorithmDecryptRequested_;
         algorithmPositionRequested_ = settings.visual.coordinateDecrypt;
-        algorithmDecryptRequested_ = settings.visual.algorithmDecrypt;
+        algorithmDecryptRequested_ = false;
         if (coordinateRequestChanged) {
             algorithmReplayBackoffPolicy_.Reset();
             algorithmReplayPagePolicy_.Invalidate();
