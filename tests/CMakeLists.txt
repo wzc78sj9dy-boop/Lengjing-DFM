@@ -56,6 +56,7 @@ add_executable(lengjing_tests
     ../jni/src/game/GameRuntime.cpp
     ../jni/src/game/native/RemoteElfIdentity.cpp
     ../jni/src/game/native/TrackingPageBinding.cpp
+    ../jni/src/platform/PerformanceTrace.cpp
     ../jni/src/render/PresentationRateTracker.cpp
 )
 

@@ -43,6 +43,7 @@
 #include "game/native/TrajectoryHook.h"
 #endif
 #include "game/native/WorldObjectRefreshPolicy.h"
+#include "platform/PerformanceTrace.h"
 #include "render/PlayerTracerPolicy.h"
 
 #include <algorithm>
@@ -886,6 +887,8 @@ bool ProjectToScreen(const Vec3& world,
                      int screenHeight,
                      Vec2& screen,
                      CameraPoint* cameraPoint = nullptr) {
+    platform::PerformanceTraceScope trace(
+        platform::PerformancePhase::Projection, 64);
     const native::ScreenProjection projected = native::ProjectWorldPoint(
         native::ProjectionPoint{world.x, world.y, world.z},
         native::ProjectionView{
@@ -1255,6 +1258,8 @@ public:
                    RuntimeProbe& probe,
                    std::string& error) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        platform::PerformanceTraceScope backendFrameTrace(
+            platform::PerformancePhase::BackendFrame);
         const std::uint64_t sequence = frame.sequence;
         frame = GameFrame{};
         frame.sequence = sequence;
@@ -1402,7 +1407,11 @@ public:
 
         FrameContext context{};
         RuntimeDiagnostic frameDiagnostic{};
-        if (!BuildFrameContext(
+        bool frameContextReady = false;
+        {
+            platform::PerformanceTraceScope frameContextTrace(
+                platform::PerformancePhase::FrameContext);
+            frameContextReady = BuildFrameContext(
                 context,
                 frame.sequence,
                 settings.visual.battlefieldMode,
@@ -1413,7 +1422,9 @@ public:
 #endif
                 settings.visual.antiFlicker,
                 frameDiagnostic,
-                error)) {
+                error);
+        }
+        if (!frameContextReady) {
             SetRuntimeFailure(
                 probe,
                 frameDiagnostic.error != RuntimeError::None
@@ -1574,6 +1585,9 @@ public:
 
         std::vector<RuntimeActorRecord>& actorRecords =
             actorRecordSnapshot_.records;
+        platform::RecordPerformanceCount(
+            platform::PerformanceCounter::ActorRecords,
+            actorRecords.size());
         std::unordered_set<std::uintptr_t> seenThreats;
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
         std::unordered_set<std::uintptr_t> seenAimActors;
@@ -1626,6 +1640,8 @@ public:
                 if (index >= botBoneStatusCounts.size()) return;
                 (bot ? botBoneStatusCounts : playerBoneStatusCounts)[index]++;
             };
+        platform::PerformanceTraceScope actorLoopTrace(
+            platform::PerformancePhase::ActorLoop);
         for (RuntimeActorRecord& actorRecord : actorRecords) {
             const std::uintptr_t actor = actorRecord.actor;
             if (!IsValidPointer(actor) || actor == context.localPawn) continue;
@@ -2521,6 +2537,16 @@ public:
             });
             frame.players.push_back(std::move(visual));
         }
+        actorLoopTrace.Finish();
+        platform::RecordPerformanceCount(
+            platform::PerformanceCounter::CharacterActors,
+            characterActorCount);
+        platform::RecordPerformanceCount(
+            platform::PerformanceCounter::CoordinateAttempts,
+            algorithmFrameAttemptCount_);
+        platform::RecordPerformanceCount(
+            platform::PerformanceCounter::CoordinateSuccesses,
+            algorithmFrameSuccessCount_);
 
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
         const bool requireDecodedNames = !recoveredTrackingActive;
@@ -3066,6 +3092,8 @@ private:
 
     void RefreshActorRecordSnapshot(FrameContext& context,
                                     bool decodedRequired) {
+        platform::PerformanceTraceScope trace(
+            platform::PerformancePhase::ActorSnapshot);
         const native::ActorRecordSnapshotKey key{
             moduleBase_,
             context.world,
@@ -3979,6 +4007,8 @@ private:
         const FeatureSettings& settings,
         const FrameContext& context,
         GameFrame& frame) const {
+        platform::PerformanceTraceScope trace(
+            platform::PerformancePhase::WorldObjects);
         if (settings.visual.combatMode &&
             (context.firing || context.zooming)) {
             return;
@@ -4223,6 +4253,10 @@ private:
         Vec3& position,
         bool localActor = false,
         native::CharacterPositionSource* positionSource = nullptr) {
+        platform::PerformanceTraceScope trace(
+            mode == native::PositionReadMode::Direct
+                ? platform::PerformancePhase::CoordinateDecode
+                : platform::PerformancePhase::PositionRead);
         if (positionSource != nullptr) {
             *positionSource = native::CharacterPositionSource::None;
         }
@@ -5514,6 +5548,8 @@ private:
     }
 
     bool ReadHealth(std::uintptr_t actor, HealthState& state) {
+        platform::PerformanceTraceScope trace(
+            platform::PerformancePhase::HealthRead);
         const std::uintptr_t healthComponent = ReadPointer(actor + 0x10C8);
         const std::uintptr_t healthSet = ReadPointer(healthComponent + 0x280);
         if (!IsValidPointer(healthSet)) return false;
@@ -5755,6 +5791,8 @@ private:
                        const Vec3* resolvedPosition,
                        BoneFrame& frame,
                        BoneFrameReadStatus* readStatus = nullptr) {
+        platform::PerformanceTraceScope trace(
+            platform::PerformancePhase::BoneRead);
         constexpr auto kCacheLifetime = std::chrono::milliseconds(300);
         frame = BoneFrame{};
         if (readStatus != nullptr) {

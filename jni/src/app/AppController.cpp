@@ -4,6 +4,7 @@
 #include "app/RenderBackendSelection.h"
 #include "app/RuntimeExitPolicy.h"
 #include "app/RuntimePresentationPolicy.h"
+#include "platform/PerformanceTrace.h"
 
 #include "ImGui/imgui.h"
 
@@ -166,6 +167,8 @@ AppController::~AppController() {
 }
 
 void AppController::RenderFrame(float presentedFramesPerSecond) {
+    platform::PerformanceTraceScope renderFrameTrace(
+        platform::PerformancePhase::RenderFrame);
     ImGuiIO& io = ImGui::GetIO();
     model_.runtime.framesPerSecond =
         std::max(0.0f, presentedFramesPerSecond);
@@ -795,6 +798,21 @@ void AppController::DrawGameFrame(const game::GameFrame& frame,
     if (drawList == nullptr) {
         return;
     }
+    platform::PerformanceTraceScope drawFrameTrace(
+        platform::PerformancePhase::DrawGameFrame);
+    const int initialVertexCount = drawList->VtxBuffer.Size;
+    const int initialIndexCount = drawList->IdxBuffer.Size;
+    ImDrawList* foregroundDrawList = ImGui::GetForegroundDrawList();
+    const bool separateForeground = foregroundDrawList != drawList;
+    const int initialForegroundVertexCount = separateForeground
+        ? foregroundDrawList->VtxBuffer.Size
+        : 0;
+    const int initialForegroundIndexCount = separateForeground
+        ? foregroundDrawList->IdxBuffer.Size
+        : 0;
+    platform::RecordPerformanceCount(
+        platform::PerformanceCounter::RenderPlayers,
+        frame.players.size());
 
     const ScreenRect viewport{
         0.0f,
@@ -852,6 +870,30 @@ void AppController::DrawGameFrame(const game::GameFrame& frame,
     if (model_.visual.enabled && model_.visual.playerCount) {
         DrawPopulation(frame, ImGui::GetForegroundDrawList());
     }
+    platform::RecordPerformanceCount(
+        platform::PerformanceCounter::DrawCommands,
+        static_cast<std::uint64_t>(drawList->CmdBuffer.Size +
+            (separateForeground
+                ? foregroundDrawList->CmdBuffer.Size
+                : 0)));
+    platform::RecordPerformanceCount(
+        platform::PerformanceCounter::DrawVertices,
+        static_cast<std::uint64_t>(std::max(
+            0,
+            drawList->VtxBuffer.Size - initialVertexCount +
+                (separateForeground
+                    ? foregroundDrawList->VtxBuffer.Size -
+                        initialForegroundVertexCount
+                    : 0))));
+    platform::RecordPerformanceCount(
+        platform::PerformanceCounter::DrawIndices,
+        static_cast<std::uint64_t>(std::max(
+            0,
+            drawList->IdxBuffer.Size - initialIndexCount +
+                (separateForeground
+                    ? foregroundDrawList->IdxBuffer.Size -
+                        initialForegroundIndexCount
+                    : 0))));
 }
 
 void AppController::DrawPopulation(const game::GameFrame& frame,

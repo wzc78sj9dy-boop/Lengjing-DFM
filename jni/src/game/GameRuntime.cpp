@@ -1,6 +1,7 @@
 #include "game/GameRuntime.h"
 #include "game/FrameRetentionPolicy.h"
 #include "game/aim/AimModePolicy.h"
+#include "platform/PerformanceTrace.h"
 
 #include <chrono>
 #include <exception>
@@ -166,7 +167,18 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
             auto frame = std::make_shared<GameFrame>();
             frame->sequence = ++sequence;
             error.clear();
-            if (!backend_->ReadFrame(settings, *frame, probe, error)) {
+            platform::PerformanceTraceScope dataFrameTrace(
+                platform::PerformancePhase::DataFrame);
+            platform::RecordPerformanceCount(
+                platform::PerformanceCounter::DataFrames);
+            if (settings.visual.coordinateDecrypt) {
+                platform::RecordPerformanceCount(
+                    platform::PerformanceCounter::CoordinateFrames);
+            }
+            const bool frameRead =
+                backend_->ReadFrame(settings, *frame, probe, error);
+            dataFrameTrace.Finish();
+            if (!frameRead) {
                 if (stopRequested_.load(std::memory_order_acquire)) break;
                 EnsureRuntimeFailure(
                     probe, RuntimeError::BackendReadFailed);
@@ -180,6 +192,14 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
                 EnsureRuntimeFailure(
                     probe, RuntimeError::FrameDataUnavailable);
             }
+
+            if (frame->ready) {
+                platform::RecordPerformanceCount(
+                    platform::PerformanceCounter::ReadyFrames);
+            }
+            platform::RecordPerformanceCount(
+                platform::PerformanceCounter::OutputPlayers,
+                frame->players.size());
 
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -253,6 +273,8 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
                 status_.failureKind = probe.failureKind;
                 status_.message = std::move(error);
             }
+
+            platform::PublishPerformanceTrace();
 
             const auto now = FrameClock::now();
             do {

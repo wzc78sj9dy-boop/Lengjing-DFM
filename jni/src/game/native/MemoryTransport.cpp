@@ -6,6 +6,7 @@
 #include "game/native/PtraceExecutionContextProvider.h"
 #include "game/native/ThreadContextDeviceTransport.h"
 #include "game/native/ThreadExecutionContextProvider.h"
+#include "platform/PerformanceTrace.h"
 #include "paradise/paradise_api.h"
 
 #include <algorithm>
@@ -943,6 +944,14 @@ struct MemoryTransport::Impl {
         std::size_t size,
         CoordinateReadDiagnostic& diagnostic) {
         const bool primaryAttempt = diagnostic.attemptCount == 0;
+        if (platform::PerformanceTraceEnabled()) {
+            platform::RecordPerformanceCount(
+                platform::PerformanceCounter::CoordinatePathAttempts);
+            if (!primaryAttempt) {
+                platform::RecordPerformanceCount(
+                    platform::PerformanceCounter::CoordinateFallbacks);
+            }
+        }
         diagnostic.lastPath = path;
         diagnostic.attemptedPaths |= CoordinateReadPathMask(path);
         ++diagnostic.attemptCount;
@@ -988,7 +997,7 @@ struct MemoryTransport::Impl {
         return true;
     }
 
-    bool ReadCoordinateMemoryUnlocked(
+    bool ReadCoordinateMemoryCoreUnlocked(
         std::uintptr_t address,
         void* destination,
         std::size_t size,
@@ -1015,6 +1024,26 @@ struct MemoryTransport::Impl {
         });
     }
 
+    bool ReadCoordinateMemoryUnlocked(
+        std::uintptr_t address,
+        void* destination,
+        std::size_t size,
+        CoordinateReadDiagnostic& diagnostic) {
+        if (!platform::PerformanceTraceEnabled()) {
+            return ReadCoordinateMemoryCoreUnlocked(
+                address, destination, size, diagnostic);
+        }
+        platform::PerformanceTraceScope trace(
+            platform::PerformancePhase::CoordinateRemoteRead, 64);
+        const bool read = ReadCoordinateMemoryCoreUnlocked(
+            address, destination, size, diagnostic);
+        platform::RecordPerformanceRead(
+            platform::PerformanceReadKind::Coordinate,
+            size,
+            read);
+        return read;
+    }
+
     bool ReadUnlocked(std::uintptr_t address,
                       void* destination,
                       std::size_t size) {
@@ -1039,8 +1068,19 @@ struct MemoryTransport::Impl {
     }
 
     bool Read(std::uintptr_t address, void* destination, std::size_t size) {
+        if (!platform::PerformanceTraceEnabled()) {
+            std::lock_guard<std::mutex> lock(ioMutex);
+            return ReadUnlocked(address, destination, size);
+        }
+        platform::PerformanceTraceScope trace(
+            platform::PerformancePhase::RemoteRead, 64);
         std::lock_guard<std::mutex> lock(ioMutex);
-        return ReadUnlocked(address, destination, size);
+        const bool read = ReadUnlocked(address, destination, size);
+        platform::RecordPerformanceRead(
+            platform::PerformanceReadKind::Standard,
+            size,
+            read);
+        return read;
     }
 
     bool ReadCoordinateMemory(
@@ -1066,6 +1106,22 @@ struct MemoryTransport::Impl {
     std::size_t ReadBatch(const MemoryReadRequest* requests,
                           std::size_t count,
                           std::uint8_t* itemStatus) {
+        const bool traceEnabled = platform::PerformanceTraceEnabled();
+        platform::PerformanceTraceScope trace(
+            platform::PerformancePhase::BatchRemoteRead, 16);
+        std::uint64_t requestedBytes = 0;
+        if (traceEnabled && requests != nullptr) {
+            for (std::size_t index = 0; index < count; ++index) {
+                requestedBytes += requests[index].size;
+            }
+        }
+        if (traceEnabled) {
+            platform::RecordPerformanceRead(
+                platform::PerformanceReadKind::Batch,
+                requestedBytes,
+                true,
+                count);
+        }
         std::unique_lock<std::mutex> lock(ioMutex);
         if (count == 0) return 0;
         if (itemStatus != nullptr) {

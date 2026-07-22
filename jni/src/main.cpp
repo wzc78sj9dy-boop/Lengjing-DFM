@@ -18,6 +18,7 @@
 #endif
 #include "platform/BackgroundProcess.h"
 #include "platform/MenuKeyMonitor.h"
+#include "platform/PerformanceTrace.h"
 
 #include "Android_Graphics/GraphicsManager.h"
 #include "Android_draw/字体.h"
@@ -763,6 +764,26 @@ int main() {
             algorithmPosition);
     }
 
+    if (lengjing::platform::PerformanceTraceEnabled()) {
+        constexpr char kPerformanceLogPath[] =
+            "/data/local/tmp/lengjing_performance.txt";
+        const char* requestedPerformanceLogPath =
+            std::getenv("LENGJING_PERFORMANCE_LOG_PATH");
+        const char* performanceLogPath =
+            requestedPerformanceLogPath != nullptr &&
+                requestedPerformanceLogPath[0] == '/'
+            ? requestedPerformanceLogPath
+            : kPerformanceLogPath;
+        if (!lengjing::platform::DetachFromTerminal(performanceLogPath)) {
+            return 3;
+        }
+        std::fprintf(
+            stderr,
+            "[perf-start] schema=2 version=%s pid=%d\n",
+            LENGJING_VERSION,
+            static_cast<int>(getpid()));
+        std::fflush(stderr);
+    } else {
 #if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
     constexpr char kCoordinateDebugLogPath[] =
         "/sdcard/Download/lengjing_coordinate_debug.txt";
@@ -789,6 +810,7 @@ int main() {
 #else
     if (!lengjing::platform::DetachFromTerminal()) return 3;
 #endif
+    }
     if constexpr (kRuntimeAuthEnabled) {
         std::system(
             "chmod 000 /sys/class/kgsl/kgsl/pagetables >/dev/null 2>&1");
@@ -857,6 +879,25 @@ int main() {
 
     controller.SetDisplayGeometry(
         surfaceWidth, surfaceHeight, display.orientation);
+
+    const char* performanceAutostart =
+        std::getenv("LENGJING_PERFORMANCE_AUTOSTART");
+    if (lengjing::platform::PerformanceTraceEnabled() &&
+        performanceAutostart != nullptr &&
+        performanceAutostart[0] != '\0' &&
+        performanceAutostart[0] != '0') {
+        const char* performanceCoordinate =
+            std::getenv("LENGJING_PERFORMANCE_COORDINATE");
+        if (performanceCoordinate != nullptr &&
+            (performanceCoordinate[0] == '0' ||
+             performanceCoordinate[0] == '1') &&
+            performanceCoordinate[1] == '\0') {
+            controller.Model().visual.coordinateDecrypt =
+                performanceCoordinate[0] == '1';
+        }
+        controller.StartRuntime();
+        controller.SetMenuVisible(false);
+    }
 
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
     const char* algorithmVisualAutostart =
@@ -1044,7 +1085,11 @@ int main() {
         limiter.Wait(controller.TargetFrameRate());
         graphics->NewFrame();
         controller.RenderFrame(graphics->PresentedFrameRate());
-        graphics->EndFrame();
+        {
+            lengjing::platform::PerformanceTraceScope submitTrace(
+                lengjing::platform::PerformancePhase::GraphicsSubmit);
+            graphics->EndFrame();
+        }
     }
 
     if (kRuntimeAuthEnabled && authSession.ExitRequested()) {
