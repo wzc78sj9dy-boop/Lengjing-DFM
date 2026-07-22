@@ -76,6 +76,24 @@ public:
         unstableRecordReads_ = 0;
     }
 
+    void MakeIndexRemapDuringDecode(std::uintptr_t address,
+                                    std::uint32_t first,
+                                    std::uint32_t second) {
+        remappedIndex_ = address;
+        firstIndex_ = first;
+        secondIndex_ = second;
+        remappedIndexReads_ = 0;
+    }
+
+    void MakeEpochValueAlternate(std::uintptr_t address,
+                                 std::uint64_t first,
+                                 std::uint64_t second) {
+        alternatingEpochValue_ = address;
+        firstEpochValue_ = first;
+        secondEpochValue_ = second;
+        alternatingEpochReads_ = 0;
+    }
+
     bool OrdinaryFieldRead() const noexcept {
         return ordinaryFieldRead_;
     }
@@ -101,6 +119,22 @@ public:
                 bytes[0] ^= 1U;
             }
         }
+        if (address == remappedIndex_ &&
+            size == sizeof(std::uint32_t)) {
+            const unsigned readInAttempt = remappedIndexReads_++ % 6U;
+            const std::uint32_t value = readInAttempt < 4U
+                ? firstIndex_
+                : secondIndex_;
+            std::memcpy(destination, &value, sizeof(value));
+        }
+        if (address == alternatingEpochValue_ &&
+            size == sizeof(std::uint64_t)) {
+            const std::uint64_t value =
+                (alternatingEpochReads_++ & 1U) == 0
+                ? firstEpochValue_
+                : secondEpochValue_;
+            std::memcpy(destination, &value, sizeof(value));
+        }
         return true;
     }
 
@@ -108,6 +142,14 @@ private:
     std::unordered_map<std::uintptr_t, std::uint8_t> bytes_;
     std::uintptr_t unstableRecord_ = 0;
     unsigned unstableRecordReads_ = 0;
+    std::uintptr_t remappedIndex_ = 0;
+    std::uint32_t firstIndex_ = 0;
+    std::uint32_t secondIndex_ = 0;
+    unsigned remappedIndexReads_ = 0;
+    std::uintptr_t alternatingEpochValue_ = 0;
+    std::uint64_t firstEpochValue_ = 0;
+    std::uint64_t secondEpochValue_ = 0;
+    unsigned alternatingEpochReads_ = 0;
     bool ordinaryFieldRead_ = false;
 };
 
@@ -547,6 +589,28 @@ void TestSnapshotAndBoundsFailures() {
 
     {
         Memory memory;
+        PutFixture(memory, layout);
+        const std::uint32_t count = 1;
+        const std::uint32_t negativeLdrswSentinel = UINT32_MAX;
+        memory.Put(kState + 0x14A0, count);
+        memory.Put(kIndexArray, negativeLdrswSentinel);
+        auto read = [&memory](std::uintptr_t address,
+                              void* destination,
+                              std::size_t size) {
+            return memory.Read(address, destination, size);
+        };
+        RuntimeCoordinateCodec codec(layout);
+        REQUIRE(Refresh(codec, read));
+        RuntimeCoordinateCodec::Coordinate coordinate{};
+        RuntimeCoordinateCodecDiagnostic diagnostic{};
+        REQUIRE(!codec.Decode(
+            kObject, kOwner, coordinate, diagnostic, read));
+        REQUIRE(diagnostic.error ==
+            RuntimeCoordinateCodecError::PhysicalIndexInvalid);
+    }
+
+    {
+        Memory memory;
         FixtureOptions options{};
         options.invalidCoordinate = true;
         PutFixture(memory, layout, options);
@@ -563,6 +627,77 @@ void TestSnapshotAndBoundsFailures() {
             kObject, kOwner, coordinate, diagnostic, read));
         REQUIRE(diagnostic.error ==
             RuntimeCoordinateCodecError::OutputInvalid);
+    }
+}
+
+void TestIndexAndEpochChangesAreRejected() {
+    const RuntimeCoordinateCodecLayout layout = BuildLayout();
+
+    {
+        Memory memory;
+        PutFixture(memory, layout);
+        const std::uint32_t count = 1;
+        memory.Put(kState + 0x14A0, count);
+        memory.Put(kIndexArray, kTargetPhysicalIndex);
+        auto read = [&memory](std::uintptr_t address,
+                              void* destination,
+                              std::size_t size) {
+            return memory.Read(address, destination, size);
+        };
+        RuntimeCoordinateCodec codec(layout);
+        REQUIRE(Refresh(codec, read));
+        memory.MakeIndexRemapDuringDecode(
+            kIndexArray, kTargetPhysicalIndex, kDecoyPhysicalIndex);
+        RuntimeCoordinateCodec::Coordinate coordinate{};
+        RuntimeCoordinateCodecDiagnostic diagnostic{};
+        REQUIRE(!codec.Decode(
+            kObject, kOwner, coordinate, diagnostic, read));
+        REQUIRE(diagnostic.error ==
+            RuntimeCoordinateCodecError::StateUnstable);
+    }
+
+    {
+        Memory memory;
+        PutFixture(memory, layout);
+        auto read = [&memory](std::uintptr_t address,
+                              void* destination,
+                              std::size_t size) {
+            return memory.Read(address, destination, size);
+        };
+        RuntimeCoordinateCodec codec(layout);
+        REQUIRE(Refresh(codec, read));
+        memory.MakeEpochValueAlternate(
+            kModule + layout.hookRva + 0x2C,
+            kTrampoline,
+            kTrampoline + 0x1000);
+        RuntimeCoordinateCodec::Coordinate coordinate{};
+        RuntimeCoordinateCodecDiagnostic diagnostic{};
+        REQUIRE(!codec.Decode(
+            kObject, kOwner, coordinate, diagnostic, read));
+        REQUIRE(diagnostic.error ==
+            RuntimeCoordinateCodecError::StateUnstable);
+    }
+
+    {
+        Memory memory;
+        PutFixture(memory, layout);
+        auto read = [&memory](std::uintptr_t address,
+                              void* destination,
+                              std::size_t size) {
+            return memory.Read(address, destination, size);
+        };
+        RuntimeCoordinateCodec codec(layout);
+        REQUIRE(Refresh(codec, read));
+        memory.MakeEpochValueAlternate(
+            RuntimeCoordinateCodec::StripPointer(kRawX0) + 0x30,
+            kStateInput,
+            kStateInput ^ UINT64_C(0x1000));
+        RuntimeCoordinateCodec::Coordinate coordinate{};
+        RuntimeCoordinateCodecDiagnostic diagnostic{};
+        REQUIRE(!codec.Decode(
+            kObject, kOwner, coordinate, diagnostic, read));
+        REQUIRE(diagnostic.error ==
+            RuntimeCoordinateCodecError::StateUnstable);
     }
 }
 
@@ -596,6 +731,7 @@ int main() {
         TestRecordedKind2RingDecode();
         TestStrictIdentityFailures();
         TestSnapshotAndBoundsFailures();
+        TestIndexAndEpochChangesAreRejected();
         TestFingerprintFailure();
         return 0;
     } catch (const std::exception& exception) {

@@ -160,6 +160,7 @@ public:
                  ValidateTrampoline&& validateTrampoline,
                  ValidateCallback&& validateCallback) noexcept {
         context_ = {};
+        hookLiteral_ = 0;
         diagnostic_ = {};
         if (moduleBase == 0 || layout_.hookRva == 0) {
             return Fail(RuntimeCoordinateCodecError::InvalidInput);
@@ -272,6 +273,7 @@ public:
             return Fail(RuntimeCoordinateCodecError::StateUnstable);
         }
         context_ = second;
+        hookLiteral_ = literal;
         CopyContextToDiagnostic(context_);
         diagnostic_.stage = RuntimeCoordinateCodecStage::Ready;
         diagnostic_.error = RuntimeCoordinateCodecError::None;
@@ -298,6 +300,10 @@ public:
         RuntimeCoordinateCodecError lastError =
             RuntimeCoordinateCodecError::RecordNotFound;
         for (unsigned attempt = 0; attempt < kMaximumAttempts; ++attempt) {
+            if (!ValidateRuntimeEpoch(readBytes)) {
+                lastError = RuntimeCoordinateCodecError::StateUnstable;
+                continue;
+            }
             TableHeader firstHeader{};
             if (!ReadTableHeader(
                     context_.state, firstHeader, readBytes)) {
@@ -470,6 +476,24 @@ public:
                     retry = true;
                     break;
                 }
+                if (!ValidateRuntimeEpoch(readBytes)) {
+                    lastError = RuntimeCoordinateCodecError::StateUnstable;
+                    retry = true;
+                    break;
+                }
+                SortedEntry finalEntry{};
+                if (!ReadStableSortedEntry(
+                        firstHeader, sorted, finalEntry, readBytes)) {
+                    lastError = RuntimeCoordinateCodecError::IndexReadFailed;
+                    retry = true;
+                    break;
+                }
+                if (finalEntry.physicalIndex != entry.physicalIndex ||
+                    finalEntry.fieldKey != entry.fieldKey) {
+                    lastError = RuntimeCoordinateCodecError::StateUnstable;
+                    retry = true;
+                    break;
+                }
                 if (!IsValidAlgorithmCoordinateValue(
                         candidate.x, candidate.y, candidate.z)) {
                     return FailDecode(
@@ -501,6 +525,10 @@ public:
                 lastError = RuntimeCoordinateCodecError::StateUnstable;
                 continue;
             }
+            if (!ValidateRuntimeEpoch(readBytes)) {
+                lastError = RuntimeCoordinateCodecError::StateUnstable;
+                continue;
+            }
             if (inactiveMatchSeen) {
                 return FailDecode(
                     diagnostic, RuntimeCoordinateCodecError::RecordInactive);
@@ -527,6 +555,7 @@ public:
 
     void Reset() noexcept {
         context_ = {};
+        hookLiteral_ = 0;
         diagnostic_ = {};
     }
 
@@ -646,6 +675,7 @@ private:
 
     bool Fail(RuntimeCoordinateCodecError error) noexcept {
         context_ = {};
+        hookLiteral_ = 0;
         diagnostic_.stage = RuntimeCoordinateCodecStage::Failed;
         diagnostic_.error = error;
         return false;
@@ -826,14 +856,19 @@ private:
             !CheckedAdd(header.indexArray, indexOffset, indexAddress)) {
             return false;
         }
-        std::uint32_t firstPhysical = 0;
-        std::uint32_t secondPhysical = 0;
+        std::int32_t firstPhysical = 0;
+        std::int32_t secondPhysical = 0;
         if (!ReadValue(readBytes, indexAddress, firstPhysical) ||
             !ReadValue(readBytes, indexAddress, secondPhysical) ||
             firstPhysical != secondPhysical) {
             return false;
         }
-        entry.physicalIndex = secondPhysical;
+        if (secondPhysical < 0) {
+            entry.physicalIndex =
+                std::numeric_limits<std::uint32_t>::max();
+            return true;
+        }
+        entry.physicalIndex = static_cast<std::uint32_t>(secondPhysical);
         if (entry.physicalIndex >= header.capacity) return true;
 
         std::uintptr_t recordAddress = 0;
@@ -859,6 +894,46 @@ private:
             return false;
         }
         entry.fieldKey = secondKey;
+        return true;
+    }
+
+    template <typename ReadBytes>
+    bool ValidateRuntimeEpoch(ReadBytes& readBytes) const noexcept {
+        if (hookLiteral_ == 0 || context_.context == 0 ||
+            diagnostic_.trampoline < sizeof(std::uint64_t)) {
+            return false;
+        }
+
+        std::uint64_t raw = 0;
+        if (!ReadValue(readBytes, hookLiteral_, raw) ||
+            StripPointer(raw) != diagnostic_.trampoline ||
+            !ReadValue(
+                readBytes,
+                diagnostic_.trampoline - sizeof(std::uint64_t),
+                raw) ||
+            StripPointer(raw) != context_.context ||
+            !ReadAt(readBytes, context_.context, 0x10, raw) ||
+            StripPointer(raw) != context_.link ||
+            !ReadAt(readBytes, context_.link, 0x10, raw) ||
+            StripPointer(raw) != context_.slot0 ||
+            !ReadAt(readBytes, context_.link, 0x28, raw) ||
+            StripPointer(raw) != context_.slot1) {
+            return false;
+        }
+
+        std::uint64_t rawX0 = 0;
+        std::uint64_t x1 = 0;
+        std::uint64_t stateInput = 0;
+        const std::uintptr_t x0Address = StripPointer(context_.rawX0);
+        if (!ReadValue(readBytes, context_.slot0, rawX0) ||
+            rawX0 != context_.rawX0 ||
+            !ReadValue(readBytes, context_.slot1, x1) ||
+            x1 != context_.x1 || x0Address == 0 ||
+            !ReadAt(readBytes, x0Address, 0x30, stateInput) ||
+            stateInput != context_.stateInput ||
+            DecodeStateAddress(rawX0, stateInput) != context_.state) {
+            return false;
+        }
         return true;
     }
 
@@ -976,6 +1051,7 @@ private:
 
     RuntimeCoordinateCodecLayout layout_{};
     Context context_{};
+    std::uintptr_t hookLiteral_ = 0;
     RuntimeCoordinateCodecDiagnostic diagnostic_{};
 };
 
