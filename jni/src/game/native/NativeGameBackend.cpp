@@ -170,6 +170,8 @@ CoordinateDecryptError CoordinatePoolError(
             return CoordinateDecryptError::PoolSlotLayoutPending;
         case CoordinatePoolRuntimeError::SlotLayoutConflict:
             return CoordinateDecryptError::PoolSlotLayoutConflict;
+        case CoordinatePoolRuntimeError::SlotLayoutEvidenceMissing:
+            return CoordinateDecryptError::PoolSlotLayoutEvidenceMissing;
     }
     return CoordinateDecryptError::UnhandledException;
 }
@@ -1577,8 +1579,13 @@ public:
         std::unordered_set<std::uintptr_t> seenAimActors;
 #endif
         if (actorRecords.empty()) {
+            const RuntimeError actorFailure = algorithmPositionRequested_
+                ? (actorRecordSnapshot_.decodedRecordArrayLocated
+                    ? RuntimeError::DecodedActorRecordsUnavailable
+                    : RuntimeError::DecodedActorSourceUnavailable)
+                : RuntimeError::ActorListUnavailable;
             SetRuntimeFailure(
-                probe, RuntimeError::ActorListUnavailable);
+                probe, actorFailure);
             error = "数据链等待：人物列表暂不可读";
             RefreshCameraView(context, frame.sequence);
             AppendWorldObjectCache(settings, context, frame);
@@ -2700,6 +2707,7 @@ private:
         std::vector<RuntimeActorRecord> records;
         std::chrono::steady_clock::time_point decodedUpdatedAt{};
         bool decodedRecordsEncrypted = false;
+        bool decodedRecordArrayLocated = false;
         bool decodedRecordSourceReady = false;
         bool decodedRecordSourceRetained = false;
         bool hasKey = false;
@@ -3070,6 +3078,8 @@ private:
             decodedActors = CollectDecodedActorRecords(
                 candidate.decodedRecordSourceReady,
                 candidate.decodedRecordsEncrypted);
+            candidate.decodedRecordArrayLocated =
+                candidate.decodedRecordSourceReady;
             const bool hasCandidateDecodedRecords = std::any_of(
                 decodedActors.begin(),
                 decodedActors.end(),
@@ -4457,9 +4467,20 @@ private:
                             observedRaw.z);
                     }
                     if (!observedValid) {
+                        const bool historyRecovered = readStableHistory();
+                        const bool cacheRecovered =
+                            !historyRecovered && readCached();
+                        if (!native::ShouldReportCoordinateOutputError(
+                                historyRecovered, cacheRecovered)) {
+                            return true;
+                        }
                         algorithmFrameOutputError_ =
                             CoordinateDecryptError::OutputZero;
-                        if (readStableHistory() || readCached()) return true;
+                        if (trace != nullptr) {
+                            trace->source = CoordinateTraceSource::Failure;
+                            trace->error = CoordinateDecryptError::OutputZero;
+                            trace->systemError = 0;
+                        }
                         decodedPositionCache_.erase(actor);
                         return false;
                     }
@@ -4791,9 +4812,23 @@ private:
                         trace->raw = decoded;
                         trace->source = CoordinateTraceSource::Failure;
                     }
-                    algorithmFrameOutputError_ = IsFinite(decoded)
+                    const bool historyRecovered = readStableHistory();
+                    const bool cacheRecovered =
+                        !historyRecovered && readCached();
+                    if (!native::ShouldReportCoordinateOutputError(
+                            historyRecovered, cacheRecovered)) {
+                        return true;
+                    }
+                    const CoordinateDecryptError outputError = IsFinite(decoded)
                         ? CoordinateDecryptError::OutputZero
                         : CoordinateDecryptError::OutputNotFinite;
+                    algorithmFrameOutputError_ = outputError;
+                    if (trace != nullptr) {
+                        trace->source = CoordinateTraceSource::Failure;
+                        trace->error = outputError;
+                        trace->systemError = 0;
+                    }
+                    return false;
                 } else {
                     if (trace != nullptr) {
                         trace->source = CoordinateTraceSource::Failure;

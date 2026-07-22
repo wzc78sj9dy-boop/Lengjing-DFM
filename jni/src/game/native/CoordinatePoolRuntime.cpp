@@ -935,17 +935,21 @@ struct CoordinatePoolRuntime::Impl {
         const bool capturePhysicalSlots =
             IsCoordinatePoolCandidateTraceFullEnabled() ||
             !slotLayout.IsLocked();
-        const std::size_t capturedPhysicalSlotCount = capturePhysicalSlots
+        std::size_t capturedPhysicalSlotCount = capturePhysicalSlots
             ? (slotLayout.IsLocked()
                 ? slotLayout.physicalSlotCount
                 : kCoordinatePoolPhysicalSlotCount)
             : 0;
-        const std::size_t snapshotSize =
+        const auto snapshotSizeFor = [&](std::size_t slotCount) {
+            return
+                (slotCount - 1) *
+                    static_cast<std::size_t>(layout.entryStride) +
+                sizeof(CoordinatePoolPosition);
+        };
+        std::size_t snapshotSize =
             (capturePhysicalSlots
-                    ? capturedPhysicalSlotCount - 1
-                    : 0) *
-                static_cast<std::size_t>(layout.entryStride) +
-            sizeof(CoordinatePoolPosition);
+                ? snapshotSizeFor(capturedPhysicalSlotCount)
+                : sizeof(CoordinatePoolPosition));
         std::vector<std::uint8_t> snapshot;
         if (capturePhysicalSlots) snapshot.resize(snapshotSize);
         bool stable = false;
@@ -1002,21 +1006,42 @@ struct CoordinatePoolRuntime::Impl {
                 return false;
             }
             if (capturePhysicalSlots) {
-                if (!IsCoordinatePoolReadRangeValid(
-                        snapshotAddress, snapshotSize)) {
+                bool snapshotRead =
+                    IsCoordinatePoolReadRangeValid(
+                        snapshotAddress, snapshotSize) &&
+                    ReadRemoteUnlocked(
+                        snapshotAddress,
+                        snapshot.data(),
+                        snapshotSize,
+                        CoordinateReadStage::Position);
+                if (ShouldRetryCoordinatePoolCompactSnapshot(
+                        slotLayout,
+                        slotLayoutCalibration.CompactPossible(),
+                        decodedPoolSlot,
+                        capturedPhysicalSlotCount,
+                        snapshotRead)) {
+                    capturedPhysicalSlotCount =
+                        kCoordinatePoolCompactLayout.physicalSlotCount;
+                    snapshotSize = snapshotSizeFor(
+                        capturedPhysicalSlotCount);
+                    snapshot.resize(snapshotSize);
+                    snapshotRead = IsCoordinatePoolReadRangeValid(
+                            snapshotAddress, snapshotSize) &&
+                        ReadRemoteUnlocked(
+                            snapshotAddress,
+                            snapshot.data(),
+                            snapshotSize,
+                            CoordinateReadStage::Position);
+                    if (snapshotRead) ClearReadDiagnosticUnlocked();
+                }
+                if (!snapshotRead && !probe.read.HasFailure()) {
                     SetError(
                         CoordinatePoolRuntimeError::PositionReadFailed,
                         true,
                         -ERANGE);
                     return false;
                 }
-                if (!ReadRemoteUnlocked(
-                        snapshotAddress,
-                        snapshot.data(),
-                        snapshotSize,
-                        CoordinateReadStage::Position)) {
-                    break;
-                }
+                if (!snapshotRead) break;
             } else {
                 if (!slotLayout.IsLocked()) {
                     SetError(
@@ -1277,8 +1302,15 @@ struct CoordinatePoolRuntime::Impl {
             return false;
         }
         if (!slotLayout.IsLocked()) {
+            const bool hasLayoutEvidence =
+                slotLayoutCalibration.EvidenceCount(
+                    CoordinatePoolSlotLayoutKind::Compact) != 0 ||
+                slotLayoutCalibration.EvidenceCount(
+                    CoordinatePoolSlotLayoutKind::Extended) != 0;
             SetError(
-                CoordinatePoolRuntimeError::SlotLayoutPending,
+                hasLayoutEvidence
+                    ? CoordinatePoolRuntimeError::SlotLayoutPending
+                    : CoordinatePoolRuntimeError::SlotLayoutEvidenceMissing,
                 false,
                 -EAGAIN);
             return false;
@@ -2662,6 +2694,8 @@ private:
             }
             ringSlots.clear();
             ringSearchBudget.Reset();
+            slotLayoutCalibration.Reset();
+            UpdateSlotLayoutProbeUnlocked();
         }
         lastPoolPointer = pointer;
     }

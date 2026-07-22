@@ -42,6 +42,8 @@ enum class RuntimeError : std::uint16_t {
     WorldTransition = 2108,
     ActorListUnavailable = 2201,
     NamePoolUnavailable = 2202,
+    DecodedActorSourceUnavailable = 2203,
+    DecodedActorRecordsUnavailable = 2204,
 
     BackendOpenFailed = 9001,
     BackendReadFailed = 9002,

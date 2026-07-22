@@ -105,6 +105,12 @@ constexpr bool IsCoordinateFrameHealthy(
     return attempts != 0 && successes != 0;
 }
 
+constexpr bool ShouldReportCoordinateOutputError(
+    bool stableHistoryRecovered,
+    bool cachedPositionRecovered) noexcept {
+    return !stableHistoryRecovered && !cachedPositionRecovered;
+}
+
 constexpr DecodedPositionCacheIdentityState
 ClassifyDecodedPositionCacheIdentity(
     const DecodedPositionCacheIdentity& cached,

@@ -27,6 +27,7 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::
         ShouldRequestCoordinatePoolCodeValidationAfterReadFailure;
     using lengjing::game::native::ShouldRetryCoordinatePoolRing;
+    using lengjing::game::native::ShouldRetryCoordinatePoolCompactSnapshot;
     using lengjing::game::native::ShouldValidateCoordinatePoolCode;
     using lengjing::game::native::kCoordinatePoolCodeValidationIdleFrame;
     using lengjing::game::native::kCoordinatePoolCodeValidationRetryFrames;
@@ -176,6 +177,38 @@ void RunCoordinatePoolPolicyTests() {
         CoordinatePoolSlotLayoutKind::Compact) == 3);
     REQUIRE(compactCalibration.ComponentCount(
         CoordinatePoolSlotLayoutKind::Compact) == 2);
+
+    CoordinatePoolSlotLayoutCalibration noisyCompactCalibration;
+    REQUIRE(noisyCompactCalibration.ObserveTransition(
+        0x1000, 1, 2, 5, 4, 0x0e01).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(noisyCompactCalibration.ObserveTransition(
+        0x2000, 3, 4, 8, 7, 0x300c).kind ==
+        CoordinatePoolSlotLayoutKind::Unknown);
+    REQUIRE(noisyCompactCalibration.ObserveTransition(
+        0x1000, 5, 6, 2, 3, 0x0d80).kind ==
+        CoordinatePoolSlotLayoutKind::Compact);
+    REQUIRE(noisyCompactCalibration.Layout().physicalSlotCount == 10);
+    REQUIRE(noisyCompactCalibration.Layout().phase == 5);
+    REQUIRE(noisyCompactCalibration.EvidenceCount(
+        CoordinatePoolSlotLayoutKind::Compact) == 3);
+    REQUIRE(noisyCompactCalibration.EvidenceCount(
+        CoordinatePoolSlotLayoutKind::Extended) == 0);
+    REQUIRE(noisyCompactCalibration.ComponentCount(
+        CoordinatePoolSlotLayoutKind::Compact) == 2);
+
+    REQUIRE(ShouldRetryCoordinatePoolCompactSnapshot(
+        {}, true, 9, 14, false));
+    REQUIRE(!ShouldRetryCoordinatePoolCompactSnapshot(
+        {}, false, 9, 14, false));
+    REQUIRE(!ShouldRetryCoordinatePoolCompactSnapshot(
+        {}, true, 10, 14, false));
+    REQUIRE(!ShouldRetryCoordinatePoolCompactSnapshot(
+        {}, true, 9, 10, false));
+    REQUIRE(!ShouldRetryCoordinatePoolCompactSnapshot(
+        {}, true, 9, 14, true));
+    REQUIRE(!ShouldRetryCoordinatePoolCompactSnapshot(
+        kCoordinatePoolCompactLayout, true, 9, 14, false));
 
     REQUIRE(!ShouldRetryCoordinatePoolRing(
         100, 100 + kCoordinatePoolRingRetryFrames - 1));

@@ -113,6 +113,17 @@ constexpr std::uint16_t CoordinatePoolTransitionMask(
         (UINT16_C(1) << previous) | (UINT16_C(1) << current));
 }
 
+constexpr bool ShouldRetryCoordinatePoolCompactSnapshot(
+    const CoordinatePoolSlotLayout& layout,
+    bool compactPossible,
+    std::uint64_t decodedSlot,
+    std::size_t attemptedPhysicalSlotCount,
+    bool snapshotRead) noexcept {
+    return !snapshotRead && !layout.IsLocked() && compactPossible &&
+        decodedSlot < kCoordinatePoolCompactLayout.physicalSlotCount &&
+        attemptedPhysicalSlotCount == kCoordinatePoolPhysicalSlotCount;
+}
+
 class CoordinatePoolSlotLayoutCalibration final {
 public:
     CoordinatePoolSlotLayout ObserveDecodedSlot(
@@ -150,8 +161,7 @@ public:
         if (layout_.IsLocked() ||
             layout_.kind == CoordinatePoolSlotLayoutKind::Conflict ||
             component == 0 || previousIndex == currentIndex ||
-            previousDecodedSlot == currentDecodedSlot ||
-            BitCount(changedMask) != 2) {
+            previousDecodedSlot == currentDecodedSlot) {
             return layout_;
         }
         if (ContainsEvidence(
@@ -161,16 +171,28 @@ public:
                 changedMask)) {
             return layout_;
         }
-        const std::uint16_t compactMatches = MatchingPhases(
-            previousDecodedSlot,
-            currentDecodedSlot,
-            changedMask,
-            kCoordinatePoolCompactLayout.physicalSlotCount);
-        const std::uint16_t extendedMatches = MatchingPhases(
-            previousDecodedSlot,
-            currentDecodedSlot,
-            changedMask,
-            kCoordinatePoolExtendedLayout.physicalSlotCount);
+        const std::uint16_t compactChangedMask =
+            changedMask & FullPhaseMask(
+                kCoordinatePoolCompactLayout.physicalSlotCount);
+        const std::uint16_t extendedChangedMask =
+            changedMask & FullPhaseMask(
+                kCoordinatePoolExtendedLayout.physicalSlotCount);
+        const std::uint16_t compactMatches =
+            BitCount(compactChangedMask) == 2
+            ? MatchingPhases(
+                  previousDecodedSlot,
+                  currentDecodedSlot,
+                  compactChangedMask,
+                  kCoordinatePoolCompactLayout.physicalSlotCount)
+            : 0;
+        const std::uint16_t extendedMatches =
+            BitCount(extendedChangedMask) == 2
+            ? MatchingPhases(
+                  previousDecodedSlot,
+                  currentDecodedSlot,
+                  extendedChangedMask,
+                  kCoordinatePoolExtendedLayout.physicalSlotCount)
+            : 0;
         if (compactMatches == 0 && extendedMatches == 0) return layout_;
         evidence_[evidenceWriteIndex_] = Evidence{
             component,
@@ -199,6 +221,7 @@ public:
         return PhaseStatsFor(
             CoordinatePoolSlotLayoutKind::Extended).phaseMask;
     }
+    bool CompactPossible() const noexcept { return compactPossible_; }
 
     std::size_t EvidenceCount(
         CoordinatePoolSlotLayoutKind kind) const noexcept {

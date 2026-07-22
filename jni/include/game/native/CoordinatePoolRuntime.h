@@ -113,6 +113,7 @@ enum class CoordinatePoolRuntimeError : std::uint8_t {
     PositionUnstable,
     SlotLayoutPending,
     SlotLayoutConflict,
+    SlotLayoutEvidenceMissing,
 };
 
 constexpr bool ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
@@ -127,6 +128,7 @@ constexpr bool ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
         case CoordinatePoolRuntimeError::PositionUnstable:
         case CoordinatePoolRuntimeError::SlotLayoutPending:
         case CoordinatePoolRuntimeError::SlotLayoutConflict:
+        case CoordinatePoolRuntimeError::SlotLayoutEvidenceMissing:
             return false;
         case CoordinatePoolRuntimeError::PositionReadFailed:
             return !read.HasFailure() ||
