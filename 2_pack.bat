@@ -51,6 +51,25 @@ if not defined BIN (
 )
 set "ROOT_BIN=%~dp0!PRODUCT!"
 
+if not exist "%BUILD_DIR%\CMakeCache.txt" (
+    echo [ERROR] CMake cache not found. Run 1_build.bat first.
+    exit /b 1
+)
+findstr /B /C:"LENGJING_ENABLE_ALGORITHM_COORDINATE:BOOL=OFF" "%BUILD_DIR%\CMakeCache.txt" >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Algorithm coordinate code is not disabled in this build.
+    exit /b 1
+)
+if not exist "%BUILD_DIR%\compile_commands.json" (
+    echo [ERROR] Compile command database not found. Run 1_build.bat first.
+    exit /b 1
+)
+findstr /C:"LENGJING_ENABLE_ALGORITHM_COORDINATE=1" "%BUILD_DIR%\compile_commands.json" >nul 2>&1
+if not errorlevel 1 (
+    echo [ERROR] Algorithm coordinate code is enabled in the compile commands.
+    exit /b 1
+)
+
 for %%I in (llvm-readelf.exe) do set "READELF=%%~$PATH:I"
     if not defined READELF if exist "%BUILD_DIR%\CMakeCache.txt" (
         for /f "tokens=2 delims==" %%R in ('findstr /B /C:"CMAKE_READELF:FILEPATH=" "%BUILD_DIR%\CMakeCache.txt"') do (
@@ -76,6 +95,18 @@ for %%I in (llvm-readelf.exe) do set "READELF=%%~$PATH:I"
     if errorlevel 1 (
         del /q "!SYMBOL_REPORT!" >nul 2>&1
         echo [ERROR] The build product is stripped: .symtab is missing.
+        exit /b 1
+    )
+    "!READELF!" --symbols --wide "!BIN!" >"!SYMBOL_REPORT!" 2>nul
+    if errorlevel 1 (
+        del /q "!SYMBOL_REPORT!" >nul 2>&1
+        echo [ERROR] Unable to inspect the build product symbols.
+        exit /b 1
+    )
+    findstr /I /C:"AlgorithmCoordinate" /C:"RuntimeCoordinateCodec" /C:"ReadAlgorithmCoordinate" "!SYMBOL_REPORT!" >nul 2>&1
+    if not errorlevel 1 (
+        del /q "!SYMBOL_REPORT!" >nul 2>&1
+        echo [ERROR] Algorithm coordinate symbols are present in the build product.
         exit /b 1
     )
     del /q "!SYMBOL_REPORT!" >nul 2>&1
@@ -153,6 +184,18 @@ findstr /C:".symtab" "!RELEASE_REPORT!" >nul 2>&1
 if errorlevel 1 (
     del /q "!RELEASE_REPORT!" "!ROOT_BIN!" >nul 2>&1
     echo [ERROR] The release product lost its ELF symbol table.
+    exit /b 1
+)
+"!READELF!" --symbols --wide "!ROOT_BIN!" >"!RELEASE_REPORT!" 2>nul
+if errorlevel 1 (
+    del /q "!RELEASE_REPORT!" "!ROOT_BIN!" >nul 2>&1
+    echo [ERROR] Unable to inspect the release product symbols.
+    exit /b 1
+)
+findstr /I /C:"AlgorithmCoordinate" /C:"RuntimeCoordinateCodec" /C:"ReadAlgorithmCoordinate" "!RELEASE_REPORT!" >nul 2>&1
+if not errorlevel 1 (
+    del /q "!RELEASE_REPORT!" "!ROOT_BIN!" >nul 2>&1
+    echo [ERROR] Algorithm coordinate symbols are present in the release product.
     exit /b 1
 )
 del /q "!RELEASE_REPORT!" >nul 2>&1

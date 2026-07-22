@@ -2,6 +2,10 @@
 #define LENGJING_ENABLE_ALGORITHM_COORDINATE 0
 #endif
 
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
+#error "Algorithm coordinate feature is temporarily disabled"
+#endif
+
 #include "app/AppController.h"
 #include "app/RenderBackendSelection.h"
 #include "app/RuntimeExitPolicy.h"

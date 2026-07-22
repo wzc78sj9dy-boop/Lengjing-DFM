@@ -32,13 +32,8 @@ if /i "%~1"=="--no-pause" (
     shift
     goto :parse_build_args
 )
-if /i "%~1"=="--algorithm-coordinate" (
-    set "ALGORITHM_COORDINATE=ON"
-    shift
-    goto :parse_build_args
-)
 echo [ERROR] Unsupported option: %~1
-echo [USAGE] 1_build.bat [clean] [--no-pause] [--algorithm-coordinate]
+echo [USAGE] 1_build.bat [clean] [--no-pause]
 set "BUILD_RESULT=1"
 goto :finish
 
