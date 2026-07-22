@@ -32,6 +32,8 @@ inline constexpr std::size_t kCoordinatePoolLayoutMinimumComponents = 2;
 inline constexpr std::size_t
     kCoordinatePoolLayoutSingleComponentEvidence = 6;
 inline constexpr std::size_t kCoordinatePoolLayoutMinimumLead = 2;
+inline constexpr std::size_t
+    kCoordinatePoolLayoutInvalidDecodedSlotLimit = 3;
 
 enum class CoordinatePoolSlotLayoutKind : std::uint8_t {
     Unknown,
@@ -132,14 +134,26 @@ public:
             return layout_;
         }
         if (decodedSlot >= kCoordinatePoolPhysicalSlotCount) {
-            layout_.kind = CoordinatePoolSlotLayoutKind::Conflict;
+            if (++invalidDecodedSlotCount_ >=
+                kCoordinatePoolLayoutInvalidDecodedSlotLimit) {
+                layout_.kind = CoordinatePoolSlotLayoutKind::Conflict;
+            }
             return layout_;
         }
+        invalidDecodedSlotCount_ = 0;
         decodedMask_ |= static_cast<std::uint16_t>(
             UINT16_C(1) << decodedSlot);
         if (layout_.IsLocked()) {
             if (decodedSlot >= layout_.physicalSlotCount) {
-                layout_.kind = CoordinatePoolSlotLayoutKind::Conflict;
+                if (layout_.kind == CoordinatePoolSlotLayoutKind::Compact) {
+                    layout_ = {};
+                    evidence_ = {};
+                    evidenceCount_ = 0;
+                    evidenceWriteIndex_ = 0;
+                    compactPossible_ = false;
+                } else {
+                    layout_.kind = CoordinatePoolSlotLayoutKind::Conflict;
+                }
             }
             return layout_;
         }
@@ -471,6 +485,7 @@ private:
     std::size_t evidenceCount_ = 0;
     std::size_t evidenceWriteIndex_ = 0;
     std::uint16_t decodedMask_ = 0;
+    std::size_t invalidDecodedSlotCount_ = 0;
     bool compactPossible_ = true;
 };
 

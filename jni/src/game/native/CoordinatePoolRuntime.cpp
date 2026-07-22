@@ -2595,8 +2595,8 @@ private:
         lastPoolPointer = 0;
         ringSlots.clear();
         ringSearchBudget.Reset();
-        slotLayoutCalibration.Reset();
-        UpdateSlotLayoutProbeUnlocked();
+        // The slot layout belongs to the analyzed code, not a rotating
+        // execution context or pool allocation.
         probe.poolPointer = {};
     }
 
@@ -2694,8 +2694,7 @@ private:
             }
             ringSlots.clear();
             ringSearchBudget.Reset();
-            slotLayoutCalibration.Reset();
-            UpdateSlotLayoutProbeUnlocked();
+            // Preserve layout evidence while component rings are rediscovered.
         }
         lastPoolPointer = pointer;
     }

@@ -111,6 +111,13 @@ constexpr bool ShouldReportCoordinateOutputError(
     return !stableHistoryRecovered && !cachedPositionRecovered;
 }
 
+constexpr bool ShouldReportCoordinateFrameOutputError(
+    std::size_t attempts,
+    std::size_t published,
+    bool hasOutputError) noexcept {
+    return hasOutputError && !IsCoordinateFrameHealthy(attempts, published);
+}
+
 constexpr DecodedPositionCacheIdentityState
 ClassifyDecodedPositionCacheIdentity(
     const DecodedPositionCacheIdentity& cached,
