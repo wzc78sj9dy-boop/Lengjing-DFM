@@ -1763,22 +1763,14 @@ public:
                 trace.output = position;
             }
             HealthState health{};
-            bool healthAvailable = ReadHealth(actor, health);
-            if (!healthAvailable && botClass && coordinateAvailable) {
-                health.health = 100.0f;
-                health.maxHealth = 100.0f;
-                healthAvailable = true;
-            }
-            const bool standardTrackable = rangeTargetClass
-                ? coordinateAvailable
-                : native::IsPlayerTrackable(
-                      native::PlayerTrackingData{
-                          coordinateAvailable,
-                          healthAvailable,
-                          healthAvailable &&
-                              (health.health > 0.0f || health.downed),
-                      },
-                      native::PlayerDirectionData{false});
+            const bool healthAvailable = ReadHealth(actor, health);
+            const bool standardTrackable = native::IsPlayerTrackable(
+                native::MakePlayerTrackingData(
+                    coordinateAvailable,
+                    healthAvailable,
+                    health.health,
+                    health.downed),
+                native::PlayerDirectionData{false});
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
             if (!coordinateAvailable ||
                 (!standardTrackable && !trackingPlayerClass)) {
@@ -1847,8 +1839,10 @@ public:
                     (!settings.aim.rejectDeadTarget || healthAlive);
             }
 #endif
-            const bool visualEligible = standardTrackable &&
-                (!health.downed || settings.visual.downedPlayer);
+            const bool visualEligible = native::IsPlayerVisualEligible(
+                standardTrackable,
+                health.downed,
+                settings.visual.downedPlayer);
             if (!visualEligible && !aimEligible
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
                 && !trackingActorEligible
@@ -1856,9 +1850,12 @@ public:
                 ) {
                 continue;
             }
-            if (bot) ++frame.botCount;
-            else ++frame.playerCount;
-            if (settings.visual.enabled && settings.visual.nearbyEnemy &&
+            if (visualEligible) {
+                if (bot) ++frame.botCount;
+                else ++frame.playerCount;
+            }
+            if (visualEligible && settings.visual.enabled &&
+                settings.visual.nearbyEnemy &&
                 threatTeamsValid && !bot &&
                 health.health > 0.0f && horizontalDistanceMeters <= 50.0f) {
                 ++frame.nearbyEnemyCount;
@@ -1877,9 +1874,11 @@ public:
             const SemanticTone actorTone = ToneForVisibility(
                 bot, settings.visual.visibilityColor, actorVisibility);
 
-            const bool radarInRange = enemyEligible && frame.radar.has_value() &&
+            const bool radarInRange = visualEligible && enemyEligible &&
+                frame.radar.has_value() &&
                 distanceMeters <= frame.radar->maxDistanceMeters;
-            const bool hudMapEligible = enemyEligible && frame.hudMap.has_value();
+            const bool hudMapEligible = visualEligible && enemyEligible &&
+                frame.hudMap.has_value();
             const bool facingNeeded = radarInRange || hudMapEligible ||
                 (settings.visual.enabled && !bot &&
                  threatTeamsValid &&
@@ -1956,12 +1955,16 @@ public:
                 }
             }
 
-            const bool drawingInRange = settings.visual.drawDistanceMeters <= 0 ||
-                distanceMeters <= static_cast<float>(settings.visual.drawDistanceMeters);
-            const bool warningInRange = threatTeamsValid &&
+            const bool drawingInRange = native::IsWithinPlayerDrawRange(
+                horizontalDistanceMeters,
+                settings.visual.drawDistanceMeters);
+            const bool warningInRange = visualEligible && threatTeamsValid &&
                 settings.visual.offscreenWarning &&
                 settings.visual.warningSize > 0.0f &&
-                horizontalDistanceMeters <= settings.visual.warningDistanceMeters;
+                native::IsWithinOffscreenWarningRange(
+                    horizontalDistanceMeters,
+                    settings.visual.drawDistanceMeters,
+                    settings.visual.warningDistanceMeters);
             if (!drawingInRange && !warningInRange && !radarInRange &&
                 !aimEligible
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
@@ -2146,7 +2149,7 @@ public:
             }
 
             bool aimWarningActive = false;
-            if (aimWarningEnabled && threatTeamsValid && !bot &&
+            if (visualEligible && aimWarningEnabled && threatTeamsValid && !bot &&
                 health.health > 0.0f &&
                 drawingInRange && onScreen) {
                 aimWarningActive = ObserveAimWarning(
@@ -2200,7 +2203,8 @@ public:
                     aimCandidates);
             }
 #endif
-            if (settings.visual.enabled && settings.visual.playerViewRay &&
+            if (visualEligible && settings.visual.enabled &&
+                settings.visual.playerViewRay &&
                 threatTeamsValid && !bot && health.health > 0.0f &&
                 drawingInRange && onScreen && actorFacingValid) {
                 const float forwardLength = Length(actorForward);
@@ -2713,6 +2717,11 @@ private:
         bool hasKey = false;
     };
 
+    struct ActorAddressSnapshot {
+        std::vector<std::uintptr_t> addresses;
+        bool complete = false;
+    };
+
     struct HealthState {
         float health = 0.0f;
         float maxHealth = 100.0f;
@@ -3026,11 +3035,11 @@ private:
         const FrameContext& context,
         const std::vector<RuntimeActorRecord>& decodedActors) {
         std::vector<RuntimeActorRecord> result;
-        const std::vector<std::uintptr_t> ordinary =
+        const ActorAddressSnapshot ordinary =
             CollectActorAddresses(context);
-        result.reserve(decodedActors.size() + ordinary.size());
+        result.reserve(decodedActors.size() + ordinary.addresses.size());
         std::unordered_map<std::uintptr_t, std::size_t> indices;
-        indices.reserve(decodedActors.size() + ordinary.size());
+        indices.reserve(decodedActors.size() + ordinary.addresses.size());
         const auto appendOrMerge = [&](const RuntimeActorRecord& record) {
             if (!IsValidPointer(record.actor)) return;
             const auto inserted = indices.emplace(record.actor, result.size());
@@ -3041,11 +3050,16 @@ private:
             native::MergeActorRecordSource(
                 result[inserted.first->second], record);
         };
-        for (const RuntimeActorRecord& record : decodedActors) {
-            appendOrMerge(record);
-        }
-        for (const std::uintptr_t actor : ordinary) {
+        for (const std::uintptr_t actor : ordinary.addresses) {
             appendOrMerge(native::MakeOrdinaryActorRecord(actor));
+        }
+        for (const RuntimeActorRecord& record : decodedActors) {
+            const bool ordinaryMember =
+                indices.find(record.actor) != indices.end();
+            if (native::IsActorPresentInCurrentLevel(
+                    ordinary.complete, ordinaryMember)) {
+                appendOrMerge(record);
+            }
         }
         return result;
     }
@@ -3167,10 +3181,11 @@ private:
         actorRecordSnapshot_ = ActorRecordSnapshot{};
     }
 
-    std::vector<std::uintptr_t> CollectActorAddresses(
+    ActorAddressSnapshot CollectActorAddresses(
         const FrameContext& context) {
         constexpr std::size_t kMaximumCollectedActors = 100000;
-        std::vector<std::uintptr_t> result;
+        ActorAddressSnapshot snapshot{};
+        std::vector<std::uintptr_t>& result = snapshot.addresses;
         std::unordered_set<std::uintptr_t> seen;
         result.reserve(static_cast<std::size_t>(std::max(context.actorCount, 0)));
         seen.reserve(static_cast<std::size_t>(std::max(context.actorCount, 0)));
@@ -3180,21 +3195,26 @@ private:
             if (!IsValidPointer(header.data) || header.count <= 0 ||
                 header.count > maximumCount || header.capacity < header.count ||
                 result.size() >= kMaximumCollectedActors) {
-                return;
+                return false;
             }
             std::vector<std::uintptr_t> addresses(
                 static_cast<std::size_t>(header.count));
-            if (!memory_->Read(
+            bool complete = memory_ != nullptr && memory_->Read(
                     header.data,
                     addresses.data(),
-                    addresses.size() * sizeof(std::uintptr_t))) {
+                    addresses.size() * sizeof(std::uintptr_t));
+            if (!complete) {
+                complete = true;
                 for (std::size_t index = 0; index < addresses.size(); ++index) {
                     const std::uintptr_t offset =
                         index * sizeof(std::uintptr_t);
                     if (offset > kMaximumRemoteAddress - header.data) {
+                        complete = false;
                         break;
                     }
-                    ReadValue(header.data + offset, addresses[index]);
+                    if (!ReadValue(header.data + offset, addresses[index])) {
+                        complete = false;
+                    }
                 }
             }
             for (const std::uintptr_t address : addresses) {
@@ -3203,9 +3223,10 @@ private:
                     if (result.size() >= kMaximumCollectedActors) break;
                 }
             }
+            return complete;
         };
 
-        appendArray(
+        snapshot.complete = appendArray(
             ActorArrayHeader{
                 context.actorArray,
                 context.actorCount,
@@ -3213,10 +3234,10 @@ private:
             },
             kMaximumActorCount);
         if (result.size() >= kMaximumCollectedActors) {
-            return result;
+            return snapshot;
         }
 
-        return result;
+        return snapshot;
     }
 
     std::vector<std::uintptr_t> CollectWorldObjectAddresses(
@@ -3494,14 +3515,12 @@ private:
         if (!std::isfinite(distanceMeters) || distanceMeters < 0.0f) return;
 
         Vec2 screen{};
-        CameraPoint cameraPoint{};
         const bool projected = ProjectToScreen(
             position,
             context.view,
             options_.screenWidth,
             options_.screenHeight,
-            screen,
-            &cameraPoint);
+            screen);
         const bool suppressLoot = settings.visual.combatMode &&
             (context.firing || context.zooming);
         const bool staticProjectionAccepted = deferStaticProjection ||
@@ -3738,15 +3757,35 @@ private:
                     threat->blue,
                     threat->alpha);
                 if (settings.visual.throwableWarning) {
-                    const float projectionScale =
-                        (static_cast<float>(options_.screenWidth) * 0.5f) /
-                        std::tan(context.view.fieldOfView * kPi / 360.0f);
-                    projectile.rangeRadius = std::clamp(
-                        threat->radiusCentimeters * projectionScale /
-                            std::max(cameraPoint.forward, 1.0f),
-                        6.0f,
-                        static_cast<float>(
-                            std::max(options_.screenWidth, options_.screenHeight)));
+                    const std::vector<native::ScreenProjectionSegment>
+                        rangeSegments = native::ProjectWorldHorizontalRing(
+                            native::ProjectionPoint{
+                                position.x, position.y, position.z},
+                            threat->radiusCentimeters,
+                            native::ProjectionView{
+                                native::ProjectionPoint{
+                                    context.view.location.x,
+                                    context.view.location.y,
+                                    context.view.location.z,
+                                },
+                                native::ProjectionRotation{
+                                    context.view.rotation.pitch,
+                                    context.view.rotation.yaw,
+                                    context.view.rotation.roll,
+                                },
+                                context.view.fieldOfView,
+                            },
+                            options_.screenWidth,
+                            options_.screenHeight);
+                    projectile.rangeSegments.reserve(rangeSegments.size());
+                    for (const native::ScreenProjectionSegment& segment :
+                         rangeSegments) {
+                        projectile.rangeSegments.push_back(
+                            GeometrySegmentVisual{
+                                ImVec2(segment.start.x, segment.start.y),
+                                ImVec2(segment.end.x, segment.end.y),
+                            });
+                    }
                 }
                 if (settings.visual.throwableTrajectory) {
                     const auto found = projectileTrails_.find(actor);

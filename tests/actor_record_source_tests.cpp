@@ -4,10 +4,16 @@
 void RunActorRecordSourceTests() {
     using lengjing::game::native::ActorRecordSource;
     using lengjing::game::native::FillOrdinaryActorPointers;
+    using lengjing::game::native::IsActorPresentInCurrentLevel;
     using lengjing::game::native::MakeOrdinaryActorRecord;
     using lengjing::game::native::MakeResolvedActorRecord;
     using lengjing::game::native::MergeActorRecordSource;
     using lengjing::game::native::ReadActorRecordSourceWithFallback;
+
+    REQUIRE(IsActorPresentInCurrentLevel(false, false));
+    REQUIRE(IsActorPresentInCurrentLevel(false, true));
+    REQUIRE(IsActorPresentInCurrentLevel(true, true));
+    REQUIRE(!IsActorPresentInCurrentLevel(true, false));
 
     constexpr std::uintptr_t actor = 0x1000;
     const ActorRecordSource decoded =

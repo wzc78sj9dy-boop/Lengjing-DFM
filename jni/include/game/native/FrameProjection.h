@@ -1,7 +1,9 @@
 #pragma once
 
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace lengjing::game::native {
 
@@ -34,6 +36,11 @@ struct ScreenProjection {
     float y = 0.0f;
     CameraSpacePoint camera{};
     bool valid = false;
+};
+
+struct ScreenProjectionSegment {
+    ScreenProjection start{};
+    ScreenProjection end{};
 };
 
 struct ProjectionFovStabilityState {
@@ -201,6 +208,46 @@ inline ScreenProjection ProjectWorldPoint(
     result.x = halfWidth + result.camera.side * scale / result.camera.forward;
     result.y = halfHeight - result.camera.vertical * scale / result.camera.forward;
     result.valid = std::isfinite(result.x) && std::isfinite(result.y);
+    return result;
+}
+
+inline std::vector<ScreenProjectionSegment> ProjectWorldHorizontalRing(
+    const ProjectionPoint& center,
+    float radius,
+    const ProjectionView& view,
+    int screenWidth,
+    int screenHeight) {
+    constexpr std::size_t kSegmentCount = 36;
+    std::vector<ScreenProjectionSegment> result;
+    if (!IsFinite(center) || !IsFinite(view) ||
+        !std::isfinite(radius) || radius <= 0.0f ||
+        screenWidth <= 1 || screenHeight <= 1) {
+        return result;
+    }
+
+    constexpr float kTwoPi = 6.28318530717958647692f;
+    std::array<ScreenProjection, kSegmentCount> points{};
+    for (std::size_t index = 0; index < kSegmentCount; ++index) {
+        const float angle = kTwoPi * static_cast<float>(index) /
+            static_cast<float>(kSegmentCount);
+        points[index] = ProjectWorldPoint(
+            ProjectionPoint{
+                center.x + radius * std::cos(angle),
+                center.y + radius * std::sin(angle),
+                center.z,
+            },
+            view,
+            screenWidth,
+            screenHeight);
+    }
+
+    result.reserve(kSegmentCount);
+    for (std::size_t index = 0; index < kSegmentCount; ++index) {
+        const ScreenProjection& start = points[index];
+        const ScreenProjection& end = points[(index + 1) % kSegmentCount];
+        if (!start.valid || !end.valid) continue;
+        result.push_back(ScreenProjectionSegment{start, end});
+    }
     return result;
 }
 

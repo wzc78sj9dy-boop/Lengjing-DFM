@@ -19,6 +19,12 @@ struct ActorRecordSource {
 inline constexpr std::uintptr_t kOrdinaryActorRootOffset = 0x180;
 inline constexpr std::uintptr_t kOrdinaryActorMeshOffset = 0x3D0;
 
+constexpr bool IsActorPresentInCurrentLevel(
+    bool ordinarySnapshotComplete,
+    bool ordinaryMember) noexcept {
+    return !ordinarySnapshotComplete || ordinaryMember;
+}
+
 inline ActorRecordSource MakeResolvedActorRecord(
     std::uintptr_t actor,
     std::uintptr_t root,

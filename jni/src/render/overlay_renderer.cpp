@@ -666,14 +666,13 @@ void OverlayRenderer::DrawProjectile(ImDrawList* drawList,
     const ImU32 color = projectile.colorOverride != 0
         ? projectile.colorOverride
         : ToneColor(projectile.tone);
-    if (std::isfinite(projectile.rangeRadius) && projectile.rangeRadius > 1.0f) {
-        const float radius = std::min(projectile.rangeRadius,
-                                      std::max(viewport.Width(), viewport.Height()));
-        drawList->AddCircle(projectile.center,
-                            radius,
-                            WithAlpha(color, 0.38f),
-                            0,
-                            std::max(1.0f, style_.metrics.lineWidth * 0.42f * scale));
+    for (const GeometrySegmentVisual& segment : projectile.rangeSegments) {
+        if (!Finite(segment.start) || !Finite(segment.end)) continue;
+        drawList->AddLine(
+            segment.start,
+            segment.end,
+            WithAlpha(color, 0.38f),
+            std::max(1.0f, style_.metrics.lineWidth * 0.42f * scale));
     }
 
     if (projectile.trajectory.size() >= 2) {

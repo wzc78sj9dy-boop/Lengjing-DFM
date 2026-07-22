@@ -154,7 +154,7 @@ struct GeometryModelVisual {
 
 struct ProjectileVisual {
     ImVec2 center{};
-    float rangeRadius = 0.0f;
+    std::vector<GeometrySegmentVisual> rangeSegments;
     std::vector<ImVec2> trajectory;
     std::string label;
     float distanceMeters = 0.0f;

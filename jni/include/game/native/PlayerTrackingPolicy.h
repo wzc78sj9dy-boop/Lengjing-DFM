@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 
 namespace lengjing::game::native {
@@ -16,12 +17,31 @@ struct PlayerDirectionData {
     bool rotationAvailable = false;
 };
 
+constexpr PlayerTrackingData MakePlayerTrackingData(
+    bool coordinateAvailable,
+    bool healthAvailable,
+    float health,
+    bool downed) noexcept {
+    return PlayerTrackingData{
+        coordinateAvailable,
+        healthAvailable,
+        healthAvailable && (health > 0.0f || downed),
+    };
+}
+
 constexpr bool IsPlayerTrackable(
     const PlayerTrackingData& tracking,
     const PlayerDirectionData&) noexcept {
     return tracking.coordinateAvailable &&
         tracking.healthAvailable &&
         tracking.aliveOrDowned;
+}
+
+constexpr bool IsPlayerVisualEligible(
+    bool trackable,
+    bool downed,
+    bool showDowned) noexcept {
+    return trackable && (!downed || showDowned);
 }
 
 constexpr bool HasUsablePlayerState(
@@ -60,6 +80,26 @@ constexpr bool IsEnemyEligible(
     return HasComparablePlayerTeams(localTeam, targetTeam)
         ? localTeam != targetTeam
         : botClass;
+}
+
+inline bool IsWithinPlayerDrawRange(
+    float horizontalDistanceMeters,
+    int drawDistanceMeters) noexcept {
+    return std::isfinite(horizontalDistanceMeters) &&
+        horizontalDistanceMeters >= 0.0f &&
+        (drawDistanceMeters <= 0 ||
+         horizontalDistanceMeters <= static_cast<float>(drawDistanceMeters));
+}
+
+inline bool IsWithinOffscreenWarningRange(
+    float horizontalDistanceMeters,
+    int drawDistanceMeters,
+    float warningDistanceMeters) noexcept {
+    return IsWithinPlayerDrawRange(
+               horizontalDistanceMeters, drawDistanceMeters) &&
+        std::isfinite(warningDistanceMeters) &&
+        warningDistanceMeters > 0.0f &&
+        horizontalDistanceMeters <= warningDistanceMeters;
 }
 
 constexpr std::uint64_t ResolvePlayerIdentity(
