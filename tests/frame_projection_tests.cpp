@@ -87,6 +87,40 @@ void RunFrameProjectionTests() {
     REQUIRE(std::fabs(offset.x - 1800.0f) < 0.01f);
     REQUIRE(std::fabs(offset.y - 240.0f) < 0.01f);
 
+    const ScreenProjection looseForward =
+        ProjectWorldPointLoose({100.0f, 50.0f, 25.0f}, prepared);
+    requireProjectionEquivalent(offset, looseForward);
+    requireProjectionEquivalent(
+        looseForward,
+        ProjectWorldPointLoose(
+            {100.0f, 50.0f, 25.0f}, view, 2400, 1080));
+
+    const ScreenProjection looseSide =
+        ProjectWorldPointLoose({100.0f, 300.0f, 0.0f}, prepared);
+    REQUIRE(looseSide.valid);
+    REQUIRE(looseSide.x > 2400.0f);
+    REQUIRE(std::isfinite(looseSide.y));
+
+    const ScreenProjection looseBehind =
+        ProjectWorldPointLoose({-100.0f, 50.0f, 25.0f}, prepared);
+    REQUIRE(!ProjectWorldPoint(
+        {-100.0f, 50.0f, 25.0f}, prepared).valid);
+    REQUIRE(looseBehind.valid);
+    REQUIRE(looseBehind.camera.forward < -0.01f);
+    REQUIRE(std::isfinite(looseBehind.x));
+    REQUIRE(std::isfinite(looseBehind.y));
+    requireProjectionEquivalent(
+        looseBehind,
+        ProjectWorldPointLoose(
+            {-100.0f, 50.0f, 25.0f}, view, 2400, 1080));
+
+    const ScreenProjection looseNearPlane =
+        ProjectWorldPointLoose({0.0f, 1.0f, 1.0f}, prepared);
+    REQUIRE(looseNearPlane.valid);
+    REQUIRE(std::fabs(looseNearPlane.camera.forward) < 0.001f);
+    REQUIRE(std::isfinite(looseNearPlane.x));
+    REQUIRE(std::isfinite(looseNearPlane.y));
+
     const CameraSpacePoint legacyCamera = ToCameraSpace(target, view);
     const CameraSpacePoint preparedCamera = ToCameraSpace(target, prepared);
     REQUIRE(std::fabs(legacyCamera.side - preparedCamera.side) < 0.001f);

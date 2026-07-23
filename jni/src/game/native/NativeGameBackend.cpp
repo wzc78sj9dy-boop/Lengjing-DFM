@@ -917,6 +917,28 @@ bool ProjectToScreen(const Vec3& world,
     return true;
 }
 
+bool ProjectToScreenLoose(const Vec3& world,
+                          const native::PreparedProjection& prepared,
+                          Vec2& screen,
+                          CameraPoint* cameraPoint = nullptr) {
+    platform::PerformanceTraceScope trace(
+        platform::PerformancePhase::Projection, 64);
+    const native::ScreenProjection projected =
+        native::ProjectWorldPointLoose(
+            native::ProjectionPoint{world.x, world.y, world.z},
+            prepared);
+    if (cameraPoint != nullptr) {
+        *cameraPoint = CameraPoint{
+            projected.camera.side,
+            projected.camera.vertical,
+            projected.camera.forward,
+        };
+    }
+    if (!projected.valid) return false;
+    screen = Vec2{projected.x, projected.y};
+    return true;
+}
+
 bool IsInsideScreen(const Vec2& point, int width, int height, float margin = 0.0f) {
     return IsFinite(point) && point.x >= -margin && point.y >= -margin &&
            point.x <= static_cast<float>(width) + margin &&
@@ -1898,7 +1920,7 @@ public:
             const bool drawingInRange = native::IsWithinPlayerDrawRange(
                 horizontalDistanceMeters,
                 settings.visual.drawDistanceMeters);
-            const bool warningInRange = visualEligible && threatTeamsValid &&
+            const bool warningInRange = visualEligible &&
                 settings.visual.offscreenWarning &&
                 settings.visual.warningSize > 0.0f &&
                 native::IsWithinOffscreenWarningRange(
@@ -1985,12 +2007,12 @@ public:
             Vec2 bodyBottom{};
             Vec2 bodyTop{};
             CameraPoint cameraPoint{};
-            const bool bottomProjected = ProjectToScreen(
+            const bool bottomProjected = ProjectToScreenLoose(
                 Vec3{position.x, position.y, position.z - 5.0f},
                 context.preparedProjection,
                 bodyBottom,
                 &cameraPoint);
-            const bool topProjected = ProjectToScreen(
+            const bool topProjected = ProjectToScreenLoose(
                 Vec3{position.x, position.y, position.z + 205.0f},
                 context.preparedProjection,
                 bodyTop);
@@ -2006,7 +2028,8 @@ public:
                     native::PlayerBoneScreenPoint{
                         bodyTop.x, bodyTop.y, topProjected},
                     anchorBounds);
-            bool onScreen = anchorBoundsReady &&
+            const bool inFrontOfCamera = cameraPoint.forward > 0.01f;
+            bool onScreen = inFrontOfCamera && anchorBoundsReady &&
                 native::IsReliablePlayerScreenBounds(
                     anchorBounds,
                     static_cast<float>(options_.screenWidth),
@@ -2059,14 +2082,15 @@ public:
                     boneBounds.bottom,
                 };
                 native::PlayerScreenBounds visibleBounds{};
-                onScreen = native::SelectPlayerScreenBounds(
-                    boneBoundsReady,
-                    projectedBoneBounds,
-                    anchorBoundsReady,
-                    anchorBounds,
-                    static_cast<float>(options_.screenWidth),
-                    static_cast<float>(options_.screenHeight),
-                    visibleBounds);
+                onScreen = inFrontOfCamera &&
+                    native::SelectPlayerScreenBounds(
+                        boneBoundsReady,
+                        projectedBoneBounds,
+                        anchorBoundsReady,
+                        anchorBounds,
+                        static_cast<float>(options_.screenWidth),
+                        static_cast<float>(options_.screenHeight),
+                        visibleBounds);
             }
 
             if (bot) ++frame.botCount;
