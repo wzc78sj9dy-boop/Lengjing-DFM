@@ -36,6 +36,7 @@ void RunHudMapTests();
 void RunKernelModuleCatalogTests();
 void RunOverlayContrastPolicyTests();
 void RunPlayerBoundsTests();
+void RunPlayerDetailReadPolicyTests();
 void RunPlayerTracerPolicyTests();
 void RunPlayerTrackingTests();
 void RunPositionResolverTests();

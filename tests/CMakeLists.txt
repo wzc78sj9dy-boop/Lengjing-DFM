@@ -32,6 +32,7 @@ add_executable(lengjing_tests
     kernel_module_catalog_tests.cpp
     overlay_contrast_policy_tests.cpp
     player_bounds_tests.cpp
+    player_detail_read_policy_tests.cpp
     player_tracer_policy_tests.cpp
     player_tracking_tests.cpp
     position_resolver_tests.cpp

@@ -31,6 +31,18 @@ struct CameraSpacePoint {
     float forward = 0.0f;
 };
 
+struct PreparedProjection {
+    ProjectionPoint location{};
+    ProjectionPoint forward{};
+    ProjectionPoint right{};
+    ProjectionPoint up{};
+    float halfWidth = 0.0f;
+    float halfHeight = 0.0f;
+    float scale = 0.0f;
+    bool basisValid = false;
+    bool valid = false;
+};
+
 struct ScreenProjection {
     float x = 0.0f;
     float y = 0.0f;
@@ -133,8 +145,9 @@ inline bool IsFinite(const ProjectionView& view) noexcept {
         std::isfinite(view.fieldOfView);
 }
 
-inline CameraSpacePoint ToCameraSpace(
-    const ProjectionPoint& world,
+namespace projection_detail {
+
+inline PreparedProjection PrepareBasis(
     const ProjectionView& view) noexcept {
     constexpr float kDegreesToRadians =
         3.14159265358979323846f / 180.0f;
@@ -148,25 +161,61 @@ inline CameraSpacePoint ToCameraSpace(
     const float sinRoll = std::sin(roll);
     const float cosRoll = std::cos(roll);
 
-    const ProjectionPoint forward{
+    PreparedProjection result{};
+    result.location = view.location;
+    result.forward = ProjectionPoint{
         cosPitch * cosYaw,
         cosPitch * sinYaw,
         sinPitch,
     };
-    const ProjectionPoint right{
+    result.right = ProjectionPoint{
         sinRoll * sinPitch * cosYaw - cosRoll * sinYaw,
         sinRoll * sinPitch * sinYaw + cosRoll * cosYaw,
         -sinRoll * cosPitch,
     };
-    const ProjectionPoint up{
+    result.up = ProjectionPoint{
         -(cosRoll * sinPitch * cosYaw + sinRoll * sinYaw),
         cosYaw * sinRoll - cosRoll * sinPitch * sinYaw,
         cosRoll * cosPitch,
     };
+    result.basisValid = true;
+    return result;
+}
+
+}  // namespace projection_detail
+
+inline PreparedProjection PrepareProjection(
+    const ProjectionView& view,
+    int screenWidth,
+    int screenHeight) noexcept {
+    if (!IsFinite(view) || screenWidth <= 1 || screenHeight <= 1) {
+        return {};
+    }
+
+    PreparedProjection result = projection_detail::PrepareBasis(view);
+    constexpr float kHalfDegreesToRadians =
+        3.14159265358979323846f / 360.0f;
+    const float tangent = std::tan(
+        view.fieldOfView * kHalfDegreesToRadians);
+    if (!std::isfinite(tangent) || tangent <= 0.001f) {
+        return result;
+    }
+
+    result.halfWidth = static_cast<float>(screenWidth) * 0.5f;
+    result.halfHeight = static_cast<float>(screenHeight) * 0.5f;
+    result.scale = result.halfWidth / tangent;
+    result.valid = true;
+    return result;
+}
+
+inline CameraSpacePoint ToCameraSpace(
+    const ProjectionPoint& world,
+    const PreparedProjection& prepared) noexcept {
+    if (!prepared.basisValid) return {};
     const ProjectionPoint delta{
-        world.x - view.location.x,
-        world.y - view.location.y,
-        world.z - view.location.z,
+        world.x - prepared.location.x,
+        world.y - prepared.location.y,
+        world.z - prepared.location.z,
     };
     const auto dot = [](const ProjectionPoint& left,
                         const ProjectionPoint& rightPoint) {
@@ -174,10 +223,39 @@ inline CameraSpacePoint ToCameraSpace(
             left.z * rightPoint.z;
     };
     return CameraSpacePoint{
-        dot(delta, right),
-        dot(delta, up),
-        dot(delta, forward),
+        dot(delta, prepared.right),
+        dot(delta, prepared.up),
+        dot(delta, prepared.forward),
     };
+}
+
+inline CameraSpacePoint ToCameraSpace(
+    const ProjectionPoint& world,
+    const ProjectionView& view) noexcept {
+    return ToCameraSpace(
+        world, projection_detail::PrepareBasis(view));
+}
+
+inline ScreenProjection ProjectWorldPoint(
+    const ProjectionPoint& world,
+    const PreparedProjection& prepared) noexcept {
+    ScreenProjection result{};
+    if (!IsFinite(world) || !prepared.basisValid) return result;
+
+    result.camera = ToCameraSpace(world, prepared);
+    if (!std::isfinite(result.camera.side) ||
+        !std::isfinite(result.camera.vertical) ||
+        !std::isfinite(result.camera.forward) ||
+        result.camera.forward <= 0.01f || !prepared.valid) {
+        return result;
+    }
+
+    result.x = prepared.halfWidth +
+        result.camera.side * prepared.scale / result.camera.forward;
+    result.y = prepared.halfHeight -
+        result.camera.vertical * prepared.scale / result.camera.forward;
+    result.valid = std::isfinite(result.x) && std::isfinite(result.y);
+    return result;
 }
 
 inline ScreenProjection ProjectWorldPoint(
@@ -185,43 +263,19 @@ inline ScreenProjection ProjectWorldPoint(
     const ProjectionView& view,
     int screenWidth,
     int screenHeight) noexcept {
-    ScreenProjection result{};
-    if (!IsFinite(world) || !IsFinite(view) ||
-        screenWidth <= 1 || screenHeight <= 1) {
-        return result;
-    }
-    result.camera = ToCameraSpace(world, view);
-    if (!std::isfinite(result.camera.side) ||
-        !std::isfinite(result.camera.vertical) ||
-        !std::isfinite(result.camera.forward) ||
-        result.camera.forward <= 0.01f) {
-        return result;
-    }
-
-    constexpr float kHalfDegreesToRadians =
-        3.14159265358979323846f / 360.0f;
-    const float tangent = std::tan(view.fieldOfView * kHalfDegreesToRadians);
-    if (!std::isfinite(tangent) || tangent <= 0.001f) return result;
-    const float halfWidth = static_cast<float>(screenWidth) * 0.5f;
-    const float halfHeight = static_cast<float>(screenHeight) * 0.5f;
-    const float scale = halfWidth / tangent;
-    result.x = halfWidth + result.camera.side * scale / result.camera.forward;
-    result.y = halfHeight - result.camera.vertical * scale / result.camera.forward;
-    result.valid = std::isfinite(result.x) && std::isfinite(result.y);
-    return result;
+    if (!IsFinite(world)) return {};
+    return ProjectWorldPoint(
+        world, PrepareProjection(view, screenWidth, screenHeight));
 }
 
 inline std::vector<ScreenProjectionSegment> ProjectWorldHorizontalRing(
     const ProjectionPoint& center,
     float radius,
-    const ProjectionView& view,
-    int screenWidth,
-    int screenHeight) {
+    const PreparedProjection& prepared) {
     constexpr std::size_t kSegmentCount = 36;
     std::vector<ScreenProjectionSegment> result;
-    if (!IsFinite(center) || !IsFinite(view) ||
-        !std::isfinite(radius) || radius <= 0.0f ||
-        screenWidth <= 1 || screenHeight <= 1) {
+    if (!IsFinite(center) || !prepared.valid ||
+        !std::isfinite(radius) || radius <= 0.0f) {
         return result;
     }
 
@@ -236,9 +290,7 @@ inline std::vector<ScreenProjectionSegment> ProjectWorldHorizontalRing(
                 center.y + radius * std::sin(angle),
                 center.z,
             },
-            view,
-            screenWidth,
-            screenHeight);
+            prepared);
     }
 
     result.reserve(kSegmentCount);
@@ -249,6 +301,23 @@ inline std::vector<ScreenProjectionSegment> ProjectWorldHorizontalRing(
         result.push_back(ScreenProjectionSegment{start, end});
     }
     return result;
+}
+
+inline std::vector<ScreenProjectionSegment> ProjectWorldHorizontalRing(
+    const ProjectionPoint& center,
+    float radius,
+    const ProjectionView& view,
+    int screenWidth,
+    int screenHeight) {
+    if (!IsFinite(center) || !IsFinite(view) ||
+        !std::isfinite(radius) || radius <= 0.0f ||
+        screenWidth <= 1 || screenHeight <= 1) {
+        return {};
+    }
+    return ProjectWorldHorizontalRing(
+        center,
+        radius,
+        PrepareProjection(view, screenWidth, screenHeight));
 }
 
 }  // namespace lengjing::game::native

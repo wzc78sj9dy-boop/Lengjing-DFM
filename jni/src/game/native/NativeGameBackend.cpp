@@ -31,6 +31,7 @@
 #include "game/native/HudMapProjection.h"
 #include "game/native/MemoryTransport.h"
 #include "game/native/PlayerBounds.h"
+#include "game/native/PlayerDetailReadPolicy.h"
 #include "game/native/PlayerTrackingPolicy.h"
 #include "game/native/PositionReadModePolicy.h"
 #include "game/native/ProjectileSpeedReader.h"
@@ -865,44 +866,45 @@ struct CameraPoint {
     float forward = 0.0f;
 };
 
-CameraPoint ToCameraSpace(const Vec3& world, const CameraView& view) {
+native::ProjectionView ToProjectionView(const CameraView& view) {
+    return native::ProjectionView{
+        native::ProjectionPoint{
+            view.location.x, view.location.y, view.location.z},
+        native::ProjectionRotation{
+            view.rotation.pitch,
+            view.rotation.yaw,
+            view.rotation.roll,
+        },
+        view.fieldOfView,
+    };
+}
+
+native::PreparedProjection PrepareProjection(
+    const CameraView& view,
+    int screenWidth,
+    int screenHeight) {
+    return native::PrepareProjection(
+        ToProjectionView(view), screenWidth, screenHeight);
+}
+
+CameraPoint ToCameraSpace(
+    const Vec3& world,
+    const native::PreparedProjection& prepared) {
     const native::CameraSpacePoint point = native::ToCameraSpace(
         native::ProjectionPoint{world.x, world.y, world.z},
-        native::ProjectionView{
-            native::ProjectionPoint{
-                view.location.x, view.location.y, view.location.z},
-            native::ProjectionRotation{
-                view.rotation.pitch,
-                view.rotation.yaw,
-                view.rotation.roll,
-            },
-            view.fieldOfView,
-        });
+        prepared);
     return CameraPoint{point.side, point.vertical, point.forward};
 }
 
 bool ProjectToScreen(const Vec3& world,
-                     const CameraView& view,
-                     int screenWidth,
-                     int screenHeight,
+                     const native::PreparedProjection& prepared,
                      Vec2& screen,
                      CameraPoint* cameraPoint = nullptr) {
     platform::PerformanceTraceScope trace(
         platform::PerformancePhase::Projection, 64);
     const native::ScreenProjection projected = native::ProjectWorldPoint(
         native::ProjectionPoint{world.x, world.y, world.z},
-        native::ProjectionView{
-            native::ProjectionPoint{
-                view.location.x, view.location.y, view.location.z},
-            native::ProjectionRotation{
-                view.rotation.pitch,
-                view.rotation.yaw,
-                view.rotation.roll,
-            },
-            view.fieldOfView,
-        },
-        screenWidth,
-        screenHeight);
+        prepared);
     if (cameraPoint != nullptr) {
         *cameraPoint = CameraPoint{
             projected.camera.side,
@@ -1580,7 +1582,8 @@ public:
         std::vector<AimCandidate> aimCandidates;
         if (aimActive) aimCandidates.reserve(64);
         if (settings.visual.enabled && settings.visual.modelGeometry) {
-            BuildModelGeometry(context.view, frame);
+            BuildModelGeometry(
+                context.view, context.preparedProjection, frame);
         }
 
         std::vector<RuntimeActorRecord>& actorRecords =
@@ -1723,20 +1726,18 @@ public:
             if (!native::HasUsablePlayerState(playerStateAvailable, botClass)) {
                 continue;
             }
-            std::int32_t primaryTeam = native::kUnknownPlayerTeam;
-            std::int32_t secondaryTeam = native::kUnknownPlayerTeam;
-            const bool primaryTeamRead = playerStateAvailable &&
-                ReadValue(playerState + 0x658, primaryTeam);
-            const bool secondaryTeamRead = playerStateAvailable &&
-                ReadValue(playerState + 0x65C, secondaryTeam);
-            primaryTeam = native::ResolvePlayerTeam(
-                primaryTeamRead, primaryTeam, botClass);
-            secondaryTeam = native::ResolvePlayerTeam(
-                secondaryTeamRead, secondaryTeam, botClass);
-            const bool useSecondaryTeam = context.warfare || settings.visual.battlefieldMode;
-            const std::int32_t targetTeam = botClass
-                ? 0
-                : (useSecondaryTeam ? secondaryTeam : primaryTeam);
+            const bool useSecondaryTeam =
+                context.warfare || settings.visual.battlefieldMode;
+            std::int32_t targetTeam = native::kUnknownPlayerTeam;
+            if (botClass) {
+                targetTeam = 0;
+            } else {
+                const bool teamRead = ReadValue(
+                    playerState + (useSecondaryTeam ? 0x65C : 0x658),
+                    targetTeam);
+                targetTeam = native::ResolvePlayerTeam(
+                    teamRead, targetTeam, false);
+            }
             const bool bot = botClass || targetTeam == 0;
             const bool threatTeamsValid =
                 native::HasComparablePlayerTeams(
@@ -1778,20 +1779,31 @@ public:
                 trace.ordinarySource = actorRecord.ordinarySource;
                 trace.output = position;
             }
+            if (!coordinateAvailable) {
+                continue;
+            }
             HealthState health{};
-            const bool healthAvailable = ReadHealth(actor, health);
+            std::uintptr_t healthSet = 0;
+            const bool healthAvailable =
+                ReadCoreHealth(actor, health, &healthSet);
+            if (healthAvailable &&
+                native::HasPlayerDetailReadField(
+                    native::ResolvePlayerDownedReadMask(
+                        true, health.health),
+                    native::PlayerDetailReadField::Downed)) {
+                ReadDownedState(actor, healthSet, health);
+            }
             const bool standardTrackable = native::IsPlayerTrackable(
                 native::MakePlayerTrackingData(
-                    coordinateAvailable,
+                    true,
                     healthAvailable,
                     health.health,
                     health.downed),
                 native::PlayerDirectionData{false});
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
-            if (!coordinateAvailable ||
-                (!standardTrackable && !trackingPlayerClass)) {
+            if (!standardTrackable && !trackingPlayerClass) {
 #else
-            if (!coordinateAvailable || !standardTrackable) {
+            if (!standardTrackable) {
 #endif
                 continue;
             }
@@ -1995,16 +2007,12 @@ public:
             CameraPoint cameraPoint{};
             const bool bottomProjected = ProjectToScreen(
                 Vec3{position.x, position.y, position.z - 5.0f},
-                context.view,
-                options_.screenWidth,
-                options_.screenHeight,
+                context.preparedProjection,
                 bodyBottom,
                 &cameraPoint);
             const bool topProjected = ProjectToScreen(
                 Vec3{position.x, position.y, position.z + 205.0f},
-                context.view,
-                options_.screenWidth,
-                options_.screenHeight,
+                context.preparedProjection,
                 bodyTop);
             native::PlayerScreenBounds anchorBounds{};
             const bool anchorBoundsReady =
@@ -2039,7 +2047,7 @@ public:
                   visualEligible && drawingInRange)) {
                 boneFrameReady = ReadBoneFrame(
                     actorRecord,
-                    context.view,
+                    context.preparedProjection,
                     settings.visual.antiFlicker,
                     resolvedBonePosition,
                     boneFrame,
@@ -2150,7 +2158,8 @@ public:
             if (!onScreen && warningInRange && settings.visual.enabled &&
                 !(bot && settings.visual.filterBots)) {
                 OffscreenMarker marker{};
-                CameraPoint directionPoint = ToCameraSpace(position, context.view);
+                CameraPoint directionPoint = ToCameraSpace(
+                    position, context.preparedProjection);
                 if (directionPoint.forward >= 0.0f) {
                     marker.direction = ImVec2(directionPoint.side, -directionPoint.vertical);
                 } else {
@@ -2244,9 +2253,7 @@ public:
                         };
                         if (ProjectToScreen(
                                 sightEnd,
-                                context.view,
-                                options_.screenWidth,
-                                options_.screenHeight,
+                                context.preparedProjection,
                                 sightEndScreen)) {
                             endProjected = true;
                             break;
@@ -2255,9 +2262,7 @@ public:
                     if (endProjected &&
                         ProjectToScreen(
                             sightStart,
-                            context.view,
-                            options_.screenWidth,
-                            options_.screenHeight,
+                            context.preparedProjection,
                             sightStartScreen) &&
                         IsInsideScreen(
                             sightStartScreen,
@@ -2313,7 +2318,7 @@ public:
                         aimMode,
                         settings.aim,
                         context.view.location,
-                        context.view,
+                        context.preparedProjection,
                         aimWorld,
                         aimScreen);
                 }
@@ -2397,6 +2402,17 @@ public:
             if (!std::isfinite(height) || height < 8.0f) {
                 continue;
             }
+            native::PlayerEquipmentReadRequest equipmentRequest{};
+            equipmentRequest.finalDrawable = true;
+            equipmentRequest.bot = bot;
+            equipmentRequest.healthBar = settings.visual.health;
+            equipmentRequest.armorLevel = settings.visual.armorLevel;
+            equipmentRequest.armorDurability =
+                settings.visual.armorDurability;
+            ReadEquipment(
+                actor,
+                native::ResolvePlayerEquipmentReadMask(equipmentRequest),
+                health);
             PlayerVisual visual{};
             visual.identity = native::ResolvePlayerIdentity(actor, playerState);
             visual.bounds = playerBounds;
@@ -2499,7 +2515,7 @@ public:
                         boneReadStatus;
                     boneFrameReady = ReadBoneFrame(
                         actorRecord,
-                        context.view,
+                        context.preparedProjection,
                         settings.visual.antiFlicker,
                         resolvedBonePosition,
                         boneFrame,
@@ -2571,9 +2587,13 @@ public:
         }
 
         RefreshCameraView(context, frame.sequence);
-        ReprojectPlayers(context.view, playerProjectionSources, frame);
+        ReprojectPlayers(
+            context.preparedProjection, playerProjectionSources, frame);
         ReprojectAimCandidates(
-            context.view, settings.aim, aimTuning, aimCandidates);
+            context.preparedProjection,
+            settings.aim,
+            aimTuning,
+            aimCandidates);
         AppendWorldObjectCache(settings, context, frame);
         FinalizeThreatSignals(settings, frame);
         PublishAimFrame(settings.aim, aimTuning, context, aimCandidates, frame);
@@ -2718,6 +2738,7 @@ private:
         Vec3 firingOrigin{};
 #endif
         CameraView view{};
+        native::PreparedProjection preparedProjection{};
         std::int32_t localTeam = -1;
         std::int32_t mapBuildId = 0;
         bool warfare = false;
@@ -3543,12 +3564,13 @@ private:
         if (!std::isfinite(distanceMeters) || distanceMeters < 0.0f) return;
 
         Vec2 screen{};
-        const bool projected = ProjectToScreen(
-            position,
-            context.view,
-            options_.screenWidth,
-            options_.screenHeight,
-            screen);
+        const bool projectionNeeded =
+            !deferStaticProjection || processThreats;
+        const bool projected = projectionNeeded &&
+            ProjectToScreen(
+                position,
+                context.preparedProjection,
+                screen);
         const bool suppressLoot = settings.visual.combatMode &&
             (context.firing || context.zooming);
         const bool staticProjectionAccepted = deferStaticProjection ||
@@ -3790,21 +3812,7 @@ private:
                             native::ProjectionPoint{
                                 position.x, position.y, position.z},
                             threat->radiusCentimeters,
-                            native::ProjectionView{
-                                native::ProjectionPoint{
-                                    context.view.location.x,
-                                    context.view.location.y,
-                                    context.view.location.z,
-                                },
-                                native::ProjectionRotation{
-                                    context.view.rotation.pitch,
-                                    context.view.rotation.yaw,
-                                    context.view.rotation.roll,
-                                },
-                                context.view.fieldOfView,
-                            },
-                            options_.screenWidth,
-                            options_.screenHeight);
+                            context.preparedProjection);
                     projectile.rangeSegments.reserve(rangeSegments.size());
                     for (const native::ScreenProjectionSegment& segment :
                          rangeSegments) {
@@ -3822,9 +3830,7 @@ private:
                             Vec2 projectedPoint{};
                             if (ProjectToScreen(
                                     point,
-                                    context.view,
-                                    options_.screenWidth,
-                                    options_.screenHeight,
+                                    context.preparedProjection,
                                     projectedPoint)) {
                                 projectile.trajectory.emplace_back(
                                     projectedPoint.x, projectedPoint.y);
@@ -3917,6 +3923,8 @@ private:
     void RefreshWorldObjectCache(
         const FrameContext& context,
         const FeatureSettings& settings) {
+        platform::PerformanceTraceScope trace(
+            platform::PerformancePhase::WorldObjectRefresh);
         if (!StaticWorldFeaturesEnabled(settings)) {
             worldObjectFrameCache_.Clear();
             worldObjectActors_.clear();
@@ -4022,9 +4030,7 @@ private:
             Vec2 screen{};
             if (!ProjectToScreen(
                     source.world,
-                    context.view,
-                    options_.screenWidth,
-                    options_.screenHeight,
+                    context.preparedProjection,
                     screen) ||
                 !IsInsideScreen(
                     screen,
@@ -4131,18 +4137,15 @@ private:
         context.warfare = mapBuild > 9000;
 
         const std::uintptr_t localState = ReadPointer(context.localPawn + 0x390);
-        std::int32_t primaryTeam = -1;
-        std::int32_t secondaryTeam = -1;
+        std::int32_t selectedTeam = native::kUnknownPlayerTeam;
         if (IsValidPointer(localState)) {
-            if (!ReadValue(localState + 0x658, primaryTeam)) {
-                primaryTeam = native::kUnknownPlayerTeam;
-            }
-            if (!ReadValue(localState + 0x65C, secondaryTeam)) {
-                secondaryTeam = native::kUnknownPlayerTeam;
-            }
+            const bool useSecondaryTeam =
+                context.warfare || battlefieldMode;
+            ReadValue(
+                localState + (useSecondaryTeam ? 0x65C : 0x658),
+                selectedTeam);
         }
-        context.localTeam =
-            (context.warfare || battlefieldMode) ? secondaryTeam : primaryTeam;
+        context.localTeam = selectedTeam;
         if (context.localTeam <= 0) {
             context.localTeam = native::kUnknownPlayerTeam;
         }
@@ -4173,6 +4176,8 @@ private:
             diagnostic = "数据链等待：相机数据暂不可读";
             return false;
         }
+        context.preparedProjection = PrepareProjection(
+            context.view, options_.screenWidth, options_.screenHeight);
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
         context.firingOriginValid = trajectoryTracking &&
             ResolveTrackingOrigin(context, context.firingOrigin);
@@ -5547,9 +5552,14 @@ private:
         }
     }
 
-    bool ReadHealth(std::uintptr_t actor, HealthState& state) {
+    bool ReadCoreHealth(std::uintptr_t actor,
+                        HealthState& state,
+                        std::uintptr_t* resolvedHealthSet = nullptr) {
         platform::PerformanceTraceScope trace(
             platform::PerformancePhase::HealthRead);
+        if (resolvedHealthSet != nullptr) {
+            *resolvedHealthSet = 0;
+        }
         const std::uintptr_t healthComponent = ReadPointer(actor + 0x10C8);
         const std::uintptr_t healthSet = ReadPointer(healthComponent + 0x280);
         if (!IsValidPointer(healthSet)) return false;
@@ -5560,7 +5570,17 @@ private:
             return false;
         }
         state.health = std::clamp(state.health, 0.0f, state.maxHealth);
+        if (resolvedHealthSet != nullptr) {
+            *resolvedHealthSet = healthSet;
+        }
+        return true;
+    }
 
+    void ReadDownedState(std::uintptr_t actor,
+                         std::uintptr_t healthSet,
+                         HealthState& state) {
+        platform::PerformanceTraceScope trace(
+            platform::PerformancePhase::DownedRead);
         std::uint8_t downed = 0;
         const std::uintptr_t blackboard = ReadPointer(actor + 0x1030);
         if (IsValidPointer(blackboard)) {
@@ -5578,20 +5598,42 @@ private:
             state.health,
             downedPoolValid ? downedHealth : 0.0f,
             downedPoolValid ? maximumDownedHealth : 0.0f);
+    }
 
+    void ReadEquipment(std::uintptr_t actor,
+                       native::PlayerDetailReadMask mask,
+                       HealthState& state) {
+        if (mask == 0) return;
+        platform::PerformanceTraceScope trace(
+            platform::PerformancePhase::EquipmentRead);
         const std::uintptr_t equipmentComponent = ReadPointer(actor + 0x2420);
         const std::uintptr_t equipment = ReadPointer(equipmentComponent + 0x1D8);
-        if (IsValidPointer(equipment)) {
+        if (!IsValidPointer(equipment)) return;
+
+        if (native::HasAnyPlayerDetailReadField(
+                mask, native::kPlayerEquipmentLevelReadMask)) {
             std::int32_t helmetDefinition = 0;
             std::int32_t armorDefinition = 0;
             ReadValue(equipment + 0x30, helmetDefinition);
             ReadValue(equipment + 0xF0, armorDefinition);
             state.helmetLevel = EquipmentLevel(helmetDefinition);
             state.armorLevel = EquipmentLevel(armorDefinition);
+        }
+        if (native::HasPlayerDetailReadField(
+                mask,
+                native::PlayerDetailReadField::HelmetDurability)) {
             ReadValue(equipment + 0x48, state.helmet);
             ReadValue(equipment + 0x4C, state.maxHelmet);
+        }
+        if (native::HasPlayerDetailReadField(
+                mask,
+                native::PlayerDetailReadField::ArmorDurability)) {
             ReadValue(equipment + 0x108, state.armor);
             ReadValue(equipment + 0x10C, state.maxArmor);
+        }
+        if (native::HasPlayerDetailReadField(
+                mask,
+                native::PlayerDetailReadField::HelmetDurability)) {
             if (!std::isfinite(state.helmet) || !std::isfinite(state.maxHelmet) ||
                 state.maxHelmet <= 0.0f || state.maxHelmet > 100000.0f) {
                 state.helmet = 0.0f;
@@ -5599,6 +5641,10 @@ private:
             } else {
                 state.helmet = std::clamp(state.helmet, 0.0f, state.maxHelmet);
             }
+        }
+        if (native::HasPlayerDetailReadField(
+                mask,
+                native::PlayerDetailReadField::ArmorDurability)) {
             if (!std::isfinite(state.armor) || !std::isfinite(state.maxArmor) ||
                 state.maxArmor <= 0.0f || state.maxArmor > 100000.0f) {
                 state.armor = 0.0f;
@@ -5607,7 +5653,6 @@ private:
                 state.armor = std::clamp(state.armor, 0.0f, state.maxArmor);
             }
         }
-        return true;
     }
 
     std::string ReadPlayerName(std::uintptr_t playerState) {
@@ -5786,7 +5831,7 @@ private:
     }
 
     bool ReadBoneFrame(const RuntimeActorRecord& actorRecord,
-                       const CameraView& view,
+                       const native::PreparedProjection& prepared,
                        bool antiFlicker,
                        const Vec3* resolvedPosition,
                        BoneFrame& frame,
@@ -6088,9 +6133,7 @@ private:
             Vec2 screen{};
             if (!ProjectToScreen(
                     world[index],
-                    view,
-                    options_.screenWidth,
-                    options_.screenHeight,
+                    prepared,
                     screen) ||
                 !IsInsideScreen(
                     screen,
@@ -6211,11 +6254,13 @@ private:
                 frameSequence,
                 refreshed)) {
             context.view = refreshed;
+            context.preparedProjection = PrepareProjection(
+                refreshed, options_.screenWidth, options_.screenHeight);
         }
     }
 
     bool ReprojectBoneFrame(const BoneFrame& source,
-                            const CameraView& view,
+                            const native::PreparedProjection& prepared,
                             BoneFrame& projected) const {
         projected = BoneFrame{};
         bool anyProjected = false;
@@ -6228,9 +6273,7 @@ private:
             Vec2 screen{};
             if (!ProjectToScreen(
                     source.world[index],
-                    view,
-                    options_.screenWidth,
-                    options_.screenHeight,
+                    prepared,
                     screen) ||
                 !IsInsideScreen(
                     screen,
@@ -6248,7 +6291,7 @@ private:
     }
 
     void ReprojectPlayers(
-        const CameraView& view,
+        const native::PreparedProjection& prepared,
         const std::vector<PlayerProjectionSource>& sources,
         GameFrame& frame) const {
         std::size_t writeIndex = 0;
@@ -6258,20 +6301,16 @@ private:
             Vec2 top{};
             const bool bottomProjected = ProjectToScreen(
                 source.bottom,
-                view,
-                options_.screenWidth,
-                options_.screenHeight,
+                prepared,
                 bottom);
             const bool topProjected = ProjectToScreen(
                 source.top,
-                view,
-                options_.screenWidth,
-                options_.screenHeight,
+                prepared,
                 top);
 
             BoneFrame bones{};
             const bool bonesReady = source.bonesReady &&
-                ReprojectBoneFrame(source.bones, view, bones);
+                ReprojectBoneFrame(source.bones, prepared, bones);
             ScreenRect boneBounds{};
             const bool boneBoundsReady = bonesReady &&
                 TryBuildBoneBounds(bones, boneBounds);
@@ -6335,7 +6374,7 @@ private:
     }
 
     void ReprojectAimCandidates(
-        const CameraView& view,
+        const native::PreparedProjection& prepared,
         const ui::AimSettings& settings,
         const ui::AimTuning& tuning,
         std::vector<AimCandidate>& candidates) const {
@@ -6351,9 +6390,7 @@ private:
                     Vec2 screen{};
                     if (!ProjectToScreen(
                             candidate.world,
-                            view,
-                            options_.screenWidth,
-                            options_.screenHeight,
+                            prepared,
                             screen)) {
                         return true;
                     }
@@ -6372,8 +6409,10 @@ private:
             candidates.end());
     }
 
-    void BuildModelGeometry(const CameraView& view,
-                            GameFrame& frame) const {
+    void BuildModelGeometry(
+        const CameraView& view,
+        const native::PreparedProjection& prepared,
+        GameFrame& frame) const {
         if (!geometrySnapshotReady_) return;
 
         Vec3 forward{};
@@ -6422,21 +6461,15 @@ private:
             Vec2 third{};
             if (!ProjectToScreen(
                     Vec3{firstWorld.x, firstWorld.y, firstWorld.z},
-                    view,
-                    options_.screenWidth,
-                    options_.screenHeight,
+                    prepared,
                     first) ||
                 !ProjectToScreen(
                     Vec3{secondWorld.x, secondWorld.y, secondWorld.z},
-                    view,
-                    options_.screenWidth,
-                    options_.screenHeight,
+                    prepared,
                     second) ||
                 !ProjectToScreen(
                     Vec3{thirdWorld.x, thirdWorld.y, thirdWorld.z},
-                    view,
-                    options_.screenWidth,
-                    options_.screenHeight,
+                    prepared,
                     third)) {
                 return;
             }
@@ -6546,7 +6579,7 @@ private:
         int mode,
         const ui::AimSettings& settings,
         const Vec3& traceOrigin,
-        const CameraView& view,
+        const native::PreparedProjection& prepared,
         Vec3& world,
         Vec2& screen) const {
         if (!IsFinite(root)) return false;
@@ -6565,9 +6598,7 @@ private:
         }
         return ProjectToScreen(
             world,
-            view,
-            options_.screenWidth,
-            options_.screenHeight,
+            prepared,
             screen);
     }
 
@@ -6739,7 +6770,7 @@ private:
         std::uintptr_t actor,
         bool classifiedState) {
         HealthState health{};
-        const bool healthAvailable = ReadHealth(actor, health);
+        const bool healthAvailable = ReadCoreHealth(actor, health);
         return (healthAvailable && health.health > 0.0f) || !classifiedState;
     }
 
@@ -6808,7 +6839,7 @@ private:
                 aimMode,
                 settings,
                 context.view.location,
-                context.view,
+                context.preparedProjection,
                 targetPoint,
                 targetScreen);
         }
@@ -6914,21 +6945,18 @@ private:
             ReadPointer(record.actor + 0x390);
         if (!rangeTargetClass) {
             const bool botClass = !IsValidPointer(playerState);
-            std::int32_t primaryTeam = native::kUnknownPlayerTeam;
-            std::int32_t secondaryTeam = native::kUnknownPlayerTeam;
-            const bool primaryTeamRead = !botClass &&
-                ReadValue(playerState + 0x658, primaryTeam);
-            const bool secondaryTeamRead = !botClass &&
-                ReadValue(playerState + 0x65C, secondaryTeam);
-            primaryTeam = native::ResolvePlayerTeam(
-                primaryTeamRead, primaryTeam, botClass);
-            secondaryTeam = native::ResolvePlayerTeam(
-                secondaryTeamRead, secondaryTeam, botClass);
-            const std::int32_t targetTeam = botClass
-                ? 0
-                : ((context.warfare || battlefieldMode)
-                       ? secondaryTeam
-                       : primaryTeam);
+            const bool useSecondaryTeam =
+                context.warfare || battlefieldMode;
+            std::int32_t targetTeam = native::kUnknownPlayerTeam;
+            if (botClass) {
+                targetTeam = 0;
+            } else {
+                const bool teamRead = ReadValue(
+                    playerState + (useSecondaryTeam ? 0x65C : 0x658),
+                    targetTeam);
+                targetTeam = native::ResolvePlayerTeam(
+                    teamRead, targetTeam, false);
+            }
             const bool bot = botClass || targetTeam == 0;
             if (native::IsSamePlayerTeam(
                     context.localTeam, targetTeam) ||
@@ -6990,7 +7018,7 @@ private:
         BoneFrame boneFrame{};
         const bool boneFrameReady = ReadBoneFrame(
             record,
-            context.view,
+            context.preparedProjection,
             antiFlicker,
             native::ShouldAlignBoneFrameToCharacterPosition(positionSource)
                 ? &position
@@ -7021,7 +7049,7 @@ private:
                 aimMode,
                 settings,
                 context.view.location,
-                context.view,
+                context.preparedProjection,
                 targetPoint,
                 targetScreen);
         }
