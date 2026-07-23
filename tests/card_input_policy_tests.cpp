@@ -134,6 +134,35 @@ void RunCardInputPolicyTests() {
     }
 
     {
+        std::istringstream input;
+        std::ostringstream output;
+        const CardInputResult result = ReadCardKeyFromStream(
+            input, output, false, {}, "SAVED_CARD_FOR_TEST");
+        REQUIRE(result.status == CardInputStatus::Accepted);
+        REQUIRE(result.value == "SAVED_CARD_FOR_TEST");
+        REQUIRE(output.str().empty());
+    }
+
+    {
+        std::istringstream input;
+        std::ostringstream output;
+        const CardInputResult result = ReadCardKeyFromStream(
+            input, output, true, {}, "SAVED_CARD_FOR_TEST");
+        REQUIRE(result.status == CardInputStatus::EndOfInput);
+        REQUIRE(result.value.empty());
+    }
+
+    {
+        std::istringstream input;
+        input.setstate(std::ios::badbit);
+        std::ostringstream output;
+        const CardInputResult result = ReadCardKeyFromStream(
+            input, output, false, {}, "SAVED_CARD_FOR_TEST");
+        REQUIRE(result.status == CardInputStatus::TerminalError);
+        REQUIRE(result.value.empty());
+    }
+
+    {
         EchoProbe probe;
         std::istringstream input("CARD_FOR_TEST\n");
         std::ostringstream output;

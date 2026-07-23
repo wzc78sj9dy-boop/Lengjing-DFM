@@ -134,6 +134,14 @@ inline CardInputResult ReadCardKeyFromStream(
         return {CardInputStatus::TerminalError, {}};
     }
     if (!readSucceeded) {
+        if (input.bad() || !input.eof()) {
+            return {CardInputStatus::TerminalError, {}};
+        }
+        if (!inputIsTerminal && reuseAvailable) {
+            return {
+                CardInputStatus::Accepted,
+                std::string(reusableCardKey)};
+        }
         return {CardInputStatus::EndOfInput, {}};
     }
     TrimCardKey(value);
