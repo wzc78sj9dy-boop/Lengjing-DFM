@@ -904,33 +904,41 @@ public:
                 return false;
             }
 
-            rtcSetSharedGeometryBuffer(
-                geometry,
-                RTC_BUFFER_TYPE_VERTEX,
-                0,
-                RTC_FORMAT_FLOAT3,
+            auto* vertexBuffer = static_cast<GeometryPoint*>(
+                rtcSetNewGeometryBuffer(
+                    geometry,
+                    RTC_BUFFER_TYPE_VERTEX,
+                    0,
+                    RTC_FORMAT_FLOAT3,
+                    sizeof(GeometryPoint),
+                    mesh->vertices.size()));
+            if (vertexBuffer == nullptr) {
+                rtcGetDeviceError(device_->Get());
+                rtcReleaseGeometry(geometry);
+                return false;
+            }
+            std::memcpy(
+                vertexBuffer,
                 mesh->vertices.data(),
-                0,
-                sizeof(GeometryPoint),
-                mesh->vertices.size());
-            if (rtcGetDeviceError(device_->Get()) != RTC_ERROR_NONE) {
-                rtcReleaseGeometry(geometry);
-                return false;
-            }
+                mesh->vertices.size() * sizeof(GeometryPoint));
 
-            rtcSetSharedGeometryBuffer(
-                geometry,
-                RTC_BUFFER_TYPE_INDEX,
-                0,
-                RTC_FORMAT_UINT3,
-                mesh->indices.data(),
-                0,
-                sizeof(std::uint32_t) * 3,
-                mesh->indices.size() / 3);
-            if (rtcGetDeviceError(device_->Get()) != RTC_ERROR_NONE) {
+            auto* indexBuffer = static_cast<std::uint32_t*>(
+                rtcSetNewGeometryBuffer(
+                    geometry,
+                    RTC_BUFFER_TYPE_INDEX,
+                    0,
+                    RTC_FORMAT_UINT3,
+                    sizeof(std::uint32_t) * 3,
+                    mesh->indices.size() / 3));
+            if (indexBuffer == nullptr) {
+                rtcGetDeviceError(device_->Get());
                 rtcReleaseGeometry(geometry);
                 return false;
             }
+            std::memcpy(
+                indexBuffer,
+                mesh->indices.data(),
+                mesh->indices.size() * sizeof(std::uint32_t));
             rtcCommitGeometry(geometry);
             if (rtcGetDeviceError(device_->Get()) != RTC_ERROR_NONE) {
                 rtcReleaseGeometry(geometry);
