@@ -116,6 +116,18 @@ enum class CoordinatePoolRuntimeError : std::uint8_t {
     SlotLayoutEvidenceMissing,
 };
 
+enum class CoordinatePoolAnalysisFailure : std::uint8_t {
+    None,
+    MappingInvalid,
+    EntryScan,
+    FinderSetup,
+    FinderPattern,
+    PassLimit,
+    FingerprintMissing,
+    SnapshotChanged,
+    RequiredPoints,
+};
+
 constexpr bool ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
     CoordinatePoolRuntimeError error,
     const CoordinateReadDiagnostic& read) noexcept {
@@ -161,6 +173,16 @@ struct CoordinatePoolRuntimeProbe {
     std::uintptr_t executableMappingStart = 0;
     std::uintptr_t executableMappingEnd = 0;
     std::uintptr_t failedMethod = 0;
+    CoordinatePoolAnalysisFailure analysisFailure =
+        CoordinatePoolAnalysisFailure::None;
+    std::uint8_t analysisFindStage = 0;
+    std::uint8_t analysisMode = 0;
+    std::uint16_t analysisPasses = 0;
+    std::uint32_t analysisLoadedPages = 0;
+    std::uint32_t analysisRequestedMethods = 0;
+    std::uint32_t analysisSkippedPages = 0;
+    std::uint8_t analysisSkippedFailure = 0;
+    int analysisSkippedSystemError = 0;
     std::int32_t poolPointerOffset = 0;
     std::int64_t indexOffset = 0;
     std::uint32_t ringOffset = 0;

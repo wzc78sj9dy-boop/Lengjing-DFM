@@ -64,6 +64,7 @@ constexpr std::uint32_t kPoolPointerContextReady = 1U << 2U;
 constexpr std::uint32_t kPoolPointerOffsetReady = 1U << 3U;
 constexpr std::uint64_t kCandidateTraceMinimumInterval = 30;
 constexpr std::uint64_t kCandidateTracePeriodicInterval = 60;
+constexpr std::uint64_t kAnalysisFailureRetryFrames = 120;
 
 std::uint64_t NormalizePointer(std::uint64_t value) noexcept {
     return NormalizeCoordinatePoolPointer(value);
@@ -700,7 +701,38 @@ struct CoordinatePoolRuntime::Impl {
         probe.stage = CoordinatePoolRuntimeStage::RootResolved;
 
         if (finder == nullptr) {
-            if (!AnalyzeCodeUnlocked()) return false;
+            const bool analysisRetryDeferred =
+                IsCoordinatePoolRootSnapshotInitialized(failedAnalysisRoot) &&
+                CoordinatePoolRootSnapshotsMatch(
+                    failedAnalysisRoot, nextRoot) &&
+                targetFrame >= failedAnalysisFrame &&
+                targetFrame - failedAnalysisFrame <
+                    kAnalysisFailureRetryFrames;
+            if (analysisRetryDeferred) {
+                probe.stage = CoordinatePoolRuntimeStage::Faulted;
+                probe.error = failedAnalysisError;
+                return false;
+            }
+            failedAnalysisRoot = {};
+            failedAnalysisError = CoordinatePoolRuntimeError::None;
+            failedAnalysisFrame =
+                std::numeric_limits<std::uint64_t>::max();
+            if (!AnalyzeCodeUnlocked()) {
+                if ((probe.error ==
+                         CoordinatePoolRuntimeError::AnalysisFailed ||
+                     probe.error ==
+                         CoordinatePoolRuntimeError::EntryMappingFragmented) &&
+                    !probe.read.HasFailure()) {
+                    failedAnalysisRoot = nextRoot;
+                    failedAnalysisError = probe.error;
+                    failedAnalysisFrame = targetFrame;
+                }
+                return false;
+            }
+            failedAnalysisRoot = {};
+            failedAnalysisError = CoordinatePoolRuntimeError::None;
+            failedAnalysisFrame =
+                std::numeric_limits<std::uint64_t>::max();
             nextCodeValidationFrame = NextCoordinatePoolCodeValidationFrame(
                 targetFrame, true);
             codeValidationRequested = false;
@@ -1877,6 +1909,19 @@ private:
     }
 
     bool AnalyzeCodeAttemptUnlocked() {
+        probe.executableMappingFragments = 0;
+        probe.executableMappingStart = 0;
+        probe.executableMappingEnd = 0;
+        probe.failedMethod = 0;
+        probe.analysisFailure = CoordinatePoolAnalysisFailure::None;
+        probe.analysisFindStage = 0;
+        probe.analysisMode = 0;
+        probe.analysisPasses = 0;
+        probe.analysisLoadedPages = 0;
+        probe.analysisRequestedMethods = 0;
+        probe.analysisSkippedPages = 0;
+        probe.analysisSkippedFailure = 0;
+        probe.analysisSkippedSystemError = 0;
         std::uint64_t mappingStart = 0;
         std::uint64_t mappingEnd = 0;
         int mappingStatus = 0;
@@ -1900,12 +1945,14 @@ private:
                 std::numeric_limits<std::uint32_t>::max()));
         probe.executableMappingStart = mappingStart;
         probe.executableMappingEnd = mappingEnd;
-        probe.failedMethod = 0;
+        probe.analysisMode = 1;
         if (mappingEnd <= mappingStart ||
             mappingEnd - mappingStart > kMaximumCodeSize ||
             (mappingEnd - mappingStart) % kPageSize != 0 ||
             guestEntry < mappingStart || guestEntry >= mappingEnd ||
             (guestEntry & 3U) != 0) {
+            probe.analysisFailure =
+                CoordinatePoolAnalysisFailure::MappingInvalid;
             SetError(CoordinatePoolRuntimeError::AnalysisFailed);
             return false;
         }
@@ -1940,7 +1987,7 @@ private:
             return false;
         };
 
-        auto loadPage = [&](std::uint64_t pageAddress) {
+        auto loadPage = [&](std::uint64_t pageAddress, bool required) {
             if (pageAddress < mappingStart || pageAddress >= mappingEnd ||
                 (pageAddress & (kPageSize - 1)) != 0 ||
                 !mappingIndex.ContainsPage(pageAddress)) {
@@ -1960,6 +2007,17 @@ private:
                     pageData.size(),
                     CoordinateReadStage::CodePage,
                     &firstRead)) {
+                if (!required) {
+                    ++probe.analysisSkippedPages;
+                    if (probe.analysisSkippedFailure == 0) {
+                        probe.analysisSkippedFailure =
+                            static_cast<std::uint8_t>(firstRead.failure);
+                        probe.analysisSkippedSystemError =
+                            firstRead.systemError;
+                    }
+                    ClearReadDiagnosticUnlocked();
+                    return false;
+                }
                 int refreshStatus = 0;
                 ExecutableMappingIndex refreshedIndex{};
                 const bool mappingFound = BuildExecutableMappingIndex(
@@ -2002,6 +2060,10 @@ private:
             std::memcpy(bytes.data() + byteOffset, pageData.data(), pageData.size());
             loadedPages[pageIndex] = true;
             ++loadedPageCount;
+            probe.analysisLoadedPages =
+                static_cast<std::uint32_t>(std::min<std::size_t>(
+                    loadedPageCount,
+                    std::numeric_limits<std::uint32_t>::max()));
             return true;
         };
 
@@ -2057,7 +2119,7 @@ private:
                 mappingEnd, methodAddress + maximumBytes);
             std::uint64_t pageAddress = methodAddress & kPageMask;
             while (pageAddress < scanLimitEnd) {
-                if (!loadPage(pageAddress)) {
+                if (!loadPage(pageAddress, true)) {
                     probe.failedMethod = methodAddress;
                     return false;
                 }
@@ -2088,6 +2150,8 @@ private:
                 kEntryAnalysisInstructionLimit,
                 entryScan)) {
             if (!probe.read.HasFailure()) {
+                probe.analysisFailure =
+                    CoordinatePoolAnalysisFailure::EntryScan;
                 SetError(
                     probe.failedMethod == guestEntry
                         ? CoordinatePoolRuntimeError::EntryMappingFragmented
@@ -2100,8 +2164,10 @@ private:
 
         std::unique_ptr<pool::coord_dec::FindDec> candidate;
         bool analysisComplete = false;
-        constexpr std::size_t kMaximumAnalysisPasses = 8;
+        bool denseFallbackAttempted = false;
+        constexpr std::size_t kMaximumAnalysisPasses = 16;
         for (std::size_t pass = 0; pass < kMaximumAnalysisPasses; ++pass) {
+            probe.analysisPasses = static_cast<std::uint16_t>(pass + 1);
             candidate = std::unique_ptr<pool::coord_dec::FindDec>(
                 new (std::nothrow) pool::coord_dec::FindDec());
             if (candidate == nullptr ||
@@ -2109,13 +2175,21 @@ private:
                     mappingStart,
                     bytes.data(),
                     static_cast<std::uint32_t>(bytes.size())) != 0) {
+                probe.analysisFailure =
+                    CoordinatePoolAnalysisFailure::FinderSetup;
                 SetError(CoordinatePoolRuntimeError::AnalysisFailed);
                 return false;
             }
 
             const int result = candidate->find_dec(guestEntry);
+            probe.analysisFindStage = static_cast<std::uint8_t>(
+                candidate->failure_stage());
             const auto requestedMethods =
                 candidate->get_shellcode()->requested_method_addresses();
+            probe.analysisRequestedMethods =
+                static_cast<std::uint32_t>(std::min<std::size_t>(
+                    requestedMethods.size(),
+                    std::numeric_limits<std::uint32_t>::max()));
             const std::size_t loadedBefore = loadedPageCount;
             for (const std::uint64_t requestedAddress : requestedMethods) {
                 const std::size_t limit = requestedAddress == guestEntry
@@ -2137,6 +2211,23 @@ private:
             }
             if (loadedPageCount != loadedBefore) continue;
             if (result != 0) {
+                if (!denseFallbackAttempted && !probe.read.HasFailure()) {
+                    denseFallbackAttempted = true;
+                    probe.analysisMode = 2;
+                    const std::size_t denseLoadedBefore = loadedPageCount;
+                    for (std::uint64_t pageAddress = mappingStart;
+                         pageAddress < mappingEnd;
+                         pageAddress += kPageSize) {
+                        if (!mappingIndex.ContainsPage(pageAddress)) continue;
+                        static_cast<void>(loadPage(pageAddress, false));
+                        if (analysisInvalidated || probe.read.HasFailure()) {
+                            return false;
+                        }
+                    }
+                    if (loadedPageCount != denseLoadedBefore) continue;
+                }
+                probe.analysisFailure =
+                    CoordinatePoolAnalysisFailure::FinderPattern;
                 SetError(CoordinatePoolRuntimeError::AnalysisFailed);
                 return false;
             }
@@ -2144,10 +2235,14 @@ private:
             break;
         }
         if (!analysisComplete || candidate == nullptr) {
+            probe.analysisFailure =
+                CoordinatePoolAnalysisFailure::PassLimit;
             SetError(CoordinatePoolRuntimeError::AnalysisFailed);
             return false;
         }
         if (rangeFingerprints.empty()) {
+            probe.analysisFailure =
+                CoordinatePoolAnalysisFailure::FingerprintMissing;
             SetError(CoordinatePoolRuntimeError::AnalysisFailed);
             return false;
         }
@@ -2157,10 +2252,32 @@ private:
             if (snapshotValidation == CodeValidationResult::Changed) {
                 analysisInvalidated = true;
             }
+            probe.analysisFailure =
+                CoordinatePoolAnalysisFailure::SnapshotChanged;
             SetError(
                 CoordinatePoolRuntimeError::CodeReadFailed,
                 true,
                 probe.read.HasFailure() ? probe.read.systemError : -ESTALE);
+            return false;
+        }
+        int refreshedMappingStatus = 0;
+        ExecutableMappingIndex refreshedMappingIndex{};
+        if (!BuildExecutableMappingIndex(
+                processId,
+                guestEntry,
+                refreshedMappingIndex,
+                &refreshedMappingStatus) ||
+            !SameExecutableMappingIndex(
+                mappingIndex, refreshedMappingIndex)) {
+            analysisInvalidated = true;
+            probe.analysisFailure =
+                CoordinatePoolAnalysisFailure::SnapshotChanged;
+            SetError(
+                CoordinatePoolRuntimeError::CodeReadFailed,
+                true,
+                refreshedMappingStatus != 0
+                    ? refreshedMappingStatus
+                    : -ESTALE);
             return false;
         }
 
@@ -2180,6 +2297,8 @@ private:
             candidate->pool_ptr_offset == 0 ||
             v87->reg == ARM64_REG_INVALID ||
             search->reg == ARM64_REG_INVALID) {
+            probe.analysisFailure =
+                CoordinatePoolAnalysisFailure::RequiredPoints;
             SetError(CoordinatePoolRuntimeError::AnalysisFailed);
             return false;
         }
@@ -2202,6 +2321,8 @@ private:
         probe.ringOffset = finder->get_ring_offset();
         finder->compact_runtime_plan();
         ClearReadDiagnosticUnlocked();
+        probe.analysisFailure = CoordinatePoolAnalysisFailure::None;
+        probe.analysisFindStage = 0;
         probe.error = CoordinatePoolRuntimeError::None;
         probe.stage = CoordinatePoolRuntimeStage::CodeAnalyzed;
         return true;
@@ -3188,6 +3309,10 @@ private:
         parameterFrame = std::numeric_limits<std::uint64_t>::max();
         parameterFingerprint = 0;
         lastPoolPointer = 0;
+        failedAnalysisRoot = {};
+        failedAnalysisError = CoordinatePoolRuntimeError::None;
+        failedAnalysisFrame =
+            std::numeric_limits<std::uint64_t>::max();
         poolPointerRefreshFrame =
             std::numeric_limits<std::uint64_t>::max();
         ringSlots.clear();
@@ -3203,6 +3328,15 @@ private:
         probe.executableMappingStart = 0;
         probe.executableMappingEnd = 0;
         probe.failedMethod = 0;
+        probe.analysisFailure = CoordinatePoolAnalysisFailure::None;
+        probe.analysisFindStage = 0;
+        probe.analysisMode = 0;
+        probe.analysisPasses = 0;
+        probe.analysisLoadedPages = 0;
+        probe.analysisRequestedMethods = 0;
+        probe.analysisSkippedPages = 0;
+        probe.analysisSkippedFailure = 0;
+        probe.analysisSkippedSystemError = 0;
         probe.poolPointerOffset = 0;
         probe.indexOffset = 0;
         probe.ringOffset = 0;
@@ -3272,6 +3406,10 @@ private:
         codeValidationRequested = false;
         frame = 0;
         lastPoolPointer = 0;
+        failedAnalysisRoot = {};
+        failedAnalysisError = CoordinatePoolRuntimeError::None;
+        failedAnalysisFrame =
+            std::numeric_limits<std::uint64_t>::max();
         poolPointerRefreshFrame =
             std::numeric_limits<std::uint64_t>::max();
         ringSlots.clear();
@@ -3310,6 +3448,11 @@ private:
     std::uint64_t frame = 0;
     CoordinateReadDiagnostic toleratedReadFailure{};
     std::uint64_t lastPoolPointer = 0;
+    CoordinatePoolRootSnapshot failedAnalysisRoot{};
+    CoordinatePoolRuntimeError failedAnalysisError =
+        CoordinatePoolRuntimeError::None;
+    std::uint64_t failedAnalysisFrame =
+        std::numeric_limits<std::uint64_t>::max();
     std::uint64_t poolPointerRefreshFrame =
         std::numeric_limits<std::uint64_t>::max();
     std::unordered_map<std::uint64_t, RingSlot> ringSlots;

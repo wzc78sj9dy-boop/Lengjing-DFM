@@ -5,6 +5,17 @@
 namespace lengjing::game::native::coordinate_pool_internal {
 namespace coord_dec {
 
+    enum class FindDecFailureStage : uint8_t {
+        None = 0,
+        EntryMethod = 1,
+        V87Marker = 2,
+        HashSearch = 3,
+        PoolPointer = 4,
+        RingOffset = 5,
+        IndexExpression = 6,
+        Patch = 7,
+    };
+
     struct param {
         std::string name;
         uint32_t size;
@@ -25,6 +36,7 @@ namespace coord_dec {
         std::string ring_index_param;
 
         std::unordered_map<std::string, uint64_t> params;
+        FindDecFailureStage failure_stage_ = FindDecFailureStage::None;
 
         bool find_v87_str();
         bool analyze_base_index_calc();
@@ -49,6 +61,10 @@ namespace coord_dec {
         }
 
         int find_dec(uint64_t entry_address);
+
+        FindDecFailureStage failure_stage() const noexcept {
+            return failure_stage_;
+        }
 
         void compact_runtime_plan() noexcept {
             entry = nullptr;

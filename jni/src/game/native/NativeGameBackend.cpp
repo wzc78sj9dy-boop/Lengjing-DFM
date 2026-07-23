@@ -8139,6 +8139,10 @@ private:
                 "tid=%d thread_start=%llu generation=%llu tpidr=%llx "
                 "key_available=%d oracle_available=%d pool_ready=%d "
                 "pool_stage=%u pool_error=%u pool_sys=%d "
+                "analysis_failure=%u analysis_find=%u analysis_mode=%u "
+                "analysis_passes=%u analysis_pages=%u analysis_methods=%u "
+                "analysis_skipped=%u analysis_skip_failure=%u "
+                "analysis_skip_sys=%d "
                 "read_stage=%u read_failure=%u read_path=%u "
                 "bridge=%llx context=%llx entry=%llx pool=%llx "
                 "attempts=%llu successes=%llu\n",
@@ -8165,6 +8169,17 @@ private:
                 static_cast<unsigned int>(poolProbe.stage),
                 static_cast<unsigned int>(poolProbe.error),
                 poolProbe.systemError,
+                static_cast<unsigned int>(poolProbe.analysisFailure),
+                static_cast<unsigned int>(poolProbe.analysisFindStage),
+                static_cast<unsigned int>(poolProbe.analysisMode),
+                static_cast<unsigned int>(poolProbe.analysisPasses),
+                static_cast<unsigned int>(poolProbe.analysisLoadedPages),
+                static_cast<unsigned int>(
+                    poolProbe.analysisRequestedMethods),
+                static_cast<unsigned int>(poolProbe.analysisSkippedPages),
+                static_cast<unsigned int>(
+                    poolProbe.analysisSkippedFailure),
+                poolProbe.analysisSkippedSystemError,
                 static_cast<unsigned int>(poolProbe.read.stage),
                 static_cast<unsigned int>(poolProbe.read.failure),
                 static_cast<unsigned int>(poolProbe.read.lastPath),

@@ -419,9 +419,11 @@ namespace coord_dec {
 	}
 
 	bool FindDec::analyze_hash_binary_search() {
+		failure_stage_ = FindDecFailureStage::HashSearch;
 		if (!find_binary_search_end()) {
 			return false;
 		}
+		failure_stage_ = FindDecFailureStage::PoolPointer;
 		if (!find_pool_ptr_offset()) {
 			return false;
 		}
@@ -638,10 +640,12 @@ namespace coord_dec {
 	}
 
 	bool FindDec::analyze_index_calc() {
+		failure_stage_ = FindDecFailureStage::RingOffset;
 		if (!find_ring_offset()) {
 			return false;
 		}
 
+		failure_stage_ = FindDecFailureStage::IndexExpression;
 		if (!analyze_base_index_calc()) {
 			return false;
 		}
@@ -789,6 +793,7 @@ namespace coord_dec {
 		hash_end_madd = 0;
 		index_offset = 0;
 		pool_ptr_offset = 0;
+		failure_stage_ = FindDecFailureStage::EntryMethod;
 
 
 		finder f;
@@ -800,6 +805,7 @@ namespace coord_dec {
 		}
 
 
+		failure_stage_ = FindDecFailureStage::V87Marker;
 		if (!find_v87_str()) {
 			return -1;
 		}
@@ -814,6 +820,7 @@ namespace coord_dec {
 		if (!analyze_index_calc()) {
 			return -1;
 		}
+		failure_stage_ = FindDecFailureStage::Patch;
 		if (!patch()) {
 			return -1;
 		}
@@ -822,6 +829,7 @@ namespace coord_dec {
 
 
 
+		failure_stage_ = FindDecFailureStage::None;
 		return 0;
 	}
 }

@@ -89,6 +89,21 @@ int main() {
 
     constexpr std::uint64_t kBase = UINT64_C(0x100000);
     std::array<std::uint8_t, 8> code{};
+
+    coord_dec::FindDec missingEntryFinder;
+    REQUIRE(missingEntryFinder.set(
+        kBase, code.data(), static_cast<std::uint32_t>(code.size())) == 0);
+    REQUIRE(missingEntryFinder.find_dec(kBase + code.size()) != 0);
+    REQUIRE(missingEntryFinder.failure_stage() ==
+        coord_dec::FindDecFailureStage::EntryMethod);
+
+    coord_dec::FindDec missingMarkerFinder;
+    REQUIRE(missingMarkerFinder.set(
+        kBase, code.data(), static_cast<std::uint32_t>(code.size())) == 0);
+    REQUIRE(missingMarkerFinder.find_dec(kBase) != 0);
+    REQUIRE(missingMarkerFinder.failure_stage() ==
+        coord_dec::FindDecFailureStage::V87Marker);
+
     coord_dec::FindDec finder;
     shellcode* binary = finder.get_shellcode();
     REQUIRE(binary->parse(kBase, code.data(), code.size()) == 0);
