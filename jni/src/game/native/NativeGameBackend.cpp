@@ -43,6 +43,7 @@
 #include "game/native/TrajectoryHook.h"
 #endif
 #include "game/native/WorldObjectRefreshPolicy.h"
+#include "platform/CoordinateDebugLog.h"
 #include "platform/PerformanceTrace.h"
 #include "render/PlayerTracerPolicy.h"
 
@@ -74,6 +75,10 @@
 
 #ifndef LENGJING_ENABLE_COORDINATE_DEBUG_LOG
 #define LENGJING_ENABLE_COORDINATE_DEBUG_LOG 0
+#endif
+
+#ifndef LENGJING_ENABLE_COORDINATE_SESSION_LOG
+#define LENGJING_ENABLE_COORDINATE_SESSION_LOG 0
 #endif
 
 namespace lengjing::game {
@@ -337,12 +342,8 @@ const char* CoordinateStabilityDecisionName(
 }
 
 bool IsCoordinateTraceEnabled() noexcept {
-#if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
-    static const bool enabled = [] {
-        const char* value = std::getenv("LENGJING_COORDINATE_TRACE");
-        return value != nullptr && value[0] != '\0' && value[0] != '0';
-    }();
-    return enabled;
+#if LENGJING_ENABLE_COORDINATE_SESSION_LOG
+    return platform::CoordinateDebugLogActive();
 #else
     return false;
 #endif
@@ -1263,6 +1264,13 @@ public:
         const std::uint64_t sequence = frame.sequence;
         frame = GameFrame{};
         frame.sequence = sequence;
+#if LENGJING_ENABLE_COORDINATE_SESSION_LOG
+        if (coordinateLogRequested_ != settings.visual.coordinateDecrypt) {
+            coordinateLogRequested_ = settings.visual.coordinateDecrypt;
+            platform::UpdateCoordinateDebugLogSession(
+                coordinateLogRequested_);
+        }
+#endif
         coordinateTraceFrame_ = sequence;
         if (IsCoordinateTraceEnabled()) {
             coordinateTraceRecords_.clear();
@@ -1274,6 +1282,14 @@ public:
         if (!opened_ || memory_ == nullptr || !memory_->IsOpen()) {
             SetRuntimeFailure(
                 probe, RuntimeError::BackendUnavailable, -ENODEV);
+            if (IsCoordinateTraceEnabled()) {
+                platform::CoordinateDebugLogPrint(
+                    "[coordinate-session-error] frame=%llu "
+                    "stage=backend runtime=%u sys=%d\n",
+                    static_cast<unsigned long long>(coordinateTraceFrame_),
+                    static_cast<unsigned int>(probe.runtimeError),
+                    probe.runtimeSystemError);
+            }
             error = "游戏后端尚未打开";
             return false;
         }
@@ -1284,6 +1300,14 @@ public:
             probe = RuntimeProbe{};
             SetRuntimeFailure(
                 probe, RuntimeError::TargetProcessExited, -ESRCH);
+            if (IsCoordinateTraceEnabled()) {
+                platform::CoordinateDebugLogPrint(
+                    "[coordinate-session-error] frame=%llu "
+                    "stage=process runtime=%u sys=%d\n",
+                    static_cast<unsigned long long>(coordinateTraceFrame_),
+                    static_cast<unsigned int>(probe.runtimeError),
+                    probe.runtimeSystemError);
+            }
             error = "目标游戏进程已结束";
             return false;
         }
@@ -2085,8 +2109,7 @@ public:
                     trace->second.bottomProjected = bottomProjected;
                     trace->second.topProjected = topProjected;
                     trace->second.onScreen = onScreen;
-                    std::fprintf(
-                        stderr,
+                    platform::CoordinateDebugLogPrint(
                         "[coordinate-trace] frame=%llu actor=%llx "
                         "resolver=%d encrypted=%d ordinary=%d "
                          "record_root=%llx input_root=%llx ordinary_root=%llx "
@@ -2143,7 +2166,6 @@ public:
                         bottomProjected ? 1 : 0,
                         topProjected ? 1 : 0,
                         onScreen ? 1 : 0);
-                    std::fflush(stderr);
                 }
             }
 
@@ -2598,7 +2620,8 @@ public:
         UpdateCoordinateProbe(probe);
         ApplyCoordinateDiagnostic(error, probe);
         const auto boneAuditNow = std::chrono::steady_clock::now();
-        if (boneAuditNow - lastBoneAuditLogAt_ >= std::chrono::seconds(1)) {
+        if (IsCoordinateTraceEnabled() &&
+            boneAuditNow - lastBoneAuditLogAt_ >= std::chrono::seconds(1)) {
             const auto requested = [](const auto& counts) {
                 std::size_t total = 0;
                 for (std::size_t index = 1; index < counts.size(); ++index) {
@@ -2610,8 +2633,7 @@ public:
                 }
                 return total;
             };
-            std::fprintf(
-                stderr,
+            platform::CoordinateDebugLogPrint(
                 "[bone-audit] records=%zu valid=%zu characters=%zu "
                 "targets=%zu bots=%zu players=%zu visuals=%zu "
                 "bot_bones=%zu/%zu bot_offscreen=%zu bot_no_source=%zu "
@@ -2671,7 +2693,6 @@ public:
                 boneFailureHealth,
                 boneFailureResolver ? 1 : 0,
                 boneFailureEncrypted ? 1 : 0);
-            std::fflush(stderr);
             lastBoneAuditLogAt_ = boneAuditNow;
         }
         frame.ready = true;
@@ -3175,8 +3196,7 @@ private:
             actorRecordSnapshot_.decodedRecordSourceReady;
 
         if (IsCoordinateTraceEnabled()) {
-            std::fprintf(
-                stderr,
+            platform::CoordinateDebugLogPrint(
                 "[coordinate-trace-snapshot] frame=%llu decoded_required=%d "
                 "decoded_ready=%d encrypted=%d retained=%d records=%zu "
                 "ordinary_array=%llx "
@@ -3189,7 +3209,6 @@ private:
                 actorRecordSnapshot_.records.size(),
                 static_cast<unsigned long long>(context.actorArray),
                 context.actorCount);
-            std::fflush(stderr);
         }
 
         const bool ordinarySourceReady =
@@ -4265,8 +4284,7 @@ private:
             Vec3 tableCandidate{};
             const bool tableAvailable =
                 ReadAlgorithmCoordinate(actor, 0, tableCandidate, true);
-            std::fprintf(
-                stderr,
+            platform::CoordinateDebugLogPrint(
                 "[coordinate-table-probe] frame=%llu actor=%llx "
                 "root=%llx available=%d xyz=(%.3f,%.3f,%.3f)\n",
                 static_cast<unsigned long long>(coordinateTraceFrame_),
@@ -4505,8 +4523,7 @@ private:
                             : CoordinateTraceSource::Pending;
                     }
                     if (IsCoordinateTraceEnabled()) {
-                        std::fprintf(
-                            stderr,
+                        platform::CoordinateDebugLogPrint(
                             "[coordinate-pool-selected] frame=%llu world=%llx "
                             "actor=%llx component=%llx ring=%llx index=%llx "
                             "decoded=%u physical=%u bank=%u selected=%u "
@@ -4659,8 +4676,7 @@ private:
                             trace->guestPc = failedProbe.guestEntry;
                         }
                         if (IsCoordinateTraceEnabled()) {
-                            std::fprintf(
-                                stderr,
+                            platform::CoordinateDebugLogPrint(
                                 "[coordinate-pool-retain] frame=%llu "
                                 "actor=%llx component=%llx error=%u "
                                 "sys=%d read_stage=%u read_failure=%u "
@@ -4735,8 +4751,7 @@ private:
                                : "failed");
                     const CoordinateDecryptError replayError =
                         AlgorithmPositionError(replayProbe.error);
-                    std::fprintf(
-                        stderr,
+                    platform::CoordinateDebugLogPrint(
                         "[coordinate-replay-probe] frame=%llu actor=%llx "
                         "component=%llx state=%s guest_pc=%llx request=%llu "
                         "completed=%llu attempts=%llu successes=%llu "
@@ -4809,7 +4824,6 @@ private:
                         static_cast<unsigned int>(replayProbe.read.lastPath),
                         static_cast<unsigned long long>(replayProbe.read.address),
                         replayProbe.read.size);
-                    std::fflush(stderr);
                     if (replayResult ==
                             native::AlgorithmPositionRuntimeResult::Failed &&
                         replayProbe.instructionTraceCount != 0 &&
@@ -4821,8 +4835,7 @@ private:
                             replayProbe.finalPc;
                         algorithmLastInstructionTraceFault_ =
                             replayProbe.faultAddress;
-                        std::fprintf(
-                            stderr,
+                        platform::CoordinateDebugLogPrint(
                             "[coordinate-replay-path] request=%llu "
                             "count=%zu pcs=",
                             static_cast<unsigned long long>(
@@ -4831,15 +4844,13 @@ private:
                         for (std::size_t index = 0;
                              index < replayProbe.instructionTraceCount;
                              ++index) {
-                            std::fprintf(
-                                stderr,
+                            platform::CoordinateDebugLogPrint(
                                 "%s%llx",
                                 index == 0 ? "" : ",",
                                 static_cast<unsigned long long>(
                                     replayProbe.instructionTrace[index]));
                         }
-                        std::fputc('\n', stderr);
-                        std::fflush(stderr);
+                        platform::CoordinateDebugLogPrint("\n");
                     }
                 }
                 if (replayResult ==
@@ -7777,8 +7788,7 @@ private:
                 memory_->ExecutionContextDiagnostic();
             const native::CoordinatePoolRuntimeProbe poolProbe =
                 coordinatePoolRuntime_.Probe();
-            std::fprintf(
-                stderr,
+            platform::CoordinateDebugLogPrint(
                 "[coordinate-context-trace] frame=%llu refreshed=%d "
                 "ready=%d source=%u cd=%u sys=%d device_sys=%d "
                 "ptrace_sys=%d device_requests=%zu operands=%d "
@@ -7821,7 +7831,6 @@ private:
                     poolProbe.poolPointer.normalizedValue),
                 static_cast<unsigned long long>(poolProbe.attempts),
                 static_cast<unsigned long long>(poolProbe.successes));
-            std::fflush(stderr);
         }
     }
 
@@ -7849,8 +7858,7 @@ private:
             : (result == native::AlgorithmPositionRuntimeResult::Ready
                    ? "ready"
                    : "failed");
-        std::fprintf(
-            stderr,
+        platform::CoordinateDebugLogPrint(
             "[coordinate-forced-probe] component=%llx state=%s "
             "request=%llu completed=%llu runtime_error=%u fault=%llx "
             "final_pc=%llx tpidr=%llx ctr=%llx cntfrq=%llx "
@@ -7884,8 +7892,7 @@ private:
                 algorithmLastForcedTraceRequest_) {
             algorithmLastForcedTraceRequest_ =
                 replayProbe.completedRequestId;
-            std::fprintf(
-                stderr,
+            platform::CoordinateDebugLogPrint(
                 "[coordinate-forced-path] request=%llu count=%zu pcs=",
                 static_cast<unsigned long long>(
                     replayProbe.completedRequestId),
@@ -7893,16 +7900,14 @@ private:
             for (std::size_t index = 0;
                  index < replayProbe.instructionTraceCount;
                  ++index) {
-                std::fprintf(
-                    stderr,
+                platform::CoordinateDebugLogPrint(
                     "%s%llx",
                     index == 0 ? "" : ",",
                     static_cast<unsigned long long>(
                         replayProbe.instructionTrace[index]));
             }
-            std::fputc('\n', stderr);
+            platform::CoordinateDebugLogPrint("\n");
         }
-        std::fflush(stderr);
     }
 
     void RefreshAlgorithmEntry(bool force) {
@@ -7946,8 +7951,7 @@ private:
         coordinateReplayEntrySnapshot_ = snapshot;
         coordinateReplayEntryDiagnostic_ = diagnostic;
         if (IsCoordinateTraceEnabled()) {
-            std::fprintf(
-                stderr,
+            platform::CoordinateDebugLogPrint(
                 "[coordinate-entry-trace] frame=%llu ready=%d bridge=%llx "
                 "entry=%llx map_start=%llx map_end=%llx instruction=%08x "
                 "cd=%u sys=%d read_stage=%u read_failure=%u read_path=%u "
@@ -7966,7 +7970,6 @@ private:
                 static_cast<unsigned int>(diagnostic.read.lastPath),
                 static_cast<unsigned long long>(diagnostic.read.address),
                 diagnostic.read.size);
-            std::fflush(stderr);
         }
     }
 
@@ -8242,6 +8245,10 @@ private:
 
     bool CloseLocked() noexcept {
         opened_ = false;
+#if LENGJING_ENABLE_COORDINATE_SESSION_LOG
+        platform::UpdateCoordinateDebugLogSession(false);
+        coordinateLogRequested_ = false;
+#endif
         aimController_.Stop();
         geometryRuntime_.Stop();
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
@@ -8362,6 +8369,9 @@ private:
     bool algorithmEntryReady_ = false;
     bool algorithmReplayAllowedThisFrame_ = true;
     bool algorithmPositionRequested_ = false;
+#if LENGJING_ENABLE_COORDINATE_SESSION_LOG
+    bool coordinateLogRequested_ = false;
+#endif
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
     bool algorithmDecryptRequested_ = false;
     bool algorithmCoordinateTableReady_ = false;

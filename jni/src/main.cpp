@@ -17,6 +17,7 @@
 #include "game/native/AlgorithmCoordinateProbePolicy.h"
 #endif
 #include "platform/BackgroundProcess.h"
+#include "platform/CoordinateDebugLog.h"
 #include "platform/MenuKeyMonitor.h"
 #include "platform/PerformanceTrace.h"
 
@@ -58,6 +59,10 @@
 
 #ifndef LENGJING_ENABLE_COORDINATE_DEBUG_LOG
 #define LENGJING_ENABLE_COORDINATE_DEBUG_LOG 0
+#endif
+
+#ifndef LENGJING_ENABLE_COORDINATE_SESSION_LOG
+#define LENGJING_ENABLE_COORDINATE_SESSION_LOG 0
 #endif
 
 namespace {
@@ -784,7 +789,7 @@ int main() {
             static_cast<int>(getpid()));
         std::fflush(stderr);
     } else {
-#if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
+#if LENGJING_ENABLE_COORDINATE_SESSION_LOG
     constexpr char kCoordinateDebugLogPath[] =
         "/sdcard/Download/lengjing_coordinate_debug.txt";
     const char* requestedCoordinateDebugLogPath =
@@ -794,19 +799,11 @@ int main() {
             requestedCoordinateDebugLogPath[0] == '/'
         ? requestedCoordinateDebugLogPath
         : kCoordinateDebugLogPath;
-    setenv("LENGJING_COORDINATE_TRACE", "1", 1);
-    setenv("LENGJING_COORDINATE_CANDIDATES_FULL", "0", 1);
-    if (!lengjing::platform::DetachFromTerminal(
-            coordinateDebugLogPath)) {
+    if (!lengjing::platform::ConfigureCoordinateDebugLog(
+            coordinateDebugLogPath, LENGJING_VERSION) ||
+        !lengjing::platform::DetachFromTerminal()) {
         return 3;
     }
-    std::fprintf(
-        stderr,
-        "[coordinate-debug-start] schema=4 version=%s pid=%d "
-        "trace=1 candidates_full=0 slot_family_calibration=1\n",
-        LENGJING_VERSION,
-        static_cast<int>(getpid()));
-    std::fflush(stderr);
 #else
     if (!lengjing::platform::DetachFromTerminal()) return 3;
 #endif

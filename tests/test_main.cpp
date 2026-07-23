@@ -20,6 +20,7 @@ int main() {
         RunCloudLayoutStartupPolicyTests();
         RunCloudLayoutTests();
         RunConfigTests();
+        RunCoordinateDebugLogTests();
         RunCoordinatePoolPolicyTests();
         RunCoordinateOutputPolicyTests();
         RunCpuMailboxPolicyTests();

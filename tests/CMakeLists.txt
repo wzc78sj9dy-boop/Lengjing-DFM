@@ -23,6 +23,7 @@ add_executable(lengjing_tests
     cloud_layout_startup_policy_tests.cpp
     cloud_layout_tests.cpp
     config_tests.cpp
+    coordinate_debug_log_tests.cpp
     coordinate_pool_policy_tests.cpp
     coordinate_output_policy_tests.cpp
     cpu_mailbox_policy_tests.cpp
@@ -56,6 +57,7 @@ add_executable(lengjing_tests
     ../jni/src/game/GameRuntime.cpp
     ../jni/src/game/native/RemoteElfIdentity.cpp
     ../jni/src/game/native/TrackingPageBinding.cpp
+    ../jni/src/platform/CoordinateDebugLog.cpp
     ../jni/src/platform/PerformanceTrace.cpp
     ../jni/src/render/PresentationRateTracker.cpp
 )

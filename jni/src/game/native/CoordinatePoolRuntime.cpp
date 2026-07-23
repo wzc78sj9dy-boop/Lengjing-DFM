@@ -4,6 +4,7 @@
 #include "game/native/CoordinatePoolPolicy.h"
 #include "game/native/MemoryTransport.h"
 #include "game/native/coordinate_pool_internal/FindDec.h"
+#include "platform/CoordinateDebugLog.h"
 
 #include <capstone/capstone.h>
 #include <unicorn/unicorn.h>
@@ -28,6 +29,10 @@
 
 #ifndef LENGJING_ENABLE_COORDINATE_DEBUG_LOG
 #define LENGJING_ENABLE_COORDINATE_DEBUG_LOG 0
+#endif
+
+#ifndef LENGJING_ENABLE_COORDINATE_SESSION_LOG
+#define LENGJING_ENABLE_COORDINATE_SESSION_LOG 0
 #endif
 
 namespace lengjing::game::native {
@@ -127,10 +132,8 @@ CoordinatePoolRuntimeError CoordinateReplayEntryRuntimeError(
 }
 
 bool IsCoordinatePoolTraceEnabled() noexcept {
-#if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
-    static const bool enabled = CoordinatePoolEnvironmentFlagEnabled(
-        std::getenv("LENGJING_COORDINATE_TRACE"));
-    return enabled;
+#if LENGJING_ENABLE_COORDINATE_SESSION_LOG
+    return platform::CoordinateDebugLogActive();
 #else
     return false;
 #endif
@@ -855,8 +858,7 @@ struct CoordinatePoolRuntime::Impl {
                 slot.stamp = frame;
                 selected = &slot;
                 if (IsCoordinatePoolTraceEnabled()) {
-                    std::fprintf(
-                        stderr,
+                    platform::CoordinateDebugLogPrint(
                         "[coordinate-pool-ring-event] frame=%llu "
                         "component=%llx event=search_success "
                         "previous=%llx ring=%llx failures=%u\n",
@@ -875,8 +877,7 @@ struct CoordinatePoolRuntime::Impl {
                 slot.ring = 0;
                 slot.stamp = frame;
                 if (IsCoordinatePoolTraceEnabled()) {
-                    std::fprintf(
-                        stderr,
+                    platform::CoordinateDebugLogPrint(
                         "[coordinate-pool-ring-event] frame=%llu "
                         "component=%llx event=search_failed error=%u "
                         "sys=%d read_stage=%u read_failure=%u\n",
@@ -1101,8 +1102,7 @@ struct CoordinatePoolRuntime::Impl {
             const bool invalidateRing = selected->recovery.Observe(event);
             if (IsCoordinatePoolTraceEnabled() &&
                 event == CoordinatePoolRingReadEvent::RemoteReadFailure) {
-                std::fprintf(
-                    stderr,
+                platform::CoordinateDebugLogPrint(
                     "[coordinate-pool-ring-event] frame=%llu "
                     "component=%llx event=remote_read_failure ring=%llx "
                     "failures=%u invalidate=%d sys=%d read_stage=%u "
@@ -1209,8 +1209,7 @@ struct CoordinatePoolRuntime::Impl {
             selected->recovery.Observe(
                 CoordinatePoolRingReadEvent::Success);
             if (IsCoordinatePoolTraceEnabled()) {
-                std::fprintf(
-                    stderr,
+                platform::CoordinateDebugLogPrint(
                     "[coordinate-pool-trace] frame=%llu component=%llx "
                     "parameter_component=%llx parameter_fingerprint=%llx "
                     "ring_offset=%u index_offset=%lld entry_stride=%u "
@@ -1408,8 +1407,7 @@ struct CoordinatePoolRuntime::Impl {
         coordinateAddress = snapshotAddress +
             poolSlot * static_cast<std::uint64_t>(layout.entryStride);
         if (capturePhysicalSlots && IsCoordinatePoolTraceEnabled()) {
-            std::fprintf(
-                stderr,
+            platform::CoordinateDebugLogPrint(
                 "[coordinate-pool-trace] frame=%llu component=%llx "
                 "parameter_component=%llx parameter_fingerprint=%llx "
                 "ring_offset=%u index_offset=%lld entry_stride=%u "
@@ -1446,8 +1444,7 @@ struct CoordinatePoolRuntime::Impl {
                 newest = candidates.physicalPositions[
                     candidates.newestPhysicalSlot];
             }
-            std::fprintf(
-                stderr,
+            platform::CoordinateDebugLogPrint(
                 "[coordinate-pool-write] frame=%llu component=%llx "
                 "ring=%llx index=%llx decoded=%u selected=%u "
                 "changed_mask=%04x "
@@ -1484,8 +1481,7 @@ struct CoordinatePoolRuntime::Impl {
                 elapsed >= kCandidateTracePeriodicInterval ||
                 (physicalSlotChanged &&
                  elapsed >= kCandidateTraceMinimumInterval)) {
-                std::fprintf(
-                    stderr,
+                platform::CoordinateDebugLogPrint(
                     "[coordinate-pool-candidates] frame=%llu "
                     "component=%llx ring=%llx index=%llx decoded=%u "
                     "physical=%u "
@@ -1568,8 +1564,7 @@ struct CoordinatePoolRuntime::Impl {
         if (!IsCoordinatePoolTraceEnabled()) return;
         const CoordinatePoolSlotLayout slotLayout =
             slotLayoutCalibration.Layout();
-        std::fprintf(
-            stderr,
+        platform::CoordinateDebugLogPrint(
             "[coordinate-pool-layout] frame=%llu event=%s "
             "component=%llx decoded=%llu changed_mask=%04x "
             "kind=%u logical=%u physical=%u phase=%u "
@@ -2562,8 +2557,7 @@ private:
         parameterFrame = frame;
         parameterFingerprint = CoordinatePoolParameterFingerprint(*finder);
         if (IsCoordinatePoolTraceEnabled()) {
-            std::fprintf(
-                stderr,
+            platform::CoordinateDebugLogPrint(
                 "[coordinate-pool-parameters] frame=%llu component=%llx "
                 "fingerprint=%llx mem=%zu var=%zu\n",
                 static_cast<unsigned long long>(frame),
@@ -2572,8 +2566,7 @@ private:
                 finder->mem_param_list.size(),
                 finder->analyze.varParams.size());
             for (const auto& parameter : finder->mem_param_list) {
-                std::fprintf(
-                    stderr,
+                platform::CoordinateDebugLogPrint(
                     "[coordinate-pool-parameter] kind=mem name=%s size=%u "
                     "disp=%d value=%llx offsets=%zu\n",
                     parameter.name.c_str(),
@@ -2583,8 +2576,7 @@ private:
                     parameter.offset.size());
             }
             for (const auto& parameter : finder->analyze.varParams) {
-                std::fprintf(
-                    stderr,
+                platform::CoordinateDebugLogPrint(
                     "[coordinate-pool-parameter] kind=var name=%s addr=%llx "
                     "reg=%u value=%llx\n",
                     parameter.name.c_str(),
@@ -2592,7 +2584,6 @@ private:
                     static_cast<unsigned int>(parameter.reg),
                     static_cast<unsigned long long>(parameter.value));
             }
-            std::fflush(stderr);
         }
         probe.error = CoordinatePoolRuntimeError::None;
         return true;
@@ -2736,8 +2727,7 @@ private:
         if (ShouldClearCoordinatePoolRingsAfterPointerRefresh(
                 true, lastPoolPointer, pointer)) {
             if (IsCoordinatePoolTraceEnabled()) {
-                std::fprintf(
-                    stderr,
+                platform::CoordinateDebugLogPrint(
                     "[coordinate-pool-ring-event] frame=%llu "
                     "component=0 event=pool_changed previous=%llx "
                     "pool=%llx cleared=%zu\n",
