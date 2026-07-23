@@ -17,6 +17,7 @@ int main() {
         RunAuthSessionTests();
         RunAuthTransportTests();
         RunCardInputPolicyTests();
+        RunCharacterComponentTransformTests();
         RunCloudLayoutStartupPolicyTests();
         RunCloudLayoutTests();
         RunConfigTests();

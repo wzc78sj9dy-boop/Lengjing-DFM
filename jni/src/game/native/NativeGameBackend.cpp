@@ -23,6 +23,7 @@
 #include "game/native/AlgorithmPositionPolicy.h"
 #include "game/native/AlgorithmReplayPolicy.h"
 #include "game/native/BoneFrameSource.h"
+#include "game/native/CharacterComponentTransform.h"
 #include "game/native/CharacterPositionResolver.h"
 #include "game/native/CoordinateOutputPolicy.h"
 #include "game/native/CoordinatePoolRuntime.h"
@@ -5770,67 +5771,61 @@ private:
         return native::GeometryVisibility::Unavailable;
     }
 
-    static bool IsZeroOrMinusNinety(const Vec3& value) {
-        return value.x == 0.0f && value.y == 0.0f &&
-            (value.z == 0.0f || value.z == -90.0f);
-    }
-
     bool RebuildResolvedComponentTransform(
         std::uintptr_t root,
-        std::uintptr_t mesh,
-        const Vec3* resolvedPosition,
         Transform& transform) {
         transform = Transform{};
-        if (!IsValidPointer(root) || !IsValidPointer(mesh) ||
-            !ReadValue(mesh + 0x210, transform)) {
+        if (!IsValidPointer(root)) return false;
+
+        Vec3 position{};
+        native::ComponentEulerAngles euler{};
+        Vec3 scale{};
+        native::ComponentPositionFlag positionFlag = 0;
+        if (layout_.componentPositionFlagOffset != 0) {
+            if (!ReadValue(
+                moduleBase_ + layout_.componentPositionFlagOffset,
+                positionFlag)) {
+                return false;
+            }
+        }
+        const native::ResolvedComponentFieldAddresses addresses =
+            native::ResolveComponentFieldAddresses(root, positionFlag);
+        if (!ReadValue(addresses.position, position) ||
+            !ReadValue(addresses.euler, euler) ||
+            !ReadValue(addresses.scale, scale)) {
             return false;
         }
 
-        Vec3 position{};
-        std::uint8_t useAlternatePosition = 0;
-        if (layout_.componentPositionFlagOffset != 0) {
-            ReadValue(
-                moduleBase_ + layout_.componentPositionFlagOffset,
-                useAlternatePosition);
-        }
-        if (useAlternatePosition != 0) {
-            ReadValue(root + 0x138, position);
-        }
-        if (useAlternatePosition == 0 || IsZeroOrMinusNinety(position)) {
-            ReadValue(root + 0x168, position);
-        }
-        bool finalFallback = false;
-        if (IsZeroOrMinusNinety(position)) {
-            ReadValue(root + 0x220, position);
-            finalFallback = true;
-        }
-        float verticalAdjustment = 0.0f;
-        float yaw = 0.0f;
-        ReadValue(root + 0x5A0, verticalAdjustment);
-        ReadValue(root + 0x17C, yaw);
-        position.z -= verticalAdjustment;
-
-        constexpr float kHalfDegreesToRadians =
-            0.008726646259971648f;
-        constexpr float kQuarterTurn = 0.7853981633974483f;
-        const float angle = yaw * kHalfDegreesToRadians -
-            (finalFallback ? 0.0f : kQuarterTurn);
-        if (resolvedPosition != nullptr && IsFinite(*resolvedPosition) &&
-            IsNonzero(*resolvedPosition)) {
-            transform.translation = *resolvedPosition;
-        } else {
-            transform.translation = position;
-        }
+        const native::ResolvedComponentTransform rebuilt =
+            native::BuildResolvedComponentTransform(
+                native::ComponentVector3{
+                    position.x,
+                    position.y,
+                    position.z,
+                },
+                euler,
+                native::ComponentVector3{
+                    scale.x,
+                    scale.y,
+                    scale.z,
+                });
         transform.rotation = Quaternion{
-            0.0f,
-            0.0f,
-            std::sin(angle),
-            std::cos(angle),
+            rebuilt.rotation.x,
+            rebuilt.rotation.y,
+            rebuilt.rotation.z,
+            rebuilt.rotation.w,
         };
-        transform.scale = Vec3{1.0f, 1.0f, 1.0f};
-        return IsFinite(transform.translation) &&
-            std::isfinite(transform.rotation.z) &&
-            std::isfinite(transform.rotation.w);
+        transform.translation = Vec3{
+            rebuilt.translation.x,
+            rebuilt.translation.y,
+            rebuilt.translation.z,
+        };
+        transform.scale = Vec3{
+            rebuilt.scale.x,
+            rebuilt.scale.y,
+            rebuilt.scale.z,
+        };
+        return IsValidTransform(transform);
     }
 
     bool ReadBoneFrame(const RuntimeActorRecord& actorRecord,
@@ -5916,6 +5911,7 @@ private:
             [this, &hasUsableLink](
                 std::uintptr_t candidateBoneArray,
                 const Matrix4& componentMatrix,
+                const native::ResolvedComponentTransform* resolvedComponent,
                 const Vec3& alignment,
                 bool alignmentReady) {
                 BoneSourceFrame result{};
@@ -5952,7 +5948,9 @@ private:
                     Transform transform{};
                     bool transformReady = bulkReady &&
                         boneIndex < transforms.size() &&
-                        IsValidTransform(transforms[boneIndex]);
+                        (resolvedComponent != nullptr
+                            ? IsFinite(transforms[boneIndex].translation)
+                            : IsValidTransform(transforms[boneIndex]));
                     if (transformReady) {
                         transform = transforms[boneIndex];
                     } else {
@@ -5960,12 +5958,31 @@ private:
                             static_cast<std::uintptr_t>(boneIndex) *
                                 kBoneTransformStride;
                         transformReady = ReadValue(address, transform) &&
-                            IsValidTransform(transform);
+                            (resolvedComponent != nullptr
+                                ? IsFinite(transform.translation)
+                                : IsValidTransform(transform));
                     }
                     if (!transformReady) continue;
 
-                    Vec3 world = MatrixTranslation(Multiply(
-                        TransformToMatrix(transform), componentMatrix));
+                    Vec3 world{};
+                    if (resolvedComponent != nullptr) {
+                        const native::ComponentVector3 resolvedWorld =
+                            native::TransformResolvedBoneTranslation(
+                                native::ComponentVector3{
+                                    transform.translation.x,
+                                    transform.translation.y,
+                                    transform.translation.z,
+                                },
+                                *resolvedComponent);
+                        world = Vec3{
+                            resolvedWorld.x,
+                            resolvedWorld.y,
+                            resolvedWorld.z,
+                        };
+                    } else {
+                        world = MatrixTranslation(Multiply(
+                            TransformToMatrix(transform), componentMatrix));
+                    }
                     if (alignmentReady) {
                         world.x += alignment.x;
                         world.y += alignment.y;
@@ -5998,8 +6015,6 @@ private:
                 const bool componentReady = source.rebuildResolvedTransform
                     ? RebuildResolvedComponentTransform(
                           source.root,
-                          source.mesh,
-                          standardizedPosition,
                           componentTransform)
                     : ReadValue(source.mesh + 0x210, componentTransform);
                 if (!componentReady) return result;
@@ -6008,6 +6023,29 @@ private:
 
                 const Matrix4 componentMatrix =
                     TransformToMatrix(componentTransform);
+                const native::ResolvedComponentTransform resolvedComponent{
+                    native::ComponentQuaternion{
+                        componentTransform.rotation.x,
+                        componentTransform.rotation.y,
+                        componentTransform.rotation.z,
+                        componentTransform.rotation.w,
+                    },
+                    native::ComponentVector3{
+                        componentTransform.translation.x,
+                        componentTransform.translation.y,
+                        componentTransform.translation.z,
+                    },
+                    native::ComponentVector3{
+                        componentTransform.scale.x,
+                        componentTransform.scale.y,
+                        componentTransform.scale.z,
+                    },
+                };
+                const native::ResolvedComponentTransform*
+                    resolvedComponentPointer =
+                        source.rebuildResolvedTransform
+                        ? &resolvedComponent
+                        : nullptr;
                 Vec3 alignment{};
                 bool alignmentReady = false;
                 if (!source.rebuildResolvedTransform &&
@@ -6024,13 +6062,18 @@ private:
                 result = readBoneArray(
                     primaryBoneArray,
                     componentMatrix,
+                    resolvedComponentPointer,
                     alignment,
                     alignmentReady);
                 result.source = source;
                 result.resolvedTranslation =
                     source.rebuildResolvedTransform || alignmentReady;
 
-                if (result.validCount < kBoneIndices.size()) {
+                if (native::ShouldReadSecondaryBoneArray(
+                        source.rebuildResolvedTransform,
+                        IsValidPointer(primaryBoneArray),
+                        result.validCount,
+                        kBoneIndices.size())) {
                     const std::uintptr_t secondaryBoneArray =
                         ReadPointer(source.mesh + 0x740);
                     if (IsValidPointer(secondaryBoneArray) &&
@@ -6038,6 +6081,7 @@ private:
                         BoneSourceFrame secondary = readBoneArray(
                             secondaryBoneArray,
                             componentMatrix,
+                            resolvedComponentPointer,
                             alignment,
                             alignmentReady);
                         secondary.source = source;

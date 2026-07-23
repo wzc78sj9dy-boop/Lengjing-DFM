@@ -20,6 +20,7 @@ add_executable(lengjing_tests
     auth_session_tests.cpp
     auth_transport_tests.cpp
     card_input_policy_tests.cpp
+    character_component_transform_tests.cpp
     cloud_layout_startup_policy_tests.cpp
     cloud_layout_tests.cpp
     config_tests.cpp

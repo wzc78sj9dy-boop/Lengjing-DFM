@@ -16,6 +16,7 @@ void RunPlayerBoundsTests() {
     using lengjing::game::native::BoneFrameCacheSource;
     using lengjing::game::native::BoneFrameRecordSource;
     using lengjing::game::native::SelectFallbackBoneFrameSource;
+    using lengjing::game::native::ShouldReadSecondaryBoneArray;
     using lengjing::game::native::ShouldResetBoneFrameCache;
     using lengjing::game::native::PlayerBoneScreenPoint;
     using lengjing::game::native::PlayerScreenBounds;
@@ -226,6 +227,11 @@ void RunPlayerBoundsTests() {
     REQUIRE(PreferBoneFrameCandidate(8, true, 15, true));
     REQUIRE(!PreferBoneFrameCandidate(15, true, 8, true));
     REQUIRE(!PreferBoneFrameCandidate(8, true, 8, true));
+    REQUIRE(ShouldReadSecondaryBoneArray(true, false, 0, 15));
+    REQUIRE(!ShouldReadSecondaryBoneArray(true, true, 0, 15));
+    REQUIRE(!ShouldReadSecondaryBoneArray(true, true, 14, 15));
+    REQUIRE(ShouldReadSecondaryBoneArray(false, true, 14, 15));
+    REQUIRE(!ShouldReadSecondaryBoneArray(false, true, 15, 15));
 
     REQUIRE(!ShouldResetBoneFrameCache(
         ordinaryPreferred,

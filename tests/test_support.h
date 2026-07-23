@@ -27,6 +27,7 @@ void RunAuthConfigTests();
 void RunAuthSessionTests();
 void RunAuthTransportTests();
 void RunCardInputPolicyTests();
+void RunCharacterComponentTransformTests();
 void RunCloudLayoutStartupPolicyTests();
 void RunCloudLayoutTests();
 void RunCpuMailboxPolicyTests();

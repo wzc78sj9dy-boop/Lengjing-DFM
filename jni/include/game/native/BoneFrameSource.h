@@ -37,6 +37,16 @@ constexpr bool PreferBoneFrameCandidate(
     return candidateValidCount > currentValidCount;
 }
 
+constexpr bool ShouldReadSecondaryBoneArray(
+    bool rebuildResolvedTransform,
+    bool primaryBoneArrayAvailable,
+    std::size_t primaryValidCount,
+    std::size_t expectedCount) noexcept {
+    return rebuildResolvedTransform
+        ? !primaryBoneArrayAvailable
+        : primaryValidCount < expectedCount;
+}
+
 inline BoneFrameSourceSelection SelectPreferredBoneFrameSource(
     const BoneFrameRecordSource& record,
     std::uintptr_t ordinaryRoot,
