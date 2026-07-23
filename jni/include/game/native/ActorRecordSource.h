@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace lengjing::game::native {
 
@@ -18,12 +20,6 @@ struct ActorRecordSource {
 
 inline constexpr std::uintptr_t kOrdinaryActorRootOffset = 0x180;
 inline constexpr std::uintptr_t kOrdinaryActorMeshOffset = 0x3D0;
-
-constexpr bool IsActorPresentInCurrentLevel(
-    bool ordinarySnapshotComplete,
-    bool ordinaryMember) noexcept {
-    return !ordinarySnapshotComplete || ordinaryMember;
-}
 
 inline ActorRecordSource MakeResolvedActorRecord(
     std::uintptr_t actor,
@@ -82,6 +78,29 @@ inline bool MergeActorRecordSource(
     destination.ordinaryMesh = ordinaryMesh;
     destination.ordinarySource = hasOrdinarySource;
     return true;
+}
+
+inline std::vector<ActorRecordSource> MergeCurrentLevelActorRecordSources(
+    const std::vector<std::uintptr_t>& currentActorAddresses,
+    const std::vector<ActorRecordSource>& decodedRecords) {
+    std::vector<ActorRecordSource> result;
+    result.reserve(currentActorAddresses.size());
+    std::unordered_map<std::uintptr_t, std::size_t> indices;
+    indices.reserve(currentActorAddresses.size());
+
+    for (const std::uintptr_t actor : currentActorAddresses) {
+        if (actor == 0) continue;
+        const auto inserted = indices.emplace(actor, result.size());
+        if (!inserted.second) continue;
+        result.push_back(MakeOrdinaryActorRecord(actor));
+    }
+
+    for (const ActorRecordSource& decoded : decodedRecords) {
+        const auto found = indices.find(decoded.actor);
+        if (found == indices.end()) continue;
+        MergeActorRecordSource(result[found->second], decoded);
+    }
+    return result;
 }
 
 template <typename ReadPointer>

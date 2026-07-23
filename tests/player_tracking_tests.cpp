@@ -4,49 +4,42 @@
 
 void RunPlayerTrackingTests() {
     using lengjing::game::native::HasComparablePlayerTeams;
-    using lengjing::game::native::IsPlayerTrackable;
     using lengjing::game::native::HasUsablePlayerState;
     using lengjing::game::native::IsEnemyEligible;
+    using lengjing::game::native::IsPlayerTeammate;
     using lengjing::game::native::IsSamePlayerTeam;
-    using lengjing::game::native::IsPlayerVisualEligible;
     using lengjing::game::native::IsWithinOffscreenWarningRange;
     using lengjing::game::native::IsWithinPlayerDrawRange;
-    using lengjing::game::native::MakePlayerTrackingData;
-    using lengjing::game::native::PlayerDirectionData;
-    using lengjing::game::native::PlayerTrackingData;
+    using lengjing::game::native::PlayerLifecycleDisposition;
     using lengjing::game::native::ResolvePlayerIdentity;
+    using lengjing::game::native::ResolvePlayerLifecycleDisposition;
     using lengjing::game::native::ResolvePlayerTeam;
     using lengjing::game::native::ResolveDownedState;
 
-    const PlayerTrackingData complete{true, true, true};
-    REQUIRE(IsPlayerTrackable(complete, PlayerDirectionData{false}));
-    REQUIRE(IsPlayerTrackable(complete, PlayerDirectionData{true}));
-
-    REQUIRE(!IsPlayerTrackable(
-        PlayerTrackingData{false, true, true},
-        PlayerDirectionData{true}));
-    REQUIRE(!IsPlayerTrackable(
-        PlayerTrackingData{true, false, true},
-        PlayerDirectionData{true}));
-    REQUIRE(!IsPlayerTrackable(
-        PlayerTrackingData{true, true, false},
-        PlayerDirectionData{true}));
-    REQUIRE(IsPlayerTrackable(
-        MakePlayerTrackingData(true, true, 100.0f, false),
-        PlayerDirectionData{}));
-    REQUIRE(IsPlayerTrackable(
-        MakePlayerTrackingData(true, true, 0.0f, true),
-        PlayerDirectionData{}));
-    REQUIRE(!IsPlayerTrackable(
-        MakePlayerTrackingData(true, true, 0.0f, false),
-        PlayerDirectionData{}));
-    REQUIRE(!IsPlayerTrackable(
-        MakePlayerTrackingData(true, false, 100.0f, false),
-        PlayerDirectionData{}));
-    REQUIRE(IsPlayerVisualEligible(true, false, false));
-    REQUIRE(IsPlayerVisualEligible(true, true, true));
-    REQUIRE(!IsPlayerVisualEligible(true, true, false));
-    REQUIRE(!IsPlayerVisualEligible(false, false, true));
+    REQUIRE(ResolvePlayerLifecycleDisposition(
+        true, true, 100.0f, false, false, false, false) ==
+        PlayerLifecycleDisposition::Visual);
+    REQUIRE(ResolvePlayerLifecycleDisposition(
+        true, true, 0.0f, true, true, false, false) ==
+        PlayerLifecycleDisposition::Visual);
+    REQUIRE(ResolvePlayerLifecycleDisposition(
+        true, true, 0.0f, true, false, true, false) ==
+        PlayerLifecycleDisposition::AimOnly);
+    REQUIRE(ResolvePlayerLifecycleDisposition(
+        true, true, 0.0f, true, false, false, false) ==
+        PlayerLifecycleDisposition::Excluded);
+    REQUIRE(ResolvePlayerLifecycleDisposition(
+        true, true, 0.0f, true, false, true, true) ==
+        PlayerLifecycleDisposition::Excluded);
+    REQUIRE(ResolvePlayerLifecycleDisposition(
+        true, true, 0.0f, false, true, true, false) ==
+        PlayerLifecycleDisposition::Excluded);
+    REQUIRE(ResolvePlayerLifecycleDisposition(
+        false, true, 100.0f, false, true, true, false) ==
+        PlayerLifecycleDisposition::Excluded);
+    REQUIRE(ResolvePlayerLifecycleDisposition(
+        true, false, 100.0f, false, true, true, false) ==
+        PlayerLifecycleDisposition::Excluded);
 
     REQUIRE(HasUsablePlayerState(true, false));
     REQUIRE(HasUsablePlayerState(false, true));
@@ -59,12 +52,18 @@ void RunPlayerTrackingTests() {
     REQUIRE(!HasComparablePlayerTeams(-1, 2));
     REQUIRE(IsSamePlayerTeam(3, 3));
     REQUIRE(!IsSamePlayerTeam(3, 4));
+    REQUIRE(IsPlayerTeammate(3, 3, false, 3, 4, 5, 6));
+    REQUIRE(IsPlayerTeammate(5, 6, true, 3, 3, 5, 6));
+    REQUIRE(IsPlayerTeammate(5, 6, true, 3, 4, 5, 5));
+    REQUIRE(!IsPlayerTeammate(5, 6, false, 3, 3, 5, 6));
+    REQUIRE(!IsPlayerTeammate(-1, -1, true, -1, -1, -1, -1));
     REQUIRE(!IsEnemyEligible(3, 3, false));
     REQUIRE(!IsEnemyEligible(3, 3, true));
     REQUIRE(IsEnemyEligible(3, 4, false));
     REQUIRE(IsEnemyEligible(3, 4, true));
-    REQUIRE(!IsEnemyEligible(3, -1, false));
+    REQUIRE(IsEnemyEligible(3, -1, false));
     REQUIRE(IsEnemyEligible(3, -1, true));
+    REQUIRE(IsEnemyEligible(-1, -1, false));
     REQUIRE(IsEnemyEligible(-1, -1, true));
 
     REQUIRE(IsWithinPlayerDrawRange(100.0f, 100));
