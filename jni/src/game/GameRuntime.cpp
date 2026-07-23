@@ -171,7 +171,8 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
                 platform::PerformancePhase::DataFrame);
             platform::RecordPerformanceCount(
                 platform::PerformanceCounter::DataFrames);
-            if (settings.visual.coordinateDecrypt) {
+            if (settings.visual.coordinateDecrypt ||
+                settings.visual.hardwareBreakpointDecrypt) {
                 platform::RecordPerformanceCount(
                     platform::PerformanceCounter::CoordinateFrames);
             }

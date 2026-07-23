@@ -131,7 +131,8 @@ void RunConfigTests() {
     expected.runtime.gameVersionIndex = 2;
     expected.runtime.driverIndex = 1;
     expected.visual.modelGeometry = true;
-    expected.visual.coordinateDecrypt = true;
+    expected.visual.coordinateDecrypt = false;
+    expected.visual.hardwareBreakpointDecrypt = true;
     expected.visual.algorithmDecrypt = true;
     expected.visual.crosshair = true;
     expected.visual.playerViewRay = true;
@@ -179,6 +180,8 @@ void RunConfigTests() {
     REQUIRE(config.Save(expected, &error));
     REQUIRE(error.empty());
     const std::string serialized = ReadText(path);
+    REQUIRE(serialized.find("\"coordinate_decrypt2\": true") !=
+        std::string::npos);
     REQUIRE(serialized.find("algorithm_decrypt") == std::string::npos);
     REQUIRE(serialized.find("\"cover\"") != std::string::npos);
     REQUIRE(serialized.find("\"cover_mode\"") != std::string::npos);
@@ -198,7 +201,8 @@ void RunConfigTests() {
     REQUIRE(actual.runtime.gameVersionIndex == expected.runtime.gameVersionIndex);
     REQUIRE(actual.runtime.driverIndex == expected.runtime.driverIndex);
     REQUIRE(actual.visual.modelGeometry == expected.visual.modelGeometry);
-    REQUIRE(actual.visual.coordinateDecrypt);
+    REQUIRE(!actual.visual.coordinateDecrypt);
+    REQUIRE(actual.visual.hardwareBreakpointDecrypt);
     REQUIRE(!actual.visual.algorithmDecrypt);
     REQUIRE(actual.visual.crosshair == expected.visual.crosshair);
     REQUIRE(actual.visual.playerViewRay == expected.visual.playerViewRay);
@@ -244,6 +248,17 @@ void RunConfigTests() {
     REQUIRE(!actual.system.toastNotifications);
 
     {
+        std::ofstream conflictingDecrypts(
+            path, std::ios::binary | std::ios::trunc);
+        conflictingDecrypts <<
+            R"({"schema_version":1,"visual":{"coordinate_decrypt":true,"coordinate_decrypt2":true}})";
+    }
+    actual = {};
+    REQUIRE(config.Load(actual, &error));
+    REQUIRE(!actual.visual.coordinateDecrypt);
+    REQUIRE(actual.visual.hardwareBreakpointDecrypt);
+
+    {
         std::ofstream legacy(path, std::ios::binary | std::ios::trunc);
         legacy << R"({"schema_version":1,"aim":{)"
                << R"("trajectory_tracking":true,)"
@@ -260,7 +275,9 @@ void RunConfigTests() {
     actual.aim.playerDeadBox = false;
     actual.aim.robotDeadBox = true;
     actual.aim.hitPercentage = 17;
+    actual.visual.hardwareBreakpointDecrypt = true;
     REQUIRE(config.Load(actual, &error));
+    REQUIRE(!actual.visual.hardwareBreakpointDecrypt);
     REQUIRE(!actual.aim.trajectoryTracking);
     REQUIRE(!actual.aim.rejectTargetState);
     REQUIRE(!actual.aim.rejectDeadTarget);
@@ -391,6 +408,19 @@ void RunConfigTests() {
         std::filesystem::path(__FILE__).parent_path().parent_path() /
         "jni" / "src" / "ui" / "MenuView.cpp";
     const std::string menuText = ReadText(menuSource);
+    REQUIRE(
+        menuText.find("Toggle(\"解密1\", visual.coordinateDecrypt)") !=
+        std::string::npos);
+    REQUIRE(
+        menuText.find("visual.hardwareBreakpointDecrypt = false;") !=
+        std::string::npos);
+    REQUIRE(
+        menuText.find(
+            "Toggle(\"解密2\", visual.hardwareBreakpointDecrypt)") !=
+        std::string::npos);
+    REQUIRE(
+        menuText.find("visual.coordinateDecrypt = false;") !=
+        std::string::npos);
     for (const char* inputModeName : {
              "只读", "写入触摸（不推荐）", "程序陀螺仪", "内核触摸", "内核陀螺仪"}) {
         REQUIRE(menuText.find(inputModeName) != std::string::npos);

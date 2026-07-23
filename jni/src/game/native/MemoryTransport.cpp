@@ -2,6 +2,7 @@
 
 #include "game/native/KernelModuleLoader.h"
 #include "game/native/KernelRpcTransport.h"
+#include "game/native/PerfExecutionBreakpoint.h"
 #include "game/native/PacgaOperandResolver.h"
 #include "game/native/PtraceExecutionContextProvider.h"
 #include "game/native/ThreadContextDeviceTransport.h"
@@ -34,6 +35,13 @@
 
 namespace lengjing::game::native {
 namespace {
+
+static_assert(sizeof(hwbp_point_config) == 24,
+              "unexpected Paradise breakpoint point layout");
+static_assert(sizeof(hwbp_record) == 848,
+              "unexpected Paradise breakpoint record layout");
+static_assert(HWBP_MAX_RECORDS == kExecutionBreakpointRecordLimit,
+              "Paradise breakpoint record limit mismatch");
 
 constexpr std::uintptr_t kMinimumRemoteAddress = 0x10000000ULL;
 constexpr std::uintptr_t kMaximumRemoteAddress = 0x10000000000ULL;
@@ -405,6 +413,12 @@ bool FindExecutableMapping(pid_t processId,
 }  // namespace
 
 struct MemoryTransport::Impl {
+    enum class ExecutionBreakpointBackend : std::uint8_t {
+        None,
+        Kernel,
+        Perf,
+    };
+
     struct PtraceOracleRootSnapshot {
         std::uintptr_t bridge = 0;
         std::uintptr_t entry = 0;
@@ -457,6 +471,13 @@ struct MemoryTransport::Impl {
     std::unique_ptr<KernelRpcTransport> privateRpc;
     kernel_rpc_abi::ProcessHandle privateProcessHandle =
         kernel_rpc_abi::kInvalidProcessHandle;
+    PerfExecutionBreakpoint perfExecutionBreakpoint;
+    ExecutionBreakpointBackend executionBreakpointBackend =
+        ExecutionBreakpointBackend::None;
+    bool executionBreakpointConfigured = false;
+    std::uintptr_t executionBreakpointAddress = 0;
+    std::array<hwbp_record, HWBP_MAX_RECORDS>
+        executionBreakpointRecordBuffer{};
     int processMemFd = -1;
     int threadContextFd = -1;
     std::unique_ptr<ThreadContextDeviceTransport> threadContextTransport;
@@ -505,6 +526,7 @@ struct MemoryTransport::Impl {
         nextPtraceOracleResolve = {};
         coordinateReplayLayout = {};
         coordinateBatchDisabled = false;
+        static_cast<void>(RemoveExecutionBreakpointsUnlocked());
         if (privateRpc != nullptr &&
             privateProcessHandle != kernel_rpc_abi::kInvalidProcessHandle) {
             static_cast<void>(privateRpc->ReleaseProcessHandle(
@@ -1395,6 +1417,191 @@ struct MemoryTransport::Impl {
         return read;
     }
 
+    bool SupportsExecutionBreakpoints() const noexcept {
+        std::lock_guard<std::mutex> lock(ioMutex);
+        if (!open || processId <= 0) {
+            return false;
+        }
+        if (mode == MemoryTransportMode::KernelDriver &&
+            kernel != nullptr) {
+            std::uint64_t breakpointCount = 0;
+            std::uint64_t watchpointCount = 0;
+            try {
+                if (kernel->hwbp_get_info(
+                        &breakpointCount, &watchpointCount) &&
+                    breakpointCount != 0) {
+                    return true;
+                }
+            } catch (...) {
+            }
+        }
+        return PerfExecutionBreakpoint::IsSupported();
+    }
+
+    bool ConfigureExecutionBreakpoint(std::uintptr_t address) noexcept {
+        std::lock_guard<std::mutex> lock(ioMutex);
+        if (!open || processId <= 0 ||
+            !IsRemoteRangeValid(address, 4) || (address & 3U) != 0) {
+            return false;
+        }
+
+        if (executionBreakpointConfigured &&
+            executionBreakpointAddress == address) {
+            return true;
+        }
+        if (!RemoveExecutionBreakpointsUnlocked()) return false;
+
+        bool kernelBreakpointAvailable = false;
+        if (mode == MemoryTransportMode::KernelDriver &&
+            kernel != nullptr) {
+            std::uint64_t breakpointCount = 0;
+            std::uint64_t watchpointCount = 0;
+            try {
+                kernelBreakpointAvailable = kernel->hwbp_get_info(
+                        &breakpointCount, &watchpointCount) &&
+                    breakpointCount != 0;
+            } catch (...) {
+                kernelBreakpointAvailable = false;
+            }
+        }
+
+        if (kernelBreakpointAvailable) {
+            hwbp_point_config point{};
+            point.bt = HWBP_BREAKPOINT_X;
+            point.bl = HWBP_BREAKPOINT_LEN_4;
+            point.bs = SCOPE_ALL_THREADS;
+            point.hit_addr = static_cast<std::uint64_t>(address);
+            try {
+                if (kernel->hwbp_set(processId, &point, 1)) {
+                    executionBreakpointBackend =
+                        ExecutionBreakpointBackend::Kernel;
+                    executionBreakpointConfigured = true;
+                    executionBreakpointAddress = address;
+                    return true;
+                }
+                static_cast<void>(kernel->hwbp_remove(processId));
+            } catch (...) {
+                try {
+                    static_cast<void>(kernel->hwbp_remove(processId));
+                } catch (...) {
+                }
+            }
+        }
+
+        if (!PerfExecutionBreakpoint::IsSupported() ||
+            !perfExecutionBreakpoint.Configure(processId, address)) {
+            return false;
+        }
+        executionBreakpointBackend =
+            ExecutionBreakpointBackend::Perf;
+        executionBreakpointConfigured = true;
+        executionBreakpointAddress = address;
+        return true;
+    }
+
+    bool ReadExecutionBreakpointRecords(
+        ExecutionBreakpointRecord* records,
+        std::size_t capacity,
+        std::size_t& recordsRead,
+        std::uintptr_t& hitAddress,
+        std::size_t& totalRecords) noexcept {
+        recordsRead = 0;
+        hitAddress = 0;
+        totalRecords = 0;
+        std::lock_guard<std::mutex> lock(ioMutex);
+        if (!open || processId <= 0 || !executionBreakpointConfigured ||
+            records == nullptr || capacity == 0) {
+            return false;
+        }
+
+        if (executionBreakpointBackend ==
+            ExecutionBreakpointBackend::Perf) {
+            return perfExecutionBreakpoint.ReadRecords(
+                records,
+                capacity,
+                recordsRead,
+                hitAddress,
+                totalRecords);
+        }
+        if (executionBreakpointBackend !=
+                ExecutionBreakpointBackend::Kernel ||
+            mode != MemoryTransportMode::KernelDriver ||
+            kernel == nullptr) {
+            return false;
+        }
+
+        const std::size_t requested = std::min(
+            capacity, static_cast<std::size_t>(HWBP_MAX_RECORDS));
+        std::uint64_t nativeHitAddress = 0;
+        int nativeTotalRecords = 0;
+        try {
+            const int copied = kernel->hwbp_read_records(
+                processId,
+                0,
+                executionBreakpointRecordBuffer.data(),
+                static_cast<int>(requested),
+                &nativeHitAddress,
+                &nativeTotalRecords);
+            if (copied < 0 || static_cast<std::size_t>(copied) > requested ||
+                nativeTotalRecords < 0 ||
+                nativeTotalRecords > HWBP_MAX_RECORDS) {
+                return false;
+            }
+            for (int index = 0; index < copied; ++index) {
+                const hwbp_record& source =
+                    executionBreakpointRecordBuffer[
+                        static_cast<std::size_t>(index)];
+                records[static_cast<std::size_t>(index)] = {
+                    source.tid,
+                    source.hit_count,
+                    static_cast<std::uintptr_t>(source.pc),
+                    static_cast<std::uintptr_t>(source.sp),
+                    static_cast<std::uintptr_t>(source.x0),
+                    static_cast<std::uintptr_t>(source.x23),
+                };
+            }
+            recordsRead = static_cast<std::size_t>(copied);
+            hitAddress = static_cast<std::uintptr_t>(nativeHitAddress);
+            totalRecords = static_cast<std::size_t>(nativeTotalRecords);
+            return true;
+        } catch (...) {
+            recordsRead = 0;
+            hitAddress = 0;
+            totalRecords = 0;
+            return false;
+        }
+    }
+
+    bool RemoveExecutionBreakpointsUnlocked() noexcept {
+        if (!executionBreakpointConfigured) return true;
+        bool removed = true;
+        if (executionBreakpointBackend ==
+            ExecutionBreakpointBackend::Kernel) {
+            if (kernel == nullptr || processId <= 0) {
+                removed = false;
+            } else {
+                try {
+                    removed = kernel->hwbp_remove(processId);
+                } catch (...) {
+                    removed = false;
+                }
+            }
+        } else if (executionBreakpointBackend ==
+                   ExecutionBreakpointBackend::Perf) {
+            removed = perfExecutionBreakpoint.Remove();
+        }
+        executionBreakpointBackend =
+            ExecutionBreakpointBackend::None;
+        executionBreakpointConfigured = false;
+        executionBreakpointAddress = 0;
+        return removed;
+    }
+
+    bool RemoveExecutionBreakpoints() noexcept {
+        std::lock_guard<std::mutex> lock(ioMutex);
+        return RemoveExecutionBreakpointsUnlocked();
+    }
+
     bool ReadCoordinateMemory(
         std::uintptr_t address,
         void* destination,
@@ -2016,6 +2223,35 @@ std::uintptr_t MemoryTransport::ModuleBase(std::string_view moduleName) {
 
 bool MemoryTransport::IsOpen() const noexcept {
     return impl_ != nullptr && impl_->IsOpen();
+}
+
+bool MemoryTransport::SupportsExecutionBreakpoints() const noexcept {
+    return impl_ != nullptr && impl_->SupportsExecutionBreakpoints();
+}
+
+bool MemoryTransport::ConfigureExecutionBreakpoint(
+    std::uintptr_t address) noexcept {
+    return impl_ != nullptr && impl_->ConfigureExecutionBreakpoint(address);
+}
+
+bool MemoryTransport::ReadExecutionBreakpointRecords(
+    ExecutionBreakpointRecord* records,
+    std::size_t capacity,
+    std::size_t& recordsRead,
+    std::uintptr_t& hitAddress,
+    std::size_t& totalRecords) noexcept {
+    if (impl_ == nullptr) {
+        recordsRead = 0;
+        hitAddress = 0;
+        totalRecords = 0;
+        return false;
+    }
+    return impl_->ReadExecutionBreakpointRecords(
+        records, capacity, recordsRead, hitAddress, totalRecords);
+}
+
+bool MemoryTransport::RemoveExecutionBreakpoints() noexcept {
+    return impl_ != nullptr && impl_->RemoveExecutionBreakpoints();
 }
 
 #if LENGJING_ENABLE_PROJECTILE_TRACKING

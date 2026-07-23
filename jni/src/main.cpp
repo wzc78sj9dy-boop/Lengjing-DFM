@@ -129,14 +129,20 @@ int AlgorithmCoordinateProbeSeconds() {
 
 int CoordinateProbeDriver() {
     const char* value = std::getenv("LENGJING_COORDINATE_PROBE_DRIVER");
-    if (value == nullptr || value[0] == '\0') return 1;
+    if (value == nullptr || value[0] == '\0') return 0;
     int driver = -1;
     const char* end = value + std::char_traits<char>::length(value);
     const auto parsed = std::from_chars(value, end, driver, 10);
     return parsed.ec == std::errc{} && parsed.ptr == end &&
             lengjing::game::native::IsValidMemoryTransportMode(driver)
         ? driver
-        : 1;
+        : 0;
+}
+
+bool HardwareBreakpointCoordinateProbe() {
+    const char* value =
+        std::getenv("LENGJING_COORDINATE_PROBE_DECRYPT2");
+    return value != nullptr && value[0] == '1' && value[1] == '\0';
 }
 
 int RunCoordinateProbe(
@@ -158,9 +164,11 @@ int RunCoordinateProbe(
     options.programDirectory = programDirectory;
     options.cloudLayout = std::move(cloudLayout);
     options.algorithmPosition = algorithmPosition;
-
     lengjing::game::FeatureSettings settings;
-    settings.visual.coordinateDecrypt = true;
+    settings.visual.hardwareBreakpointDecrypt =
+        HardwareBreakpointCoordinateProbe();
+    settings.visual.coordinateDecrypt =
+        !settings.visual.hardwareBreakpointDecrypt;
     lengjing::game::GameRuntime runtime(
         lengjing::game::CreateNativeGameBackend());
     runtime.UpdateSettings(settings);
@@ -174,6 +182,7 @@ int RunCoordinateProbe(
     }
 
     lengjing::game::RuntimeStatus last{};
+    std::uint64_t peakPublishedCoordinates = 0;
     lengjing::game::CoordinateDecryptError lastReportedError =
         lengjing::game::CoordinateDecryptError::None;
     int lastReportedSystemError = 0;
@@ -233,15 +242,39 @@ int RunCoordinateProbe(
             lastReportedRuntimeSystemError = 0;
         }
         last = status;
+        peakPublishedCoordinates = std::max(
+            peakPublishedCoordinates, status.coordinateSuccesses);
         if (status.phase == lengjing::game::RuntimePhase::Faulted) break;
         std::this_thread::sleep_for(100ms);
     }
     runtime.Stop();
     runtime.WaitUntilStopped();
+    std::fprintf(
+        stderr,
+        "[coordinate-probe] requested=%d entry_ready=%d "
+        "context_ready=%d thread=%d guest_pc=0x%llx generation=%llu "
+        "attempts=%llu published=%llu peak_published=%llu "
+        "error=%u system_error=%d "
+        "phase=%u failure=%u\n",
+        last.coordinateRequested ? 1 : 0,
+        last.coordinateEntryReady ? 1 : 0,
+        last.coordinateContextReady ? 1 : 0,
+        last.coordinateThreadId,
+        static_cast<unsigned long long>(last.coordinateGuestPc),
+        static_cast<unsigned long long>(
+            last.coordinateContextGeneration),
+        static_cast<unsigned long long>(last.coordinateAttempts),
+        static_cast<unsigned long long>(last.coordinateSuccesses),
+        static_cast<unsigned long long>(peakPublishedCoordinates),
+        static_cast<unsigned>(last.coordinateError),
+        last.coordinateSystemError,
+        static_cast<unsigned>(last.phase),
+        static_cast<unsigned>(last.failureKind));
+    std::fflush(stderr);
     const int runtimeExitCode = lengjing::app::ResolveRuntimeExitCode(
         cloudLayoutActive, last.phase, last.failureKind);
     if (runtimeExitCode != 0) return runtimeExitCode;
-    return last.coordinateSuccesses != 0
+    return peakPublishedCoordinates != 0
         ? 0
         : (last.coordinateContextReady
             ? 13

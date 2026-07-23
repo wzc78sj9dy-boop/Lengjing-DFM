@@ -3,6 +3,8 @@
 #include <exception>
 #include <iostream>
 
+void RunExecutionVeneerLocatorTests();
+
 int main() {
     try {
         RunActorFrameVisitSetTests();
@@ -24,12 +26,15 @@ int main() {
         RunCoordinatePoolPolicyTests();
         RunCoordinateOutputPolicyTests();
         RunCpuMailboxPolicyTests();
+        RunExecutionVeneerLocatorTests();
         RunFrameProjectionTests();
         RunGameVersionPolicyTests();
         RunGeometrySceneBuildPolicyTests();
+        RunHardwareBreakpointCoordinateRuntimeTests();
         RunHudMapTests();
         RunKernelModuleCatalogTests();
         RunOverlayContrastPolicyTests();
+        RunPerfExecutionBreakpointTests();
         RunPlayerBoundsTests();
         RunPlayerDetailReadPolicyTests();
         RunPlayerTracerPolicyTests();

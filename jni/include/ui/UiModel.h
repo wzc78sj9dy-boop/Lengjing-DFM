@@ -97,6 +97,7 @@ struct VisualSettings {
     bool modelGeometry = false;
     bool visibilityColor = false;
     bool coordinateDecrypt = false;
+    bool hardwareBreakpointDecrypt = false;
     bool algorithmDecrypt = false;
 
     bool box = true;

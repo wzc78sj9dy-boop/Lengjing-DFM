@@ -159,6 +159,7 @@ Json Serialize(const ui::UiModel& model) {
             {"model_geometry", model.visual.modelGeometry},
             {"visibility_color", model.visual.visibilityColor},
             {"coordinate_decrypt", model.visual.coordinateDecrypt},
+            {"coordinate_decrypt2", model.visual.hardwareBreakpointDecrypt},
             {"box", model.visual.box},
             {"snapline", model.visual.snapline},
             {"skeleton", model.visual.skeleton},
@@ -260,6 +261,11 @@ void Apply(const Json& root, ui::UiModel& model) {
     LOAD_VISUAL_BOOL(modelGeometry, "model_geometry");
     LOAD_VISUAL_BOOL(visibilityColor, "visibility_color");
     LOAD_VISUAL_BOOL(coordinateDecrypt, "coordinate_decrypt");
+    model.visual.hardwareBreakpointDecrypt =
+        ReadBool(visual, "coordinate_decrypt2", false);
+    if (model.visual.hardwareBreakpointDecrypt) {
+        model.visual.coordinateDecrypt = false;
+    }
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
     LOAD_VISUAL_BOOL(algorithmDecrypt, "algorithm_decrypt");
 #else

@@ -33,6 +33,7 @@ struct BackendState {
     std::atomic_bool selfAimSetting{false};
     std::atomic_bool projectileTrackingSetting{false};
     std::atomic_bool coordinateDecryptSetting{false};
+    std::atomic_bool hardwareBreakpointDecryptSetting{false};
     std::atomic_bool algorithmDecryptSetting{false};
     std::atomic_bool frameReady{true};
     std::atomic<std::uint16_t> coordinateError{0};
@@ -81,6 +82,8 @@ public:
             settings.aim.trajectoryTracking);
         state_->coordinateDecryptSetting.store(
             settings.visual.coordinateDecrypt);
+        state_->hardwareBreakpointDecryptSetting.store(
+            settings.visual.hardwareBreakpointDecrypt);
         state_->algorithmDecryptSetting.store(
             settings.visual.algorithmDecrypt);
         probe.algorithmCoordinateRequested =
@@ -246,20 +249,32 @@ void RunRuntimeTests() {
     REQUIRE(state->selfAimSetting.load());
     REQUIRE(!state->projectileTrackingSetting.load());
     REQUIRE(!state->coordinateDecryptSetting.load());
+    REQUIRE(!state->hardwareBreakpointDecryptSetting.load());
     REQUIRE(!state->algorithmDecryptSetting.load());
 
     settings.visual.coordinateDecrypt = true;
     runtime.UpdateSettings(settings);
     REQUIRE(WaitFor([&] {
         return state->coordinateDecryptSetting.load() &&
+            !state->hardwareBreakpointDecryptSetting.load() &&
             !state->algorithmDecryptSetting.load();
     }));
 
     settings.visual.coordinateDecrypt = false;
+    settings.visual.hardwareBreakpointDecrypt = true;
+    runtime.UpdateSettings(settings);
+    REQUIRE(WaitFor([&] {
+        return !state->coordinateDecryptSetting.load() &&
+            state->hardwareBreakpointDecryptSetting.load() &&
+            !state->algorithmDecryptSetting.load();
+    }));
+
+    settings.visual.hardwareBreakpointDecrypt = false;
     settings.visual.algorithmDecrypt = true;
     runtime.UpdateSettings(settings);
     REQUIRE(WaitFor([&] {
         return !state->coordinateDecryptSetting.load() &&
+            !state->hardwareBreakpointDecryptSetting.load() &&
             state->algorithmDecryptSetting.load();
     }));
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
@@ -299,21 +314,34 @@ void RunRuntimeTests() {
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
     REQUIRE(WaitFor([&] {
         return state->coordinateDecryptSetting.load() &&
+            !state->hardwareBreakpointDecryptSetting.load() &&
             state->algorithmDecryptSetting.load() &&
             runtime.Status().algorithmCoordinateActive;
     }));
 #else
     REQUIRE(WaitFor([&] {
         return state->coordinateDecryptSetting.load() &&
+            !state->hardwareBreakpointDecryptSetting.load() &&
             state->algorithmDecryptSetting.load();
     }));
 #endif
 
     settings.visual.coordinateDecrypt = false;
+    settings.visual.hardwareBreakpointDecrypt = true;
     settings.visual.algorithmDecrypt = false;
     runtime.UpdateSettings(settings);
     REQUIRE(WaitFor([&] {
         return !state->coordinateDecryptSetting.load() &&
+            state->hardwareBreakpointDecryptSetting.load() &&
+            !state->algorithmDecryptSetting.load();
+    }));
+
+    settings.visual.coordinateDecrypt = false;
+    settings.visual.hardwareBreakpointDecrypt = false;
+    runtime.UpdateSettings(settings);
+    REQUIRE(WaitFor([&] {
+        return !state->coordinateDecryptSetting.load() &&
+            !state->hardwareBreakpointDecryptSetting.load() &&
             !state->algorithmDecryptSetting.load();
     }));
 

@@ -27,8 +27,10 @@
 #include "game/native/CharacterPositionResolver.h"
 #include "game/native/CoordinateOutputPolicy.h"
 #include "game/native/CoordinatePoolRuntime.h"
+#include "game/native/ExecutionVeneerLocator.h"
 #include "game/native/FrameProjection.h"
 #include "game/native/GeometryRuntime.h"
+#include "game/native/HardwareBreakpointCoordinateRuntime.h"
 #include "game/native/HudMapProjection.h"
 #include "game/native/MemoryTransport.h"
 #include "game/native/PlayerBounds.h"
@@ -87,6 +89,30 @@ constexpr std::uintptr_t kMaximumRemoteAddress = 0x10000000000ULL;
 constexpr std::int32_t kMaximumActorCount = 10000;
 constexpr std::int32_t kMaximumWorldObjectCount = 65536;
 constexpr std::size_t kMaximumNameLength = 249;
+
+constexpr std::uintptr_t kCoordinateIdOffset = 0x2D8;
+
+struct CoordinateExecutionProfile {
+    std::string_view buildId;
+    std::uintptr_t firstVeneerRva = 0;
+};
+
+constexpr std::array<CoordinateExecutionProfile, 1>
+    kCoordinateExecutionProfiles{{
+        {
+            "8187ddb9edbc9d5201201ffd7b008df3bfe533db",
+            UINT64_C(0x0E7F5514),
+        },
+    }};
+
+const CoordinateExecutionProfile* FindCoordinateExecutionProfile(
+    std::string_view buildId) noexcept {
+    for (const CoordinateExecutionProfile& profile :
+         kCoordinateExecutionProfiles) {
+        if (profile.buildId == buildId) return &profile;
+    }
+    return nullptr;
+}
 
 std::uintptr_t ForcedCoordinateProbeComponent() noexcept {
 #if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
@@ -268,6 +294,7 @@ enum class CoordinateTraceSource : std::uint8_t {
     Replay,
     Cache,
     StabilityHistory,
+    HardwareBreakpoint,
     Standard,
     Failure,
 };
@@ -288,6 +315,8 @@ const char* CoordinateTraceSourceName(CoordinateTraceSource source) noexcept {
             return "cache";
         case CoordinateTraceSource::StabilityHistory:
             return "history";
+        case CoordinateTraceSource::HardwareBreakpoint:
+            return "hardware_breakpoint";
         case CoordinateTraceSource::Standard:
             return "standard";
         case CoordinateTraceSource::Failure:
@@ -636,7 +665,10 @@ bool IsMappedNamedExecutableAddress(pid_t processId,
                (mappedName.back() == ' ' || mappedName.back() == '\t')) {
             mappedName.remove_suffix(1);
         }
-        return mappedName == expectedName;
+        if (mappedName == expectedName) return true;
+        const std::size_t separator = mappedName.find_last_of('/');
+        return separator != std::string_view::npos &&
+            mappedName.substr(separator + 1) == expectedName;
     }
     return false;
 }
@@ -1189,13 +1221,15 @@ public:
             return false;
         }
 
+        moduleBuildId_.clear();
+        const bool moduleBuildIdReady =
+            native::ReadRemoteElfBuildId(
+                moduleBase_,
+                &ReadElfBytes,
+                memory_.get(),
+                moduleBuildId_);
         if (options.cloudLayout != nullptr) {
-            std::string runtimeBuildId;
-            if (!native::ReadRemoteElfBuildId(
-                    moduleBase_,
-                    &ReadElfBytes,
-                    memory_.get(),
-                    runtimeBuildId)) {
+            if (!moduleBuildIdReady) {
                 probe.failureKind =
                     RuntimeFailureKind::CloudLayoutRejected;
                 SetRuntimeFailure(
@@ -1206,7 +1240,7 @@ public:
             }
             const auto cloudLayout = native::BuildRuntimeLayoutOverride(
                 options.cloudLayout.get(), layout_.processName,
-                "libUE4.so", runtimeBuildId);
+                "libUE4.so", moduleBuildId_);
             if (!cloudLayout.has_value() ||
                 !memory_->ConfigureCoordinateReplay(
                     cloudLayout->coordinateTransport) ||
@@ -1314,8 +1348,39 @@ public:
         }
         UpdateGeometryRuntime(settings);
 
+        const bool requestedHardwareBreakpoint =
+            settings.visual.hardwareBreakpointDecrypt;
+        const bool requestedCoordinateReplay =
+            settings.visual.coordinateDecrypt &&
+            !requestedHardwareBreakpoint;
+        const bool hardwareBreakpointRequestChanged =
+            hardwareBreakpointRequested_ != requestedHardwareBreakpoint;
+        if (hardwareBreakpointRequestChanged) {
+            hardwareBreakpointRetryAfter_ = {};
+            hardwareBreakpointFailure_ = {};
+        }
+        const auto hardwareBreakpointNow =
+            std::chrono::steady_clock::now();
+        if (requestedHardwareBreakpoint &&
+            !hardwareBreakpointRuntime_.IsActive() &&
+            (hardwareBreakpointRetryAfter_ ==
+                 std::chrono::steady_clock::time_point{} ||
+             hardwareBreakpointNow >= hardwareBreakpointRetryAfter_)) {
+            if (StartHardwareBreakpointRuntime()) {
+                hardwareBreakpointRetryAfter_ = {};
+            } else {
+                hardwareBreakpointRetryAfter_ =
+                    hardwareBreakpointNow +
+                    std::chrono::seconds(1);
+            }
+        } else if (!requestedHardwareBreakpoint &&
+                   hardwareBreakpointRuntime_.IsActive()) {
+            static_cast<void>(StopHardwareBreakpointRuntime());
+        }
+        hardwareBreakpointRequested_ = requestedHardwareBreakpoint;
+
         const bool coordinateRequestChanged =
-            algorithmPositionRequested_ != settings.visual.coordinateDecrypt;
+            algorithmPositionRequested_ != requestedCoordinateReplay;
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
         const bool requestedAlgorithmCoordinate =
             settings.visual.algorithmDecrypt ||
@@ -1324,7 +1389,7 @@ public:
             algorithmDecryptRequested_ != requestedAlgorithmCoordinate;
         algorithmDecryptRequested_ = requestedAlgorithmCoordinate;
 #endif
-        algorithmPositionRequested_ = settings.visual.coordinateDecrypt;
+        algorithmPositionRequested_ = requestedCoordinateReplay;
         if (coordinateRequestChanged) {
             algorithmReplayBackoffPolicy_.Reset();
             algorithmReplayPagePolicy_.Invalidate();
@@ -1336,7 +1401,8 @@ public:
             coordinatePoolContext_ = 0;
             coordinatePoolEntry_ = 0;
         }
-        bool coordinateSourceChanged = coordinateRequestChanged;
+        bool coordinateSourceChanged = coordinateRequestChanged ||
+            hardwareBreakpointRequestChanged;
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
         coordinateSourceChanged =
             coordinateSourceChanged || algorithmCoordinateRequestChanged;
@@ -1415,7 +1481,7 @@ public:
         UpdateCoordinateProbe(probe);
         const native::PositionReadMode positionMode =
             native::ResolvePositionReadMode(
-                settings.visual.coordinateDecrypt);
+                algorithmPositionRequested_);
         if (positionMode != positionReadMode_) {
             characterPositions_.Clear();
             decodedPositionCache_.clear();
@@ -1467,6 +1533,25 @@ public:
             ResetWorldState();
             world_ = context.world;
             RequestGeometryRefresh();
+        }
+        if (hardwareBreakpointRequested_ &&
+            hardwareBreakpointRuntime_.IsActive()) {
+            if (hardwareBreakpointRuntime_.Poll(context.world) &&
+                hardwareBreakpointRuntime_.PublishedCoordinateCount() !=
+                    0) {
+                hardwareBreakpointFailure_ = {};
+            } else if (
+                hardwareBreakpointRuntime_.AcceptedSampleCount() == 0) {
+                hardwareBreakpointFailure_.error =
+                    CoordinateDecryptError::PoolPointerStateInvalid;
+            } else if (
+                hardwareBreakpointRuntime_.RecordsBase() == 0) {
+                hardwareBreakpointFailure_.error =
+                    CoordinateDecryptError::PoolPointerValueInvalid;
+            } else {
+                hardwareBreakpointFailure_.error =
+                    CoordinateDecryptError::PositionReadFailed;
+            }
         }
         RefreshWorldObjectCache(context, settings);
         if (settings.visual.debugInfo) {
@@ -4207,6 +4292,132 @@ private:
         return true;
     }
 
+    bool StartHardwareBreakpointRuntime() {
+        hardwareBreakpointFailure_ = {};
+        if (memory_ == nullptr || !memory_->IsOpen() ||
+            !memory_->SupportsExecutionBreakpoints()) {
+            hardwareBreakpointFailure_.error =
+                CoordinateDecryptError::MemoryTransportUnavailable;
+            return false;
+        }
+
+        const CoordinateExecutionProfile* profile =
+            FindCoordinateExecutionProfile(moduleBuildId_);
+        if (profile == nullptr ||
+            profile->firstVeneerRva == 0 ||
+            (profile->firstVeneerRva & 3U) != 0 ||
+            moduleBase_ >
+                std::numeric_limits<std::uintptr_t>::max() -
+                    profile->firstVeneerRva) {
+            hardwareBreakpointFailure_.error =
+                CoordinateDecryptError::InvalidConfiguration;
+            return false;
+        }
+
+        const std::uintptr_t firstVeneerAddress =
+            moduleBase_ + profile->firstVeneerRva;
+        if (!IsMappedNamedExecutableAddress(
+                processId_, firstVeneerAddress, "libUE4.so")) {
+            hardwareBreakpointFailure_.error =
+                CoordinateDecryptError::EntryMappingMissing;
+            return false;
+        }
+
+        const native::ExecutionVeneerReadMemory readMemory =
+            [this](std::uintptr_t address,
+                   void* destination,
+                   std::size_t size) {
+                return memory_ != nullptr && destination != nullptr &&
+                    size != 0 && IsValidReadAddress(address) &&
+                    size <= kMaximumRemoteAddress - address &&
+                    memory_->Read(address, destination, size);
+            };
+        std::uintptr_t breakpointAddress = 0;
+        if (!native::LocateSecondExecutionVeneer(
+                moduleBase_,
+                profile->firstVeneerRva,
+                readMemory,
+                breakpointAddress)) {
+            hardwareBreakpointFailure_.error =
+                CoordinateDecryptError::EntryResolveFailed;
+            return false;
+        }
+        if (!IsMappedExecutableAddress(
+                processId_, breakpointAddress)) {
+            hardwareBreakpointFailure_.error =
+                CoordinateDecryptError::EntryMappingMissing;
+            return false;
+        }
+
+        native::HardwareBreakpointCoordinateCallbacks callbacks{
+            [this](std::uintptr_t address) {
+                return memory_ != nullptr &&
+                    memory_->ConfigureExecutionBreakpoint(address);
+            },
+            [this](native::ExecutionBreakpointRecord* records,
+                   std::size_t capacity,
+                   std::size_t& recordsRead,
+                   std::uintptr_t& hitAddress,
+                   std::size_t& totalRecords) {
+                return memory_ != nullptr &&
+                    memory_->ReadExecutionBreakpointRecords(
+                        records, capacity, recordsRead, hitAddress,
+                        totalRecords);
+            },
+            [readMemory](std::uintptr_t address,
+                         void* destination,
+                         std::size_t size) {
+                return readMemory(address, destination, size);
+            },
+            [this] {
+                return memory_ != nullptr &&
+                    memory_->RemoveExecutionBreakpoints();
+            },
+        };
+        if (!hardwareBreakpointRuntime_.Start(
+                breakpointAddress, std::move(callbacks))) {
+            hardwareBreakpointFailure_.error =
+                CoordinateDecryptError::EngineSetupFailed;
+            return false;
+        }
+        hardwareBreakpointFailure_.error =
+            CoordinateDecryptError::PoolPointerStateInvalid;
+        return true;
+    }
+
+    bool StopHardwareBreakpointRuntime() noexcept {
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            if (hardwareBreakpointRuntime_.Stop()) return true;
+        }
+        return false;
+    }
+
+    bool ReadHardwareBreakpointPosition(
+        std::uintptr_t mesh,
+        Vec3& position) {
+        if (!IsValidPointer(mesh)) return false;
+        std::uint32_t coordinateId = 0;
+        if (!ReadValue(
+                mesh + kCoordinateIdOffset, coordinateId) ||
+            coordinateId == 0) {
+            return false;
+        }
+        native::HardwareBreakpointCoordinate coordinate{};
+        if (!hardwareBreakpointRequested_ ||
+            !hardwareBreakpointRuntime_.Lookup(
+                coordinateId, world_, coordinate)) {
+            return false;
+        }
+        const Vec3 candidate{
+            coordinate.x,
+            coordinate.y,
+            coordinate.z,
+        };
+        if (!IsFinite(candidate) || !IsNonzero(candidate)) return false;
+        position = candidate;
+        return true;
+    }
+
     bool ReadActorPosition(std::uintptr_t actor, Vec3& position, bool allowCache) {
         constexpr auto kCacheLifetime = std::chrono::milliseconds(300);
         const auto now = std::chrono::steady_clock::now();
@@ -4251,6 +4462,34 @@ private:
                 : platform::PerformancePhase::PositionRead);
         if (positionSource != nullptr) {
             *positionSource = native::CharacterPositionSource::None;
+        }
+        if (hardwareBreakpointRequested_) {
+            position = Vec3{};
+            const std::uintptr_t mesh =
+                ReadPointer(actor + native::kOrdinaryActorMeshOffset);
+            const bool available =
+                ReadHardwareBreakpointPosition(mesh, position);
+            if (IsCoordinateTraceEnabled()) {
+                auto& traceRecord = coordinateTraceRecords_[actor];
+                traceRecord = CoordinateTraceRecord{};
+                traceRecord.root = decodedRoot;
+                traceRecord.component = mesh;
+                traceRecord.raw = position;
+                traceRecord.output = position;
+                traceRecord.source = available
+                    ? CoordinateTraceSource::HardwareBreakpoint
+                    : CoordinateTraceSource::Failure;
+                traceRecord.attempted = true;
+                if (!available) {
+                    traceRecord.error =
+                        CoordinateDecryptError::PositionReadFailed;
+                }
+            }
+            if (available && positionSource != nullptr) {
+                *positionSource =
+                    native::CharacterPositionSource::HardwareBreakpoint;
+            }
+            return available;
         }
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
         if (IsCoordinateTableProbeEnabled() && algorithmPositionRequested_) {
@@ -5325,6 +5564,40 @@ private:
         position = Vec3{};
         if (positionSource != nullptr) {
             *positionSource = native::CharacterPositionSource::None;
+        }
+        if (hardwareBreakpointRequested_) {
+            std::uintptr_t mesh = record.ordinaryMesh;
+            if (!IsValidPointer(mesh)) {
+                mesh = ReadPointer(
+                    record.actor + native::kOrdinaryActorMeshOffset);
+            }
+            if (!IsValidPointer(mesh) && IsValidPointer(record.mesh)) {
+                mesh = record.mesh;
+            }
+            const bool available =
+                ReadHardwareBreakpointPosition(mesh, position);
+            if (IsCoordinateTraceEnabled()) {
+                auto& traceRecord =
+                    coordinateTraceRecords_[record.actor];
+                traceRecord = CoordinateTraceRecord{};
+                traceRecord.root = record.root;
+                traceRecord.component = mesh;
+                traceRecord.raw = position;
+                traceRecord.output = position;
+                traceRecord.source = available
+                    ? CoordinateTraceSource::HardwareBreakpoint
+                    : CoordinateTraceSource::Failure;
+                traceRecord.attempted = true;
+                if (!available) {
+                    traceRecord.error =
+                        CoordinateDecryptError::PositionReadFailed;
+                }
+            }
+            if (available && positionSource != nullptr) {
+                *positionSource =
+                    native::CharacterPositionSource::HardwareBreakpoint;
+            }
+            return available;
         }
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
         if (native::ShouldReadAlgorithmCoordinate(
@@ -8243,41 +8516,76 @@ private:
             coordinatePoolSelected
             ? coordinatePoolRuntime_.Probe()
             : native::CoordinatePoolRuntimeProbe{};
-        const CoordinateFailure failure = CurrentCoordinateFailure();
-        probe.coordinateRequested = algorithmPositionRequested_;
-        probe.coordinateEntryReady = CoordinateEntryReady();
-        probe.coordinateContextReady = algorithmExecutionContextReady_;
-        probe.coordinateThreadId = algorithmExecutionContext_.threadId;
-        probe.coordinateGuestPc = coordinatePoolSelected
-            ? poolProbe.guestEntry
-            : algorithmGuestPc_;
-        probe.coordinateContextGeneration =
-            algorithmExecutionContext_.generation;
-        probe.coordinateAttempts = coordinatePoolSelected
-            ? poolProbe.attempts
-            : algorithmAttemptCount_;
-        probe.coordinateSuccesses = coordinatePoolSelected
-            ? poolProbe.successes
-            : algorithmSuccessCount_;
-        probe.coordinateError = failure.error;
-        probe.coordinateSystemError = failure.systemError;
-        probe.coordinateRead = failure.read;
-        probe.coordinatePoolPointer = poolProbe.poolPointer;
-        probe.coordinateEntry = coordinatePoolSelected
-            ? CoordinateEntryDiagnostic{
-                  poolProbe.guestEntry,
-                  poolProbe.executableMappingStart,
-                  poolProbe.executableMappingEnd,
-                  poolProbe.failedMethod,
-                  poolProbe.executableMappingFragments,
-              }
-            : CoordinateEntryDiagnostic{
-                  coordinateReplayEntrySnapshot_.entry,
-                  coordinateReplayEntrySnapshot_.mappingStart,
-                  coordinateReplayEntrySnapshot_.mappingEnd,
-                  0,
-                  0,
-              };
+        if (hardwareBreakpointRequested_) {
+            probe.coordinateRequested = true;
+            probe.coordinateEntryReady =
+                hardwareBreakpointRuntime_.IsActive();
+            probe.coordinateContextReady =
+                hardwareBreakpointRuntime_.IsActive();
+            probe.coordinateThreadId = 0;
+            probe.coordinateGuestPc =
+                hardwareBreakpointRuntime_.BreakpointAddress();
+            probe.coordinateContextGeneration = 0;
+            probe.coordinateAttempts =
+                hardwareBreakpointRuntime_.PollCount();
+            probe.coordinateSuccesses =
+                hardwareBreakpointRuntime_.PublishedCoordinateCount();
+            probe.coordinateError =
+                hardwareBreakpointFailure_.error !=
+                        CoordinateDecryptError::None
+                    ? hardwareBreakpointFailure_.error
+                    : (hardwareBreakpointRuntime_.IsActive()
+                           ? CoordinateDecryptError::None
+                           : CoordinateDecryptError::EntryResolveFailed);
+            probe.coordinateSystemError =
+                hardwareBreakpointFailure_.systemError;
+            probe.coordinateRead =
+                hardwareBreakpointFailure_.read;
+            probe.coordinatePoolPointer = {};
+            probe.coordinateEntry = CoordinateEntryDiagnostic{
+                hardwareBreakpointRuntime_.BreakpointAddress(),
+                0,
+                0,
+                0,
+                0,
+            };
+        } else {
+            const CoordinateFailure failure = CurrentCoordinateFailure();
+            probe.coordinateRequested = algorithmPositionRequested_;
+            probe.coordinateEntryReady = CoordinateEntryReady();
+            probe.coordinateContextReady = algorithmExecutionContextReady_;
+            probe.coordinateThreadId = algorithmExecutionContext_.threadId;
+            probe.coordinateGuestPc = coordinatePoolSelected
+                ? poolProbe.guestEntry
+                : algorithmGuestPc_;
+            probe.coordinateContextGeneration =
+                algorithmExecutionContext_.generation;
+            probe.coordinateAttempts = coordinatePoolSelected
+                ? poolProbe.attempts
+                : algorithmAttemptCount_;
+            probe.coordinateSuccesses = coordinatePoolSelected
+                ? poolProbe.successes
+                : algorithmSuccessCount_;
+            probe.coordinateError = failure.error;
+            probe.coordinateSystemError = failure.systemError;
+            probe.coordinateRead = failure.read;
+            probe.coordinatePoolPointer = poolProbe.poolPointer;
+            probe.coordinateEntry = coordinatePoolSelected
+                ? CoordinateEntryDiagnostic{
+                      poolProbe.guestEntry,
+                      poolProbe.executableMappingStart,
+                      poolProbe.executableMappingEnd,
+                      poolProbe.failedMethod,
+                      poolProbe.executableMappingFragments,
+                  }
+                : CoordinateEntryDiagnostic{
+                      coordinateReplayEntrySnapshot_.entry,
+                      coordinateReplayEntrySnapshot_.mappingStart,
+                      coordinateReplayEntrySnapshot_.mappingEnd,
+                      0,
+                      0,
+                  };
+        }
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
         probe.algorithmCoordinateRequested = algorithmDecryptRequested_;
         probe.algorithmCoordinateActive =
@@ -8350,6 +8658,10 @@ private:
         geometrySnapshotReady_ = false;
         geometryRefreshEpoch_ = 0;
         geometryRetryAfter_ = {};
+        if (!StopHardwareBreakpointRuntime()) {
+            aimEnabled_.store(false, std::memory_order_release);
+            return false;
+        }
         algorithmPositionRuntime_.Reset();
         coordinatePoolRuntime_.Reset();
         if (memory_ != nullptr) memory_->Close();
@@ -8375,6 +8687,9 @@ private:
         algorithmFrameAgedDecodedFailure_ = false;
         decodedPositionPending_.clear();
         algorithmPositionRequested_ = false;
+        hardwareBreakpointRequested_ = false;
+        hardwareBreakpointRetryAfter_ = {};
+        hardwareBreakpointFailure_ = {};
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
         algorithmDecryptRequested_ = false;
         algorithmCoordinateSnapshot_.clear();
@@ -8412,6 +8727,7 @@ private:
         coordinatePoolEntry_ = 0;
         processId_ = -1;
         moduleBase_ = 0;
+        moduleBuildId_.clear();
         layout_ = VersionLayout{};
         options_ = RuntimeOptions{};
         customItemPath_.clear();
@@ -8438,6 +8754,8 @@ private:
     std::unique_ptr<native::MemoryTransport> memory_;
     native::AlgorithmPositionRuntime algorithmPositionRuntime_{};
     native::CoordinatePoolRuntime coordinatePoolRuntime_{};
+    native::HardwareBreakpointCoordinateRuntime
+        hardwareBreakpointRuntime_{};
     native::AlgorithmExecutionContextRefreshPolicy
         algorithmExecutionContextRefreshPolicy_{};
     native::AlgorithmReplayBackoffPolicy algorithmReplayBackoffPolicy_{};
@@ -8455,6 +8773,11 @@ private:
     bool algorithmEntryReady_ = false;
     bool algorithmReplayAllowedThisFrame_ = true;
     bool algorithmPositionRequested_ = false;
+    bool hardwareBreakpointRequested_ = false;
+    std::chrono::steady_clock::time_point
+        hardwareBreakpointRetryAfter_{};
+    CoordinateFailure hardwareBreakpointFailure_{};
+    std::string moduleBuildId_;
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
     bool algorithmDecryptRequested_ = false;
     bool algorithmCoordinateTableReady_ = false;

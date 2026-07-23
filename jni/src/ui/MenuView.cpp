@@ -787,17 +787,19 @@ void RenderRuntime(UiModel& model, UiActions& actions) {
             ImGuiTableFlags_SizingStretchSame |
                 ImGuiTableFlags_NoSavedSettings)) {
         ImGui::TableNextColumn();
-        Mark(
-            actions,
-            SettingsDomain::Visual,
-            Toggle("坐标解密", visual.coordinateDecrypt));
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
+        if (Toggle("解密1", visual.coordinateDecrypt)) {
+            if (visual.coordinateDecrypt) {
+                visual.hardwareBreakpointDecrypt = false;
+            }
+            actions.SettingsChanged(SettingsDomain::Visual);
+        }
         ImGui::TableNextColumn();
-        Mark(
-            actions,
-            SettingsDomain::Visual,
-            Toggle("算法解密", visual.algorithmDecrypt));
-#endif
+        if (Toggle("解密2", visual.hardwareBreakpointDecrypt)) {
+            if (visual.hardwareBreakpointDecrypt) {
+                visual.coordinateDecrypt = false;
+            }
+            actions.SettingsChanged(SettingsDomain::Visual);
+        }
         ImGui::EndTable();
     }
     ImGui::Dummy(ImVec2(0.0f, 4.0f));
