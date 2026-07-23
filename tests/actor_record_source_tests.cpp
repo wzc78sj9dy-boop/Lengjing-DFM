@@ -1,25 +1,54 @@
 #include "game/native/ActorRecordSource.h"
 #include "test_support.h"
 
+#include <vector>
+
 void RunActorRecordSourceTests() {
     using lengjing::game::native::ActorRecordSource;
     using lengjing::game::native::FillOrdinaryActorPointers;
-    using lengjing::game::native::IsActorPresentInCurrentLevel;
     using lengjing::game::native::MakeOrdinaryActorRecord;
     using lengjing::game::native::MakeResolvedActorRecord;
     using lengjing::game::native::MergeActorRecordSource;
+    using lengjing::game::native::MergeCurrentLevelActorRecordSources;
     using lengjing::game::native::ReadActorRecordSourceWithFallback;
-
-    REQUIRE(IsActorPresentInCurrentLevel(false, false));
-    REQUIRE(IsActorPresentInCurrentLevel(false, true));
-    REQUIRE(IsActorPresentInCurrentLevel(true, true));
-    REQUIRE(!IsActorPresentInCurrentLevel(true, false));
 
     constexpr std::uintptr_t actor = 0x1000;
     const ActorRecordSource decoded =
         MakeResolvedActorRecord(actor, 0x2000, 0x3000, true);
     const ActorRecordSource ordinary =
         MakeOrdinaryActorRecord(actor, 0x4000, 0x5000);
+
+    const std::vector<std::uintptr_t> currentActors{
+        0x7000,
+        actor,
+        0x7000,
+        0x8000,
+        actor,
+    };
+    const std::vector<ActorRecordSource> decodedActors{
+        MakeResolvedActorRecord(actor, 0x2100, 0x3100, true),
+        MakeResolvedActorRecord(0x9000, 0x2200, 0x3200, true),
+        MakeResolvedActorRecord(0x7000, 0x2300, 0x3300, false),
+    };
+    const std::vector<ActorRecordSource> currentRecords =
+        MergeCurrentLevelActorRecordSources(currentActors, decodedActors);
+    REQUIRE(currentRecords.size() == 3);
+    REQUIRE(currentRecords[0].actor == 0x7000);
+    REQUIRE(currentRecords[1].actor == actor);
+    REQUIRE(currentRecords[2].actor == 0x8000);
+    REQUIRE(currentRecords[0].ordinarySource);
+    REQUIRE(currentRecords[0].resolverRecord);
+    REQUIRE(currentRecords[0].root == 0x2300);
+    REQUIRE(currentRecords[0].mesh == 0x3300);
+    REQUIRE(currentRecords[1].ordinarySource);
+    REQUIRE(currentRecords[1].resolverRecord);
+    REQUIRE(currentRecords[1].root == 0x2100);
+    REQUIRE(currentRecords[1].mesh == 0x3100);
+    REQUIRE(currentRecords[2].ordinarySource);
+    REQUIRE(!currentRecords[2].resolverRecord);
+    for (const ActorRecordSource& record : currentRecords) {
+        REQUIRE(record.actor != 0x9000);
+    }
 
     ActorRecordSource decodedFirst = decoded;
     REQUIRE(MergeActorRecordSource(decodedFirst, ordinary));

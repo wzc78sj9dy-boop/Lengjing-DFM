@@ -7,41 +7,32 @@ namespace lengjing::game::native {
 
 inline constexpr int kUnknownPlayerTeam = -1;
 
-struct PlayerTrackingData {
-    bool coordinateAvailable = false;
-    bool healthAvailable = false;
-    bool aliveOrDowned = false;
+enum class PlayerLifecycleDisposition : std::uint8_t {
+    Excluded = 0,
+    Visual,
+    AimOnly,
 };
 
-struct PlayerDirectionData {
-    bool rotationAvailable = false;
-};
-
-constexpr PlayerTrackingData MakePlayerTrackingData(
+constexpr PlayerLifecycleDisposition ResolvePlayerLifecycleDisposition(
     bool coordinateAvailable,
     bool healthAvailable,
     float health,
-    bool downed) noexcept {
-    return PlayerTrackingData{
-        coordinateAvailable,
-        healthAvailable,
-        healthAvailable && (health > 0.0f || downed),
-    };
-}
-
-constexpr bool IsPlayerTrackable(
-    const PlayerTrackingData& tracking,
-    const PlayerDirectionData&) noexcept {
-    return tracking.coordinateAvailable &&
-        tracking.healthAvailable &&
-        tracking.aliveOrDowned;
-}
-
-constexpr bool IsPlayerVisualEligible(
-    bool trackable,
     bool downed,
-    bool showDowned) noexcept {
-    return trackable && (!downed || showDowned);
+    bool showDowned,
+    bool aimEnabled,
+    bool ignoreDowned) noexcept {
+    if (!coordinateAvailable || !healthAvailable) {
+        return PlayerLifecycleDisposition::Excluded;
+    }
+    const bool aimOnly = health <= 0.0f && downed && !showDowned &&
+        aimEnabled && !ignoreDowned;
+    if (health <= 0.0f &&
+        (!downed || (!showDowned && !aimOnly))) {
+        return PlayerLifecycleDisposition::Excluded;
+    }
+    return aimOnly
+        ? PlayerLifecycleDisposition::AimOnly
+        : PlayerLifecycleDisposition::Visual;
 }
 
 constexpr bool HasUsablePlayerState(
@@ -73,13 +64,25 @@ constexpr bool IsSamePlayerTeam(
         localTeam == targetTeam;
 }
 
+constexpr bool IsPlayerTeammate(
+    int localTeam,
+    int targetTeam,
+    bool compareBothTeams,
+    int localPrimaryTeam,
+    int targetPrimaryTeam,
+    int localSecondaryTeam,
+    int targetSecondaryTeam) noexcept {
+    return IsSamePlayerTeam(localTeam, targetTeam) ||
+        (compareBothTeams &&
+         (IsSamePlayerTeam(localPrimaryTeam, targetPrimaryTeam) ||
+          IsSamePlayerTeam(localSecondaryTeam, targetSecondaryTeam)));
+}
+
 constexpr bool IsEnemyEligible(
     int localTeam,
     int targetTeam,
-    bool botClass) noexcept {
-    return HasComparablePlayerTeams(localTeam, targetTeam)
-        ? localTeam != targetTeam
-        : botClass;
+    bool) noexcept {
+    return !IsSamePlayerTeam(localTeam, targetTeam);
 }
 
 inline bool IsWithinPlayerDrawRange(

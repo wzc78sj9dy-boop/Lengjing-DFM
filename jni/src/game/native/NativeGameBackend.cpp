@@ -1728,22 +1728,37 @@ public:
             }
             const bool useSecondaryTeam =
                 context.warfare || settings.visual.battlefieldMode;
-            std::int32_t targetTeam = native::kUnknownPlayerTeam;
+            std::int32_t primaryTeam = native::kUnknownPlayerTeam;
+            std::int32_t secondaryTeam = native::kUnknownPlayerTeam;
             if (botClass) {
-                targetTeam = 0;
+                primaryTeam = 0;
+                secondaryTeam = 0;
             } else {
-                const bool teamRead = ReadValue(
-                    playerState + (useSecondaryTeam ? 0x65C : 0x658),
-                    targetTeam);
-                targetTeam = native::ResolvePlayerTeam(
-                    teamRead, targetTeam, false);
+                const bool primaryTeamRead =
+                    ReadValue(playerState + 0x658, primaryTeam);
+                primaryTeam = native::ResolvePlayerTeam(
+                    primaryTeamRead, primaryTeam, false);
+                if (useSecondaryTeam) {
+                    const bool secondaryTeamRead =
+                        ReadValue(playerState + 0x65C, secondaryTeam);
+                    secondaryTeam = native::ResolvePlayerTeam(
+                        secondaryTeamRead, secondaryTeam, false);
+                }
             }
+            const std::int32_t targetTeam =
+                useSecondaryTeam ? secondaryTeam : primaryTeam;
             const bool bot = botClass || targetTeam == 0;
             const bool threatTeamsValid =
                 native::HasComparablePlayerTeams(
                     context.localTeam, targetTeam);
-            if (native::IsSamePlayerTeam(
-                    context.localTeam, targetTeam)) {
+            if (native::IsPlayerTeammate(
+                    context.localTeam,
+                    targetTeam,
+                    useSecondaryTeam,
+                    context.localPrimaryTeam,
+                    primaryTeam,
+                    context.localSecondaryTeam,
+                    secondaryTeam)) {
                 continue;
             }
             const bool enemyEligible = native::IsEnemyEligible(
@@ -1793,20 +1808,23 @@ public:
                     native::PlayerDetailReadField::Downed)) {
                 ReadDownedState(actor, healthSet, health);
             }
-            const bool standardTrackable = native::IsPlayerTrackable(
-                native::MakePlayerTrackingData(
+            const native::PlayerLifecycleDisposition lifecycle =
+                native::ResolvePlayerLifecycleDisposition(
                     true,
                     healthAvailable,
                     health.health,
-                    health.downed),
-                native::PlayerDirectionData{false});
-#if LENGJING_ENABLE_PROJECTILE_TRACKING
-            if (!standardTrackable && !trackingPlayerClass) {
-#else
-            if (!standardTrackable) {
-#endif
+                    health.downed,
+                    settings.visual.downedPlayer,
+                    settings.aim.enabled,
+                    settings.aim.ignoreDowned);
+            if (lifecycle ==
+                native::PlayerLifecycleDisposition::Excluded) {
                 continue;
             }
+            const bool visualEligible = lifecycle ==
+                native::PlayerLifecycleDisposition::Visual;
+            const bool aimOnly = lifecycle ==
+                native::PlayerLifecycleDisposition::AimOnly;
             const Vec3* resolvedBonePosition =
                 native::ShouldAlignBoneFrameToCharacterPosition(positionSource)
                 ? &position
@@ -1822,11 +1840,8 @@ public:
 
             const bool combatModeActive = settings.visual.combatMode &&
                 (context.firing || context.zooming);
-            const bool commonAimEligible =
-                enemyEligible &&
-                standardTrackable;
             const bool selfAimActorEligible = aimModes.selfAim &&
-                commonAimEligible &&
+                enemyEligible &&
                 !(!rangeTargetClass && bot && settings.aim.ignoreBots) &&
                 !(health.downed && settings.aim.ignoreDowned);
             const bool aimEligible = selfAimActorEligible;
@@ -1852,42 +1867,20 @@ public:
                     ReadValue(playerState + 0x4C0, playerStateGate);
                 }
                 std::int32_t meshType = 0;
-                const bool healthAlive =
-                    healthAvailable && health.health > 0.0f;
+                const bool healthAlive = health.health > 0.0f;
+                const bool trackingHealthEligible = healthAlive ||
+                    (health.downed && !settings.aim.ignoreDowned);
                 trackingActorEligible = excludedState == 0 &&
+                    trackingHealthEligible &&
                     (playerStateGate == 0 || trackingTargetState != 0) &&
                     ReadTrackingMeshType(actorRecord, meshType) &&
                     (rangeTargetClass ||
                      PassTrackingCategory(actor, settings.aim)) &&
-                    (rangeTargetClass ||
-                     PassTrackingAcquisitionHealth(
-                         actor, trackingTargetState != 0)) &&
                     (!settings.aim.rejectTargetState ||
                      trackingTargetState == 0) &&
                     (!settings.aim.rejectDeadTarget || healthAlive);
             }
 #endif
-            const bool visualEligible = native::IsPlayerVisualEligible(
-                standardTrackable,
-                health.downed,
-                settings.visual.downedPlayer);
-            if (!visualEligible && !aimEligible
-#if LENGJING_ENABLE_PROJECTILE_TRACKING
-                && !trackingActorEligible
-#endif
-                ) {
-                continue;
-            }
-            if (visualEligible) {
-                if (bot) ++frame.botCount;
-                else ++frame.playerCount;
-            }
-            if (visualEligible && settings.visual.enabled &&
-                settings.visual.nearbyEnemy &&
-                threatTeamsValid && !bot &&
-                health.health > 0.0f && horizontalDistanceMeters <= 50.0f) {
-                ++frame.nearbyEnemyCount;
-            }
 
             native::GeometryVisibility actorVisibility =
                 native::GeometryVisibility::Unavailable;
@@ -1902,13 +1895,26 @@ public:
             const SemanticTone actorTone = ToneForVisibility(
                 bot, settings.visual.visibilityColor, actorVisibility);
 
-            const bool radarInRange = visualEligible && enemyEligible &&
+            const bool drawingInRange = native::IsWithinPlayerDrawRange(
+                horizontalDistanceMeters,
+                settings.visual.drawDistanceMeters);
+            const bool warningInRange = visualEligible && threatTeamsValid &&
+                settings.visual.offscreenWarning &&
+                settings.visual.warningSize > 0.0f &&
+                native::IsWithinOffscreenWarningRange(
+                    horizontalDistanceMeters,
+                    settings.visual.drawDistanceMeters,
+                    settings.visual.warningDistanceMeters);
+            const bool radarInRange = health.health > 0.0f && enemyEligible &&
                 frame.radar.has_value() &&
                 distanceMeters <= frame.radar->maxDistanceMeters;
-            const bool hudMapEligible = visualEligible && enemyEligible &&
+            const bool hudMapEligible = enemyEligible &&
                 frame.hudMap.has_value();
+            if (!HasReadableMesh(actorRecord)) {
+                continue;
+            }
             const bool facingNeeded = radarInRange || hudMapEligible ||
-                (settings.visual.enabled && !bot &&
+                (visualEligible && settings.visual.enabled && !bot &&
                  threatTeamsValid &&
                  (settings.visual.playerViewRay || aimWarningEnabled));
             Vec3 actorForward{};
@@ -1918,18 +1924,7 @@ public:
                     actorRecord,
                     actorForward,
                     actorHeadingRadians);
-            if (radarInRange && !(bot && settings.visual.filterBots)) {
-                AddRadarBlip(
-                    context,
-                    position,
-                    bot,
-                    className,
-                    actorHeadingRadians,
-                    actorFacingValid,
-                    actorTone,
-                    *frame.radar);
-            }
-            if (hudMapEligible) {
+            if (hudMapEligible && (bot || actorFacingValid)) {
                 const bool botAllowed = !bot ||
                     (hudBigMapActive
                         ? settings.radar.bigMapBots
@@ -1983,22 +1978,7 @@ public:
                 }
             }
 
-            const bool drawingInRange = native::IsWithinPlayerDrawRange(
-                horizontalDistanceMeters,
-                settings.visual.drawDistanceMeters);
-            const bool warningInRange = visualEligible && threatTeamsValid &&
-                settings.visual.offscreenWarning &&
-                settings.visual.warningSize > 0.0f &&
-                native::IsWithinOffscreenWarningRange(
-                    horizontalDistanceMeters,
-                    settings.visual.drawDistanceMeters,
-                    settings.visual.warningDistanceMeters);
-            if (!drawingInRange && !warningInRange && !radarInRange &&
-                !aimEligible
-#if LENGJING_ENABLE_PROJECTILE_TRACKING
-                && !trackingActorEligible
-#endif
-                ) {
+            if (!drawingInRange) {
                 continue;
             }
 
@@ -2014,6 +1994,10 @@ public:
                 Vec3{position.x, position.y, position.z + 205.0f},
                 context.preparedProjection,
                 bodyTop);
+            if (!bottomProjected || !topProjected ||
+                !HasReadableBoneArray(actorRecord)) {
+                continue;
+            }
             native::PlayerScreenBounds anchorBounds{};
             const bool anchorBoundsReady =
                 native::CalculatePlayerAnchorBounds(
@@ -2085,6 +2069,12 @@ public:
                     visibleBounds);
             }
 
+            if (bot) ++frame.botCount;
+            else ++frame.playerCount;
+            if (!bot && horizontalDistanceMeters <= 50.0f) {
+                ++frame.nearbyEnemyCount;
+            }
+
             if (IsCoordinateTraceEnabled()) {
                 const auto trace = coordinateTraceRecords_.find(actor);
                 if (trace != coordinateTraceRecords_.end()) {
@@ -2153,24 +2143,6 @@ public:
                         onScreen ? 1 : 0);
                     std::fflush(stderr);
                 }
-            }
-
-            if (!onScreen && warningInRange && settings.visual.enabled &&
-                !(bot && settings.visual.filterBots)) {
-                OffscreenMarker marker{};
-                CameraPoint directionPoint = ToCameraSpace(
-                    position, context.preparedProjection);
-                if (directionPoint.forward >= 0.0f) {
-                    marker.direction = ImVec2(directionPoint.side, -directionPoint.vertical);
-                } else {
-                    marker.direction = ImVec2(-directionPoint.side, directionPoint.vertical);
-                }
-                marker.radiusPixels = settings.visual.warningSize;
-                marker.markerScale = std::clamp(
-                    settings.visual.warningSize / 300.0f, 0.35f, 2.5f);
-                marker.distanceMeters = distanceMeters;
-                marker.tone = bot ? SemanticTone::Caution : SemanticTone::Danger;
-                frame.offscreenMarkers.push_back(std::move(marker));
             }
 
             bool aimWarningActive = false;
@@ -2369,9 +2341,47 @@ public:
                 }
             }
 
-            if (!visualEligible || !settings.visual.enabled || !drawingInRange || !onScreen ||
-                (combatModeActive && bot) ||
+            if (aimOnly) {
+                continue;
+            }
+            if ((combatModeActive && bot) ||
                 (bot && settings.visual.filterBots)) {
+                continue;
+            }
+            if (radarInRange && !bot) {
+                AddRadarBlip(
+                    context,
+                    position,
+                    false,
+                    className,
+                    actorHeadingRadians,
+                    actorFacingValid,
+                    ToneForVisibility(
+                        false,
+                        settings.visual.visibilityColor,
+                        playerVisibility),
+                    *frame.radar);
+            }
+            if (!onScreen && warningInRange &&
+                settings.visual.enabled && !bot) {
+                OffscreenMarker marker{};
+                CameraPoint directionPoint = ToCameraSpace(
+                    position, context.preparedProjection);
+                if (directionPoint.forward >= 0.0f) {
+                    marker.direction =
+                        ImVec2(directionPoint.side, -directionPoint.vertical);
+                } else {
+                    marker.direction =
+                        ImVec2(-directionPoint.side, directionPoint.vertical);
+                }
+                marker.radiusPixels = settings.visual.warningSize;
+                marker.markerScale = std::clamp(
+                    settings.visual.warningSize / 300.0f, 0.35f, 2.5f);
+                marker.distanceMeters = distanceMeters;
+                marker.tone = SemanticTone::Danger;
+                frame.offscreenMarkers.push_back(std::move(marker));
+            }
+            if (!visualEligible || !settings.visual.enabled || !onScreen) {
                 continue;
             }
 
@@ -2740,6 +2750,8 @@ private:
         CameraView view{};
         native::PreparedProjection preparedProjection{};
         std::int32_t localTeam = -1;
+        std::int32_t localPrimaryTeam = -1;
+        std::int32_t localSecondaryTeam = -1;
         std::int32_t mapBuildId = 0;
         bool warfare = false;
         bool firing = false;
@@ -2756,17 +2768,13 @@ private:
     struct ActorRecordSnapshot {
         native::ActorRecordSnapshotKey key{};
         std::vector<RuntimeActorRecord> records;
+        std::vector<RuntimeActorRecord> decodedRecords;
         std::chrono::steady_clock::time_point decodedUpdatedAt{};
         bool decodedRecordsEncrypted = false;
         bool decodedRecordArrayLocated = false;
         bool decodedRecordSourceReady = false;
         bool decodedRecordSourceRetained = false;
         bool hasKey = false;
-    };
-
-    struct ActorAddressSnapshot {
-        std::vector<std::uintptr_t> addresses;
-        bool complete = false;
     };
 
     struct HealthState {
@@ -3081,34 +3089,8 @@ private:
     std::vector<RuntimeActorRecord> CollectActorRecords(
         const FrameContext& context,
         const std::vector<RuntimeActorRecord>& decodedActors) {
-        std::vector<RuntimeActorRecord> result;
-        const ActorAddressSnapshot ordinary =
-            CollectActorAddresses(context);
-        result.reserve(decodedActors.size() + ordinary.addresses.size());
-        std::unordered_map<std::uintptr_t, std::size_t> indices;
-        indices.reserve(decodedActors.size() + ordinary.addresses.size());
-        const auto appendOrMerge = [&](const RuntimeActorRecord& record) {
-            if (!IsValidPointer(record.actor)) return;
-            const auto inserted = indices.emplace(record.actor, result.size());
-            if (inserted.second) {
-                result.push_back(record);
-                return;
-            }
-            native::MergeActorRecordSource(
-                result[inserted.first->second], record);
-        };
-        for (const std::uintptr_t actor : ordinary.addresses) {
-            appendOrMerge(native::MakeOrdinaryActorRecord(actor));
-        }
-        for (const RuntimeActorRecord& record : decodedActors) {
-            const bool ordinaryMember =
-                indices.find(record.actor) != indices.end();
-            if (native::IsActorPresentInCurrentLevel(
-                    ordinary.complete, ordinaryMember)) {
-                appendOrMerge(record);
-            }
-        }
-        return result;
+        return native::MergeCurrentLevelActorRecordSources(
+            CollectActorAddresses(context), decodedActors);
     }
 
     void RefreshActorRecordSnapshot(FrameContext& context,
@@ -3125,75 +3107,57 @@ private:
             decodedRequired,
         };
         const auto now = std::chrono::steady_clock::now();
-        if (!actorRecordRefreshPolicy_.ShouldRefresh(key, now)) {
-            context.decodedRecordsEncrypted =
-                actorRecordSnapshot_.decodedRecordsEncrypted;
-            context.decodedRecordSourceReady =
-                actorRecordSnapshot_.decodedRecordSourceReady;
-            return;
+        const bool metadataRefreshed =
+            actorRecordRefreshPolicy_.ShouldRefresh(key, now);
+        if (metadataRefreshed) {
+            ActorRecordSnapshot candidate{};
+            candidate.key = key;
+            candidate.hasKey = true;
+            if (decodedRequired) {
+                candidate.decodedRecords = CollectDecodedActorRecords(
+                    candidate.decodedRecordSourceReady,
+                    candidate.decodedRecordsEncrypted);
+                candidate.decodedRecordArrayLocated =
+                    candidate.decodedRecordSourceReady;
+                if (!candidate.decodedRecords.empty()) {
+                    candidate.decodedUpdatedAt = now;
+                } else if (actorRecordSnapshot_.hasKey &&
+                           native::CanRetainDecodedActorSnapshot(
+                               native::ActorRecordIdentity(
+                                   actorRecordSnapshot_.key),
+                               native::ActorRecordIdentity(key),
+                               actorRecordSnapshot_.decodedRecordSourceReady,
+                               false,
+                               actorRecordSnapshot_.decodedUpdatedAt,
+                               now)) {
+                    candidate.decodedRecords =
+                        actorRecordSnapshot_.decodedRecords;
+                    candidate.decodedRecordSourceReady =
+                        !candidate.decodedRecords.empty();
+                    candidate.decodedRecordsEncrypted =
+                        actorRecordSnapshot_.decodedRecordsEncrypted;
+                    candidate.decodedUpdatedAt =
+                        actorRecordSnapshot_.decodedUpdatedAt;
+                    candidate.decodedRecordSourceRetained =
+                        candidate.decodedRecordSourceReady;
+                }
+            }
+            actorRecordSnapshot_ = std::move(candidate);
         }
 
-        ActorRecordSnapshot candidate{};
-        candidate.key = key;
-        candidate.hasKey = true;
-        std::vector<RuntimeActorRecord> decodedActors;
-        if (decodedRequired) {
-            decodedActors = CollectDecodedActorRecords(
-                candidate.decodedRecordSourceReady,
-                candidate.decodedRecordsEncrypted);
-            candidate.decodedRecordArrayLocated =
-                candidate.decodedRecordSourceReady;
-            const bool hasCandidateDecodedRecords = std::any_of(
-                decodedActors.begin(),
-                decodedActors.end(),
-                [](const RuntimeActorRecord& record) {
-                    return record.resolverRecord;
-                });
-            if (hasCandidateDecodedRecords) {
-                candidate.decodedUpdatedAt = now;
-            } else if (actorRecordSnapshot_.hasKey &&
-                       native::CanRetainDecodedActorSnapshot(
-                           native::ActorRecordIdentity(
-                               actorRecordSnapshot_.key),
-                           native::ActorRecordIdentity(key),
-                           actorRecordSnapshot_.decodedRecordSourceReady,
-                           false,
-                           actorRecordSnapshot_.decodedUpdatedAt,
-                           now)) {
-                for (const RuntimeActorRecord& record :
-                     actorRecordSnapshot_.records) {
-                    if (record.resolverRecord) decodedActors.push_back(record);
-                }
-                candidate.decodedRecordSourceReady =
-                    !decodedActors.empty();
-                candidate.decodedRecordsEncrypted =
-                    actorRecordSnapshot_.decodedRecordsEncrypted;
-                candidate.decodedUpdatedAt =
-                    actorRecordSnapshot_.decodedUpdatedAt;
-                candidate.decodedRecordSourceRetained =
-                    candidate.decodedRecordSourceReady;
-            }
-        }
-        candidate.records = CollectActorRecords(context, decodedActors);
-        const bool candidateHasDecodedRecords =
-            candidate.decodedRecordSourceReady &&
-            std::any_of(
-                candidate.records.begin(),
-                candidate.records.end(),
-                [](const RuntimeActorRecord& record) {
-                    return record.resolverRecord;
-                });
-        if (decodedRequired && !candidateHasDecodedRecords) {
-            candidate.records.clear();
-            candidate.decodedRecordsEncrypted = false;
-            candidate.decodedRecordSourceReady = false;
-            candidate.decodedRecordSourceRetained = false;
-        }
-        actorRecordSnapshot_ = std::move(candidate);
+        actorRecordSnapshot_.records = CollectActorRecords(
+            context, actorRecordSnapshot_.decodedRecords);
+        const bool currentDecodedRecordsReady = std::any_of(
+            actorRecordSnapshot_.records.begin(),
+            actorRecordSnapshot_.records.end(),
+            [](const RuntimeActorRecord& record) {
+                return record.resolverRecord;
+            });
         context.decodedRecordsEncrypted =
             actorRecordSnapshot_.decodedRecordsEncrypted;
         context.decodedRecordSourceReady =
-            actorRecordSnapshot_.decodedRecordSourceReady;
+            actorRecordSnapshot_.decodedRecordSourceReady &&
+            (!decodedRequired || currentDecodedRecordsReady);
 
         if (IsCoordinateTraceEnabled()) {
             std::fprintf(
@@ -3204,7 +3168,7 @@ private:
                 "ordinary_count=%d\n",
                 static_cast<unsigned long long>(coordinateTraceFrame_),
                 decodedRequired ? 1 : 0,
-                actorRecordSnapshot_.decodedRecordSourceReady ? 1 : 0,
+                context.decodedRecordSourceReady ? 1 : 0,
                 actorRecordSnapshot_.decodedRecordsEncrypted ? 1 : 0,
                 actorRecordSnapshot_.decodedRecordSourceRetained ? 1 : 0,
                 actorRecordSnapshot_.records.size(),
@@ -3213,14 +3177,11 @@ private:
             std::fflush(stderr);
         }
 
-        const bool ordinarySourceReady =
-            IsValidPointer(context.actorArray) && context.actorCount > 0;
         const bool cacheable = !actorRecordSnapshot_.records.empty() &&
-            (ordinarySourceReady || context.decodedRecordSourceReady) &&
             (!decodedRequired || context.decodedRecordSourceReady);
-        if (cacheable) {
+        if (cacheable && metadataRefreshed) {
             actorRecordRefreshPolicy_.MarkRefreshed(key, now);
-        } else {
+        } else if (!cacheable) {
             actorRecordRefreshPolicy_.Invalidate();
         }
     }
@@ -3230,11 +3191,10 @@ private:
         actorRecordSnapshot_ = ActorRecordSnapshot{};
     }
 
-    ActorAddressSnapshot CollectActorAddresses(
+    std::vector<std::uintptr_t> CollectActorAddresses(
         const FrameContext& context) {
         constexpr std::size_t kMaximumCollectedActors = 100000;
-        ActorAddressSnapshot snapshot{};
-        std::vector<std::uintptr_t>& result = snapshot.addresses;
+        std::vector<std::uintptr_t> result;
         std::unordered_set<std::uintptr_t> seen;
         result.reserve(static_cast<std::size_t>(std::max(context.actorCount, 0)));
         seen.reserve(static_cast<std::size_t>(std::max(context.actorCount, 0)));
@@ -3244,25 +3204,26 @@ private:
             if (!IsValidPointer(header.data) || header.count <= 0 ||
                 header.count > maximumCount || header.capacity < header.count ||
                 result.size() >= kMaximumCollectedActors) {
-                return false;
+                return;
             }
             std::vector<std::uintptr_t> addresses(
                 static_cast<std::size_t>(header.count));
-            bool complete = memory_ != nullptr && memory_->Read(
+            const bool bulkRead = memory_ != nullptr && memory_->Read(
                     header.data,
                     addresses.data(),
                     addresses.size() * sizeof(std::uintptr_t));
-            if (!complete) {
-                complete = true;
+            if (!bulkRead) {
                 for (std::size_t index = 0; index < addresses.size(); ++index) {
                     const std::uintptr_t offset =
                         index * sizeof(std::uintptr_t);
                     if (offset > kMaximumRemoteAddress - header.data) {
-                        complete = false;
                         break;
                     }
-                    if (!ReadValue(header.data + offset, addresses[index])) {
-                        complete = false;
+                    std::uintptr_t address = 0;
+                    if (ReadValue(header.data + offset, address)) {
+                        addresses[index] = address;
+                    } else {
+                        addresses[index] = 0;
                     }
                 }
             }
@@ -3272,10 +3233,9 @@ private:
                     if (result.size() >= kMaximumCollectedActors) break;
                 }
             }
-            return complete;
         };
 
-        snapshot.complete = appendArray(
+        appendArray(
             ActorArrayHeader{
                 context.actorArray,
                 context.actorCount,
@@ -3283,10 +3243,10 @@ private:
             },
             kMaximumActorCount);
         if (result.size() >= kMaximumCollectedActors) {
-            return snapshot;
+            return result;
         }
 
-        return snapshot;
+        return result;
     }
 
     std::vector<std::uintptr_t> CollectWorldObjectAddresses(
@@ -4092,10 +4052,13 @@ private:
             IsValidPointer(actors.data) && actors.count > 0 &&
             actors.count <= kMaximumActorCount &&
             actors.capacity >= actors.count;
-        if (ordinaryActorsAvailable) {
-            context.actorArray = actors.data;
-            context.actorCount = actors.count;
+        if (!ordinaryActorsAvailable) {
+            failure.error = RuntimeError::ActorSourceUnavailable;
+            diagnostic = "数据链等待：人物数组暂不可读";
+            return false;
         }
+        context.actorArray = actors.data;
+        context.actorCount = actors.count;
         const std::uintptr_t gameInstance = ReadPointer(context.world + 0x190);
         const std::uintptr_t localPlayers = ReadPointer(gameInstance + 0x38);
         const std::uintptr_t localPlayer = ReadPointer(localPlayers);
@@ -4109,16 +4072,12 @@ private:
 #endif
             ;
         RefreshActorRecordSnapshot(context, decodedRequired);
-        if (positionMode == native::PositionReadMode::Direct &&
-            !context.decodedRecordSourceReady &&
-            !ordinaryActorsAvailable) {
+        if (decodedRequired && !context.decodedRecordSourceReady) {
             failure.error = RuntimeError::ActorSourceUnavailable;
             diagnostic = "数据链等待：人物列表暂不可读";
             return false;
         }
-        if (!ordinaryActorsAvailable &&
-            !context.decodedRecordSourceReady &&
-            actorRecordSnapshot_.records.empty()) {
+        if (actorRecordSnapshot_.records.empty()) {
             failure.error = RuntimeError::ActorSourceUnavailable;
             diagnostic = "数据链等待：人物数组暂不可读";
             return false;
@@ -4137,18 +4096,21 @@ private:
         context.warfare = mapBuild > 9000;
 
         const std::uintptr_t localState = ReadPointer(context.localPawn + 0x390);
-        std::int32_t selectedTeam = native::kUnknownPlayerTeam;
+        std::int32_t primaryTeam = native::kUnknownPlayerTeam;
+        std::int32_t secondaryTeam = native::kUnknownPlayerTeam;
         if (IsValidPointer(localState)) {
-            const bool useSecondaryTeam =
-                context.warfare || battlefieldMode;
-            ReadValue(
-                localState + (useSecondaryTeam ? 0x65C : 0x658),
-                selectedTeam);
+            ReadValue(localState + 0x658, primaryTeam);
+            ReadValue(localState + 0x65C, secondaryTeam);
         }
-        context.localTeam = selectedTeam;
-        if (context.localTeam <= 0) {
-            context.localTeam = native::kUnknownPlayerTeam;
-        }
+        context.localPrimaryTeam = primaryTeam > 0
+            ? primaryTeam
+            : native::kUnknownPlayerTeam;
+        context.localSecondaryTeam = secondaryTeam > 0
+            ? secondaryTeam
+            : native::kUnknownPlayerTeam;
+        context.localTeam = (context.warfare || battlefieldMode)
+            ? context.localSecondaryTeam
+            : context.localPrimaryTeam;
 
         const std::uintptr_t blackboard = ReadPointer(context.localPawn + 0x2430);
         std::uint8_t zooming = 0;
@@ -5466,6 +5428,23 @@ private:
             });
     }
 
+    bool HasReadableMesh(const RuntimeActorRecord& record) const {
+        return (record.resolverRecord && IsValidPointer(record.mesh)) ||
+            (record.ordinarySource &&
+             IsValidPointer(record.ordinaryMesh));
+    }
+
+    bool HasReadableBoneArray(const RuntimeActorRecord& record) {
+        const auto hasBoneArray = [this](std::uintptr_t mesh) {
+            return IsValidPointer(mesh) &&
+                IsValidPointer(ReadPointer(mesh + 0x730));
+        };
+        if (record.ordinarySource && hasBoneArray(record.ordinaryMesh)) {
+            return true;
+        }
+        return record.resolverRecord && hasBoneArray(record.mesh);
+    }
+
     bool ObserveAimWarning(
         std::uintptr_t actor,
         bool aligned,
@@ -6768,10 +6747,17 @@ private:
 
     bool PassTrackingAcquisitionHealth(
         std::uintptr_t actor,
-        bool classifiedState) {
+        bool ignoreDowned) {
         HealthState health{};
-        const bool healthAvailable = ReadCoreHealth(actor, health);
-        return (healthAvailable && health.health > 0.0f) || !classifiedState;
+        std::uintptr_t healthSet = 0;
+        if (!ReadCoreHealth(actor, health, &healthSet)) {
+            return false;
+        }
+        if (health.health <= 0.0f) {
+            ReadDownedState(actor, healthSet, health);
+        }
+        return health.health > 0.0f ||
+            (health.downed && !ignoreDowned);
     }
 
     bool PassTrackingCategory(
@@ -6947,21 +6933,33 @@ private:
             const bool botClass = !IsValidPointer(playerState);
             const bool useSecondaryTeam =
                 context.warfare || battlefieldMode;
-            std::int32_t targetTeam = native::kUnknownPlayerTeam;
+            std::int32_t primaryTeam = native::kUnknownPlayerTeam;
+            std::int32_t secondaryTeam = native::kUnknownPlayerTeam;
             if (botClass) {
-                targetTeam = 0;
+                primaryTeam = 0;
+                secondaryTeam = 0;
             } else {
-                const bool teamRead = ReadValue(
-                    playerState + (useSecondaryTeam ? 0x65C : 0x658),
-                    targetTeam);
-                targetTeam = native::ResolvePlayerTeam(
-                    teamRead, targetTeam, false);
+                const bool primaryTeamRead =
+                    ReadValue(playerState + 0x658, primaryTeam);
+                primaryTeam = native::ResolvePlayerTeam(
+                    primaryTeamRead, primaryTeam, false);
+                if (useSecondaryTeam) {
+                    const bool secondaryTeamRead =
+                        ReadValue(playerState + 0x65C, secondaryTeam);
+                    secondaryTeam = native::ResolvePlayerTeam(
+                        secondaryTeamRead, secondaryTeam, false);
+                }
             }
-            const bool bot = botClass || targetTeam == 0;
-            if (native::IsSamePlayerTeam(
-                    context.localTeam, targetTeam) ||
-                !native::IsEnemyEligible(
-                    context.localTeam, targetTeam, bot)) {
+            const std::int32_t targetTeam =
+                useSecondaryTeam ? secondaryTeam : primaryTeam;
+            if (native::IsPlayerTeammate(
+                    context.localTeam,
+                    targetTeam,
+                    useSecondaryTeam,
+                    context.localPrimaryTeam,
+                    primaryTeam,
+                    context.localSecondaryTeam,
+                    secondaryTeam)) {
                 return;
             }
         }
@@ -7000,9 +6998,8 @@ private:
             !PassTrackingCategory(record.actor, settings)) {
             return;
         }
-        if (!rangeTargetClass &&
-            !PassTrackingAcquisitionHealth(
-                record.actor, targetState != 0)) {
+        if (!PassTrackingAcquisitionHealth(
+                record.actor, settings.ignoreDowned)) {
             return;
         }
 
