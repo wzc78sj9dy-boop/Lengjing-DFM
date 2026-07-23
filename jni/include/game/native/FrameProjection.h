@@ -268,6 +268,42 @@ inline ScreenProjection ProjectWorldPoint(
         world, PrepareProjection(view, screenWidth, screenHeight));
 }
 
+inline ScreenProjection ProjectWorldPointLoose(
+    const ProjectionPoint& world,
+    const PreparedProjection& prepared) noexcept {
+    ScreenProjection result{};
+    if (!IsFinite(world) || !prepared.basisValid) return result;
+
+    result.camera = ToCameraSpace(world, prepared);
+    if (!std::isfinite(result.camera.side) ||
+        !std::isfinite(result.camera.vertical) ||
+        !std::isfinite(result.camera.forward) ||
+        !prepared.valid) {
+        return result;
+    }
+
+    float projectedDepth = result.camera.forward;
+    if (std::fabs(projectedDepth) < 0.01f) {
+        projectedDepth = projectedDepth >= 0.0f ? 0.01f : -0.01f;
+    }
+    result.x = prepared.halfWidth +
+        result.camera.side * prepared.scale / projectedDepth;
+    result.y = prepared.halfHeight -
+        result.camera.vertical * prepared.scale / projectedDepth;
+    result.valid = std::isfinite(result.x) && std::isfinite(result.y);
+    return result;
+}
+
+inline ScreenProjection ProjectWorldPointLoose(
+    const ProjectionPoint& world,
+    const ProjectionView& view,
+    int screenWidth,
+    int screenHeight) noexcept {
+    if (!IsFinite(world)) return {};
+    return ProjectWorldPointLoose(
+        world, PrepareProjection(view, screenWidth, screenHeight));
+}
+
 inline std::vector<ScreenProjectionSegment> ProjectWorldHorizontalRing(
     const ProjectionPoint& center,
     float radius,
