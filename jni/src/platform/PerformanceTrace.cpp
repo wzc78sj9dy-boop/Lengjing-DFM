@@ -43,6 +43,7 @@ constexpr std::array<const char*,
         "backend_frame",
         "frame_context",
         "actor_snapshot",
+        "actor_classification",
         "actor_loop",
         "position_read",
         "coordinate_decode",
@@ -53,12 +54,16 @@ constexpr std::array<const char*,
         "projection",
         "world_object_refresh",
         "world_objects",
+        "geometry_mesh_collection",
+        "geometry_scene_build",
+        "geometry_ray_query",
         "render_frame",
         "draw_game_frame",
         "graphics_submit",
         "remote_read",
         "coordinate_remote_read",
         "batch_remote_read",
+        "geometry_remote_read",
     };
 
 struct PhaseAccumulator {
@@ -229,6 +234,16 @@ void RecordPerformanceRead(PerformanceReadKind kind,
             add(PerformanceCounter::BatchReadCalls, 1);
             add(PerformanceCounter::BatchReadItems, items);
             add(PerformanceCounter::BatchReadBytes, bytes);
+            if (!succeeded) {
+                add(PerformanceCounter::BatchReadFailures, 1);
+            }
+            break;
+        case PerformanceReadKind::Geometry:
+            add(PerformanceCounter::GeometryReadCalls, 1);
+            add(PerformanceCounter::GeometryReadBytes, bytes);
+            if (!succeeded) {
+                add(PerformanceCounter::GeometryReadFailures, 1);
+            }
             break;
     }
 }
@@ -320,7 +335,23 @@ void PublishPerformanceTrace() noexcept {
         "coordinate_reads=%llu coordinate_bytes=%llu "
         "coordinate_failures=%llu coordinate_path_attempts=%llu "
         "coordinate_fallbacks=%llu batches=%llu batch_items=%llu "
-        "batch_bytes=%llu render_players=%llu draw_commands=%llu "
+        "batch_bytes=%llu batch_failures=%llu batch_fallback_items=%llu "
+         "batch_process_vm=%llu batch_kernel_driver=%llu "
+         "batch_private_rpc=%llu "
+         "geometry_reads=%llu geometry_bytes=%llu geometry_failures=%llu "
+         "geometry_collections=%llu geometry_meshes=%llu "
+        "geometry_vertices=%llu geometry_triangles=%llu "
+        "geometry_scene_build_attempts=%llu "
+        "geometry_scene_build_successes=%llu geometry_scene_reuses=%llu "
+         "geometry_ray_queries=%llu geometry_ray_scene_tests=%llu "
+         "geometry_ray_hits=%llu geometry_refresh_requests=%llu "
+         "geometry_validation_requests=%llu "
+         "geometry_refresh_stale=%llu geometry_publish_failures=%llu "
+         "geometry_static_refreshes=%llu geometry_dynamic_refreshes=%llu "
+         "geometry_dedicated_reads=%llu geometry_shared_reads=%llu "
+         "geometry_transport_demotions=%llu "
+         "geometry_transport_recoveries=%llu "
+        "render_players=%llu draw_commands=%llu "
         "draw_vertices=%llu draw_indices=%llu\n",
         static_cast<unsigned long long>(windowMilliseconds),
         static_cast<unsigned long long>(value(PerformanceCounter::DataFrames)),
@@ -342,6 +373,34 @@ void PublishPerformanceTrace() noexcept {
         static_cast<unsigned long long>(value(PerformanceCounter::BatchReadCalls)),
         static_cast<unsigned long long>(value(PerformanceCounter::BatchReadItems)),
         static_cast<unsigned long long>(value(PerformanceCounter::BatchReadBytes)),
+        static_cast<unsigned long long>(value(PerformanceCounter::BatchReadFailures)),
+        static_cast<unsigned long long>(value(PerformanceCounter::BatchFallbackItems)),
+         static_cast<unsigned long long>(value(PerformanceCounter::BatchProcessVmCalls)),
+         static_cast<unsigned long long>(value(PerformanceCounter::BatchKernelDriverCalls)),
+         static_cast<unsigned long long>(value(PerformanceCounter::BatchPrivateRpcCalls)),
+         static_cast<unsigned long long>(value(PerformanceCounter::GeometryReadCalls)),
+         static_cast<unsigned long long>(value(PerformanceCounter::GeometryReadBytes)),
+         static_cast<unsigned long long>(value(PerformanceCounter::GeometryReadFailures)),
+         static_cast<unsigned long long>(value(PerformanceCounter::GeometryCollectionCalls)),
+        static_cast<unsigned long long>(value(PerformanceCounter::GeometryCollectedMeshes)),
+        static_cast<unsigned long long>(value(PerformanceCounter::GeometryCollectedVertices)),
+        static_cast<unsigned long long>(value(PerformanceCounter::GeometryCollectedTriangles)),
+        static_cast<unsigned long long>(value(PerformanceCounter::GeometrySceneBuildAttempts)),
+        static_cast<unsigned long long>(value(PerformanceCounter::GeometrySceneBuildSuccesses)),
+        static_cast<unsigned long long>(value(PerformanceCounter::GeometrySceneReuses)),
+        static_cast<unsigned long long>(value(PerformanceCounter::GeometryRayQueries)),
+         static_cast<unsigned long long>(value(PerformanceCounter::GeometryRaySceneTests)),
+         static_cast<unsigned long long>(value(PerformanceCounter::GeometryRayHits)),
+         static_cast<unsigned long long>(value(PerformanceCounter::GeometryRefreshRequests)),
+         static_cast<unsigned long long>(value(PerformanceCounter::GeometryValidationRequests)),
+         static_cast<unsigned long long>(value(PerformanceCounter::GeometryRefreshStale)),
+         static_cast<unsigned long long>(value(PerformanceCounter::GeometryPublishFailures)),
+         static_cast<unsigned long long>(value(PerformanceCounter::GeometryStaticRefreshes)),
+         static_cast<unsigned long long>(value(PerformanceCounter::GeometryDynamicRefreshes)),
+         static_cast<unsigned long long>(value(PerformanceCounter::GeometryDedicatedReads)),
+         static_cast<unsigned long long>(value(PerformanceCounter::GeometrySharedReads)),
+         static_cast<unsigned long long>(value(PerformanceCounter::GeometryTransportDemotions)),
+         static_cast<unsigned long long>(value(PerformanceCounter::GeometryTransportRecoveries)),
         static_cast<unsigned long long>(value(PerformanceCounter::RenderPlayers)),
         static_cast<unsigned long long>(value(PerformanceCounter::DrawCommands)),
         static_cast<unsigned long long>(value(PerformanceCounter::DrawVertices)),

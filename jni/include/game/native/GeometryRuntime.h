@@ -39,6 +39,7 @@ struct GeometrySnapshot {
     std::uintptr_t instanceAddress = 0;
     std::uint64_t generation = 0;
     std::uint64_t refreshEpoch = 0;
+    std::uint64_t validationEpoch = 0;
     std::size_t triangleCount = 0;
     std::vector<std::shared_ptr<const GeometryMesh>> staticMeshes;
     std::vector<std::shared_ptr<const GeometryMesh>> dynamicMeshes;
@@ -91,6 +92,8 @@ public:
     bool Start(ReadCallback read, GeometryRuntimeConfig config);
     void Stop() noexcept;
     bool IsRunning() const noexcept;
+    std::uint64_t CurrentRefreshEpoch() const noexcept;
+    std::uint64_t RequestValidation() noexcept;
     std::uint64_t RequestRefresh() noexcept;
 
     std::shared_ptr<const GeometrySnapshot> GetSnapshot() const noexcept;

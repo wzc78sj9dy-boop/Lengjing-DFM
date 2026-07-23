@@ -1,6 +1,7 @@
 #include "game/native/GeometryRuntime.h"
 #include "game/native/GeometrySceneBuildPolicy.h"
 #include "game/native/GeometryShapeFilterPolicy.h"
+#include "platform/PerformanceTrace.h"
 
 #include "embree4/rtcore.h"
 #include "embree4/rtcore_ray.h"
@@ -855,6 +856,11 @@ public:
     SceneOwner& operator=(const SceneOwner&) = delete;
 
     bool Build() {
+        lengjing::platform::PerformanceTraceScope trace(
+            lengjing::platform::PerformancePhase::GeometrySceneBuild);
+        lengjing::platform::RecordPerformanceCount(
+            lengjing::platform::PerformanceCounter::
+                GeometrySceneBuildAttempts);
         if (!device_ || device_->Get() == nullptr) {
             return false;
         }
@@ -882,6 +888,7 @@ public:
         }
         rtcSetSceneFlags(scene_, static_cast<RTCSceneFlags>(sceneFlags));
 
+        geometryById_.reserve(meshes_.size());
         for (const auto& mesh : meshes_) {
             if (!mesh || mesh->vertices.size() < 3 ||
                 mesh->indices.size() < 3 ||
@@ -897,31 +904,33 @@ public:
                 return false;
             }
 
-            auto* vertexBuffer = static_cast<GeometryPoint*>(
-                rtcSetNewGeometryBuffer(
-                    geometry, RTC_BUFFER_TYPE_VERTEX, 0,
-                    RTC_FORMAT_FLOAT3, sizeof(GeometryPoint),
-                    mesh->vertices.size()));
-            if (vertexBuffer == nullptr) {
-                rtcGetDeviceError(device_->Get());
+            rtcSetSharedGeometryBuffer(
+                geometry,
+                RTC_BUFFER_TYPE_VERTEX,
+                0,
+                RTC_FORMAT_FLOAT3,
+                mesh->vertices.data(),
+                0,
+                sizeof(GeometryPoint),
+                mesh->vertices.size());
+            if (rtcGetDeviceError(device_->Get()) != RTC_ERROR_NONE) {
                 rtcReleaseGeometry(geometry);
                 return false;
             }
-            std::memcpy(vertexBuffer, mesh->vertices.data(),
-                        mesh->vertices.size() * sizeof(GeometryPoint));
 
-            auto* indexBuffer = static_cast<std::uint32_t*>(
-                rtcSetNewGeometryBuffer(
-                    geometry, RTC_BUFFER_TYPE_INDEX, 0,
-                    RTC_FORMAT_UINT3, sizeof(std::uint32_t) * 3,
-                    mesh->indices.size() / 3));
-            if (indexBuffer == nullptr) {
-                rtcGetDeviceError(device_->Get());
+            rtcSetSharedGeometryBuffer(
+                geometry,
+                RTC_BUFFER_TYPE_INDEX,
+                0,
+                RTC_FORMAT_UINT3,
+                mesh->indices.data(),
+                0,
+                sizeof(std::uint32_t) * 3,
+                mesh->indices.size() / 3);
+            if (rtcGetDeviceError(device_->Get()) != RTC_ERROR_NONE) {
                 rtcReleaseGeometry(geometry);
                 return false;
             }
-            std::memcpy(indexBuffer, mesh->indices.data(),
-                        mesh->indices.size() * sizeof(std::uint32_t));
             rtcCommitGeometry(geometry);
             if (rtcGetDeviceError(device_->Get()) != RTC_ERROR_NONE) {
                 rtcReleaseGeometry(geometry);
@@ -956,6 +965,9 @@ public:
             scene_ = nullptr;
             return false;
         }
+        lengjing::platform::RecordPerformanceCount(
+            lengjing::platform::PerformanceCounter::
+                GeometrySceneBuildSuccesses);
         return true;
     }
 
@@ -1031,10 +1043,14 @@ struct GeometryRuntime::Impl final {
         config = std::move(requestedConfig);
         device = std::move(newDevice);
         generation = 0;
-        {
-            std::lock_guard<std::mutex> waitLock(waitMutex);
-            requestEpoch.fetch_add(1, std::memory_order_acq_rel);
+            {
+                std::lock_guard<std::mutex> waitLock(waitMutex);
+                requestEpoch.fetch_add(1, std::memory_order_acq_rel);
+            lengjing::platform::RecordPerformanceCount(
+                lengjing::platform::PerformanceCounter::
+                    GeometryRefreshRequests);
             refreshRequested = true;
+            validationRequested = false;
         }
         running.store(true, std::memory_order_release);
         try {
@@ -1044,6 +1060,7 @@ struct GeometryRuntime::Impl final {
             {
                 std::lock_guard<std::mutex> waitLock(waitMutex);
                 refreshRequested = false;
+                validationRequested = false;
             }
             read = {};
             config = {};
@@ -1063,6 +1080,7 @@ struct GeometryRuntime::Impl final {
         {
             std::lock_guard<std::mutex> waitLock(waitMutex);
             refreshRequested = false;
+            validationRequested = false;
         }
         waitCondition.notify_all();
         if (worker.joinable()) {
@@ -1079,11 +1097,33 @@ struct GeometryRuntime::Impl final {
         return running.load(std::memory_order_acquire);
     }
 
+    std::uint64_t CurrentRefreshEpoch() const noexcept {
+        return requestEpoch.load(std::memory_order_acquire);
+    }
+
+    std::uint64_t RequestValidation() noexcept {
+        std::lock_guard<std::mutex> lock(waitMutex);
+        const std::uint64_t epoch =
+            validationRequestEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+        lengjing::platform::RecordPerformanceCount(
+            lengjing::platform::PerformanceCounter::
+                GeometryValidationRequests);
+        if (!running.load(std::memory_order_acquire)) {
+            return epoch;
+        }
+        validationRequested = true;
+        waitCondition.notify_all();
+        return epoch;
+    }
+
     std::uint64_t RequestRefresh() noexcept {
         {
             std::lock_guard<std::mutex> lock(waitMutex);
             const std::uint64_t epoch =
                 requestEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+            lengjing::platform::RecordPerformanceCount(
+                lengjing::platform::PerformanceCounter::
+                    GeometryRefreshRequests);
             if (!running.load(std::memory_order_acquire)) {
                 return epoch;
             }
@@ -1101,6 +1141,10 @@ struct GeometryRuntime::Impl final {
 
     GeometryVisibility Trace(const GeometryPoint& origin,
                              const GeometryPoint& target) const noexcept {
+        lengjing::platform::PerformanceTraceScope trace(
+            lengjing::platform::PerformancePhase::GeometryRayQuery, 64);
+        lengjing::platform::RecordPerformanceCount(
+            lengjing::platform::PerformanceCounter::GeometryRayQueries);
         if (!IsFinite(origin) || !IsFinite(target)) {
             return GeometryVisibility::Unavailable;
         }
@@ -1156,18 +1200,30 @@ struct GeometryRuntime::Impl final {
 
                 RTCOccludedArguments arguments;
                 rtcInitOccludedArguments(&arguments);
+                lengjing::platform::RecordPerformanceCount(
+                    lengjing::platform::PerformanceCounter::
+                        GeometryRaySceneTests);
                 rtcOccluded1(scene->Get(), &ray, &arguments);
                 return ray.tfar < 0.0f;
             };
-        return occludedBy(state->staticScene) ||
-                occludedBy(state->dynamicScene)
-            ? GeometryVisibility::Occluded
-            : GeometryVisibility::Visible;
+        const bool occluded =
+            occludedBy(state->staticScene) ||
+            occludedBy(state->dynamicScene);
+        if (occluded) {
+            lengjing::platform::RecordPerformanceCount(
+                lengjing::platform::PerformanceCounter::GeometryRayHits);
+        }
+        return occluded ? GeometryVisibility::Occluded
+                        : GeometryVisibility::Visible;
     }
 
     GeometryVisibility TraceFullSegment(
         const GeometryPoint& origin,
         const GeometryPoint& target) const noexcept {
+        lengjing::platform::PerformanceTraceScope trace(
+            lengjing::platform::PerformancePhase::GeometryRayQuery, 64);
+        lengjing::platform::RecordPerformanceCount(
+            lengjing::platform::PerformanceCounter::GeometryRayQueries);
         if (!IsFinite(origin) || !IsFinite(target)) {
             return GeometryVisibility::Unavailable;
         }
@@ -1217,17 +1273,29 @@ struct GeometryRuntime::Impl final {
 
                 RTCIntersectArguments arguments;
                 rtcInitIntersectArguments(&arguments);
+                lengjing::platform::RecordPerformanceCount(
+                    lengjing::platform::PerformanceCounter::
+                        GeometryRaySceneTests);
                 rtcIntersect1(scene->Get(), &rayHit, &arguments);
                 return rayHit.hit.geomID != RTC_INVALID_GEOMETRY_ID;
             };
-        return intersects(state->staticScene) ||
-                intersects(state->dynamicScene)
-            ? GeometryVisibility::Occluded
-            : GeometryVisibility::Visible;
+        const bool occluded =
+            intersects(state->staticScene) ||
+            intersects(state->dynamicScene);
+        if (occluded) {
+            lengjing::platform::RecordPerformanceCount(
+                lengjing::platform::PerformanceCounter::GeometryRayHits);
+        }
+        return occluded ? GeometryVisibility::Occluded
+                        : GeometryVisibility::Visible;
     }
 
     GeometryRaycastHit Raycast(const GeometryPoint& origin,
                                const GeometryPoint& target) const noexcept {
+        lengjing::platform::PerformanceTraceScope trace(
+            lengjing::platform::PerformancePhase::GeometryRayQuery, 64);
+        lengjing::platform::RecordPerformanceCount(
+            lengjing::platform::PerformanceCounter::GeometryRayQueries);
         GeometryRaycastHit result;
         if (!IsFinite(origin) || !IsFinite(target)) {
             return result;
@@ -1286,6 +1354,9 @@ struct GeometryRuntime::Impl final {
 
                 RTCIntersectArguments arguments;
                 rtcInitIntersectArguments(&arguments);
+                lengjing::platform::RecordPerformanceCount(
+                    lengjing::platform::PerformanceCounter::
+                        GeometryRaySceneTests);
                 rtcIntersect1(scene->Get(), &rayHit, &arguments);
                 if (rayHit.hit.geomID == RTC_INVALID_GEOMETRY_ID ||
                     !IsFinite(rayHit.ray.tfar) || rayHit.ray.tfar < 0.0f ||
@@ -1307,6 +1378,10 @@ struct GeometryRuntime::Impl final {
             };
         intersectScene(state->staticScene);
         intersectScene(state->dynamicScene);
+        if (result.mesh) {
+            lengjing::platform::RecordPerformanceCount(
+                lengjing::platform::PerformanceCounter::GeometryRayHits);
+        }
         return result;
     }
 
@@ -1991,19 +2066,17 @@ private:
             return false;
         }
 
-        for (const std::uint32_t index : mesh->indices) {
-            if (index >= mesh->vertices.size()) {
-                return false;
-            }
-        }
-
-        std::vector<std::uint32_t> validIndices;
-        validIndices.reserve(mesh->indices.size());
+        std::size_t validIndexCount = 0;
         for (std::size_t index = 0; index + 2 < mesh->indices.size();
              index += 3) {
             const std::uint32_t first = mesh->indices[index];
             const std::uint32_t second = mesh->indices[index + 1];
             const std::uint32_t third = mesh->indices[index + 2];
+            if (first >= mesh->vertices.size() ||
+                second >= mesh->vertices.size() ||
+                third >= mesh->vertices.size()) {
+                return false;
+            }
             if (first == second || second == third || first == third) {
                 continue;
             }
@@ -2017,14 +2090,14 @@ private:
             if (!IsFinite(areaSquared) || areaSquared <= 1.0e-10f) {
                 continue;
             }
-            validIndices.push_back(first);
-            validIndices.push_back(second);
-            validIndices.push_back(third);
+            mesh->indices[validIndexCount++] = first;
+            mesh->indices[validIndexCount++] = second;
+            mesh->indices[validIndexCount++] = third;
         }
-        if (validIndices.empty()) {
+        if (validIndexCount == 0) {
             return false;
         }
-        mesh->indices = std::move(validIndices);
+        mesh->indices.resize(validIndexCount);
 
         const double inverseCount =
             1.0 / static_cast<double>(mesh->vertices.size());
@@ -2548,6 +2621,12 @@ private:
         std::size_t initialShapeCount = 0,
         std::size_t* selectedShapeCount = nullptr,
         const std::vector<std::uintptr_t>* expectedScenes = nullptr) const {
+        lengjing::platform::PerformanceTraceScope trace(
+            lengjing::platform::PerformancePhase::
+                GeometryMeshCollection);
+        lengjing::platform::RecordPerformanceCount(
+            lengjing::platform::PerformanceCounter::
+                GeometryCollectionCalls);
         CollectionReport report;
         output.clear();
         if (selectedShapeCount != nullptr) {
@@ -2566,8 +2645,7 @@ private:
         if (!report.sourceAvailable && previous.empty()) {
             return report;
         }
-        std::stable_sort(references.begin(), references.end(),
-                         ActorShapeLess);
+        std::sort(references.begin(), references.end(), ActorShapeLess);
         references.erase(
             std::unique(references.begin(), references.end()),
             references.end());
@@ -2622,8 +2700,8 @@ private:
                 }
             }
         }
-        std::stable_sort(candidateKeys.begin(), candidateKeys.end(),
-                         ActorShapeLess);
+        std::sort(
+            candidateKeys.begin(), candidateKeys.end(), ActorShapeLess);
         candidateKeys.erase(
             std::unique(candidateKeys.begin(), candidateKeys.end()),
             candidateKeys.end());
@@ -2709,6 +2787,18 @@ private:
         if (selectedShapeCount != nullptr) {
             *selectedShapeCount = shapeCount - initialShapeCount;
         }
+        lengjing::platform::RecordPerformanceCount(
+            lengjing::platform::PerformanceCounter::
+                GeometryCollectedMeshes,
+            output.size());
+        lengjing::platform::RecordPerformanceCount(
+            lengjing::platform::PerformanceCounter::
+                GeometryCollectedVertices,
+            totalVertices - initialVertexCount);
+        lengjing::platform::RecordPerformanceCount(
+            lengjing::platform::PerformanceCounter::
+                GeometryCollectedTriangles,
+            totalTriangles - initialTriangleCount);
         return report;
     }
 
@@ -2786,6 +2876,7 @@ private:
         }
 
         std::shared_ptr<const SceneOwner> staticScene;
+        bool reusedStaticScene = false;
         if (!rebuildStaticScene) {
             const auto current =
                 std::atomic_load_explicit(
@@ -2794,6 +2885,7 @@ private:
                 current->snapshot->available &&
                 current->snapshot->instanceAddress == instance) {
                 staticScene = current->staticScene;
+                reusedStaticScene = staticScene != nullptr;
             }
         }
         if (!staticScene) {
@@ -2804,8 +2896,14 @@ private:
             }
             staticScene = std::move(candidate);
         }
+        if (reusedStaticScene) {
+            lengjing::platform::RecordPerformanceCount(
+                lengjing::platform::PerformanceCounter::
+                    GeometrySceneReuses);
+        }
 
         std::shared_ptr<const SceneOwner> dynamicScene;
+        bool reusedDynamicScene = false;
         const auto current =
             std::atomic_load_explicit(&published, std::memory_order_acquire);
         // Mesh identity is conservative because immutable meshes contain
@@ -2820,6 +2918,7 @@ private:
                 expectedScenes,
                 dynamicMeshes)) {
             dynamicScene = current->dynamicScene;
+            reusedDynamicScene = true;
         }
         if (!dynamicScene) {
             auto candidate = std::make_shared<SceneOwner>(
@@ -2829,9 +2928,25 @@ private:
             }
             dynamicScene = std::move(candidate);
         }
+        if (reusedDynamicScene) {
+            lengjing::platform::RecordPerformanceCount(
+                lengjing::platform::PerformanceCounter::
+                    GeometrySceneReuses);
+        }
         if (staticScene->GeometryCount() +
                 dynamicScene->GeometryCount() ==
             0) {
+            return PublishResult::Failed;
+        }
+
+        const std::uint64_t verifiedValidationEpoch =
+            validationRequestEpoch.load(std::memory_order_acquire);
+        std::uintptr_t verifiedInstance = 0;
+        std::vector<std::uintptr_t> verifiedScenePointers;
+        if (!ResolveInstance(verifiedInstance) ||
+            verifiedInstance != instance ||
+            !ReadScenePointers(instance, verifiedScenePointers) ||
+            verifiedScenePointers != expectedScenes) {
             return PublishResult::Failed;
         }
 
@@ -2844,11 +2959,7 @@ private:
             if (requestEpoch.load(std::memory_order_acquire) != epoch) {
                 return PublishResult::Stale;
             }
-            std::vector<std::uintptr_t> verifiedScenes;
-            if (!ReadScenePointers(instance, verifiedScenes) ||
-                verifiedScenes != expectedScenes) {
-                return PublishResult::Failed;
-            }
+            snapshot->validationEpoch = verifiedValidationEpoch;
             snapshot->generation = ++generation;
             state->snapshot = std::move(snapshot);
             std::atomic_store_explicit(
@@ -2896,6 +3007,7 @@ private:
                 std::lock_guard<std::mutex> lock(waitMutex);
                 forceRefresh = refreshRequested;
                 refreshRequested = false;
+                validationRequested = false;
                 roundEpoch =
                     requestEpoch.load(std::memory_order_acquire);
             }
@@ -2943,7 +3055,8 @@ private:
                     (instance == 0 ||
                      ReadScenePointers(instance, scenePointers));
                 if (!instanceResolved || !scenesResolved) {
-                    recordFailure(now, activeInstance);
+                    recordFailure(
+                        std::chrono::steady_clock::now(), activeInstance);
                 } else if (instance == 0) {
                     activeInstance = 0;
                     activeScenePointers.clear();
@@ -2999,7 +3112,7 @@ private:
                             lock, remaining, [this] {
                                 return !running.load(
                                            std::memory_order_acquire) ||
-                                    refreshRequested;
+                                    refreshRequested || validationRequested;
                             });
                         continue;
                     }
@@ -3011,6 +3124,9 @@ private:
                     bool rebuildStaticScene = false;
 
                     if (refreshStatic) {
+                        lengjing::platform::RecordPerformanceCount(
+                            lengjing::platform::PerformanceCounter::
+                                GeometryStaticRefreshes);
                         std::vector<std::shared_ptr<const GeometryMesh>>
                             freshStatic;
                         std::size_t freshStaticShapeCount = 0;
@@ -3024,10 +3140,6 @@ private:
                         rebuildStaticScene =
                             staticReport.sourceAvailable ||
                             candidateStatic.size() != staticMeshes.size();
-                        if (!staticReport.sourceAvailable) {
-                            nextStaticRefresh =
-                                now + config.dynamicRefresh;
-                        }
                     }
 
                     bool staticBudgetValid = true;
@@ -3054,6 +3166,9 @@ private:
                         candidateDynamic;
                     CollectionReport dynamicReport;
                     if (staticBudgetValid) {
+                        lengjing::platform::RecordPerformanceCount(
+                            lengjing::platform::PerformanceCounter::
+                                GeometryDynamicRefreshes);
                         dynamicReport = CollectMeshes(
                             instance, GeometryBodyType::Dynamic,
                             dynamicMeshes, dynamicMissingCounts,
@@ -3080,26 +3195,29 @@ private:
                         publishResult =
                             Publish(instance, candidateStatic,
                                     candidateDynamic, rebuildStaticScene,
-                                    scenePointers, roundEpoch);
+                                     scenePointers, roundEpoch);
                     }
+
+                    const auto completedAt =
+                        std::chrono::steady_clock::now();
 
                     if (publishResult == PublishResult::Published) {
                         staticMeshes = std::move(candidateStatic);
                         dynamicMeshes = std::move(candidateDynamic);
                         staticShapeCount = candidateStaticShapeCount;
-                        if (refreshStatic &&
-                            staticReport.sourceAvailable) {
+                        if (refreshStatic) {
                             nextStaticRefresh =
-                                !staticReport.partial &&
+                                staticReport.sourceAvailable &&
+                                        !staticReport.partial &&
                                         (staticReport.complete ||
                                          staticReport.budgetLimited)
-                                    ? now + config.staticRefresh
-                                    : now + config.dynamicRefresh;
+                                    ? completedAt + config.staticRefresh
+                                    : completedAt + config.dynamicRefresh;
                         }
                         hasLastGood = true;
                         hasPublishedScene = true;
-                        lastGoodAt = now;
-                        lastPublishedAt = now;
+                        lastGoodAt = completedAt;
+                        lastPublishedAt = completedAt;
                         consecutiveFailures = 0;
                         if ((refreshStatic &&
                              (!staticReport.complete ||
@@ -3108,15 +3226,23 @@ private:
                             dynamicReport.partial) {
                             nextStaticRefresh = std::min(
                                 nextStaticRefresh,
-                                now + config.dynamicRefresh);
+                                completedAt + config.dynamicRefresh);
                         }
                     } else if (publishResult == PublishResult::Failed) {
+                        lengjing::platform::RecordPerformanceCount(
+                            lengjing::platform::PerformanceCounter::
+                                GeometryPublishFailures);
                         if (refreshStatic) {
                             nextStaticRefresh =
                                 std::min(nextStaticRefresh,
-                                         now + config.dynamicRefresh);
+                                         completedAt +
+                                             config.dynamicRefresh);
                         }
-                        recordFailure(now, instance);
+                        recordFailure(completedAt, instance);
+                    } else if (publishResult == PublishResult::Stale) {
+                        lengjing::platform::RecordPerformanceCount(
+                            lengjing::platform::PerformanceCounter::
+                                GeometryRefreshStale);
                     }
                 }
             } catch (...) {
@@ -3128,7 +3254,7 @@ private:
             waitCondition.wait_for(
                 lock, config.dynamicRefresh, [this] {
                     return !running.load(std::memory_order_acquire) ||
-                           refreshRequested;
+                           refreshRequested || validationRequested;
                 });
         }
     }
@@ -3139,7 +3265,9 @@ private:
     std::thread worker;
     std::atomic<bool> running{false};
     std::atomic<std::uint64_t> requestEpoch{0};
+    std::atomic<std::uint64_t> validationRequestEpoch{0};
     bool refreshRequested = false;
+    bool validationRequested = false;
 
     ReadCallback read;
     GeometryRuntimeConfig config{};
@@ -3162,6 +3290,14 @@ void GeometryRuntime::Stop() noexcept {
 
 bool GeometryRuntime::IsRunning() const noexcept {
     return impl_->IsRunning();
+}
+
+std::uint64_t GeometryRuntime::CurrentRefreshEpoch() const noexcept {
+    return impl_->CurrentRefreshEpoch();
+}
+
+std::uint64_t GeometryRuntime::RequestValidation() noexcept {
+    return impl_->RequestValidation();
 }
 
 std::uint64_t GeometryRuntime::RequestRefresh() noexcept {

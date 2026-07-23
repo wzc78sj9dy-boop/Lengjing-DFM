@@ -29,6 +29,12 @@ constexpr GeometrySceneBuildPolicy ResolveGeometrySceneBuildPolicy(
 
 constexpr std::chrono::milliseconds kMinimumGeometryPublishInterval{33};
 
+constexpr bool ShouldRequestGeometryRefresh(
+    std::uintptr_t previousWorld,
+    std::uintptr_t currentWorld) noexcept {
+    return previousWorld != 0 && previousWorld != currentWorld;
+}
+
 template <typename Clock, typename Duration>
 bool ShouldPublishGeometryUpdate(
     bool hasPublished,

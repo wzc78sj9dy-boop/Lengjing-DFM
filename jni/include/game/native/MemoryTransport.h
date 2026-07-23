@@ -138,9 +138,17 @@ public:
               std::string_view processName,
               RuntimeDiagnostic& diagnostic,
               std::string& error);
+    bool OpenReadOnly(int modeIndex,
+                      pid_t processId,
+                      std::string_view processName,
+                      RuntimeDiagnostic& diagnostic,
+                      std::string& error);
     void Close() noexcept;
 
     bool Read(std::uintptr_t address, void* destination, std::size_t size);
+    bool ReadGeometry(std::uintptr_t address,
+                      void* destination,
+                      std::size_t size);
     bool ReadCoordinateMemory(
         std::uintptr_t address,
         void* destination,

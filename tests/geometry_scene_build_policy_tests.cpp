@@ -11,6 +11,13 @@ void RunGeometrySceneBuildPolicyTests() {
     using lengjing::game::native::GeometryBodyType;
     using lengjing::game::native::ResolveGeometrySceneBuildPolicy;
     using lengjing::game::native::ShouldIncludeGeometryShape;
+    using lengjing::game::native::ShouldRequestGeometryRefresh;
+
+    REQUIRE(!ShouldRequestGeometryRefresh(0, 0x1000));
+    REQUIRE(!ShouldRequestGeometryRefresh(0, 0));
+    REQUIRE(!ShouldRequestGeometryRefresh(0x1000, 0x1000));
+    REQUIRE(ShouldRequestGeometryRefresh(0x1000, 0x2000));
+    REQUIRE(ShouldRequestGeometryRefresh(0x1000, 0));
 
     const auto staticPolicy =
         ResolveGeometrySceneBuildPolicy(GeometrySceneKind::Static);

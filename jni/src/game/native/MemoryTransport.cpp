@@ -926,7 +926,8 @@ struct MemoryTransport::Impl {
               pid_t targetProcessId,
               std::string_view processName,
               RuntimeDiagnostic& diagnostic,
-              std::string& error) {
+              std::string& error,
+              bool initializeExecutionContext) {
         std::lock_guard<std::mutex> lock(ioMutex);
         ResetUnlocked();
         diagnostic = {};
@@ -1034,7 +1035,12 @@ struct MemoryTransport::Impl {
                 return false;
         }
 
-        static_cast<void>(OpenThreadContextUnlocked());
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+        if (!initializeExecutionContext) writable = false;
+#endif
+        if (initializeExecutionContext) {
+            static_cast<void>(OpenThreadContextUnlocked());
+        }
         open = true;
         diagnostic = {};
         error.clear();
@@ -1379,20 +1385,40 @@ struct MemoryTransport::Impl {
                  privateProcessHandle, address, destination, size) == 0;
     }
 
-    bool Read(std::uintptr_t address, void* destination, std::size_t size) {
+    bool ReadWithKind(std::uintptr_t address,
+                      void* destination,
+                      std::size_t size,
+                      platform::PerformancePhase phase,
+                      platform::PerformanceReadKind kind) {
         if (!platform::PerformanceTraceEnabled()) {
             std::lock_guard<std::mutex> lock(ioMutex);
             return ReadUnlocked(address, destination, size);
         }
-        platform::PerformanceTraceScope trace(
-            platform::PerformancePhase::RemoteRead, 64);
+        platform::PerformanceTraceScope trace(phase, 64);
         std::lock_guard<std::mutex> lock(ioMutex);
         const bool read = ReadUnlocked(address, destination, size);
-        platform::RecordPerformanceRead(
-            platform::PerformanceReadKind::Standard,
-            size,
-            read);
+        platform::RecordPerformanceRead(kind, size, read);
         return read;
+    }
+
+    bool Read(std::uintptr_t address, void* destination, std::size_t size) {
+        return ReadWithKind(
+            address,
+            destination,
+            size,
+            platform::PerformancePhase::RemoteRead,
+            platform::PerformanceReadKind::Standard);
+    }
+
+    bool ReadGeometry(std::uintptr_t address,
+                      void* destination,
+                      std::size_t size) {
+        return ReadWithKind(
+            address,
+            destination,
+            size,
+            platform::PerformancePhase::GeometryRemoteRead,
+            platform::PerformanceReadKind::Geometry);
     }
 
     bool ReadCoordinateMemory(
@@ -1437,25 +1463,28 @@ struct MemoryTransport::Impl {
                 requestedBytes += requests[index].size;
             }
         }
-        if (traceEnabled) {
-            platform::RecordPerformanceRead(
-                platform::PerformanceReadKind::Batch,
-                requestedBytes,
-                true,
-                count);
-        }
+        const auto finish = [&](std::size_t successful) {
+            if (traceEnabled) {
+                platform::RecordPerformanceRead(
+                    platform::PerformanceReadKind::Batch,
+                    requestedBytes,
+                    successful == count,
+                    count);
+            }
+            return successful;
+        };
         std::unique_lock<std::mutex> lock(ioMutex);
-        if (count == 0) return 0;
+        if (count == 0) return finish(0);
         if (itemStatus != nullptr) {
             std::fill_n(itemStatus, count, static_cast<std::uint8_t>(0));
         }
-        if (!open || requests == nullptr) return 0;
+        if (!open || requests == nullptr) return finish(0);
 
         for (std::size_t index = 0; index < count; ++index) {
             if (requests[index].localBuffer == nullptr ||
                 !IsRemoteRangeValid(
                     requests[index].remoteAddress, requests[index].size)) {
-                return 0;
+                return finish(0);
             }
         }
 
@@ -1463,6 +1492,8 @@ struct MemoryTransport::Impl {
         if (mode == MemoryTransportMode::PrivateRpc &&
             privateRpc != nullptr &&
             privateProcessHandle != kernel_rpc_abi::kInvalidProcessHandle) {
+            platform::RecordPerformanceCount(
+                platform::PerformanceCounter::BatchPrivateRpcCalls);
             try {
                 std::vector<MutableMemoryTransfer> transfers;
                 transfers.reserve(count);
@@ -1478,12 +1509,19 @@ struct MemoryTransport::Impl {
                     transfers.data(),
                     transfers.size(),
                     itemStatus);
-                return result > 0 ? static_cast<std::size_t>(result) : 0;
+                return finish(
+                    result > 0 ? static_cast<std::size_t>(result) : 0);
             } catch (...) {
-                return 0;
+                return finish(0);
             }
         }
 
+        platform::RecordPerformanceCount(
+            mode == MemoryTransportMode::ProcessVm
+                ? platform::PerformanceCounter::BatchProcessVmCalls
+                : platform::PerformanceCounter::BatchKernelDriverCalls);
+        platform::RecordPerformanceCount(
+            platform::PerformanceCounter::BatchFallbackItems, count);
         lock.unlock();
         std::size_t successful = 0;
         for (std::size_t index = 0; index < count; ++index) {
@@ -1498,7 +1536,7 @@ struct MemoryTransport::Impl {
             if (itemStatus != nullptr) itemStatus[index] = read ? 1 : 0;
             if (read) ++successful;
         }
-        return successful;
+        return finish(successful);
     }
 
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
@@ -1940,7 +1978,25 @@ bool MemoryTransport::Open(int modeIndex,
         error.clear();
         return false;
     }
-    return impl_->Open(modeIndex, processId, processName, diagnostic, error);
+    return impl_->Open(
+        modeIndex, processId, processName, diagnostic, error, true);
+}
+
+bool MemoryTransport::OpenReadOnly(int modeIndex,
+                                   pid_t processId,
+                                   std::string_view processName,
+                                   RuntimeDiagnostic& diagnostic,
+                                   std::string& error) {
+    if (impl_ == nullptr) {
+        diagnostic = {
+            RuntimeError::BackendUnavailable,
+            -ENODEV,
+        };
+        error.clear();
+        return false;
+    }
+    return impl_->Open(
+        modeIndex, processId, processName, diagnostic, error, false);
 }
 
 void MemoryTransport::Close() noexcept {
@@ -1952,6 +2008,14 @@ bool MemoryTransport::Read(
     void* destination,
     std::size_t size) {
     return impl_ != nullptr && impl_->Read(address, destination, size);
+}
+
+bool MemoryTransport::ReadGeometry(
+    std::uintptr_t address,
+    void* destination,
+    std::size_t size) {
+    return impl_ != nullptr &&
+        impl_->ReadGeometry(address, destination, size);
 }
 
 bool MemoryTransport::ReadCoordinateMemory(

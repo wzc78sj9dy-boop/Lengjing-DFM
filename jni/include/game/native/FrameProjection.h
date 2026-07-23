@@ -147,6 +147,26 @@ inline bool IsFinite(const ProjectionView& view) noexcept {
 
 namespace projection_detail {
 
+inline const std::array<ProjectionPoint, 36>&
+HorizontalRingUnitPoints() noexcept {
+    static const std::array<ProjectionPoint, 36> points = [] {
+        constexpr std::size_t kSegmentCount = 36;
+        constexpr float kTwoPi = 6.28318530717958647692f;
+        std::array<ProjectionPoint, kSegmentCount> result{};
+        for (std::size_t index = 0; index < kSegmentCount; ++index) {
+            const float angle = kTwoPi * static_cast<float>(index) /
+                static_cast<float>(kSegmentCount);
+            result[index] = ProjectionPoint{
+                std::cos(angle),
+                std::sin(angle),
+                0.0f,
+            };
+        }
+        return result;
+    }();
+    return points;
+}
+
 inline PreparedProjection PrepareBasis(
     const ProjectionView& view) noexcept {
     constexpr float kDegreesToRadians =
@@ -279,15 +299,15 @@ inline std::vector<ScreenProjectionSegment> ProjectWorldHorizontalRing(
         return result;
     }
 
-    constexpr float kTwoPi = 6.28318530717958647692f;
     std::array<ScreenProjection, kSegmentCount> points{};
+    const auto& unitPoints =
+        projection_detail::HorizontalRingUnitPoints();
     for (std::size_t index = 0; index < kSegmentCount; ++index) {
-        const float angle = kTwoPi * static_cast<float>(index) /
-            static_cast<float>(kSegmentCount);
+        const ProjectionPoint& unitPoint = unitPoints[index];
         points[index] = ProjectWorldPoint(
             ProjectionPoint{
-                center.x + radius * std::cos(angle),
-                center.y + radius * std::sin(angle),
+                center.x + radius * unitPoint.x,
+                center.y + radius * unitPoint.y,
                 center.z,
             },
             prepared);
