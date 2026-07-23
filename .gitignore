@@ -14,6 +14,7 @@
 /jni/include/auth/AuthConfigPrivate.h
 /jni/config/cloud_layout.v2.json
 /jni/config/*.local.json
+/tools/blind_eval/.test-work/
 
 # Machine-local state
 .adb_wifi
