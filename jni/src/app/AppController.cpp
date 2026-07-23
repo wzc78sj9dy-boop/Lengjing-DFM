@@ -4,6 +4,7 @@
 #include "app/RenderBackendSelection.h"
 #include "app/RuntimeExitPolicy.h"
 #include "app/RuntimePresentationPolicy.h"
+#include "game/GameVersionPolicy.h"
 #include "platform/PerformanceTrace.h"
 
 #include "ImGui/imgui.h"
@@ -221,7 +222,9 @@ bool AppController::ExitRequested() const noexcept {
 int AppController::RuntimeExitCode() const {
     const game::RuntimeStatus status = runtime_.Status();
     return ResolveRuntimeExitCode(
-        options_.cloudLayout != nullptr,
+        game::CloudLayoutMatchesGameVersion(
+            options_.cloudLayout.get(),
+            model_.runtime.gameVersionIndex),
         status.phase,
         status.failureKind);
 }
@@ -558,7 +561,9 @@ game::RuntimeOptions AppController::BuildRuntimeOptions() const {
     options.screenHeight = model_.runtime.screenHeight;
     options.orientation = displayOrientation_;
     options.programDirectory = options_.programDirectory;
-    options.cloudLayout = options_.cloudLayout;
+    options.cloudLayout = game::SelectCloudLayoutForGameVersion(
+        options_.cloudLayout,
+        options.gameVersionIndex);
     options.algorithmPosition = options_.algorithmPosition;
     return options;
 }
