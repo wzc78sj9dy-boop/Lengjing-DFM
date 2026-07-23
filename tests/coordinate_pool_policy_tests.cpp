@@ -15,6 +15,7 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::CoordinatePoolRootSnapshot;
     using lengjing::game::native::CoordinatePoolRootStabilityWindow;
     using lengjing::game::native::CoordinatePoolRootSnapshotsMatch;
+    using lengjing::game::native::IsCoordinatePoolRootSnapshotInitialized;
     using lengjing::game::native::CoordinatePoolCandidateSet;
     using lengjing::game::native::IsCoordinatePoolReadRangeValid;
     using lengjing::game::native::IsCoordinatePoolSelectedCandidateValid;
@@ -297,6 +298,16 @@ void RunCoordinatePoolPolicyTests() {
         0x30000000,
     };
     REQUIRE(CoordinatePoolRootSnapshotsMatch(root, root));
+    REQUIRE(IsCoordinatePoolRootSnapshotInitialized(root));
+    REQUIRE(!IsCoordinatePoolRootSnapshotInitialized({}));
+    REQUIRE(CoordinatePoolGuardedRootSnapshotMatches(
+        root, root, root.bridge));
+    REQUIRE(!CoordinatePoolGuardedRootSnapshotMatches(
+        root, root, root.bridge + 4));
+    REQUIRE(!CoordinatePoolGuardedRootSnapshotMatches(
+        root,
+        CoordinatePoolRootSnapshot{root.bridge, root.context + 8, root.entry},
+        root.bridge));
     REQUIRE(!CoordinatePoolRootSnapshotsMatch(
         root,
         CoordinatePoolRootSnapshot{

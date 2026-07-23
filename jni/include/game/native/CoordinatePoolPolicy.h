@@ -515,6 +515,21 @@ constexpr bool CoordinatePoolRootSnapshotsMatch(
         left.entry == right.entry;
 }
 
+constexpr bool IsCoordinatePoolRootSnapshotInitialized(
+    const CoordinatePoolRootSnapshot& snapshot) noexcept {
+    return snapshot.bridge != 0 && snapshot.context != 0 &&
+        snapshot.entry != 0;
+}
+
+constexpr bool CoordinatePoolGuardedRootSnapshotMatches(
+    const CoordinatePoolRootSnapshot& accepted,
+    const CoordinatePoolRootSnapshot& observed,
+    std::uint64_t trailingBridge) noexcept {
+    return IsCoordinatePoolRootSnapshotInitialized(accepted) &&
+        CoordinatePoolRootSnapshotsMatch(accepted, observed) &&
+        observed.bridge == trailingBridge;
+}
+
 constexpr bool CoordinatePoolCodeIdentityChanged(
     const CoordinatePoolRootSnapshot& previous,
     const CoordinatePoolRootSnapshot& current) noexcept {

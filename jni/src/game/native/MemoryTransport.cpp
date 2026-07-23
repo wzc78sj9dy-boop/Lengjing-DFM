@@ -102,6 +102,13 @@ struct MemoryTransferResult {
     std::size_t completed = 0;
 };
 
+struct MemoryBatchTransferResult {
+    int status = 0;
+    std::size_t completed = 0;
+    std::size_t failedIndex = 0;
+    std::size_t failedCompleted = 0;
+};
+
 MemoryTransferResult ProcessVmTransferExact(
     pid_t processId,
     std::uintptr_t address,
@@ -176,6 +183,112 @@ MemoryTransferResult ProcessMemReadExact(
         return transfer;
     }
     return transfer;
+}
+
+MemoryBatchTransferResult ProcessVmReadBatchOnce(
+    pid_t processId,
+    const MemoryReadRequest* requests,
+    std::size_t count,
+    std::size_t totalSize) {
+    MemoryBatchTransferResult transfer{};
+    std::array<iovec, kCoordinateMemoryBatchRequestLimit> local{};
+    std::array<iovec, kCoordinateMemoryBatchRequestLimit> remote{};
+    for (std::size_t index = 0; index < count; ++index) {
+        local[index] = iovec{
+            requests[index].localBuffer,
+            requests[index].size,
+        };
+        remote[index] = iovec{
+            reinterpret_cast<void*>(requests[index].remoteAddress),
+            requests[index].size,
+        };
+    }
+
+    ssize_t result = 0;
+    do {
+        errno = 0;
+        result = static_cast<ssize_t>(syscall(
+            __NR_process_vm_readv,
+            processId,
+            local.data(),
+            static_cast<unsigned long>(count),
+            remote.data(),
+            static_cast<unsigned long>(count),
+            0UL));
+    } while (result < 0 && errno == EINTR);
+
+    if (result == static_cast<ssize_t>(totalSize)) {
+        transfer.completed = totalSize;
+        transfer.failedIndex = count;
+        return transfer;
+    }
+    if (result > 0 && static_cast<std::size_t>(result) <= totalSize) {
+        transfer.completed = static_cast<std::size_t>(result);
+        transfer.status = -ENODATA;
+    } else {
+        transfer.status = result == 0
+            ? -ENODATA
+            : (errno != 0 ? -errno : -EIO);
+    }
+
+    std::size_t remaining = transfer.completed;
+    for (std::size_t index = 0; index < count; ++index) {
+        if (remaining < requests[index].size) {
+            transfer.failedIndex = index;
+            transfer.failedCompleted = remaining;
+            return transfer;
+        }
+        remaining -= requests[index].size;
+    }
+    transfer.failedIndex = count - 1;
+    transfer.failedCompleted = requests[count - 1].size;
+    return transfer;
+}
+
+MemoryBatchTransferResult ProcessMemReadBatchExact(
+    int descriptor,
+    const MemoryReadRequest* requests,
+    std::size_t count) {
+    MemoryBatchTransferResult transfer{};
+    for (std::size_t index = 0; index < count; ++index) {
+        const MemoryTransferResult item = ProcessMemReadExact(
+            descriptor,
+            requests[index].remoteAddress,
+            requests[index].localBuffer,
+            requests[index].size);
+        transfer.completed += item.completed;
+        if (item.status != 0 || item.completed != requests[index].size) {
+            transfer.status = item.status != 0 ? item.status : -ENODATA;
+            transfer.failedIndex = index;
+            transfer.failedCompleted = item.completed;
+            return transfer;
+        }
+    }
+    transfer.failedIndex = count;
+    return transfer;
+}
+
+std::size_t CoordinateBatchRequestedBytes(
+    const MemoryReadRequest* requests,
+    std::size_t count) noexcept {
+    if (requests == nullptr || count == 0 ||
+        count > kCoordinateMemoryBatchRequestLimit) {
+        return 0;
+    }
+    std::size_t total = 0;
+    for (std::size_t index = 0; index < count; ++index) {
+        if (requests[index].size >
+            std::numeric_limits<std::size_t>::max() - total) {
+            return 0;
+        }
+        total += requests[index].size;
+    }
+    return total;
+}
+
+bool IsStructuralCoordinateBatchFailure(int status) noexcept {
+    return status == -EINVAL || status == -ENOSYS || status == -E2BIG ||
+        status == -EOPNOTSUPP;
 }
 
 CoordinateReadFailure ClassifyCoordinateReadFailure(
@@ -363,6 +476,7 @@ struct MemoryTransport::Impl {
     std::chrono::steady_clock::time_point nextThreadContextOpen{};
     std::chrono::steady_clock::time_point nextPtraceOracleResolve{};
     CoordinateReplayTransportLayout coordinateReplayLayout{};
+    bool coordinateBatchDisabled = false;
     bool open = false;
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
     bool writable = false;
@@ -390,6 +504,7 @@ struct MemoryTransport::Impl {
         nextThreadContextOpen = {};
         nextPtraceOracleResolve = {};
         coordinateReplayLayout = {};
+        coordinateBatchDisabled = false;
         if (privateRpc != nullptr &&
             privateProcessHandle != kernel_rpc_abi::kInvalidProcessHandle) {
             static_cast<void>(privateRpc->ReleaseProcessHandle(
@@ -997,6 +1112,98 @@ struct MemoryTransport::Impl {
         return true;
     }
 
+    bool AttemptCoordinateBatchReadUnlocked(
+        CoordinateReadPath path,
+        const MemoryReadRequest* requests,
+        std::size_t count,
+        std::size_t totalSize,
+        CoordinateReadDiagnostic& diagnostic,
+        std::size_t& failedIndex) {
+        const bool primaryAttempt = diagnostic.attemptCount == 0;
+        if (platform::PerformanceTraceEnabled()) {
+            platform::RecordPerformanceCount(
+                platform::PerformanceCounter::CoordinatePathAttempts);
+            if (!primaryAttempt) {
+                platform::RecordPerformanceCount(
+                    platform::PerformanceCounter::CoordinateFallbacks);
+            }
+        }
+        diagnostic.lastPath = path;
+        diagnostic.attemptedPaths |= CoordinateReadPathMask(path);
+        ++diagnostic.attemptCount;
+
+        MemoryBatchTransferResult transfer{};
+        CoordinateReadFailure fallback =
+            CoordinateReadFailure::TransportUnavailable;
+        switch (path) {
+            case CoordinateReadPath::ProcessVm:
+                fallback = CoordinateReadFailure::ProcessVmReadFailed;
+                transfer = ProcessVmReadBatchOnce(
+                    processId, requests, count, totalSize);
+                if (IsStructuralCoordinateBatchFailure(transfer.status)) {
+                    coordinateBatchDisabled = true;
+                }
+                break;
+            case CoordinateReadPath::ProcMem: {
+                const int openStatus = OpenProcessMemUnlocked();
+                if (openStatus != 0) {
+                    transfer.status = openStatus;
+                    transfer.failedIndex = 0;
+                    fallback = CoordinateReadFailure::ProcMemOpenFailed;
+                } else {
+                    transfer = ProcessMemReadBatchExact(
+                        processMemFd, requests, count);
+                    fallback = CoordinateReadFailure::ProcMemReadFailed;
+                }
+                break;
+            }
+            case CoordinateReadPath::None:
+                transfer.status = -EINVAL;
+                break;
+        }
+
+        const bool succeeded = transfer.status == 0 &&
+            transfer.completed == totalSize && transfer.failedIndex == count;
+        if (!succeeded && transfer.status == 0) {
+            transfer.status = -ENODATA;
+        }
+        const std::size_t completed = succeeded
+            ? totalSize
+            : transfer.completed;
+        if (primaryAttempt) {
+            diagnostic.primaryCompleted = completed;
+            diagnostic.primarySystemError = transfer.status;
+        }
+        diagnostic.lastCompleted = completed;
+        diagnostic.lastSystemError = transfer.status;
+        diagnostic.systemError = transfer.status;
+        if (succeeded) {
+            failedIndex = count;
+            diagnostic.batchFailedIndex = count;
+            diagnostic.failedItemCompleted = 0;
+            diagnostic.address = requests[0].remoteAddress;
+            diagnostic.size = totalSize;
+            diagnostic.failure = CoordinateReadFailure::None;
+            diagnostic.systemError = 0;
+            return true;
+        }
+
+        failedIndex = transfer.failedIndex < count
+            ? transfer.failedIndex
+            : count - 1;
+        diagnostic.batchFailedIndex = failedIndex;
+        diagnostic.failedItemCompleted = transfer.failedCompleted;
+        diagnostic.address = requests[failedIndex].remoteAddress;
+        diagnostic.size = requests[failedIndex].size;
+        diagnostic.failure = ClassifyCoordinateReadFailure(
+            fallback,
+            MemoryTransferResult{
+                transfer.status,
+                transfer.failedCompleted,
+            });
+        return false;
+    }
+
     bool ReadCoordinateMemoryCoreUnlocked(
         std::uintptr_t address,
         void* destination,
@@ -1041,6 +1248,111 @@ struct MemoryTransport::Impl {
             platform::PerformanceReadKind::Coordinate,
             size,
             read);
+        return read;
+    }
+
+    bool ReadCoordinateMemoryBatchCoreUnlocked(
+        const MemoryReadRequest* requests,
+        std::size_t count,
+        CoordinateReadDiagnostic& diagnostic,
+        std::size_t& failedIndex) {
+        diagnostic = {};
+        failedIndex = 0;
+        if (requests != nullptr && count != 0) {
+            diagnostic.address = requests[0].remoteAddress;
+            diagnostic.size = requests[0].size;
+        }
+        diagnostic.batchItemCount = count;
+        diagnostic.batchFailedIndex = 0;
+        if (!open) {
+            diagnostic.failure =
+                CoordinateReadFailure::TransportUnavailable;
+            diagnostic.systemError = -ENODEV;
+            return false;
+        }
+        if (requests == nullptr || count == 0 ||
+            count > kCoordinateMemoryBatchRequestLimit) {
+            diagnostic.failure = CoordinateReadFailure::InvalidRange;
+            diagnostic.systemError = -EINVAL;
+            return false;
+        }
+
+        std::size_t totalSize = 0;
+        const std::size_t maximumTransferSize = static_cast<std::size_t>(
+            std::numeric_limits<ssize_t>::max());
+        for (std::size_t index = 0; index < count; ++index) {
+            const MemoryReadRequest& request = requests[index];
+            if (request.localBuffer == nullptr ||
+                !IsRemoteRangeValid(request.remoteAddress, request.size) ||
+                request.size > maximumTransferSize - totalSize) {
+                failedIndex = index;
+                diagnostic.batchFailedIndex = index;
+                diagnostic.address = request.remoteAddress;
+                diagnostic.size = request.size;
+                diagnostic.failure = CoordinateReadFailure::InvalidRange;
+                diagnostic.systemError = -EINVAL;
+                return false;
+            }
+            totalSize += request.size;
+        }
+
+        diagnostic.address = requests[0].remoteAddress;
+        diagnostic.size = totalSize;
+        if (coordinateBatchDisabled) {
+            for (std::size_t index = 0; index < count; ++index) {
+                CoordinateReadDiagnostic itemDiagnostic{};
+                if (!ReadCoordinateMemoryCoreUnlocked(
+                        requests[index].remoteAddress,
+                        requests[index].localBuffer,
+                        requests[index].size,
+                        itemDiagnostic)) {
+                    diagnostic = itemDiagnostic;
+                    diagnostic.batchItemCount = count;
+                    diagnostic.batchFailedIndex = index;
+                    diagnostic.failedItemCompleted =
+                        itemDiagnostic.lastCompleted;
+                    failedIndex = index;
+                    return false;
+                }
+            }
+            diagnostic = {};
+            diagnostic.batchItemCount = count;
+            diagnostic.batchFailedIndex = count;
+            failedIndex = count;
+            return true;
+        }
+        diagnostic.primaryPath = kCoordinateReadPathOrder.front();
+        return TryCoordinateReadPaths([&](CoordinateReadPath path) {
+            return AttemptCoordinateBatchReadUnlocked(
+                path,
+                requests,
+                count,
+                totalSize,
+                diagnostic,
+                failedIndex);
+        });
+    }
+
+    bool ReadCoordinateMemoryBatchUnlocked(
+        const MemoryReadRequest* requests,
+        std::size_t count,
+        CoordinateReadDiagnostic& diagnostic,
+        std::size_t& failedIndex) {
+        if (!platform::PerformanceTraceEnabled()) {
+            return ReadCoordinateMemoryBatchCoreUnlocked(
+                requests, count, diagnostic, failedIndex);
+        }
+        platform::PerformanceTraceScope trace(
+            platform::PerformancePhase::CoordinateRemoteRead, 64);
+        const std::size_t requestedBytes =
+            CoordinateBatchRequestedBytes(requests, count);
+        const bool read = ReadCoordinateMemoryBatchCoreUnlocked(
+            requests, count, diagnostic, failedIndex);
+        platform::RecordPerformanceRead(
+            platform::PerformanceReadKind::Coordinate,
+            requestedBytes,
+            read,
+            count);
         return read;
     }
 
@@ -1091,6 +1403,16 @@ struct MemoryTransport::Impl {
         std::lock_guard<std::mutex> lock(ioMutex);
         return ReadCoordinateMemoryUnlocked(
             address, destination, size, diagnostic);
+    }
+
+    bool ReadCoordinateMemoryBatch(
+        const MemoryReadRequest* requests,
+        std::size_t count,
+        CoordinateReadDiagnostic& diagnostic,
+        std::size_t& failedIndex) {
+        std::lock_guard<std::mutex> lock(ioMutex);
+        return ReadCoordinateMemoryBatchUnlocked(
+            requests, count, diagnostic, failedIndex);
     }
 
     bool ReadAtGeneration(std::uint64_t expectedGeneration,
@@ -1648,6 +1970,26 @@ bool MemoryTransport::ReadCoordinateMemory(
     }
     return impl_->ReadCoordinateMemory(
         address, destination, size, diagnostic);
+}
+
+bool MemoryTransport::ReadCoordinateMemoryBatch(
+    const MemoryReadRequest* requests,
+    std::size_t count,
+    CoordinateReadDiagnostic& diagnostic,
+    std::size_t& failedIndex) {
+    if (impl_ == nullptr) {
+        diagnostic = {};
+        failedIndex = 0;
+        if (requests != nullptr && count != 0) {
+            diagnostic.address = requests[0].remoteAddress;
+            diagnostic.size = requests[0].size;
+        }
+        diagnostic.failure = CoordinateReadFailure::TransportUnavailable;
+        diagnostic.systemError = -ENODEV;
+        return false;
+    }
+    return impl_->ReadCoordinateMemoryBatch(
+        requests, count, diagnostic, failedIndex);
 }
 
 std::size_t MemoryTransport::ReadBatch(

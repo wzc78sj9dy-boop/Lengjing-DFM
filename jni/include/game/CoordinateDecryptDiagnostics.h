@@ -150,6 +150,9 @@ struct CoordinateReadDiagnostic {
     std::size_t size = 0;
     std::size_t primaryCompleted = 0;
     std::size_t lastCompleted = 0;
+    std::size_t batchItemCount = 0;
+    std::size_t batchFailedIndex = 0;
+    std::size_t failedItemCompleted = 0;
     int primarySystemError = 0;
     int lastSystemError = 0;
     int systemError = 0;
@@ -198,6 +201,9 @@ constexpr bool operator==(const CoordinateReadDiagnostic& left,
         left.address == right.address && left.size == right.size &&
         left.primaryCompleted == right.primaryCompleted &&
         left.lastCompleted == right.lastCompleted &&
+        left.batchItemCount == right.batchItemCount &&
+        left.batchFailedIndex == right.batchFailedIndex &&
+        left.failedItemCompleted == right.failedItemCompleted &&
         left.primarySystemError == right.primarySystemError &&
         left.lastSystemError == right.lastSystemError &&
         left.systemError == right.systemError;

@@ -639,9 +639,14 @@ struct CoordinatePoolRuntime::Impl {
             moduleBase = targetModuleBase;
         }
 
+        const CoordinatePoolRootSnapshot previousRoot{
+            bridge,
+            decryptContext,
+            guestEntry,
+        };
         CoordinatePoolRootSnapshot nextRoot{};
         int rootStatus = 0;
-        if (!ResolveRootUnlocked(nextRoot, rootStatus)) {
+        if (!ResolveRootUnlocked(previousRoot, nextRoot, rootStatus)) {
             if (rootStatus != 0 && !probe.read.HasFailure()) {
                 SetError(
                     CoordinatePoolRuntimeError::RootReadFailed,
@@ -653,11 +658,6 @@ struct CoordinatePoolRuntime::Impl {
             return false;
         }
 
-        const CoordinatePoolRootSnapshot previousRoot{
-            bridge,
-            decryptContext,
-            guestEntry,
-        };
         const bool codeIdentityChanged = finder != nullptr &&
             CoordinatePoolCodeIdentityChanged(previousRoot, nextRoot);
         const bool runtimeContextChanged = finder != nullptr &&
@@ -940,6 +940,7 @@ struct CoordinatePoolRuntime::Impl {
                 ? slotLayout.physicalSlotCount
                 : kCoordinatePoolPhysicalSlotCount)
             : 0;
+        bool useBatchSnapshot = slotLayout.IsLocked();
         const auto snapshotSizeFor = [&](std::size_t slotCount) {
             return
                 (slotCount - 1) *
@@ -950,10 +951,91 @@ struct CoordinatePoolRuntime::Impl {
             (capturePhysicalSlots
                 ? snapshotSizeFor(capturedPhysicalSlotCount)
                 : sizeof(CoordinatePoolPosition));
-        std::vector<std::uint8_t> snapshot;
-        if (capturePhysicalSlots) snapshot.resize(snapshotSize);
+        const std::size_t batchSnapshotSize = slotLayout.IsLocked()
+            ? snapshotSizeFor(slotLayout.physicalSlotCount)
+            : 0;
+        std::vector<std::uint8_t>& snapshot = poolSnapshotScratch;
+        if (capturePhysicalSlots || useBatchSnapshot) {
+            snapshot.resize(std::max(snapshotSize, batchSnapshotSize));
+        }
+        std::uint64_t relativeAddress = 0;
+        std::uint64_t rawSnapshotAddress = 0;
+        if (!AddUnsignedOffset(
+                finder->get_ring_offset(),
+                layout.poolHeadSkip,
+                relativeAddress) ||
+            !AddUnsignedOffset(
+                selected->ring,
+                relativeAddress,
+                rawSnapshotAddress)) {
+            SetError(
+                CoordinatePoolRuntimeError::PositionReadFailed,
+                true,
+                -ERANGE);
+            return false;
+        }
+        snapshotAddress = NormalizePointer(rawSnapshotAddress);
+        if (!IsRemoteAddress(snapshotAddress)) {
+            SetError(
+                CoordinatePoolRuntimeError::PositionReadFailed,
+                true,
+                -ERANGE);
+            return false;
+        }
         bool stable = false;
         for (int attempt = 0; attempt < 2; ++attempt) {
+            if (useBatchSnapshot) {
+                const bool rangeValid =
+                    batchSnapshotSize != 0 &&
+                    IsCoordinatePoolReadRangeValid(
+                        snapshotAddress, batchSnapshotSize);
+                const std::array<MemoryReadRequest, 3> requests{{
+                    {indexAddress, &index, sizeof(index)},
+                    {snapshotAddress, snapshot.data(), batchSnapshotSize},
+                    {indexAddress, &indexAfter, sizeof(indexAfter)},
+                }};
+                const std::array<CoordinateReadStage, 3> stages{{
+                    CoordinateReadStage::RingIndex,
+                    CoordinateReadStage::Position,
+                    CoordinateReadStage::RingIndex,
+                }};
+                std::size_t failedIndex = requests.size();
+                if (rangeValid && ReadRemoteBatchUnlocked(
+                        requests.data(),
+                        requests.size(),
+                        stages.data(),
+                        failedIndex)) {
+                    decodedPoolSlot = finder->decode_ring_slot(index);
+                    poolSlot = MapDecodedCoordinatePoolSlot(
+                        decodedPoolSlot, slotLayout);
+                    if (index == indexAfter) {
+                        if (poolSlot < kCoordinatePoolPhysicalSlotCount) {
+                            const std::size_t slotOffset =
+                                poolSlot *
+                                static_cast<std::size_t>(layout.entryStride);
+                            std::memcpy(
+                                &selectedCandidate,
+                                snapshot.data() + slotOffset,
+                                sizeof(selectedCandidate));
+                            if (!AddUnsignedOffset(
+                                    snapshotAddress,
+                                    slotOffset,
+                                    coordinateAddress)) {
+                                SetError(
+                                    CoordinatePoolRuntimeError::PositionReadFailed,
+                                    true,
+                                    -ERANGE);
+                                return false;
+                            }
+                        }
+                        stable = true;
+                        break;
+                    }
+                    continue;
+                }
+                ClearReadDiagnosticUnlocked();
+                useBatchSnapshot = false;
+            }
             if (!ReadRemoteUnlocked(
                     indexAddress,
                     &index,
@@ -980,30 +1062,6 @@ struct CoordinatePoolRuntime::Impl {
                     }
                     continue;
                 }
-            }
-            std::uint64_t relativeAddress = 0;
-            std::uint64_t rawSnapshotAddress = 0;
-            if (!AddUnsignedOffset(
-                    finder->get_ring_offset(),
-                    layout.poolHeadSkip,
-                    relativeAddress) ||
-                !AddUnsignedOffset(
-                    selected->ring,
-                    relativeAddress,
-                    rawSnapshotAddress)) {
-                SetError(
-                    CoordinatePoolRuntimeError::PositionReadFailed,
-                    true,
-                    -ERANGE);
-                return false;
-            }
-            snapshotAddress = NormalizePointer(rawSnapshotAddress);
-            if (!IsRemoteAddress(snapshotAddress)) {
-                SetError(
-                    CoordinatePoolRuntimeError::PositionReadFailed,
-                    true,
-                    -ERANGE);
-                return false;
             }
             if (capturePhysicalSlots) {
                 bool snapshotRead =
@@ -1634,19 +1692,83 @@ private:
         return 1;
     }
 
-    bool ReadRootSnapshotUnlocked(CoordinatePoolRootSnapshot& snapshot) {
+    bool ResolveRootPointerAddressUnlocked(
+        std::uint64_t& rootAddress) const noexcept {
+        rootAddress = 0;
+        std::uint64_t rootBase = 0;
+        return memory != nullptr &&
+            AddUnsignedOffset(moduleBase, layout.rootRva, rootBase) &&
+            AddUnsignedOffset(rootBase, layout.bridgeOffset, rootAddress) &&
+            IsRemoteAddress(rootAddress);
+    }
+
+    bool ReadAcceptedRootSnapshotUnlocked(
+        const CoordinatePoolRootSnapshot& accepted,
+        CoordinatePoolRootSnapshot& snapshot) {
         snapshot = {};
-        if (memory == nullptr ||
-            layout.rootRva >
-                std::numeric_limits<std::uintptr_t>::max() - moduleBase ||
-            layout.bridgeOffset >
-                std::numeric_limits<std::uintptr_t>::max() -
-                    moduleBase - layout.rootRva) {
+        if (!IsCoordinatePoolRootSnapshotInitialized(accepted) ||
+            !IsRemoteAddress(accepted.bridge)) {
             return false;
         }
+
+        std::uint64_t rootAddress = 0;
+        std::uint64_t contextAddress = 0;
+        std::uint64_t entryAddress = 0;
+        if (!ResolveRootPointerAddressUnlocked(rootAddress) ||
+            !AddSignedOffset(
+                accepted.bridge, layout.contextOffset, contextAddress) ||
+            !AddUnsignedOffset(
+                accepted.bridge, layout.entryOffset, entryAddress) ||
+            !IsRemoteAddress(contextAddress) ||
+            !IsRemoteAddress(entryAddress)) {
+            return false;
+        }
+
+        std::uint64_t rawBridgeBefore = 0;
+        std::uint64_t rawContext = 0;
+        std::uint64_t rawEntry = 0;
+        std::uint64_t rawBridgeAfter = 0;
+        const std::array<MemoryReadRequest, 4> requests{{
+            {rootAddress, &rawBridgeBefore, sizeof(rawBridgeBefore)},
+            {contextAddress, &rawContext, sizeof(rawContext)},
+            {entryAddress, &rawEntry, sizeof(rawEntry)},
+            {rootAddress, &rawBridgeAfter, sizeof(rawBridgeAfter)},
+        }};
+        const std::array<CoordinateReadStage, 4> stages{{
+            CoordinateReadStage::Root,
+            CoordinateReadStage::Context,
+            CoordinateReadStage::Entry,
+            CoordinateReadStage::Root,
+        }};
+        std::size_t failedIndex = requests.size();
+        if (!ReadRemoteBatchUnlocked(
+                requests.data(),
+                requests.size(),
+                stages.data(),
+                failedIndex)) {
+            return false;
+        }
+
+        snapshot = {
+            NormalizePointer(rawBridgeBefore),
+            rawContext,
+            NormalizePointer(rawEntry),
+        };
+        const std::uint64_t trailingBridge =
+            NormalizePointer(rawBridgeAfter);
+        return IsValidGuestAddress(snapshot.context) &&
+            IsRemoteAddress(snapshot.entry) && (snapshot.entry & 3U) == 0 &&
+            CoordinatePoolGuardedRootSnapshotMatches(
+                accepted, snapshot, trailingBridge);
+    }
+
+    bool ReadRootSnapshotUnlocked(CoordinatePoolRootSnapshot& snapshot) {
+        snapshot = {};
+        std::uint64_t rootAddress = 0;
+        if (!ResolveRootPointerAddressUnlocked(rootAddress)) return false;
         std::uint64_t rawBridge = 0;
         if (!ReadRemoteUnlocked(
-                moduleBase + layout.rootRva + layout.bridgeOffset,
+                rootAddress,
                 &rawBridge,
                 sizeof(rawBridge),
                 CoordinateReadStage::Root)) {
@@ -1656,23 +1778,47 @@ private:
         std::uint64_t rawContext = 0;
         std::uint64_t rawEntry = 0;
         std::uint64_t contextAddress = 0;
+        std::uint64_t entryAddress = 0;
         if (!IsRemoteAddress(nextBridge) ||
             !AddSignedOffset(
                 nextBridge, layout.contextOffset, contextAddress) ||
             layout.entryOffset >
                 std::numeric_limits<std::uint64_t>::max() - nextBridge ||
             !IsRemoteAddress(contextAddress) ||
-            !ReadRemoteUnlocked(
-                contextAddress,
-                &rawContext,
-                sizeof(rawContext),
-                CoordinateReadStage::Context) ||
-            !ReadRemoteUnlocked(
-                nextBridge + layout.entryOffset,
-                &rawEntry,
-                sizeof(rawEntry),
-                CoordinateReadStage::Entry)) {
+            !AddUnsignedOffset(
+                nextBridge, layout.entryOffset, entryAddress) ||
+            !IsRemoteAddress(entryAddress)) {
             return false;
+        }
+        const std::array<MemoryReadRequest, 2> requests{{
+            {contextAddress, &rawContext, sizeof(rawContext)},
+            {entryAddress, &rawEntry, sizeof(rawEntry)},
+        }};
+        const std::array<CoordinateReadStage, 2> stages{{
+            CoordinateReadStage::Context,
+            CoordinateReadStage::Entry,
+        }};
+        std::size_t failedIndex = requests.size();
+        if (!ReadRemoteBatchUnlocked(
+                requests.data(),
+                requests.size(),
+                stages.data(),
+                failedIndex)) {
+            // A device or kernel may reject multi-iovec reads.  Retain the
+            // scalar path as a compatibility fallback for that case.
+            ClearReadDiagnosticUnlocked();
+            if (!ReadRemoteUnlocked(
+                    contextAddress,
+                    &rawContext,
+                    sizeof(rawContext),
+                    CoordinateReadStage::Context) ||
+                !ReadRemoteUnlocked(
+                    entryAddress,
+                    &rawEntry,
+                    sizeof(rawEntry),
+                    CoordinateReadStage::Entry)) {
+                return false;
+            }
         }
         snapshot = {
             nextBridge,
@@ -1683,10 +1829,17 @@ private:
             IsRemoteAddress(snapshot.entry) && (snapshot.entry & 3U) == 0;
     }
 
-    bool ResolveRootUnlocked(CoordinatePoolRootSnapshot& snapshot,
-                             int& status) {
+    bool ResolveRootUnlocked(
+        const CoordinatePoolRootSnapshot& accepted,
+        CoordinatePoolRootSnapshot& snapshot,
+        int& status) {
         snapshot = {};
         status = 0;
+        if (ReadAcceptedRootSnapshotUnlocked(accepted, snapshot)) {
+            ClearReadDiagnosticUnlocked();
+            return true;
+        }
+        ClearReadDiagnosticUnlocked();
         CoordinatePoolRootStabilityWindow stability;
         for (std::size_t attempt = 0;
              attempt < kRootSnapshotReadLimit;
@@ -2765,6 +2918,40 @@ private:
         return read;
     }
 
+    bool ReadRemoteBatchUnlocked(
+        const MemoryReadRequest* requests,
+        std::size_t count,
+        const CoordinateReadStage* stages,
+        std::size_t& failedIndex) {
+        CoordinateReadDiagnostic diagnostic{};
+        bool read = false;
+        failedIndex = count;
+        if (memory != nullptr) {
+            read = memory->ReadCoordinateMemoryBatch(
+                requests, count, diagnostic, failedIndex);
+        } else {
+            failedIndex = 0;
+            if (requests != nullptr && count != 0) {
+                diagnostic.address = requests[0].remoteAddress;
+                diagnostic.size = requests[0].size;
+            }
+            diagnostic.failure =
+                CoordinateReadFailure::TransportUnavailable;
+            diagnostic.systemError = -ENODEV;
+        }
+        if (!read) {
+            const std::size_t stageIndex = failedIndex < count
+                ? failedIndex
+                : 0;
+            diagnostic.stage = stages != nullptr && count != 0
+                ? stages[stageIndex]
+                : CoordinateReadStage::None;
+            probe.read = diagnostic;
+            probe.systemError = diagnostic.systemError;
+        }
+        return read;
+    }
+
     bool LoadRemotePageUnlocked(std::uint64_t faultAddress) {
         if (engine == nullptr || memory == nullptr) return false;
         const std::uint64_t guestPage = faultAddress & kPageMask;
@@ -3128,6 +3315,7 @@ private:
     std::unordered_map<std::uint64_t, RingSlot> ringSlots;
     CoordinatePoolRingSearchBudget ringSearchBudget;
     CoordinatePoolSlotLayoutCalibration slotLayoutCalibration;
+    std::vector<std::uint8_t> poolSnapshotScratch;
     std::unique_ptr<pool::coord_dec::FindDec> finder;
     std::vector<CodeRangeFingerprint> analysisCodeFingerprints;
     ExecutableMappingIndex executableMappingIndex{};

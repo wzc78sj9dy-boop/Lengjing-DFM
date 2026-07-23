@@ -123,6 +123,8 @@ struct MemoryReadRequest {
     std::size_t size = 0;
 };
 
+inline constexpr std::size_t kCoordinateMemoryBatchRequestLimit = 4;
+
 class MemoryTransport final {
 public:
     MemoryTransport();
@@ -144,6 +146,11 @@ public:
         void* destination,
         std::size_t size,
         CoordinateReadDiagnostic& diagnostic);
+    bool ReadCoordinateMemoryBatch(
+        const MemoryReadRequest* requests,
+        std::size_t count,
+        CoordinateReadDiagnostic& diagnostic,
+        std::size_t& failedIndex);
     std::size_t ReadBatch(const MemoryReadRequest* requests,
                           std::size_t count,
                           std::uint8_t* itemStatus = nullptr);
