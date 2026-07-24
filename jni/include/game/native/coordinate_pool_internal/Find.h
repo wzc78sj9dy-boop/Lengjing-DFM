@@ -985,6 +985,14 @@ namespace lengjing::game::native::coordinate_pool_internal {
             return method_requests_;
         }
 
+        void request_method_address(uint64_t address) {
+            method_requests_.push_back(address);
+        }
+
+        uint32_t instruction_count() const noexcept {
+            return count;
+        }
+
         int parse(uint64_t base, void* data, uint32_t size) {
             reset();
 

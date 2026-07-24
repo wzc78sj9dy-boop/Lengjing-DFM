@@ -170,6 +170,16 @@ enum class CoordinatePoolRuntimeError : std::uint8_t {
     SlotLayoutEvidenceMissing,
 };
 
+constexpr bool ShouldRetryCoordinatePoolCompatibilityAnalysis(
+    bool indexedPointers,
+    CoordinatePoolRuntimeError error,
+    bool analysisInvalidated,
+    const CoordinateReadDiagnostic& read) noexcept {
+    return !indexedPointers &&
+        error == CoordinatePoolRuntimeError::AnalysisFailed &&
+        !analysisInvalidated && !read.HasFailure();
+}
+
 constexpr bool ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
     CoordinatePoolRuntimeError error,
     const CoordinateReadDiagnostic& read) noexcept {
@@ -248,6 +258,12 @@ struct CoordinatePoolRuntimeProbe {
     std::uintptr_t resolvedEntry = 0;
     std::uint32_t entryTerminalInstruction = 0;
     std::uint16_t analysisDecodeInstructionLimit = 0;
+    std::uint16_t analysisPasses = 0;
+    std::uint8_t analysisMode = 0;
+    std::uint8_t primaryAnalysisError = 0;
+    std::uint8_t primaryAnalysisFindStage = 0;
+    std::uint8_t primaryAnalysisFindDetail = 0;
+    std::uint8_t analysisMethodLoadResult = UINT8_MAX;
     std::uint8_t entryBranchStatus = UINT8_MAX;
     std::uint8_t entryBranchHops = 0;
 };

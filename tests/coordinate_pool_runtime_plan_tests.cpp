@@ -45,7 +45,7 @@ extern "C" cs_err cs_option(csh, cs_opt_type, std::size_t) {
 
 extern "C" std::size_t cs_disasm(
     csh,
-    const std::uint8_t*,
+    const std::uint8_t* code,
     std::size_t codeSize,
     std::uint64_t address,
     std::size_t requestedCount,
@@ -64,6 +64,9 @@ extern "C" std::size_t cs_disasm(
         result[index].id = index + 1 == count
             ? ARM64_INS_RET
             : ARM64_INS_NOP;
+        if (code != nullptr) {
+            std::memcpy(result[index].bytes, code + index * 4, 4);
+        }
         result[index].detail = static_cast<cs_detail*>(
             std::calloc(1, sizeof(cs_detail)));
         if (result[index].detail == nullptr) {
@@ -140,6 +143,29 @@ int main() {
     REQUIRE(decodeLimitFinder.decode_method_instruction_limit() == 2000);
     decodeLimitFinder.set_decode_method_instruction_limit(0);
     REQUIRE(decodeLimitFinder.decode_method_instruction_limit() == 500);
+
+    std::array<std::uint32_t, 4> branchWrappedMethod{{
+        UINT32_C(0x14000002),
+        UINT32_C(0xD65F03C0),
+        UINT32_C(0x14000001),
+        UINT32_C(0xFC190FE8),
+    }};
+    coord_dec::FindDec branchWrappedFinder;
+    REQUIRE(branchWrappedFinder.set(
+        kBase,
+        branchWrappedMethod.data(),
+        static_cast<std::uint32_t>(sizeof(branchWrappedMethod))) == 0);
+    REQUIRE(branchWrappedFinder.resolve_decode_method_entry(kBase) == kBase);
+    REQUIRE(branchWrappedFinder.get_shellcode()
+        ->requested_method_addresses().empty());
+    branchWrappedFinder.set_resolve_decode_method_entry_branches(true);
+    REQUIRE(branchWrappedFinder.resolve_decode_method_entry(kBase) ==
+        kBase + 12U);
+    const auto& branchRequests = branchWrappedFinder.get_shellcode()
+        ->requested_method_addresses();
+    REQUIRE(branchRequests.size() == 2);
+    REQUIRE(branchRequests[0] == kBase);
+    REQUIRE(branchRequests[1] == kBase + 8U);
 
     std::array<std::uint8_t, 8> code{};
 

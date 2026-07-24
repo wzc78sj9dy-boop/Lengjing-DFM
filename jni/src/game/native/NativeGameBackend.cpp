@@ -8682,8 +8682,13 @@ private:
                     "analysis_find=%u analysis_detail=%u "
                     "analysis_madds=%u analysis_ring_madds=%u "
                     "analysis_candidates=%u analysis_insn=%u "
+                    "decode_limit=%u analysis_mode=%u analysis_passes=%u "
+                    "primary_error=%u primary_find=%u primary_detail=%u "
+                    "method_load=%u failed_method=%llx "
                     "read_stage=%u read_failure=%u read_path=%u "
-                    "bridge=%llx context=%llx entry=%llx pool=%llx "
+                    "bridge=%llx context=%llx raw_entry=%llx "
+                    "resolved_entry=%llx branch_status=%u branch_hops=%u "
+                    "branch_insn=%08x branch_terminal=%08x pool=%llx "
                     "attempts=%llu successes=%llu\n",
                     static_cast<unsigned long long>(coordinateTraceFrame_),
                     executionContextRefreshed ? 1 : 0,
@@ -8717,12 +8722,31 @@ private:
                         poolProbe.analysisCandidateCount),
                     static_cast<unsigned int>(
                         poolProbe.analysisFailureInstruction),
+                    static_cast<unsigned int>(
+                        poolProbe.analysisDecodeInstructionLimit),
+                    static_cast<unsigned int>(poolProbe.analysisMode),
+                    static_cast<unsigned int>(poolProbe.analysisPasses),
+                    static_cast<unsigned int>(
+                        poolProbe.primaryAnalysisError),
+                    static_cast<unsigned int>(
+                        poolProbe.primaryAnalysisFindStage),
+                    static_cast<unsigned int>(
+                        poolProbe.primaryAnalysisFindDetail),
+                    static_cast<unsigned int>(
+                        poolProbe.analysisMethodLoadResult),
+                    static_cast<unsigned long long>(poolProbe.failedMethod),
                     static_cast<unsigned int>(poolProbe.read.stage),
                     static_cast<unsigned int>(poolProbe.read.failure),
                     static_cast<unsigned int>(poolProbe.read.lastPath),
                     static_cast<unsigned long long>(poolProbe.bridge),
                     static_cast<unsigned long long>(poolProbe.context),
                     static_cast<unsigned long long>(poolProbe.guestEntry),
+                    static_cast<unsigned long long>(poolProbe.resolvedEntry),
+                    static_cast<unsigned int>(poolProbe.entryBranchStatus),
+                    static_cast<unsigned int>(poolProbe.entryBranchHops),
+                    static_cast<unsigned int>(poolProbe.entryInstruction),
+                    static_cast<unsigned int>(
+                        poolProbe.entryTerminalInstruction),
                     static_cast<unsigned long long>(
                         poolProbe.poolPointer.normalizedValue),
                     static_cast<unsigned long long>(poolProbe.attempts),

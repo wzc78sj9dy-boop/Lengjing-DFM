@@ -61,6 +61,7 @@ namespace coord_dec {
         uint16_t candidate_count_ = 0;
         uint16_t failure_instruction_ = 0;
         uint32_t decode_method_instruction_limit_ = 500;
+        bool resolve_decode_method_entry_branches_ = false;
 
         bool find_v87_str();
         bool analyze_base_index_calc();
@@ -117,6 +118,13 @@ namespace coord_dec {
         uint32_t decode_method_instruction_limit() const noexcept {
             return decode_method_instruction_limit_;
         }
+
+        void set_resolve_decode_method_entry_branches(
+            bool enabled) noexcept {
+            resolve_decode_method_entry_branches_ = enabled;
+        }
+
+        uint64_t resolve_decode_method_entry(uint64_t address);
 
         void compact_runtime_plan() noexcept {
             entry = nullptr;

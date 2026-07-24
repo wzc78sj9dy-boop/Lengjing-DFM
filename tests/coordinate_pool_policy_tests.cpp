@@ -6,10 +6,14 @@
 #include <array>
 
 void RunCoordinatePoolPolicyTests() {
+    using lengjing::game::native::CodeMethodLoadResult;
     using lengjing::game::native::CoordinatePoolCodeFingerprint;
     using lengjing::game::native::CoordinatePoolCodeIdentityChanged;
     using lengjing::game::native::CoordinatePoolContextIdentityChanged;
     using lengjing::game::native::CoordinatePoolEnvironmentFlagEnabled;
+    using lengjing::game::native::CoordinatePoolMaximumAnalysisPasses;
+    using lengjing::game::native::
+        CoordinatePoolRequestedMethodInstructionLimit;
     using lengjing::game::native::CoordinatePoolRingReadEvent;
     using lengjing::game::native::CoordinatePoolRingRecoveryState;
     using lengjing::game::native::CoordinatePoolRingSearchBudget;
@@ -34,6 +38,8 @@ void RunCoordinatePoolPolicyTests() {
         MatchingCoordinatePoolDecryptIndexOffsets;
     using lengjing::game::native::MakeCoordinateDecrypt2RuntimeLayout;
     using lengjing::game::native::NextCoordinatePoolCodeValidationFrame;
+    using lengjing::game::native::
+        NextCoordinatePoolDecodeAnalysisInstructionLimit;
     using lengjing::game::native::NormalizeCoordinatePoolIndexedPointer;
     using lengjing::game::native::NormalizeCoordinatePoolPointer;
     using lengjing::game::native::
@@ -42,15 +48,26 @@ void RunCoordinatePoolPolicyTests() {
         ResolveCoordinatePoolIndexedRootAddresses;
     using lengjing::game::native::ResolveCoordinatePoolDecryptMode;
     using lengjing::game::native::InferCoordinatePoolDecryptIndexOffset;
+    using lengjing::game::native::IsCoordinatePoolMethodLoadFatal;
+    using lengjing::game::native::
+        IsCoordinatePoolMethodScanLimitExhausted;
     using lengjing::game::native::
         ExpireCoordinatePoolDecryptIndexWitnesses;
     using lengjing::game::native::IsCoordinatePoolDecryptRequested;
     using lengjing::game::native::IsCoordinatePoolIndexedDecrypt;
     using lengjing::game::native::
+        ShouldAdvanceCoordinatePoolCompatibilityDecodeMethodScan;
+    using lengjing::game::native::
         ShouldClearCoordinatePoolRingsAfterPointerRefresh;
+    using lengjing::game::native::
+        ShouldExpandCoordinatePoolDecodeMethodScan;
     using lengjing::game::native::ShouldSearchCoordinatePoolRing;
     using lengjing::game::native::
         ShouldRequestCoordinatePoolCodeValidationAfterReadFailure;
+    using lengjing::game::native::
+        ShouldRepeatCoordinatePoolCompatibilityAnalysis;
+    using lengjing::game::native::
+        ShouldRetryCoordinatePoolCompatibilityAnalysis;
     using lengjing::game::native::ShouldRetryCoordinatePoolRing;
     using lengjing::game::native::ShouldRetryCoordinatePoolCompactSnapshot;
     using lengjing::game::native::ShouldValidateCoordinatePoolCode;
@@ -75,6 +92,68 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::
         kCoordinatePoolDecryptIndexFlickerWindowFrames;
     using lengjing::game::native::kCoordinatePoolMinimumRemoteAddress;
+    REQUIRE(!IsCoordinatePoolMethodLoadFatal(
+        CodeMethodLoadResult::Loaded));
+    REQUIRE(!IsCoordinatePoolMethodLoadFatal(
+        CodeMethodLoadResult::LimitExhausted));
+    REQUIRE(!IsCoordinatePoolMethodLoadFatal(
+        CodeMethodLoadResult::MappingExhausted));
+    REQUIRE(!IsCoordinatePoolMethodLoadFatal(
+        CodeMethodLoadResult::DisassemblyFailed));
+    REQUIRE(IsCoordinatePoolMethodLoadFatal(
+        CodeMethodLoadResult::InvalidRange));
+    REQUIRE(IsCoordinatePoolMethodLoadFatal(
+        CodeMethodLoadResult::ReadFailed));
+    REQUIRE(IsCoordinatePoolMethodScanLimitExhausted(
+        CodeMethodLoadResult::LimitExhausted));
+    REQUIRE(!IsCoordinatePoolMethodScanLimitExhausted(
+        CodeMethodLoadResult::MappingExhausted));
+    REQUIRE(CoordinatePoolMaximumAnalysisPasses(false) == 8);
+    REQUIRE(CoordinatePoolMaximumAnalysisPasses(true) == 16);
+    REQUIRE(!ShouldExpandCoordinatePoolDecodeMethodScan(
+        false, false, true));
+    REQUIRE(ShouldExpandCoordinatePoolDecodeMethodScan(
+        true, false, true));
+    REQUIRE(!ShouldExpandCoordinatePoolDecodeMethodScan(
+        true, true, true));
+    REQUIRE(!ShouldExpandCoordinatePoolDecodeMethodScan(
+        true, false, false));
+    REQUIRE(ShouldAdvanceCoordinatePoolCompatibilityDecodeMethodScan(
+        false, false, true, false, true, true));
+    REQUIRE(!ShouldAdvanceCoordinatePoolCompatibilityDecodeMethodScan(
+        true, false, true, false, true, true));
+    REQUIRE(!ShouldAdvanceCoordinatePoolCompatibilityDecodeMethodScan(
+        false, true, true, false, true, true));
+    REQUIRE(!ShouldAdvanceCoordinatePoolCompatibilityDecodeMethodScan(
+        false, false, false, false, true, true));
+    REQUIRE(!ShouldAdvanceCoordinatePoolCompatibilityDecodeMethodScan(
+        false, false, true, true, true, true));
+    REQUIRE(!ShouldAdvanceCoordinatePoolCompatibilityDecodeMethodScan(
+        false, false, true, false, false, true));
+    REQUIRE(!ShouldAdvanceCoordinatePoolCompatibilityDecodeMethodScan(
+        false, false, true, false, true, false));
+    REQUIRE(ShouldRepeatCoordinatePoolCompatibilityAnalysis(
+        false, false, true, false));
+    REQUIRE(ShouldRepeatCoordinatePoolCompatibilityAnalysis(
+        false, false, false, true));
+    REQUIRE(ShouldRepeatCoordinatePoolCompatibilityAnalysis(
+        false, true, false, false));
+    REQUIRE(!ShouldRepeatCoordinatePoolCompatibilityAnalysis(
+        true, true, true, true));
+    REQUIRE(!ShouldRepeatCoordinatePoolCompatibilityAnalysis(
+        false, false, false, false));
+    REQUIRE(NextCoordinatePoolDecodeAnalysisInstructionLimit(0) == 500);
+    REQUIRE(NextCoordinatePoolDecodeAnalysisInstructionLimit(500) == 1000);
+    REQUIRE(NextCoordinatePoolDecodeAnalysisInstructionLimit(1000) == 2000);
+    REQUIRE(NextCoordinatePoolDecodeAnalysisInstructionLimit(2000) == 4000);
+    REQUIRE(NextCoordinatePoolDecodeAnalysisInstructionLimit(4000) == 5000);
+    REQUIRE(NextCoordinatePoolDecodeAnalysisInstructionLimit(5000) == 5000);
+    REQUIRE(CoordinatePoolRequestedMethodInstructionLimit(
+        UINT64_C(0x1000), UINT64_C(0x1000), false, 2000) == 5000);
+    REQUIRE(CoordinatePoolRequestedMethodInstructionLimit(
+        UINT64_C(0x2000), UINT64_C(0x1000), false, 2000) == 2000);
+    REQUIRE(CoordinatePoolRequestedMethodInstructionLimit(
+        UINT64_C(0x2000), UINT64_C(0x1000), true, 2000) == 5000);
     REQUIRE(!CoordinatePoolEnvironmentFlagEnabled(nullptr));
     REQUIRE(!CoordinatePoolEnvironmentFlagEnabled(""));
     REQUIRE(!CoordinatePoolEnvironmentFlagEnabled("0"));
@@ -1008,9 +1087,34 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::CoordinateReadStage;
     using lengjing::game::native::CoordinatePoolRuntimeError;
     using lengjing::game::native::IsCoordinatePoolRingRemoteReadFailure;
+    REQUIRE(ShouldRetryCoordinatePoolCompatibilityAnalysis(
+        false,
+        CoordinatePoolRuntimeError::AnalysisFailed,
+        false,
+        CoordinateReadDiagnostic{}));
+    REQUIRE(!ShouldRetryCoordinatePoolCompatibilityAnalysis(
+        true,
+        CoordinatePoolRuntimeError::AnalysisFailed,
+        false,
+        CoordinateReadDiagnostic{}));
+    REQUIRE(!ShouldRetryCoordinatePoolCompatibilityAnalysis(
+        false,
+        CoordinatePoolRuntimeError::CodeReadFailed,
+        false,
+        CoordinateReadDiagnostic{}));
+    REQUIRE(!ShouldRetryCoordinatePoolCompatibilityAnalysis(
+        false,
+        CoordinatePoolRuntimeError::AnalysisFailed,
+        true,
+        CoordinateReadDiagnostic{}));
     CoordinateReadDiagnostic positionReadFailure{};
     positionReadFailure.stage = CoordinateReadStage::Position;
     positionReadFailure.failure = CoordinateReadFailure::AddressFault;
+    REQUIRE(!ShouldRetryCoordinatePoolCompatibilityAnalysis(
+        false,
+        CoordinatePoolRuntimeError::AnalysisFailed,
+        false,
+        positionReadFailure));
     REQUIRE(!ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
         CoordinatePoolRuntimeError::PositionReadFailed,
         positionReadFailure));

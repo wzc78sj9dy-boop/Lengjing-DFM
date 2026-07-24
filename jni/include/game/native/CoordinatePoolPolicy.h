@@ -15,18 +15,59 @@ inline constexpr std::size_t
 inline constexpr std::size_t kCoordinatePoolBaselineMaximumAnalysisPasses = 8;
 inline constexpr std::size_t kCoordinatePoolIndexedMaximumAnalysisPasses = 16;
 
+enum class CodeMethodLoadResult : std::uint8_t {
+    Loaded,
+    LimitExhausted,
+    MappingExhausted,
+    InvalidRange,
+    ReadFailed,
+    DisassemblyFailed,
+};
+
+constexpr bool IsCoordinatePoolMethodLoadFatal(
+    CodeMethodLoadResult result) noexcept {
+    return result == CodeMethodLoadResult::InvalidRange ||
+        result == CodeMethodLoadResult::ReadFailed;
+}
+
+constexpr bool IsCoordinatePoolMethodScanLimitExhausted(
+    CodeMethodLoadResult result) noexcept {
+    return result == CodeMethodLoadResult::LimitExhausted;
+}
+
 constexpr std::size_t CoordinatePoolMaximumAnalysisPasses(
-    bool indexedPointers) noexcept {
-    return indexedPointers
+    bool extendedAnalysis) noexcept {
+    return extendedAnalysis
         ? kCoordinatePoolIndexedMaximumAnalysisPasses
         : kCoordinatePoolBaselineMaximumAnalysisPasses;
 }
 
 constexpr bool ShouldExpandCoordinatePoolDecodeMethodScan(
-    bool indexedPointers,
+    bool extendedAnalysis,
     bool analysisComplete,
     bool decodeFailureStage) noexcept {
-    return indexedPointers && !analysisComplete && decodeFailureStage;
+    return extendedAnalysis && !analysisComplete && decodeFailureStage;
+}
+
+constexpr bool ShouldAdvanceCoordinatePoolCompatibilityDecodeMethodScan(
+    bool analysisComplete,
+    bool newPagesLoaded,
+    bool indexExpressionFailure,
+    bool entryMethod,
+    bool limitExhausted,
+    bool previouslyAttempted) noexcept {
+    return !analysisComplete && !newPagesLoaded &&
+        indexExpressionFailure && !entryMethod && limitExhausted &&
+        previouslyAttempted;
+}
+
+constexpr bool ShouldRepeatCoordinatePoolCompatibilityAnalysis(
+    bool analysisComplete,
+    bool newPagesLoaded,
+    bool methodRegistered,
+    bool limitAdvanced) noexcept {
+    return !analysisComplete &&
+        (newPagesLoaded || methodRegistered || limitAdvanced);
 }
 
 constexpr std::size_t NextCoordinatePoolDecodeAnalysisInstructionLimit(

@@ -480,6 +480,17 @@ struct EntryCodeScan {
     std::uint64_t returnAddress = 0;
 };
 
+inline constexpr std::uint8_t kAnalysisModeEntryBranch = 1U << 0U;
+inline constexpr std::uint8_t kAnalysisModeProgressiveDecode = 1U << 1U;
+inline constexpr std::uint8_t kAnalysisModeCompatibilityRetry = 1U << 2U;
+
+struct CodeAnalysisOptions {
+    bool resolveEntryBranches = false;
+    bool progressiveDecode = false;
+    bool conservativeProgression = false;
+    std::uint8_t mode = 0;
+};
+
 bool ScanEntryCode(const std::vector<std::uint8_t>& bytes,
                    std::uint64_t mappingStart,
                    std::uint64_t scanStart,
@@ -2574,13 +2585,14 @@ private:
         return false;
     }
 
-    bool AnalyzeCodeUnlocked() {
+    bool AnalyzeCodeWithOptionsUnlocked(
+        const CodeAnalysisOptions& options) {
         constexpr std::size_t kMaximumSnapshotAttempts = 2;
         for (std::size_t attempt = 0;
              attempt < kMaximumSnapshotAttempts;
              ++attempt) {
             analysisInvalidated = false;
-            if (AnalyzeCodeAttemptUnlocked()) return true;
+            if (AnalyzeCodeAttemptUnlocked(options)) return true;
             if (!analysisInvalidated ||
                 attempt + 1 == kMaximumSnapshotAttempts) {
                 return false;
@@ -2591,7 +2603,51 @@ private:
         return false;
     }
 
-    bool AnalyzeCodeAttemptUnlocked() {
+    bool AnalyzeCodeUnlocked() {
+        probe.primaryAnalysisError = 0;
+        probe.primaryAnalysisFindStage = 0;
+        probe.primaryAnalysisFindDetail = 0;
+        if (indexedPointers) {
+            return AnalyzeCodeWithOptionsUnlocked(CodeAnalysisOptions{
+                true,
+                true,
+                false,
+                static_cast<std::uint8_t>(
+                    kAnalysisModeEntryBranch |
+                    kAnalysisModeProgressiveDecode),
+            });
+        }
+
+        if (AnalyzeCodeWithOptionsUnlocked(CodeAnalysisOptions{})) {
+            return true;
+        }
+        if (!ShouldRetryCoordinatePoolCompatibilityAnalysis(
+                indexedPointers,
+                probe.error,
+                analysisInvalidated,
+                probe.read)) {
+            return false;
+        }
+
+        probe.primaryAnalysisError = static_cast<std::uint8_t>(probe.error);
+        probe.primaryAnalysisFindStage = probe.analysisFindStage;
+        probe.primaryAnalysisFindDetail = probe.analysisFindDetail;
+        analysisCodeFingerprints.clear();
+        ClearReadDiagnosticUnlocked();
+        probe.error = CoordinatePoolRuntimeError::None;
+        probe.stage = CoordinatePoolRuntimeStage::RootResolved;
+        return AnalyzeCodeWithOptionsUnlocked(CodeAnalysisOptions{
+            true,
+            true,
+            true,
+            static_cast<std::uint8_t>(
+                kAnalysisModeEntryBranch |
+                kAnalysisModeProgressiveDecode |
+                kAnalysisModeCompatibilityRetry),
+        });
+    }
+
+    bool AnalyzeCodeAttemptUnlocked(const CodeAnalysisOptions& options) {
         probe.analysisFindStage = 0;
         probe.analysisFindDetail = 0;
         probe.analysisMaddCount = 0;
@@ -2599,6 +2655,9 @@ private:
         probe.analysisCandidateCount = 0;
         probe.analysisFailureInstruction = 0;
         probe.analysisDecodeInstructionLimit = 0;
+        probe.analysisPasses = 0;
+        probe.analysisMode = options.mode;
+        probe.analysisMethodLoadResult = UINT8_MAX;
         probe.resolvedEntry = 0;
         probe.entryInstruction = 0;
         probe.entryTerminalInstruction = 0;
@@ -2627,7 +2686,7 @@ private:
         std::vector<EntryBranchPage> entryBranchPages;
         std::uint64_t analysisEntryAddress = guestEntry;
         CoordinateEntryBranchResolution branchResolution{};
-        if (indexedPointers) {
+        if (options.resolveEntryBranches) {
             auto readBranchPage = [&](std::uint64_t pageAddress,
                                       EntryBranchPage& page) {
                 page.address = pageAddress;
@@ -2828,19 +2887,21 @@ private:
                     : CoordinatePoolRuntimeError::CodeReadFailed,
                 true,
                 diagnostic.systemError);
-            return false;
+            return CodeMethodLoadResult::ReadFailed;
         };
 
         auto loadPage = [&](std::uint64_t pageAddress) {
             if (pageAddress < mappingStart || pageAddress >= mappingEnd ||
                 (pageAddress & (kPageSize - 1)) != 0 ||
                 !mappingIndex.ContainsPage(pageAddress)) {
-                return false;
+                return CodeMethodLoadResult::InvalidRange;
             }
             const std::size_t pageIndex = static_cast<std::size_t>(
                 (pageAddress - mappingStart) / kPageSize);
             if (pageIndex >= loadedPages.size() || loadedPages[pageIndex]) {
-                return true;
+                return pageIndex < loadedPages.size()
+                    ? CodeMethodLoadResult::Loaded
+                    : CodeMethodLoadResult::InvalidRange;
             }
 
             std::array<std::uint8_t, kPageSize> pageData{};
@@ -2910,7 +2971,7 @@ private:
             std::memcpy(bytes.data() + byteOffset, pageData.data(), pageData.size());
             loadedPages[pageIndex] = true;
             ++loadedPageCount;
-            return true;
+            return CodeMethodLoadResult::Loaded;
         };
 
         auto recordRangeFingerprint = [&](std::uint64_t address,
@@ -2952,31 +3013,36 @@ private:
 
         auto loadMethod = [&](std::uint64_t methodAddress,
                               std::size_t instructionLimit,
-                              EntryCodeScan& scan) {
+                              EntryCodeScan& scan) -> CodeMethodLoadResult {
             if (methodAddress < mappingStart || methodAddress >= mappingEnd ||
                 (methodAddress & 3U) != 0 || instructionLimit == 0 ||
                 instructionLimit >
                     (std::numeric_limits<std::uint64_t>::max() / 4U)) {
                 probe.failedMethod = methodAddress;
-                return false;
+                return CodeMethodLoadResult::InvalidRange;
             }
             if (!mappingIndex.ContainsPage(methodAddress & kPageMask)) {
                 probe.failedMethod = methodAddress;
-                return false;
+                return CodeMethodLoadResult::InvalidRange;
             }
             const std::uint64_t maximumBytes =
                 static_cast<std::uint64_t>(instructionLimit) * 4U;
             if (methodAddress > std::numeric_limits<std::uint64_t>::max() -
                     maximumBytes) {
-                return false;
+                probe.failedMethod = methodAddress;
+                return CodeMethodLoadResult::InvalidRange;
             }
+            const std::uint64_t requestedScanEnd =
+                methodAddress + maximumBytes;
             const std::uint64_t scanLimitEnd = std::min(
-                mappingEnd, methodAddress + maximumBytes);
+                mappingEnd, requestedScanEnd);
             std::uint64_t pageAddress = methodAddress & kPageMask;
             while (pageAddress < scanLimitEnd) {
-                if (!loadPage(pageAddress)) {
+                const CodeMethodLoadResult pageLoadResult =
+                    loadPage(pageAddress);
+                if (pageLoadResult != CodeMethodLoadResult::Loaded) {
                     probe.failedMethod = methodAddress;
-                    return false;
+                    return pageLoadResult;
                 }
                 const std::uint64_t pageEnd = std::min(
                     mappingEnd, pageAddress + kPageSize);
@@ -2987,33 +3053,46 @@ private:
                         methodAddress,
                         scanEnd,
                         scan)) {
-                    return false;
+                    return CodeMethodLoadResult::DisassemblyFailed;
                 }
                 if (scan.returnAddress != 0) {
                     return recordMethodRange(
-                        methodAddress, scan.returnAddress);
+                               methodAddress, scan.returnAddress)
+                        ? CodeMethodLoadResult::Loaded
+                        : CodeMethodLoadResult::DisassemblyFailed;
                 }
                 if (scanEnd >= scanLimitEnd) break;
                 pageAddress += kPageSize;
             }
-            return false;
+            return scanLimitEnd == requestedScanEnd
+                ? CodeMethodLoadResult::LimitExhausted
+                : CodeMethodLoadResult::MappingExhausted;
         };
 
         EntryCodeScan entryScan{};
-        if (!loadMethod(
-                analysisEntryAddress,
-                kCoordinatePoolEntryAnalysisInstructionLimit,
-                entryScan)) {
-            if (!probe.read.HasFailure()) {
-                SetError(
-                    probe.failedMethod == analysisEntryAddress
-                        ? CoordinatePoolRuntimeError::EntryMappingFragmented
-                        : CoordinatePoolRuntimeError::AnalysisFailed,
-                    true,
-                    probe.failedMethod == analysisEntryAddress
-                        ? -ERANGE
-                        : -ENODATA);
+        const CodeMethodLoadResult entryLoadResult = loadMethod(
+            analysisEntryAddress,
+            kCoordinatePoolEntryAnalysisInstructionLimit,
+            entryScan);
+        probe.analysisMethodLoadResult =
+            static_cast<std::uint8_t>(entryLoadResult);
+        if (entryLoadResult != CodeMethodLoadResult::Loaded) {
+            if (entryLoadResult == CodeMethodLoadResult::ReadFailed) {
+                return false;
             }
+            const bool invalidRange =
+                entryLoadResult == CodeMethodLoadResult::InvalidRange;
+            SetError(
+                invalidRange
+                    ? CoordinatePoolRuntimeError::EntryMappingFragmented
+                    : CoordinatePoolRuntimeError::AnalysisFailed,
+                true,
+                invalidRange
+                    ? -ERANGE
+                    : entryLoadResult ==
+                            CodeMethodLoadResult::DisassemblyFailed
+                        ? -EILSEQ
+                        : -ENODATA);
             return false;
         }
 
@@ -3024,21 +3103,24 @@ private:
             pendingAnalysisMethodLimits;
         std::size_t requiredDecodeInstructionLimit =
             kCoordinatePoolDecodeAnalysisInstructionLimit;
-        if (indexedPointers) {
+        if (options.progressiveDecode) {
             loadedAnalysisMethods.push_back(analysisEntryAddress);
         }
         const std::size_t maximumAnalysisPasses =
-            CoordinatePoolMaximumAnalysisPasses(indexedPointers);
+            CoordinatePoolMaximumAnalysisPasses(options.progressiveDecode);
         for (std::size_t pass = 0; pass < maximumAnalysisPasses; ++pass) {
+            probe.analysisPasses = static_cast<std::uint16_t>(pass + 1);
             std::size_t decodeInstructionLimit =
                 kCoordinatePoolDecodeAnalysisInstructionLimit;
-            if (indexedPointers) {
+            if (options.progressiveDecode) {
                 decodeInstructionLimit = requiredDecodeInstructionLimit;
                 for (const auto& pending : pendingAnalysisMethodLimits) {
                     decodeInstructionLimit = std::max(
                         decodeInstructionLimit,
-                        NextCoordinatePoolDecodeAnalysisInstructionLimit(
-                            pending.second));
+                        options.conservativeProgression
+                            ? pending.second
+                            : NextCoordinatePoolDecodeAnalysisInstructionLimit(
+                                  pending.second));
                 }
             }
             probe.analysisDecodeInstructionLimit =
@@ -3049,7 +3131,9 @@ private:
                 SetError(CoordinatePoolRuntimeError::AnalysisFailed);
                 return false;
             }
-            if (indexedPointers) {
+            candidate->set_resolve_decode_method_entry_branches(
+                options.conservativeProgression);
+            if (options.progressiveDecode) {
                 candidate->set_decode_method_instruction_limit(
                     static_cast<std::uint32_t>(decodeInstructionLimit));
             }
@@ -3076,7 +3160,7 @@ private:
             const std::size_t loadedBefore = loadedPageCount;
             const auto failureStage = candidate->failure_stage();
             const bool entryMethodPending =
-                indexedPointers && failureStage ==
+                options.progressiveDecode && failureStage ==
                 pool::coord_dec::FindDecFailureStage::EntryMethod;
             const bool decodeFailureStage =
                 failureStage ==
@@ -3085,10 +3169,25 @@ private:
                     pool::coord_dec::FindDecFailureStage::IndexExpression;
             const bool decodeMethodPending =
                 ShouldExpandCoordinatePoolDecodeMethodScan(
-                    indexedPointers, result == 0, decodeFailureStage);
+                    options.progressiveDecode,
+                    result == 0,
+                    decodeFailureStage);
             bool scanRangeExpanded = false;
+            bool compatibilityStateChanged = false;
+            std::vector<std::uint64_t> processedRequestedMethods;
+            std::vector<std::uint64_t> stableExhaustedMethods;
             for (const std::uint64_t requestedAddress : requestedMethods) {
-                if (indexedPointers &&
+                if (options.conservativeProgression) {
+                    if (std::find(
+                            processedRequestedMethods.begin(),
+                            processedRequestedMethods.end(),
+                            requestedAddress) !=
+                        processedRequestedMethods.end()) {
+                        continue;
+                    }
+                    processedRequestedMethods.push_back(requestedAddress);
+                }
+                if (options.progressiveDecode &&
                     std::find(
                         loadedAnalysisMethods.begin(),
                         loadedAnalysisMethods.end(),
@@ -3099,31 +3198,42 @@ private:
                     decodeMethodPending
                     ? decodeInstructionLimit
                     : kCoordinatePoolDecodeAnalysisInstructionLimit;
-                const std::size_t limit = indexedPointers
-                    ? CoordinatePoolRequestedMethodInstructionLimit(
-                          requestedAddress,
-                          analysisEntryAddress,
-                          entryMethodPending,
-                          requestedDecodeInstructionLimit)
-                    : requestedAddress == guestEntry
-                        ? kCoordinatePoolEntryAnalysisInstructionLimit
-                        : kCoordinatePoolDecodeAnalysisInstructionLimit;
+                std::size_t limit = requestedAddress == analysisEntryAddress
+                    ? kCoordinatePoolEntryAnalysisInstructionLimit
+                    : kCoordinatePoolDecodeAnalysisInstructionLimit;
+                bool methodWasPending = false;
+                if (options.progressiveDecode) {
+                    limit = CoordinatePoolRequestedMethodInstructionLimit(
+                        requestedAddress,
+                        analysisEntryAddress,
+                        entryMethodPending,
+                        requestedDecodeInstructionLimit);
+                    if (options.conservativeProgression &&
+                        requestedAddress != analysisEntryAddress &&
+                        !entryMethodPending) {
+                        const auto pending = pendingAnalysisMethodLimits.find(
+                            requestedAddress);
+                        methodWasPending =
+                            pending != pendingAnalysisMethodLimits.end();
+                    }
+                }
                 EntryCodeScan methodScan{};
-                const bool methodLoaded =
+                const CodeMethodLoadResult methodLoadResult =
                     loadMethod(requestedAddress, limit, methodScan);
-                if (!methodLoaded && probe.read.HasFailure()) {
+                probe.analysisMethodLoadResult =
+                    static_cast<std::uint8_t>(methodLoadResult);
+                if (methodLoadResult == CodeMethodLoadResult::ReadFailed) {
                     return false;
                 }
-                if (probe.failedMethod != 0 &&
-                    probe.failedMethod == requestedAddress) {
+                if (methodLoadResult == CodeMethodLoadResult::InvalidRange) {
                     SetError(
                         CoordinatePoolRuntimeError::EntryMappingFragmented,
                         true,
                         -ERANGE);
                     return false;
                 }
-                if (!indexedPointers) continue;
-                if (methodLoaded) {
+                if (!options.progressiveDecode) continue;
+                if (methodLoadResult == CodeMethodLoadResult::Loaded) {
                     loadedAnalysisMethods.push_back(requestedAddress);
                     pendingAnalysisMethodLimits.erase(requestedAddress);
                     if (requestedAddress != analysisEntryAddress) {
@@ -3132,7 +3242,22 @@ private:
                     }
                     continue;
                 }
-                if (decodeMethodPending) {
+                if (options.conservativeProgression) {
+                    if (IsCoordinatePoolMethodScanLimitExhausted(
+                            methodLoadResult) &&
+                        requestedAddress != analysisEntryAddress &&
+                        !entryMethodPending) {
+                        if (methodWasPending) {
+                            stableExhaustedMethods.push_back(
+                                requestedAddress);
+                        } else {
+                            compatibilityStateChanged =
+                                pendingAnalysisMethodLimits.emplace(
+                                    requestedAddress, limit).second ||
+                                compatibilityStateChanged;
+                        }
+                    }
+                } else if (decodeMethodPending) {
                     std::size_t& attemptedLimit =
                         pendingAnalysisMethodLimits[requestedAddress];
                     if (limit > attemptedLimit) {
@@ -3141,22 +3266,58 @@ private:
                     }
                 }
             }
-            if (loadedPageCount != loadedBefore ||
-                (indexedPointers && scanRangeExpanded)) {
+            if (loadedPageCount != loadedBefore) {
                 continue;
             }
-            if (result != 0) {
-                SetError(CoordinatePoolRuntimeError::AnalysisFailed);
-                return false;
+            if (result == 0) {
+                analysisComplete = true;
+                break;
             }
-            analysisComplete = true;
-            break;
+            if (options.conservativeProgression) {
+                const bool advanceCompatibilityScan =
+                    ShouldAdvanceCoordinatePoolCompatibilityDecodeMethodScan(
+                        result == 0,
+                        loadedPageCount != loadedBefore,
+                        failureStage == pool::coord_dec::
+                            FindDecFailureStage::IndexExpression,
+                        false,
+                        true,
+                        true);
+                if (advanceCompatibilityScan) {
+                    for (const std::uint64_t methodAddress :
+                         stableExhaustedMethods) {
+                        auto pending = pendingAnalysisMethodLimits.find(
+                            methodAddress);
+                        if (pending == pendingAnalysisMethodLimits.end()) {
+                            continue;
+                        }
+                        const std::size_t nextLimit =
+                            NextCoordinatePoolDecodeAnalysisInstructionLimit(
+                                pending->second);
+                        if (nextLimit > pending->second) {
+                            pending->second = nextLimit;
+                            scanRangeExpanded = true;
+                        }
+                    }
+                }
+                if (ShouldRepeatCoordinatePoolCompatibilityAnalysis(
+                        result == 0,
+                        loadedPageCount != loadedBefore,
+                        compatibilityStateChanged,
+                        scanRangeExpanded)) {
+                    continue;
+                }
+            } else if (options.progressiveDecode && scanRangeExpanded) {
+                continue;
+            }
+            SetError(CoordinatePoolRuntimeError::AnalysisFailed);
+            return false;
         }
         if (!analysisComplete || candidate == nullptr) {
             SetError(CoordinatePoolRuntimeError::AnalysisFailed);
             return false;
         }
-        if (indexedPointers) {
+        if (options.resolveEntryBranches) {
             for (std::size_t index = 0;
                  index < branchResolution.observationCount;
                  ++index) {
@@ -3248,7 +3409,9 @@ private:
         probe.analysisRingMaddCount = 0;
         probe.analysisCandidateCount = 0;
         probe.analysisFailureInstruction = 0;
-        probe.analysisDecodeInstructionLimit = 0;
+        if (!options.conservativeProgression) {
+            probe.analysisDecodeInstructionLimit = 0;
+        }
         probe.error = CoordinatePoolRuntimeError::None;
         probe.stage = CoordinatePoolRuntimeStage::CodeAnalyzed;
         return true;
@@ -4289,6 +4452,12 @@ private:
         probe.analysisCandidateCount = 0;
         probe.analysisFailureInstruction = 0;
         probe.analysisDecodeInstructionLimit = 0;
+        probe.analysisPasses = 0;
+        probe.analysisMode = 0;
+        probe.primaryAnalysisError = 0;
+        probe.primaryAnalysisFindStage = 0;
+        probe.primaryAnalysisFindDetail = 0;
+        probe.analysisMethodLoadResult = UINT8_MAX;
         probe.entryBranchStatus = UINT8_MAX;
         probe.entryBranchHops = 0;
         probe.poolPointerOffset = 0;

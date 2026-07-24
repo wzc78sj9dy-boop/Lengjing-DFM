@@ -1,7 +1,9 @@
 ﻿#include "game/native/coordinate_pool_internal/FindDec.h"
+#include "game/native/CoordinateEntryBranchPolicy.h"
 #include "game/native/coordinate_pool_internal/RingIndexCandidatePolicy.h"
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <set>
 #include <unordered_map>
@@ -483,6 +485,42 @@ namespace coord_dec {
 		return true;
 	}
 
+	uint64_t FindDec::resolve_decode_method_entry(uint64_t address) {
+		if (!resolve_decode_method_entry_branches_) return address;
+		const uint64_t mapping_start = binary_.start_addr();
+		const uint64_t mapping_end = binary_.end_addr();
+		auto contains = [&](uint64_t candidate, size_t size) {
+			return size != 0 && candidate >= mapping_start &&
+				candidate <= mapping_end && size <= mapping_end - candidate;
+		};
+		const auto resolution = ResolveCoordinateEntryBranchChain(
+			address,
+			[&](uint64_t candidate, uint32_t& instruction) {
+				if (!contains(candidate, sizeof(instruction))) return false;
+				const uint32_t index = binary_.index(candidate);
+				if (index >= binary_.instruction_count()) return false;
+				const cs_insn* decoded = binary_.get_insn(index);
+				if (decoded == nullptr || decoded->address != candidate ||
+					decoded->size < sizeof(instruction)) {
+					return false;
+				}
+				std::memcpy(&instruction, decoded->bytes, sizeof(instruction));
+				return true;
+			},
+			contains);
+		if (resolution.status != CoordinateEntryResolveStatus::Resolved) {
+			return address;
+		}
+		for (size_t index = 0;
+			 index < resolution.hopCount &&
+			 index < resolution.observationCount;
+			 ++index) {
+			binary_.request_method_address(
+				resolution.observations[index].address);
+		}
+		return resolution.resolvedEntry;
+	}
+
 	bool FindDec::analyze_base_index_calc() {
 		auto parse_instruction = [&](cs_insn* instruction) {
 			const int legacy_result = analyze.parse(instruction);
@@ -573,7 +611,9 @@ namespace coord_dec {
 
 			if (entry->id(i) == ARM64_INS_BL) {
 
-				auto decode = binary_.create_method("decode", entry->imm(i, 0), [](finder& f) {
+				const uint64_t decode_address = resolve_decode_method_entry(
+					entry->imm(i, 0));
+				auto decode = binary_.create_method("decode", decode_address, [](finder& f) {
 					f.is_ret();
 					}, decode_method_instruction_limit_
 				);
