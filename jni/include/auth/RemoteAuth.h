@@ -2,6 +2,7 @@
 
 #include "auth/AuthConfig.h"
 #include "auth/CloudLayout.h"
+#include "auth/CoordinatePoolCloudLayout.h"
 
 #include <chrono>
 #include <memory>
@@ -83,6 +84,7 @@ struct AuthSessionOptions {
     std::chrono::milliseconds stopTimeout{500};
     int maximumHeartbeatFailures = kMaximumHeartbeatFailures;
     CloudVariableConfig cloudVariable{};
+    CloudVariableConfig coordinateDecrypt2Variable{};
     bool startHeartbeat = true;
 };
 
@@ -110,9 +112,14 @@ public:
     std::string ExpiresAt() const;
 
     CloudLayoutUpdateResult RefreshCloudLayout(CloudLayoutStore& store);
+    CoordinatePoolCloudLayoutUpdateResult
+    RefreshCoordinateDecrypt2Layout(
+        CoordinatePoolCloudLayoutStore& store);
 
 private:
+    struct VariableFetchResult;
     struct Runtime;
+    VariableFetchResult FetchCloudVariable(bool coordinateDecrypt2);
     std::shared_ptr<Runtime> runtime_;
 };
 

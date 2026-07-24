@@ -151,10 +151,14 @@ int RunCoordinateProbe(
     int height,
     const std::string& programDirectory,
     std::shared_ptr<const lengjing::auth::CloudLayoutDocument> cloudLayout,
+    std::shared_ptr<
+        const lengjing::auth::CoordinatePoolCloudLayoutDocument>
+        coordinateDecrypt2Layout,
     const lengjing::game::native::AlgorithmPositionRuntimeConfig&
         algorithmPosition) {
     using namespace std::chrono_literals;
-    const bool cloudLayoutActive = cloudLayout != nullptr;
+    const bool cloudLayoutActive =
+        cloudLayout != nullptr || coordinateDecrypt2Layout != nullptr;
     lengjing::game::RuntimeOptions options;
     options.gameVersionIndex = 0;
     options.driverIndex = CoordinateProbeDriver();
@@ -163,6 +167,8 @@ int RunCoordinateProbe(
     options.screenHeight = height;
     options.programDirectory = programDirectory;
     options.cloudLayout = std::move(cloudLayout);
+    options.coordinateDecrypt2Layout =
+        std::move(coordinateDecrypt2Layout);
     options.algorithmPosition = algorithmPosition;
     lengjing::game::FeatureSettings settings;
     settings.visual.hardwareBreakpointDecrypt =
@@ -301,9 +307,13 @@ int RunAlgorithmCoordinateProbe(
     int width,
     int height,
     const std::string& programDirectory,
-    std::shared_ptr<const lengjing::auth::CloudLayoutDocument> cloudLayout) {
+    std::shared_ptr<const lengjing::auth::CloudLayoutDocument> cloudLayout,
+    std::shared_ptr<
+        const lengjing::auth::CoordinatePoolCloudLayoutDocument>
+        coordinateDecrypt2Layout) {
     using namespace std::chrono_literals;
-    const bool cloudLayoutActive = cloudLayout != nullptr;
+    const bool cloudLayoutActive =
+        cloudLayout != nullptr || coordinateDecrypt2Layout != nullptr;
     lengjing::game::RuntimeOptions options;
     options.gameVersionIndex = 0;
     options.driverIndex = CoordinateProbeDriver();
@@ -312,6 +322,9 @@ int RunAlgorithmCoordinateProbe(
     options.screenHeight = height;
     options.programDirectory = programDirectory;
     options.cloudLayout = std::move(cloudLayout);
+    options.coordinateDecrypt2Layout =
+        std::move(coordinateDecrypt2Layout);
+
     lengjing::game::FeatureSettings settings;
     settings.visual.coordinateDecrypt = false;
     settings.visual.algorithmDecrypt = true;
@@ -482,6 +495,9 @@ int RunAlgorithmCoordinateProbe(
 
 struct CloudLayoutFetchResult {
     std::shared_ptr<const lengjing::auth::CloudLayoutDocument> snapshot;
+    std::shared_ptr<
+        const lengjing::auth::CoordinatePoolCloudLayoutDocument>
+        coordinateDecrypt2Snapshot;
     bool continueStartup = false;
 };
 
@@ -503,34 +519,74 @@ CloudLayoutFetchResult FetchAuthenticatedCloudLayout(
             false,
             false,
             false);
+    CloudLayoutFetchResult output{};
     if (initialAction ==
         lengjing::auth::CloudLayoutStartupAction::UseBuiltInLayout) {
-        return {{}, true};
-    }
-    if (initialAction !=
+    } else if (initialAction !=
         lengjing::auth::CloudLayoutStartupAction::FetchCloudLayout) {
         std::fprintf(
             stderr, "%s\n", lengjing::app::VerificationFailureText());
         return {};
+    } else {
+        lengjing::auth::CloudLayoutStore store(identity);
+        const lengjing::auth::CloudLayoutUpdateResult result =
+            session.RefreshCloudLayout(store);
+        const auto refreshAction =
+            lengjing::auth::ResolveCloudLayoutStartupAction(
+                true,
+                true,
+                true,
+                result.Succeeded(),
+                result.snapshot != nullptr);
+        if (refreshAction !=
+            lengjing::auth::CloudLayoutStartupAction::UseCloudLayout) {
+            std::fprintf(
+                stderr, "%s\n", lengjing::app::VerificationFailureText());
+            return {};
+        }
+        output.snapshot = result.snapshot;
     }
 
-    lengjing::auth::CloudLayoutStore store(identity);
-    const lengjing::auth::CloudLayoutUpdateResult result =
-        session.RefreshCloudLayout(store);
-    const auto refreshAction =
+    const bool hasAnyDecrypt2VariableValue =
+        config.coordinateDecrypt2Variable.HasAnyValue();
+    const bool decrypt2ConfigurationComplete =
+        config.coordinateDecrypt2Variable.IsConfigured() &&
+        config.cloudIdentity.IsConfigured() && identity.IsValid();
+    const auto decrypt2InitialAction =
         lengjing::auth::ResolveCloudLayoutStartupAction(
-            true,
-            true,
-            true,
-            result.Succeeded(),
-            result.snapshot != nullptr);
-    if (refreshAction !=
-        lengjing::auth::CloudLayoutStartupAction::UseCloudLayout) {
+            hasAnyDecrypt2VariableValue,
+            decrypt2ConfigurationComplete,
+            false,
+            false,
+            false);
+    if (decrypt2InitialAction ==
+        lengjing::auth::CloudLayoutStartupAction::UseBuiltInLayout) {
+    } else if (decrypt2InitialAction !=
+               lengjing::auth::CloudLayoutStartupAction::FetchCloudLayout) {
         std::fprintf(
             stderr, "%s\n", lengjing::app::VerificationFailureText());
         return {};
+    } else {
+        lengjing::auth::CoordinatePoolCloudLayoutStore store(identity);
+        const lengjing::auth::CoordinatePoolCloudLayoutUpdateResult result =
+            session.RefreshCoordinateDecrypt2Layout(store);
+        const auto refreshAction =
+            lengjing::auth::ResolveCloudLayoutStartupAction(
+                true,
+                true,
+                true,
+                result.Succeeded(),
+                result.snapshot != nullptr);
+        if (refreshAction !=
+            lengjing::auth::CloudLayoutStartupAction::UseCloudLayout) {
+            std::fprintf(
+                stderr, "%s\n", lengjing::app::VerificationFailureText());
+            return {};
+        }
+        output.coordinateDecrypt2Snapshot = result.snapshot;
     }
-    return {result.snapshot, true};
+    output.continueStartup = true;
+    return output;
 }
 
 std::vector<std::string> DriverOptions() {
@@ -739,6 +795,9 @@ int main() {
 
     lengjing::auth::AuthSession authSession;
     std::shared_ptr<const lengjing::auth::CloudLayoutDocument> cloudLayout;
+    std::shared_ptr<
+        const lengjing::auth::CoordinatePoolCloudLayoutDocument>
+        coordinateDecrypt2Layout;
     if constexpr (kRuntimeAuthEnabled) {
         if (!lengjing::auth::LoginInteractive(
                 authSession,
@@ -754,6 +813,8 @@ int main() {
             return lengjing::auth::kCloudLayoutStartupFailureExitCode;
         }
         cloudLayout = std::move(cloudFetch.snapshot);
+        coordinateDecrypt2Layout =
+            std::move(cloudFetch.coordinateDecrypt2Snapshot);
     }
 
     const auto algorithmPosition = CoordinateReplayConfiguration();
@@ -777,7 +838,8 @@ int main() {
             display.width,
             display.height,
             programDirectory,
-            std::move(cloudLayout));
+            std::move(cloudLayout),
+            std::move(coordinateDecrypt2Layout));
     }
 #endif
     if (coordinateProbeSeconds != 0) {
@@ -792,6 +854,7 @@ int main() {
             display.height,
             programDirectory,
             std::move(cloudLayout),
+            std::move(coordinateDecrypt2Layout),
             algorithmPosition);
     }
 
@@ -874,6 +937,7 @@ int main() {
     options.driverOptions = DriverOptions();
     options.buildVersion = LENGJING_VERSION;
     options.cloudLayout = cloudLayout;
+    options.coordinateDecrypt2Layout = coordinateDecrypt2Layout;
     options.algorithmPosition = algorithmPosition;
     lengjing::app::AppController controller(std::move(options));
 

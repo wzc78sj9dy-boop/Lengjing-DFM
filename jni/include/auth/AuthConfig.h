@@ -42,6 +42,14 @@
 #define LENGJING_T3_LAYOUT_VALUE_NAME ""
 #endif
 
+#ifndef LENGJING_T3_DECRYPT2_LAYOUT_VALUE_ID
+#define LENGJING_T3_DECRYPT2_LAYOUT_VALUE_ID ""
+#endif
+
+#ifndef LENGJING_T3_DECRYPT2_LAYOUT_VALUE_NAME
+#define LENGJING_T3_DECRYPT2_LAYOUT_VALUE_NAME ""
+#endif
+
 #ifndef LENGJING_T3_LAYOUT_PACKAGE
 #define LENGJING_T3_LAYOUT_PACKAGE "com.tencent.tmgp.dfm"
 #endif
@@ -88,6 +96,7 @@ struct T3AuthConfig {
     std::string_view appKey;
     std::string_view rsaPublicKey;
     CloudVariableConfig cloudVariable;
+    CloudVariableConfig coordinateDecrypt2Variable;
     CloudIdentityConfig cloudIdentity;
 
     constexpr bool IsLoginConfigured() const noexcept {
@@ -110,6 +119,9 @@ inline constexpr T3AuthConfig kDefaultT3AuthConfig{
     {LENGJING_T3_GET_VARIABLE_CODE,
      LENGJING_T3_LAYOUT_VALUE_ID,
      LENGJING_T3_LAYOUT_VALUE_NAME},
+    {LENGJING_T3_GET_VARIABLE_CODE,
+     LENGJING_T3_DECRYPT2_LAYOUT_VALUE_ID,
+     LENGJING_T3_DECRYPT2_LAYOUT_VALUE_NAME},
     {LENGJING_T3_LAYOUT_PACKAGE,
      LENGJING_T3_LAYOUT_MODULE,
      LENGJING_T3_LAYOUT_BUILD_ID},

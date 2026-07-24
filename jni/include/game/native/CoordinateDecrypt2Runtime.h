@@ -6,17 +6,7 @@ namespace lengjing::game::native {
 
 constexpr CoordinatePoolRuntimeLayout MakeCoordinateDecrypt2RuntimeLayout(
     const CoordinatePoolRuntimeLayout& configured) noexcept {
-    CoordinatePoolRuntimeLayout layout{
-        0x0E738950,
-        0x0C,
-        -8,
-        0xA0,
-        0x210,
-        0x30,
-        0x10,
-        configured.ringRefreshFrames,
-    };
-    return layout;
+    return configured;
 }
 
 class CoordinateDecrypt2Runtime final {
@@ -34,6 +24,11 @@ public:
                         std::uint32_t decryptIndexOffset,
                         CoordinatePoolCandidateSet& candidates,
                         bool refresh = false) noexcept;
+    bool ObserveOutputStability(
+        std::uintptr_t component,
+        std::uint32_t decryptIndexOffset,
+        std::uint8_t blockCount,
+        bool flicker) noexcept;
     CoordinatePoolRuntimeProbe Probe() const noexcept;
     void Reset() noexcept;
 

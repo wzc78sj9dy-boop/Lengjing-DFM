@@ -18,6 +18,8 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::CoordinatePoolRootSnapshotsMatch;
     using lengjing::game::native::IsCoordinatePoolRootSnapshotInitialized;
     using lengjing::game::native::CoordinatePoolCandidateSet;
+    using lengjing::game::native::CoordinatePoolDecryptIndexCalibration;
+    using lengjing::game::native::CoordinatePoolDecryptIndexFlickerSwitch;
     using lengjing::game::native::CoordinatePoolDecryptMode;
     using lengjing::game::native::CoordinatePoolStablePositionCache;
     using lengjing::game::native::IsCoordinatePoolReadRangeValid;
@@ -25,6 +27,8 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::IsCoordinatePoolDecryptIndexOffsetValid;
     using lengjing::game::native::IsCoordinatePoolSelectedCandidateValid;
     using lengjing::game::native::MapDecodedCoordinatePoolSlot;
+    using lengjing::game::native::
+        MatchingCoordinatePoolDecryptIndexOffsets;
     using lengjing::game::native::MakeCoordinateDecrypt2RuntimeLayout;
     using lengjing::game::native::NextCoordinatePoolCodeValidationFrame;
     using lengjing::game::native::NormalizeCoordinatePoolIndexedPointer;
@@ -34,6 +38,9 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::
         ResolveCoordinatePoolIndexedRootAddresses;
     using lengjing::game::native::ResolveCoordinatePoolDecryptMode;
+    using lengjing::game::native::InferCoordinatePoolDecryptIndexOffset;
+    using lengjing::game::native::
+        ExpireCoordinatePoolDecryptIndexWitnesses;
     using lengjing::game::native::IsCoordinatePoolDecryptRequested;
     using lengjing::game::native::IsCoordinatePoolIndexedDecrypt;
     using lengjing::game::native::
@@ -56,6 +63,12 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::kCoordinatePoolMaximumBlockCount;
     using lengjing::game::native::
         kCoordinatePoolMaximumDecryptIndexOffset;
+    using lengjing::game::native::
+        kCoordinatePoolDecryptIndexCalibrationReadsPerFrame;
+    using lengjing::game::native::
+        kCoordinatePoolDecryptIndexFlickerGraceFrames;
+    using lengjing::game::native::
+        kCoordinatePoolDecryptIndexFlickerWindowFrames;
     using lengjing::game::native::kCoordinatePoolMinimumRemoteAddress;
     REQUIRE(!CoordinatePoolEnvironmentFlagEnabled(nullptr));
     REQUIRE(!CoordinatePoolEnvironmentFlagEnabled(""));
@@ -116,6 +129,213 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(SelectCoordinatePoolIndexedSlot(
         1, kCoordinatePoolMaximumDecryptIndexOffset + 1, 10) ==
         kCoordinatePoolBlockProbeCount);
+    std::uint8_t inferredDecryptIndex = UINT8_MAX;
+    REQUIRE(InferCoordinatePoolDecryptIndexOffset(
+        7,
+        SelectCoordinatePoolIndexedSlot(7, 4, 19),
+        19,
+        inferredDecryptIndex));
+    REQUIRE(inferredDecryptIndex == 4);
+    REQUIRE(InferCoordinatePoolDecryptIndexOffset(
+        UINT64_MAX,
+        SelectCoordinatePoolIndexedSlot(UINT64_MAX, 10, 19),
+        19,
+        inferredDecryptIndex));
+    REQUIRE(inferredDecryptIndex == 10);
+    REQUIRE(!InferCoordinatePoolDecryptIndexOffset(
+        7, 19, 19, inferredDecryptIndex));
+    const std::uint32_t changedOffsetSlots =
+        (UINT32_C(1) << SelectCoordinatePoolIndexedSlot(3, 2, 14)) |
+        (UINT32_C(1) << SelectCoordinatePoolIndexedSlot(3, 7, 14));
+    REQUIRE(MatchingCoordinatePoolDecryptIndexOffsets(
+        3, changedOffsetSlots, 14) ==
+        static_cast<std::uint16_t>(
+            (UINT16_C(1) << 2) | (UINT16_C(1) << 7)));
+    REQUIRE(MatchingCoordinatePoolDecryptIndexOffsets(
+        UINT64_MAX, UINT32_C(1), 1) == UINT16_C(1));
+    const std::size_t fiveBlockSlot =
+        SelectCoordinatePoolIndexedSlot(3, 7, 5);
+    REQUIRE(MatchingCoordinatePoolDecryptIndexOffsets(
+        3,
+        UINT32_C(1) << fiveBlockSlot,
+        5) == (UINT16_C(1) << 2));
+    const std::size_t tenBlockSlot =
+        SelectCoordinatePoolIndexedSlot(0, 10, 10);
+    REQUIRE(MatchingCoordinatePoolDecryptIndexOffsets(
+        0,
+        UINT32_C(1) << tenBlockSlot,
+        10) == UINT16_C(1));
+
+    CoordinatePoolDecryptIndexCalibration multiComponentCalibration;
+    REQUIRE(!multiComponentCalibration.IsLocked());
+    REQUIRE(multiComponentCalibration.Resolve(9) == 9);
+    multiComponentCalibration.Observe(0x1000, UINT16_C(1) << 4);
+    multiComponentCalibration.Observe(0x1000, UINT16_C(1) << 4);
+    REQUIRE(!multiComponentCalibration.IsLocked());
+    REQUIRE(multiComponentCalibration.Resolve(9) == 9);
+    multiComponentCalibration.Observe(0x2000, UINT16_C(1) << 4);
+    REQUIRE(multiComponentCalibration.IsLocked());
+    REQUIRE(multiComponentCalibration.Selected() == 4);
+    REQUIRE(multiComponentCalibration.Resolve(9) == 4);
+    REQUIRE(multiComponentCalibration.Evidence() == 3);
+    REQUIRE(multiComponentCalibration.ComponentCount() == 2);
+    multiComponentCalibration.Observe(0x1000, UINT16_C(1) << 6);
+    multiComponentCalibration.Observe(
+        0x4000,
+        static_cast<std::uint16_t>(
+            (UINT16_C(1) << 4) | (UINT16_C(1) << 6)));
+    REQUIRE(multiComponentCalibration.Contradictions() == 1);
+    multiComponentCalibration.Observe(0x2000, UINT16_C(1) << 6);
+    REQUIRE(multiComponentCalibration.IsLocked());
+    REQUIRE(multiComponentCalibration.Contradictions() == 2);
+    multiComponentCalibration.Observe(0x3000, UINT16_C(1) << 6);
+    REQUIRE(!multiComponentCalibration.IsLocked());
+    REQUIRE(multiComponentCalibration.Resolve(9) == 9);
+
+    CoordinatePoolDecryptIndexCalibration singleIndexCalibration;
+    for (std::size_t observation = 0; observation < 5; ++observation) {
+        singleIndexCalibration.Observe(
+            0x3000, UINT16_C(1) << 10);
+    }
+    REQUIRE(!singleIndexCalibration.IsLocked());
+    singleIndexCalibration.Observe(0x3000, UINT16_C(1) << 10);
+    REQUIRE(singleIndexCalibration.IsLocked());
+    REQUIRE(singleIndexCalibration.Resolve(0) == 10);
+    singleIndexCalibration.Reset();
+    REQUIRE(!singleIndexCalibration.IsLocked());
+    REQUIRE(singleIndexCalibration.Resolve(6) == 6);
+
+    CoordinatePoolDecryptIndexCalibration ambiguousCalibration;
+    for (std::size_t observation = 0; observation < 8; ++observation) {
+        ambiguousCalibration.Observe(
+            0x4000 + observation,
+            static_cast<std::uint16_t>(
+                (UINT16_C(1) << 1) | (UINT16_C(1) << 8)));
+    }
+    REQUIRE(!ambiguousCalibration.IsLocked());
+    REQUIRE(ambiguousCalibration.Resolve(5) == 5);
+
+    CoordinatePoolDecryptIndexFlickerSwitch flickerSwitch;
+    auto switchDecision =
+        flickerSwitch.Observe(0x1000, 0, 10, 100, false);
+    REQUIRE(!switchDecision.requested);
+    REQUIRE(flickerSwitch.ActiveOffset() == 0);
+    for (std::uint64_t frame = 101;
+         frame < 100 + kCoordinatePoolDecryptIndexFlickerGraceFrames;
+         ++frame) {
+        REQUIRE(!flickerSwitch
+                     .Observe(0x1000, 0, 10, frame, true)
+                     .requested);
+    }
+    const std::uint64_t flickerFrame =
+        100 + kCoordinatePoolDecryptIndexFlickerGraceFrames;
+    REQUIRE(!flickerSwitch
+                 .Observe(0x1000, 0, 10, flickerFrame, true)
+                 .requested);
+    REQUIRE(!flickerSwitch
+                 .Observe(0x2000, 0, 10, flickerFrame + 1, true)
+                 .requested);
+    REQUIRE(!flickerSwitch
+                 .Observe(0x3000, 0, 10, flickerFrame + 2, true)
+                 .requested);
+    switchDecision =
+        flickerSwitch.Observe(
+            0x1000, 0, 10, flickerFrame + 3, true);
+    REQUIRE(switchDecision.requested);
+    REQUIRE(switchDecision.currentOffset == 0);
+    REQUIRE(switchDecision.nextOffset == 1);
+    REQUIRE(switchDecision.evidence == 4);
+    REQUIRE(switchDecision.components == 3);
+    REQUIRE(switchDecision.frames == 4);
+    REQUIRE(flickerSwitch.SwitchRequested());
+    REQUIRE(!flickerSwitch
+                 .Observe(
+                     0x4000, 0, 10, flickerFrame + 3, true)
+                 .requested);
+    REQUIRE(!flickerSwitch
+                 .Observe(
+                     0x1000, 1, 10, flickerFrame + 4, false)
+                 .requested);
+    REQUIRE(flickerSwitch.ActiveOffset() == 1);
+    REQUIRE(!flickerSwitch.SwitchRequested());
+
+    CoordinatePoolDecryptIndexFlickerSwitch expiringFlickerSwitch;
+    REQUIRE(!expiringFlickerSwitch
+                 .Observe(0x1000, 4, 5, 0, false)
+                 .requested);
+    const std::uint64_t expiringStart =
+        kCoordinatePoolDecryptIndexFlickerGraceFrames;
+    REQUIRE(!expiringFlickerSwitch
+                 .Observe(0x1000, 4, 5, expiringStart, true)
+                 .requested);
+    REQUIRE(!expiringFlickerSwitch
+                 .Observe(
+                     0x2000, 4, 5, expiringStart + 1, true)
+                 .requested);
+    REQUIRE(!expiringFlickerSwitch
+                 .Observe(
+                     0x3000, 4, 5, expiringStart + 2, true)
+                 .requested);
+    const std::uint64_t expiredFrame =
+        expiringStart + 2 +
+        kCoordinatePoolDecryptIndexFlickerWindowFrames;
+    REQUIRE(!expiringFlickerSwitch
+                 .Observe(
+                     0x4000,
+                     4,
+                     5,
+                     expiredFrame,
+                     true)
+                 .requested);
+    REQUIRE(expiringFlickerSwitch.Evidence() == 1);
+    REQUIRE(!expiringFlickerSwitch
+                 .Observe(
+                     0x1000,
+                     4,
+                     5,
+                     expiredFrame + 1,
+                     true)
+                 .requested);
+    REQUIRE(!expiringFlickerSwitch
+                 .Observe(
+                     0x2000,
+                     4,
+                     5,
+                     expiredFrame + 2,
+                     true)
+                 .requested);
+    switchDecision = expiringFlickerSwitch.Observe(
+        0x3000,
+        4,
+        5,
+        expiredFrame + 3,
+        true);
+    REQUIRE(switchDecision.requested);
+    REQUIRE(switchDecision.nextOffset == 0);
+
+    std::array<std::uint64_t,
+               kCoordinatePoolDecryptIndexCalibrationReadsPerFrame>
+        auditWitnesses{0x1000, 0x2000, 0, 0};
+    std::array<std::uint64_t,
+               kCoordinatePoolDecryptIndexCalibrationReadsPerFrame>
+        auditWitnessFrames{99, 70, 0, 0};
+    std::size_t auditWitnessCount =
+        ExpireCoordinatePoolDecryptIndexWitnesses(
+            auditWitnesses, auditWitnessFrames, 2, 100);
+    REQUIRE(auditWitnessCount == 1);
+    REQUIRE(auditWitnesses[0] == 0x1000);
+    REQUIRE(auditWitnessFrames[0] == 99);
+    auditWitnesses[auditWitnessCount] = 0x3000;
+    auditWitnessFrames[auditWitnessCount++] = 100;
+    REQUIRE(auditWitnessCount == 2);
+    REQUIRE(auditWitnesses[1] == 0x3000);
+    REQUIRE(auditWitnessFrames[1] == 100);
+    auditWitnessCount = ExpireCoordinatePoolDecryptIndexWitnesses(
+        auditWitnesses, auditWitnessFrames, auditWitnessCount, 101);
+    REQUIRE(auditWitnessCount == 2);
+    auditWitnessCount = ExpireCoordinatePoolDecryptIndexWitnesses(
+        auditWitnesses, auditWitnessFrames, auditWitnessCount, 98);
+    REQUIRE(auditWitnessCount == 0);
     REQUIRE(IsCoordinatePoolBlockTerminator({}));
     REQUIRE(IsCoordinatePoolBlockTerminator({-0.0f, 0.0f, -0.0f}));
     REQUIRE(!IsCoordinatePoolBlockTerminator({1.0f, 0.0f, 0.0f}));
@@ -564,16 +784,26 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(cloudLayout.IsValid());
     const auto decrypt2Layout =
         MakeCoordinateDecrypt2RuntimeLayout(cloudLayout);
-    REQUIRE(decrypt2Layout.rootRva == 0x0E738950);
-    REQUIRE(decrypt2Layout.bridgeOffset == 0x0C);
-    REQUIRE(decrypt2Layout.entryOffset == 0xA0);
-    REQUIRE(decrypt2Layout.contextOffset == -8);
-    REQUIRE(decrypt2Layout.componentKeyOffset == 0x210);
-    REQUIRE(decrypt2Layout.entryStride == 0x30);
-    REQUIRE(decrypt2Layout.poolHeadSkip == 0x10);
-    REQUIRE(decrypt2Layout.ringRefreshFrames == 90);
-    REQUIRE(kCoordinatePoolBlockProbeCount * decrypt2Layout.entryStride ==
-        0x3C0);
+    REQUIRE(decrypt2Layout.rootRva == cloudLayout.rootRva);
+    REQUIRE(decrypt2Layout.bridgeOffset == cloudLayout.bridgeOffset);
+    REQUIRE(decrypt2Layout.entryOffset == cloudLayout.entryOffset);
+    REQUIRE(decrypt2Layout.contextOffset == cloudLayout.contextOffset);
+    REQUIRE(decrypt2Layout.componentKeyOffset ==
+            cloudLayout.componentKeyOffset);
+    REQUIRE(decrypt2Layout.entryStride == cloudLayout.entryStride);
+    REQUIRE(decrypt2Layout.poolHeadSkip == cloudLayout.poolHeadSkip);
+    REQUIRE(decrypt2Layout.ringRefreshFrames ==
+            cloudLayout.ringRefreshFrames);
+    const auto builtInDecrypt2Layout =
+        MakeCoordinateDecrypt2RuntimeLayout({});
+    REQUIRE(builtInDecrypt2Layout.rootRva == 0x0E738950);
+    REQUIRE(builtInDecrypt2Layout.bridgeOffset == 0x0C);
+    REQUIRE(builtInDecrypt2Layout.contextOffset == -8);
+    REQUIRE(builtInDecrypt2Layout.entryOffset == 0xA0);
+    REQUIRE(builtInDecrypt2Layout.componentKeyOffset == 0x210);
+    REQUIRE(builtInDecrypt2Layout.entryStride == 0x30);
+    REQUIRE(builtInDecrypt2Layout.poolHeadSkip == 0x10);
+    REQUIRE(builtInDecrypt2Layout.ringRefreshFrames == 60);
     REQUIRE(!ShouldClearCoordinatePoolRingsAfterPointerRefresh(
         true,
         NormalizeCoordinatePoolPointer(UINT64_C(0xABCD007123456780)),

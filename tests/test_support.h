@@ -30,6 +30,7 @@ void RunCardInputPolicyTests();
 void RunCharacterComponentTransformTests();
 void RunCloudLayoutStartupPolicyTests();
 void RunCloudLayoutTests();
+void RunCoordinatePoolCloudLayoutStandaloneTests();
 void RunCpuMailboxPolicyTests();
 void RunFrameProjectionTests();
 void RunGameVersionPolicyTests();

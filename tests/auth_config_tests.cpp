@@ -10,6 +10,10 @@ void RunAuthConfigTests() {
     REQUIRE(kMaximumHeartbeatFailures == 5);
     REQUIRE(!kDefaultT3AuthConfig.cloudVariable.IsConfigured());
     REQUIRE(!kDefaultT3AuthConfig.cloudVariable.HasAnyValue());
+    REQUIRE(
+        !kDefaultT3AuthConfig.coordinateDecrypt2Variable.IsConfigured());
+    REQUIRE(
+        !kDefaultT3AuthConfig.coordinateDecrypt2Variable.HasAnyValue());
     REQUIRE(!kDefaultT3AuthConfig.cloudIdentity.IsConfigured());
     REQUIRE(kDefaultT3AuthConfig.cloudIdentity.packageName ==
             "com.tencent.tmgp.dfm");

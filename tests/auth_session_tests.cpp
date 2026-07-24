@@ -36,9 +36,11 @@ public:
 
     lengjing::auth::AuthVariableResult GetVariableByCard(
         std::string_view,
-        std::string_view,
-        std::string_view) override {
+        std::string_view valueId,
+        std::string_view valueName) override {
         ++variableCalls;
+        lastValueId = valueId;
+        lastValueName = valueName;
         return variableResult;
     }
 
@@ -57,6 +59,8 @@ public:
     std::atomic_int versionCalls{0};
     std::atomic_int variableCalls{0};
     std::atomic_int cancelCalls{0};
+    std::string lastValueId;
+    std::string lastValueName;
 };
 
 class BlockingHeartbeatGateway final : public lengjing::auth::AuthGateway {
@@ -185,6 +189,10 @@ private:
 
 std::string CloudPayload() {
     return R"({"schema_version":2,"package":"com.example.runtime","module":"libUE4.so","build_id":"0123456789abcdef0123456789abcdef01234567","revision":1,"layout":{"name_pool":"0x12001000","world":"0x13002000","coordinate_replay_entry":"0x0","geometry_instances":["0x0","0x0"],"tracking_matrix_root":"0x0","component_position_flag":"0x0","actor_records":{"tagged_container":"0x0","plain_array":"0x0","plain_root":"0x0","plain_mesh":"0x0","encrypted_record_count":0,"plain_record_stride":0,"maximum_plain_count":0,"fallback_plain_count":0},"coordinate_pool":{"root_rva":"0x1a009000","bridge_offset":"0x14","context_offset":-16,"entry_offset":"0xb0","component_key_offset":"0x220","pacga_data":"0x13579bdf","pacga_modifier":"0x2468ace0","entry_stride":64,"pool_head_skip":24,"ring_refresh_frames":90}}})";
+}
+
+std::string CoordinatePoolPayload() {
+    return R"({"schema_version":1,"package":"com.example.runtime","module":"libUE4.so","build_id":"0123456789abcdef0123456789abcdef01234567","revision":1,"coordinate_pool":{"root_rva":"0x0e738950","bridge_offset":"0x0c","context_offset":-8,"entry_offset":"0x00a0","component_key_offset":"0x0210","entry_stride":48,"pool_head_skip":16,"ring_refresh_frames":60}})";
 }
 
 std::string EncodeCloudPayloadQuotes(std::string_view quoteEntity) {
@@ -376,6 +384,28 @@ void RunAuthSessionTests() {
         REQUIRE(update.status == CloudLayoutStatus::Published);
         REQUIRE(gateway->variableCalls.load() == 1);
         REQUIRE(store.Snapshot()->revision == 1);
+    }
+
+    {
+        auto gateway = std::make_shared<FakeAuthGateway>();
+        gateway->variableResult = {true, {}, CoordinatePoolPayload()};
+        AuthSessionOptions options;
+        options.coordinateDecrypt2Variable = {
+            "CALL_CODE", "DECRYPT2_ID", "DECRYPT2_NAME"};
+
+        AuthSession session;
+        REQUIRE(session.Login(
+            gateway, "CARD_FOR_TEST", "DEVICE_FOR_TEST", options));
+        CoordinatePoolCloudLayoutStore store(RuntimeIdentity());
+        const CoordinatePoolCloudLayoutUpdateResult update =
+            session.RefreshCoordinateDecrypt2Layout(store);
+        REQUIRE(update.status == CloudLayoutStatus::Published);
+        REQUIRE(gateway->variableCalls.load() == 1);
+        REQUIRE(gateway->lastValueId == "DECRYPT2_ID");
+        REQUIRE(gateway->lastValueName == "DECRYPT2_NAME");
+        REQUIRE(store.Snapshot() != nullptr);
+        REQUIRE(store.Snapshot()->coordinatePool.rootRva == 0x0E738950);
+        REQUIRE(store.Snapshot()->coordinatePool.entryStride == 48);
     }
 
     {

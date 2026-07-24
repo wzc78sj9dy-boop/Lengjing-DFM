@@ -24,6 +24,68 @@ inline constexpr std::size_t kCoordinatePoolBlockProbeCount = 20;
 inline constexpr std::size_t kCoordinatePoolMaximumBlockCount =
     kCoordinatePoolBlockProbeCount - 1;
 inline constexpr std::uint32_t kCoordinatePoolMaximumDecryptIndexOffset = 10;
+inline constexpr std::uint8_t kCoordinatePoolUnknownDecryptIndexOffset =
+    UINT8_MAX;
+inline constexpr std::size_t kCoordinatePoolDecryptIndexEvidenceLimit = 64;
+inline constexpr std::size_t kCoordinatePoolDecryptIndexMinimumEvidence = 3;
+inline constexpr std::size_t kCoordinatePoolDecryptIndexMinimumComponents = 2;
+inline constexpr std::size_t
+    kCoordinatePoolDecryptIndexSingleComponentEvidence = 6;
+inline constexpr std::size_t kCoordinatePoolDecryptIndexMinimumLead = 2;
+inline constexpr std::size_t
+    kCoordinatePoolDecryptIndexCalibrationReadsPerFrame = 4;
+inline constexpr std::size_t
+    kCoordinatePoolDecryptIndexAuditReadsPerFrame = 2;
+inline constexpr std::uint64_t
+    kCoordinatePoolDecryptIndexWitnessRefreshFrames = 30;
+inline constexpr std::size_t
+    kCoordinatePoolDecryptIndexContradictionEvidence = 3;
+inline constexpr std::size_t
+    kCoordinatePoolDecryptIndexSingleComponentContradictionEvidence = 6;
+inline constexpr std::uint64_t
+    kCoordinatePoolDecryptIndexFlickerGraceFrames = 12;
+inline constexpr std::uint64_t
+    kCoordinatePoolDecryptIndexFlickerWindowFrames = 24;
+inline constexpr std::size_t
+    kCoordinatePoolDecryptIndexFlickerEvidenceLimit = 32;
+inline constexpr std::size_t
+    kCoordinatePoolDecryptIndexFlickerMinimumEvidence = 4;
+inline constexpr std::size_t
+    kCoordinatePoolDecryptIndexFlickerMinimumComponents = 3;
+inline constexpr std::size_t
+    kCoordinatePoolDecryptIndexFlickerMinimumFrames = 2;
+
+inline std::size_t ExpireCoordinatePoolDecryptIndexWitnesses(
+    std::array<std::uint64_t,
+               kCoordinatePoolDecryptIndexCalibrationReadsPerFrame>&
+        witnesses,
+    std::array<std::uint64_t,
+               kCoordinatePoolDecryptIndexCalibrationReadsPerFrame>&
+        lastSeenFrames,
+    std::size_t witnessCount,
+    std::uint64_t frame) noexcept {
+    const std::size_t boundedCount =
+        witnessCount < witnesses.size() ? witnessCount : witnesses.size();
+    std::size_t retainedCount = 0;
+    for (std::size_t index = 0; index < boundedCount; ++index) {
+        const std::uint64_t lastSeen = lastSeenFrames[index];
+        if (frame < lastSeen ||
+            frame - lastSeen >=
+                kCoordinatePoolDecryptIndexWitnessRefreshFrames) {
+            continue;
+        }
+        witnesses[retainedCount] = witnesses[index];
+        lastSeenFrames[retainedCount] = lastSeen;
+        ++retainedCount;
+    }
+    for (std::size_t index = retainedCount;
+         index < witnesses.size();
+         ++index) {
+        witnesses[index] = 0;
+        lastSeenFrames[index] = 0;
+    }
+    return retainedCount;
+}
 
 inline constexpr std::size_t kCoordinatePoolCompactLogicalSlotCount = 5;
 inline constexpr std::size_t kCoordinatePoolExtendedLogicalSlotCount = 7;
@@ -83,6 +145,401 @@ constexpr std::size_t SelectCoordinatePoolIndexedSlot(
         decodedSlot + static_cast<std::uint64_t>(decryptIndexOffset);
     return static_cast<std::size_t>(adjusted % blockCount);
 }
+
+constexpr bool InferCoordinatePoolDecryptIndexOffset(
+    std::uint64_t decodedSlot,
+    std::size_t changedSlot,
+    std::size_t blockCount,
+    std::uint8_t& offset) noexcept {
+    offset = kCoordinatePoolUnknownDecryptIndexOffset;
+    if (blockCount == 0 ||
+        blockCount > kCoordinatePoolMaximumBlockCount ||
+        changedSlot >= blockCount) {
+        return false;
+    }
+    for (std::uint8_t candidate = 0;
+         candidate <= kCoordinatePoolMaximumDecryptIndexOffset;
+         ++candidate) {
+        if (SelectCoordinatePoolIndexedSlot(
+                decodedSlot, candidate, blockCount) == changedSlot) {
+            offset = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+constexpr std::uint16_t MatchingCoordinatePoolDecryptIndexOffsets(
+    std::uint64_t decodedSlot,
+    std::uint32_t changedSlotMask,
+    std::size_t blockCount) noexcept {
+    if (blockCount == 0 ||
+        blockCount > kCoordinatePoolMaximumBlockCount) {
+        return 0;
+    }
+    std::uint16_t matches = 0;
+    std::uint32_t seenSlots = 0;
+    for (std::uint8_t offset = 0;
+         offset <= kCoordinatePoolMaximumDecryptIndexOffset;
+         ++offset) {
+        const std::size_t slot = SelectCoordinatePoolIndexedSlot(
+            decodedSlot, offset, blockCount);
+        if (slot < blockCount &&
+            (changedSlotMask & (UINT32_C(1) << slot)) != 0 &&
+            (seenSlots & (UINT32_C(1) << slot)) == 0) {
+            matches |= static_cast<std::uint16_t>(
+                UINT16_C(1) << offset);
+            seenSlots |= UINT32_C(1) << slot;
+        }
+    }
+    return matches;
+}
+
+class CoordinatePoolDecryptIndexCalibration final {
+public:
+    void Observe(
+        std::uintptr_t component,
+        std::uint16_t matchingOffsets) noexcept {
+        if (component == 0 || matchingOffsets == 0) return;
+        if (locked_) {
+            const std::uint16_t selectedBit = static_cast<std::uint16_t>(
+                UINT16_C(1) << selected_);
+            if (matchingOffsets == selectedBit) {
+                contradictionCount_ = 0;
+                contradictionComponent_ = 0;
+                contradictionHasMultipleComponents_ = false;
+                return;
+            }
+            if ((matchingOffsets & selectedBit) != 0) return;
+            if (contradictionCount_ == 0) {
+                contradictionComponent_ = component;
+            } else if (component != contradictionComponent_) {
+                contradictionHasMultipleComponents_ = true;
+            }
+            ++contradictionCount_;
+            const std::size_t required =
+                contradictionHasMultipleComponents_
+                ? kCoordinatePoolDecryptIndexContradictionEvidence
+                : kCoordinatePoolDecryptIndexSingleComponentContradictionEvidence;
+            if (contradictionCount_ >= required) Reset();
+            return;
+        }
+        evidence_[writeIndex_] = {component, matchingOffsets};
+        writeIndex_ = (writeIndex_ + 1) % evidence_.size();
+        if (evidenceCount_ < evidence_.size()) ++evidenceCount_;
+        Resolve();
+    }
+
+    void Reset() noexcept { *this = {}; }
+
+    std::uint8_t Resolve(std::uint8_t fallback) const noexcept {
+        return locked_
+            ? selected_
+            : fallback;
+    }
+
+    bool IsLocked() const noexcept { return locked_; }
+    std::uint8_t Selected() const noexcept { return selected_; }
+    std::size_t Evidence() const noexcept { return bestEvidence_; }
+    std::size_t ComponentCount() const noexcept { return componentCount_; }
+    std::size_t Contradictions() const noexcept {
+        return contradictionCount_;
+    }
+
+private:
+    struct Observation {
+        std::uintptr_t component = 0;
+        std::uint16_t matchingOffsets = 0;
+    };
+
+    std::size_t CountComponents(std::uint8_t offset) const noexcept {
+        std::array<std::uintptr_t,
+                   kCoordinatePoolDecryptIndexEvidenceLimit> components{};
+        std::size_t count = 0;
+        const std::uint16_t offsetBit = static_cast<std::uint16_t>(
+            UINT16_C(1) << offset);
+        for (std::size_t index = 0; index < evidenceCount_; ++index) {
+            if ((evidence_[index].matchingOffsets & offsetBit) == 0) continue;
+            bool found = false;
+            for (std::size_t componentIndex = 0;
+                 componentIndex < count;
+                 ++componentIndex) {
+                if (components[componentIndex] ==
+                    evidence_[index].component) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) components[count++] = evidence_[index].component;
+        }
+        return count;
+    }
+
+    void Resolve() noexcept {
+        std::array<std::size_t,
+                   kCoordinatePoolMaximumDecryptIndexOffset + 1> votes{};
+        for (std::size_t index = 0; index < evidenceCount_; ++index) {
+            for (std::uint8_t offset = 0;
+                 offset <= kCoordinatePoolMaximumDecryptIndexOffset;
+                 ++offset) {
+                if ((evidence_[index].matchingOffsets &
+                     (UINT16_C(1) << offset)) != 0) {
+                    ++votes[offset];
+                }
+            }
+        }
+
+        std::uint16_t bestMask = 0;
+        std::size_t bestEvidence = 0;
+        std::size_t runnerUpEvidence = 0;
+        for (std::uint8_t offset = 0;
+             offset <= kCoordinatePoolMaximumDecryptIndexOffset;
+             ++offset) {
+            if (votes[offset] > bestEvidence) {
+                runnerUpEvidence = bestEvidence;
+                bestEvidence = votes[offset];
+                bestMask = static_cast<std::uint16_t>(
+                    UINT16_C(1) << offset);
+            } else if (votes[offset] == bestEvidence) {
+                bestMask |= static_cast<std::uint16_t>(
+                    UINT16_C(1) << offset);
+            } else if (votes[offset] > runnerUpEvidence) {
+                runnerUpEvidence = votes[offset];
+            }
+        }
+        if (bestEvidence == 0 || (bestMask & (bestMask - 1U)) != 0) return;
+
+        std::uint8_t bestOffset = 0;
+        while ((bestMask & (UINT16_C(1) << bestOffset)) == 0) ++bestOffset;
+        const std::size_t componentCount = CountComponents(bestOffset);
+        selected_ = bestOffset;
+        bestEvidence_ = bestEvidence;
+        componentCount_ = componentCount;
+        const bool enoughComponents =
+            componentCount >=
+                kCoordinatePoolDecryptIndexMinimumComponents ||
+            (componentCount == 1 &&
+             bestEvidence >=
+                 kCoordinatePoolDecryptIndexSingleComponentEvidence);
+        if (bestEvidence < kCoordinatePoolDecryptIndexMinimumEvidence ||
+            !enoughComponents ||
+            bestEvidence <
+                runnerUpEvidence +
+                    kCoordinatePoolDecryptIndexMinimumLead) {
+            return;
+        }
+        locked_ = true;
+    }
+
+    std::array<Observation,
+               kCoordinatePoolDecryptIndexEvidenceLimit> evidence_{};
+    std::size_t evidenceCount_ = 0;
+    std::size_t writeIndex_ = 0;
+    std::size_t bestEvidence_ = 0;
+    std::size_t componentCount_ = 0;
+    std::size_t contradictionCount_ = 0;
+    std::uintptr_t contradictionComponent_ = 0;
+    std::uint8_t selected_ = kCoordinatePoolUnknownDecryptIndexOffset;
+    bool contradictionHasMultipleComponents_ = false;
+    bool locked_ = false;
+};
+
+struct CoordinatePoolDecryptIndexSwitchDecision {
+    bool requested = false;
+    std::uint8_t currentOffset =
+        kCoordinatePoolUnknownDecryptIndexOffset;
+    std::uint8_t nextOffset =
+        kCoordinatePoolUnknownDecryptIndexOffset;
+    std::size_t evidence = 0;
+    std::size_t components = 0;
+    std::size_t frames = 0;
+};
+
+class CoordinatePoolDecryptIndexFlickerSwitch final {
+public:
+    CoordinatePoolDecryptIndexSwitchDecision Observe(
+        std::uintptr_t component,
+        std::uint32_t observedOffset,
+        std::size_t blockCount,
+        std::uint64_t frame,
+        bool flicker) noexcept {
+        if (component == 0) return {};
+        if (!IsCoordinatePoolDecryptIndexOffsetValid(observedOffset) ||
+            blockCount == 0 ||
+            blockCount > kCoordinatePoolMaximumBlockCount) {
+            Reset();
+            return {};
+        }
+
+        const std::uint8_t candidateCount =
+            static_cast<std::uint8_t>(
+                blockCount <
+                        kCoordinatePoolMaximumDecryptIndexOffset + 1
+                    ? blockCount
+                    : kCoordinatePoolMaximumDecryptIndexOffset + 1);
+        if (candidateCount < 2) {
+            Reset();
+            return {};
+        }
+        const std::uint8_t normalizedOffset =
+            static_cast<std::uint8_t>(observedOffset % candidateCount);
+        if (!initialized_ || blockCount_ != blockCount ||
+            frame < lastObservedFrame_ ||
+            normalizedOffset != activeOffset_) {
+            ResetForOffset(
+                normalizedOffset, candidateCount, blockCount, frame);
+        }
+        lastObservedFrame_ = frame;
+        Expire(frame);
+        if (switchRequested_ ||
+            frame - activatedFrame_ <
+                kCoordinatePoolDecryptIndexFlickerGraceFrames ||
+            !flicker) {
+            return {};
+        }
+        for (std::size_t index = 0; index < observationCount_; ++index) {
+            if (observations_[index].component == component &&
+                observations_[index].frame == frame) {
+                return {};
+            }
+        }
+        if (observationCount_ == observations_.size()) {
+            for (std::size_t index = 1;
+                 index < observationCount_;
+                 ++index) {
+                observations_[index - 1] = observations_[index];
+            }
+            --observationCount_;
+        }
+        observations_[observationCount_++] = {component, frame};
+
+        std::array<std::uintptr_t,
+                   kCoordinatePoolDecryptIndexFlickerEvidenceLimit>
+            components{};
+        std::array<std::uint64_t,
+                   kCoordinatePoolDecryptIndexFlickerEvidenceLimit>
+            frames{};
+        std::size_t componentCount = 0;
+        std::size_t frameCount = 0;
+        for (std::size_t index = 0; index < observationCount_; ++index) {
+            const Observation& observation = observations_[index];
+            bool componentSeen = false;
+            for (std::size_t componentIndex = 0;
+                 componentIndex < componentCount;
+                 ++componentIndex) {
+                if (components[componentIndex] ==
+                    observation.component) {
+                    componentSeen = true;
+                    break;
+                }
+            }
+            if (!componentSeen) {
+                components[componentCount++] = observation.component;
+            }
+
+            bool frameSeen = false;
+            for (std::size_t frameIndex = 0;
+                 frameIndex < frameCount;
+                 ++frameIndex) {
+                if (frames[frameIndex] == observation.frame) {
+                    frameSeen = true;
+                    break;
+                }
+            }
+            if (!frameSeen) frames[frameCount++] = observation.frame;
+        }
+        if (observationCount_ <
+                kCoordinatePoolDecryptIndexFlickerMinimumEvidence ||
+            componentCount <
+                kCoordinatePoolDecryptIndexFlickerMinimumComponents ||
+            frameCount < kCoordinatePoolDecryptIndexFlickerMinimumFrames) {
+            return {};
+        }
+
+        CoordinatePoolDecryptIndexSwitchDecision decision{};
+        decision.requested = true;
+        decision.currentOffset = activeOffset_;
+        decision.nextOffset = static_cast<std::uint8_t>(
+            (activeOffset_ + 1) % candidateCount_);
+        decision.evidence = observationCount_;
+        decision.components = componentCount;
+        decision.frames = frameCount;
+        switchRequested_ = true;
+        observations_ = {};
+        observationCount_ = 0;
+        return decision;
+    }
+
+    void Reset() noexcept { *this = {}; }
+
+    std::uint8_t ActiveOffset() const noexcept {
+        return initialized_
+            ? activeOffset_
+            : kCoordinatePoolUnknownDecryptIndexOffset;
+    }
+
+    std::size_t Evidence() const noexcept {
+        return observationCount_;
+    }
+
+    bool SwitchRequested() const noexcept {
+        return switchRequested_;
+    }
+
+private:
+    struct Observation {
+        std::uintptr_t component = 0;
+        std::uint64_t frame = 0;
+    };
+
+    void ResetForOffset(
+        std::uint8_t offset,
+        std::uint8_t candidateCount,
+        std::size_t blockCount,
+        std::uint64_t frame) noexcept {
+        observations_ = {};
+        observationCount_ = 0;
+        activatedFrame_ = frame;
+        lastObservedFrame_ = frame;
+        blockCount_ = blockCount;
+        activeOffset_ = offset;
+        candidateCount_ = candidateCount;
+        switchRequested_ = false;
+        initialized_ = true;
+    }
+
+    void Expire(std::uint64_t frame) noexcept {
+        std::size_t retained = 0;
+        for (std::size_t index = 0; index < observationCount_; ++index) {
+            const Observation& observation = observations_[index];
+            if (frame < observation.frame ||
+                frame - observation.frame >=
+                    kCoordinatePoolDecryptIndexFlickerWindowFrames) {
+                continue;
+            }
+            observations_[retained++] = observation;
+        }
+        for (std::size_t index = retained;
+             index < observationCount_;
+             ++index) {
+            observations_[index] = {};
+        }
+        observationCount_ = retained;
+    }
+
+    std::array<Observation,
+               kCoordinatePoolDecryptIndexFlickerEvidenceLimit>
+        observations_{};
+    std::size_t observationCount_ = 0;
+    std::uint64_t activatedFrame_ = 0;
+    std::uint64_t lastObservedFrame_ = 0;
+    std::size_t blockCount_ = 0;
+    std::uint8_t activeOffset_ =
+        kCoordinatePoolUnknownDecryptIndexOffset;
+    std::uint8_t candidateCount_ = 0;
+    bool switchRequested_ = false;
+    bool initialized_ = false;
+};
 
 enum class CoordinatePoolSlotLayoutKind : std::uint8_t {
     Unknown,

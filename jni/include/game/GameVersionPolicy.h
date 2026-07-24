@@ -1,6 +1,7 @@
 #pragma once
 
 #include "auth/CloudLayout.h"
+#include "auth/CoordinatePoolCloudLayout.h"
 
 #include <array>
 #include <cstddef>
@@ -37,6 +38,26 @@ SelectCloudLayoutForGameVersion(
     const std::shared_ptr<const auth::CloudLayoutDocument>& cloudLayout,
     int gameVersionIndex) noexcept {
     return CloudLayoutMatchesGameVersion(
+               cloudLayout.get(), gameVersionIndex)
+        ? cloudLayout
+        : nullptr;
+}
+
+inline bool CoordinatePoolCloudLayoutMatchesGameVersion(
+    const auth::CoordinatePoolCloudLayoutDocument* cloudLayout,
+    int gameVersionIndex) noexcept {
+    const std::string_view package =
+        ResolveGameVersionPackage(gameVersionIndex);
+    return cloudLayout != nullptr && !package.empty() &&
+        cloudLayout->identity.packageName == package;
+}
+
+inline std::shared_ptr<const auth::CoordinatePoolCloudLayoutDocument>
+SelectCoordinatePoolCloudLayoutForGameVersion(
+    const std::shared_ptr<
+        const auth::CoordinatePoolCloudLayoutDocument>& cloudLayout,
+    int gameVersionIndex) noexcept {
+    return CoordinatePoolCloudLayoutMatchesGameVersion(
                cloudLayout.get(), gameVersionIndex)
         ? cloudLayout
         : nullptr;

@@ -802,14 +802,6 @@ void RenderRuntime(UiModel& model, UiActions& actions) {
         }
         ImGui::EndTable();
     }
-    if (visual.hardwareBreakpointDecrypt) {
-        Mark(actions, SettingsDomain::Visual, SliderIntRow(
-            "解密索引偏移",
-            &visual.coordinateDecrypt2Index,
-            0,
-            10,
-            "%d"));
-    }
     ImGui::Dummy(ImVec2(0.0f, 4.0f));
     int renderBackend = std::clamp(
         static_cast<int>(system.renderBackend),

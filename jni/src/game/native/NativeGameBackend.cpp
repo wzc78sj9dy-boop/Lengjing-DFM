@@ -1232,7 +1232,8 @@ public:
                 &ReadElfBytes,
                 memory_.get(),
                 moduleBuildId_);
-        if (options.cloudLayout != nullptr) {
+        if (options.cloudLayout != nullptr ||
+            options.coordinateDecrypt2Layout != nullptr) {
             if (!moduleBuildIdReady) {
                 probe.failureKind =
                     RuntimeFailureKind::CloudLayoutRejected;
@@ -1242,6 +1243,8 @@ public:
                 CloseLocked();
                 return false;
             }
+        }
+        if (options.cloudLayout != nullptr) {
             const auto cloudLayout = native::BuildRuntimeLayoutOverride(
                 options.cloudLayout.get(), layout_.processName,
                 "libUE4.so", moduleBuildId_);
@@ -1249,8 +1252,6 @@ public:
                 !memory_->ConfigureCoordinateReplay(
                     cloudLayout->coordinateTransport) ||
                 !coordinatePoolRuntime_.Configure(
-                    cloudLayout->coordinatePool) ||
-                !coordinateDecrypt2Runtime_.Configure(
                     cloudLayout->coordinatePool)) {
                 probe.failureKind =
                     RuntimeFailureKind::CloudLayoutRejected;
@@ -1278,6 +1279,24 @@ public:
                       0,
                   }
                 : native::AlgorithmPositionRuntimeConfig{};
+        }
+        if (options.coordinateDecrypt2Layout != nullptr) {
+            const auth::CoordinatePoolCloudLayoutDocument& decrypt2 =
+                *options.coordinateDecrypt2Layout;
+            if (decrypt2.identity.packageName != layout_.processName ||
+                decrypt2.identity.moduleName != "libUE4.so" ||
+                decrypt2.identity.buildId != moduleBuildId_ ||
+                !decrypt2.coordinatePool.IsValid() ||
+                !coordinateDecrypt2Runtime_.Configure(
+                    decrypt2.coordinatePool)) {
+                probe.failureKind =
+                    RuntimeFailureKind::CloudLayoutRejected;
+                SetRuntimeFailure(
+                    probe, RuntimeError::CloudLayoutInvalid, -EINVAL);
+                error = "decrypt2 cloud layout validation failed";
+                CloseLocked();
+                return false;
+            }
         }
 
         RefreshAlgorithmEntry(true);
@@ -5014,6 +5033,16 @@ private:
                                 IsNonzero(observedRaw);
                         }
                     }
+                    const auto observeIndexedOutputStability =
+                        [&](bool flicker) {
+                            if (!indexedDecrypt) return;
+                            static_cast<void>(coordinateDecrypt2Runtime_
+                                .ObserveOutputStability(
+                                coordinateIdentity,
+                                candidates.decryptIndexOffset,
+                                candidates.poolBlockCount,
+                                flicker));
+                        };
 
                     if (trace != nullptr) {
                         trace->raw = observedRaw;
@@ -5095,6 +5124,7 @@ private:
                         }
                     }
                     if (!observedValid) {
+                        observeIndexedOutputStability(true);
                         const bool historyRecovered = readStableHistory();
                         const bool cacheRecovered =
                             !historyRecovered && readCached();
@@ -5162,6 +5192,10 @@ private:
                                     pending.sample,
                                     coordinateTraceFrame_,
                                     now);
+                        observeIndexedOutputStability(
+                            observation.decision ==
+                            native::AlgorithmPositionOutputDecision::
+                                RetainHistory);
                         if (trace != nullptr) {
                             trace->history = history->second.position;
                             trace->stabilityDelta = std::sqrt(
@@ -5196,9 +5230,12 @@ private:
                             if (retained) ++algorithmFrameSuccessCount_;
                             return retained;
                         }
-                    } else if (trace != nullptr) {
-                        trace->stabilityDecision =
-                            CoordinateStabilityDecision::FirstNoHistory;
+                    } else {
+                        observeIndexedOutputStability(false);
+                        if (trace != nullptr) {
+                            trace->stabilityDecision =
+                                CoordinateStabilityDecision::FirstNoHistory;
+                        }
                     }
                     storeDecoded(observedRaw, CoordinateTraceSource::Pool);
                     ++algorithmFrameSuccessCount_;
