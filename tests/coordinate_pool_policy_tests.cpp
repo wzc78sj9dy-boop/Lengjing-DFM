@@ -31,6 +31,8 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::NormalizeCoordinatePoolPointer;
     using lengjing::game::native::
         ResolveCoordinatePoolIndexedPointerAddress;
+    using lengjing::game::native::
+        ResolveCoordinatePoolIndexedRootAddresses;
     using lengjing::game::native::ResolveCoordinatePoolDecryptMode;
     using lengjing::game::native::IsCoordinatePoolDecryptRequested;
     using lengjing::game::native::IsCoordinatePoolIndexedDecrypt;
@@ -540,6 +542,14 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(indexedContextAddress == UINT64_C(0x0000007123456FF8));
     REQUIRE(!ResolveCoordinatePoolIndexedPointerAddress(
         4, -8, indexedContextAddress));
+    REQUIRE(ResolveCoordinatePoolIndexedRootAddresses(
+        UINT64_C(0xAB00007123456000),
+        -8,
+        0xA0,
+        indexedContextAddress,
+        indexedEntryAddress));
+    REQUIRE(indexedContextAddress == UINT64_C(0x0000007123455FF8));
+    REQUIRE(indexedEntryAddress == UINT64_C(0x00000071234560A0));
 
     const lengjing::game::native::CoordinatePoolRuntimeLayout cloudLayout{
         0x1A009000,

@@ -642,6 +642,20 @@ constexpr bool ResolveCoordinatePoolIndexedPointerAddress(
     return true;
 }
 
+constexpr bool ResolveCoordinatePoolIndexedRootAddresses(
+    std::uint64_t bridge,
+    std::int64_t contextOffset,
+    std::uint64_t entryOffset,
+    std::uint64_t& contextAddress,
+    std::uint64_t& entryAddress) noexcept {
+    return ResolveCoordinatePoolIndexedPointerAddress(
+               bridge, contextOffset, contextAddress) &&
+        ResolveCoordinatePoolIndexedPointerAddress(
+               bridge,
+               static_cast<std::int64_t>(entryOffset),
+               entryAddress);
+}
+
 inline std::uint64_t CoordinatePoolCodeFingerprint(
     const std::uint8_t* bytes,
     std::size_t size) noexcept {
