@@ -139,6 +139,8 @@ list(APPEND LENGJING_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/lib/t3/t3sdk.cpp"
 )
 list(FILTER LENGJING_SOURCES EXCLUDE REGEX "/imgui_demo\\.cpp$")
+list(FILTER LENGJING_SOURCES EXCLUDE REGEX
+    "/game/native/CoordinateDecrypt3Runtime\\.cpp$")
 if(NOT LENGJING_ENABLE_PROJECTILE_TRACKING)
     list(FILTER LENGJING_SOURCES EXCLUDE REGEX
         "/game/native/(TrackingPageBinding|TrajectoryHook)\\.cpp$")
