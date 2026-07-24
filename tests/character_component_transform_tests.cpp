@@ -78,6 +78,19 @@ void RunCharacterComponentTransformTests() {
     REQUIRE(NearlyEqual(scaledWorld.y, 206.0f));
     REQUIRE(NearlyEqual(scaledWorld.z, 226.0f));
 
+    const ComponentVector3 decodedAlignment =
+        BuildResolvedBoneAlignment(
+            {1000.0f, 2000.0f, 3000.0f},
+            scaledIdentity.translation);
+    REQUIRE(NearlyEqual(decodedAlignment.x, 900.0f));
+    REQUIRE(NearlyEqual(decodedAlignment.y, 1800.0f));
+    REQUIRE(NearlyEqual(decodedAlignment.z, 2786.0f));
+    REQUIRE(NearlyEqual(
+        scaledIdentity.translation.z +
+            kResolvedBoneVerticalAdjustment +
+            decodedAlignment.z,
+        3000.0f));
+
     const ResolvedComponentTransform yawRotation{
         BuildResolvedComponentQuaternion({0.0f, 180.0f, 0.0f}),
         {},

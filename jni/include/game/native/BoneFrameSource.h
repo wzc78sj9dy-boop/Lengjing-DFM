@@ -58,6 +58,14 @@ inline BoneFrameSourceSelection SelectPreferredBoneFrameSource(
     std::uintptr_t ordinaryRoot,
     std::uintptr_t ordinaryMesh,
     bool resolvedBoneTransformEnabled) noexcept {
+    if (resolvedBoneTransformEnabled &&
+        (record.resolverRecord || record.encryptedRecord)) {
+        return BoneFrameSourceSelection{
+            record.root,
+            record.mesh,
+            true,
+        };
+    }
     if (ordinaryMesh != 0) {
         return BoneFrameSourceSelection{
             ordinaryRoot,
@@ -80,9 +88,12 @@ inline BoneFrameSourceSelection SelectFallbackBoneFrameSource(
     std::uintptr_t ordinaryRoot,
     std::uintptr_t ordinaryMesh,
     bool resolvedBoneTransformEnabled) noexcept {
+    if (record.encryptedRecord ||
+        (record.resolverRecord && resolvedBoneTransformEnabled)) {
+        return {};
+    }
     if (ordinaryMesh == 0 || record.mesh == 0 ||
-        !record.resolverRecord ||
-        (record.encryptedRecord && !resolvedBoneTransformEnabled)) {
+        !record.resolverRecord) {
         return {};
     }
     const BoneFrameSourceSelection preferred =

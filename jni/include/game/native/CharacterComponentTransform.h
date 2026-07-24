@@ -147,6 +147,17 @@ inline ResolvedComponentTransform BuildResolvedComponentTransform(
     };
 }
 
+inline ComponentVector3 BuildResolvedBoneAlignment(
+    const ComponentVector3& resolvedPosition,
+    const ComponentVector3& componentPosition) noexcept {
+    return ComponentVector3{
+        resolvedPosition.x - componentPosition.x,
+        resolvedPosition.y - componentPosition.y,
+        resolvedPosition.z -
+            (componentPosition.z + kResolvedBoneVerticalAdjustment),
+    };
+}
+
 inline ComponentVector3 TransformResolvedBoneTranslation(
     const ComponentVector3& local,
     const ResolvedComponentTransform& component) noexcept {

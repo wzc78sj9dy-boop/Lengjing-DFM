@@ -4176,11 +4176,15 @@ private:
         context.localPawn = ReadPointer(context.localController + 0x3F0);
         context.cameraManager = ReadPointer(context.localController + 0x408);
         const bool decodedRequired =
-            positionMode == native::PositionReadMode::Direct
+            native::ShouldRequireDecodedActorRecords(
+                positionMode,
+                hardwareBreakpointRequested_,
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
-            || trajectoryTracking
+                trajectoryTracking
+#else
+                false
 #endif
-            ;
+            );
         RefreshActorRecordSnapshot(context, decodedRequired);
         if (decodedRequired && !context.decodedRecordSourceReady) {
             failure.error = RuntimeError::ActorSourceUnavailable;
@@ -5734,8 +5738,9 @@ private:
 
     bool HasReadableBoneArray(const RuntimeActorRecord& record) {
         const auto hasBoneArray = [this](std::uintptr_t mesh) {
-            return IsValidPointer(mesh) &&
-                IsValidPointer(ReadPointer(mesh + 0x730));
+            if (!IsValidPointer(mesh)) return false;
+            return IsValidPointer(ReadPointer(mesh + 0x730)) ||
+                IsValidPointer(ReadPointer(mesh + 0x740));
         };
         if (record.ordinarySource && hasBoneArray(record.ordinaryMesh)) {
             return true;
@@ -6328,12 +6333,28 @@ private:
                         : nullptr;
                 Vec3 alignment{};
                 bool alignmentReady = false;
-                if (!source.rebuildResolvedTransform &&
-                    standardizedPosition != nullptr &&
+                if (standardizedPosition != nullptr &&
                     IsFinite(*standardizedPosition)) {
-                    alignment = Subtract(
-                        *standardizedPosition,
-                        MatrixTranslation(componentMatrix));
+                    if (source.rebuildResolvedTransform) {
+                        const native::ComponentVector3
+                            resolvedAlignment =
+                                native::BuildResolvedBoneAlignment(
+                                    native::ComponentVector3{
+                                        standardizedPosition->x,
+                                        standardizedPosition->y,
+                                        standardizedPosition->z,
+                                    },
+                                    resolvedComponent.translation);
+                        alignment = Vec3{
+                            resolvedAlignment.x,
+                            resolvedAlignment.y,
+                            resolvedAlignment.z,
+                        };
+                    } else {
+                        alignment = Subtract(
+                            *standardizedPosition,
+                            MatrixTranslation(componentMatrix));
+                    }
                     alignmentReady = IsFinite(alignment);
                 }
 

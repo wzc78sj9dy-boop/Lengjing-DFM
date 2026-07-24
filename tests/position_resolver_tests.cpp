@@ -46,10 +46,19 @@ void RunPositionResolverTests() {
     using lengjing::game::native::ResolveDecodedCharacterZ;
     using lengjing::game::native::ResolvePositionReadMode;
     using lengjing::game::native::ShouldAlignBoneFrameToCharacterPosition;
+    using lengjing::game::native::ShouldRequireDecodedActorRecords;
     using Coordinate = CharacterPositionResolver::Coordinate;
 
     REQUIRE(ResolvePositionReadMode(false) == PositionReadMode::Standard);
     REQUIRE(ResolvePositionReadMode(true) == PositionReadMode::Direct);
+    REQUIRE(!ShouldRequireDecodedActorRecords(
+        PositionReadMode::Standard, false, false));
+    REQUIRE(ShouldRequireDecodedActorRecords(
+        PositionReadMode::Direct, false, false));
+    REQUIRE(ShouldRequireDecodedActorRecords(
+        PositionReadMode::Standard, true, false));
+    REQUIRE(ShouldRequireDecodedActorRecords(
+        PositionReadMode::Standard, false, true));
     REQUIRE(ResolveDecodedCharacterZ(1000.0f) == 910.0f);
     REQUIRE(ResolveDecodedCharacterZ(90.0f) == 0.0f);
     REQUIRE(ResolveDecodedCharacterZ(-10.0f) == -100.0f);

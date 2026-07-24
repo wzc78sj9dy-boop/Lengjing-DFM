@@ -206,6 +206,7 @@ void RunPlayerBoundsTests() {
     const BoneFrameRecordSource encryptedRecord{
         0x4000, 0x5000, true, true};
     REQUIRE(SelectBoneFrameMesh(encryptedRecord, 0x6000, false) == 0x6000);
+    REQUIRE(SelectBoneFrameMesh(encryptedRecord, 0x6000, true) == 0x5000);
     REQUIRE(SelectBoneFrameMesh(encryptedRecord, 0, false) == 0);
     const auto firstDecryptPreferred = SelectPreferredBoneFrameSource(
         encryptedRecord,
@@ -227,17 +228,31 @@ void RunPlayerBoundsTests() {
     REQUIRE(ordinaryPreferred.root == 0x7000);
     REQUIRE(ordinaryPreferred.mesh == 0x6000);
     REQUIRE(!ordinaryPreferred.rebuildResolvedTransform);
-    const auto encryptedFallback = SelectFallbackBoneFrameSource(
+    const auto encryptedPreferred = SelectPreferredBoneFrameSource(
         encryptedRecord, 0x7000, 0x6000, true);
-    REQUIRE(encryptedFallback.root == 0x4000);
-    REQUIRE(encryptedFallback.mesh == 0x5000);
-    REQUIRE(encryptedFallback.rebuildResolvedTransform);
+    REQUIRE(encryptedPreferred.root == 0x4000);
+    REQUIRE(encryptedPreferred.mesh == 0x5000);
+    REQUIRE(encryptedPreferred.rebuildResolvedTransform);
+    REQUIRE(!SelectFallbackBoneFrameSource(
+        encryptedRecord, 0x7000, 0x6000, true));
     REQUIRE(!SelectFallbackBoneFrameSource(
         encryptedRecord, 0x7000, 0x6000, false));
     REQUIRE(!SelectFallbackBoneFrameSource(
         encryptedRecord, 0, 0, true));
     const BoneFrameRecordSource plainResolver{
         0x8000, 0x9000, false, true};
+    const auto plainResolverPreferred = SelectPreferredBoneFrameSource(
+        plainResolver, 0xA000, 0xB000, true);
+    REQUIRE(plainResolverPreferred.root == 0x8000);
+    REQUIRE(plainResolverPreferred.mesh == 0x9000);
+    REQUIRE(plainResolverPreferred.rebuildResolvedTransform);
+    REQUIRE(!SelectFallbackBoneFrameSource(
+        plainResolver, 0xA000, 0xB000, true));
+    const auto plainResolverOrdinary = SelectPreferredBoneFrameSource(
+        plainResolver, 0xA000, 0xB000, false);
+    REQUIRE(plainResolverOrdinary.root == 0xA000);
+    REQUIRE(plainResolverOrdinary.mesh == 0xB000);
+    REQUIRE(!plainResolverOrdinary.rebuildResolvedTransform);
     const auto plainFallback = SelectFallbackBoneFrameSource(
         plainResolver, 0xA000, 0xB000, false);
     REQUIRE(plainFallback.root == 0x8000);
@@ -301,6 +316,12 @@ void RunPlayerBoundsTests() {
         0x6000,
         false,
         BoneFrameCacheSource{0x4000, 0x5000, true}));
+    REQUIRE(!IsBoneFrameCacheSourceCompatible(
+        encryptedRecord,
+        0x7000,
+        0x6000,
+        true,
+        BoneFrameCacheSource{0x7000, 0x6000, false}));
     REQUIRE(IsBoneFrameCacheSourceCompatible(
         encryptedRecord,
         0x7000,
@@ -319,4 +340,16 @@ void RunPlayerBoundsTests() {
         0x6000,
         true,
         BoneFrameCacheSource{0x4000, 0x5000, false}));
+    REQUIRE(IsBoneFrameCacheSourceCompatible(
+        plainResolver,
+        0xA000,
+        0xB000,
+        true,
+        BoneFrameCacheSource{0x8000, 0x9000, true}));
+    REQUIRE(!IsBoneFrameCacheSourceCompatible(
+        plainResolver,
+        0xA000,
+        0xB000,
+        true,
+        BoneFrameCacheSource{0xA000, 0xB000, false}));
 }

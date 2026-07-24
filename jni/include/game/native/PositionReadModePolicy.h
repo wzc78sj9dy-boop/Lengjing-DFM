@@ -26,6 +26,14 @@ constexpr PositionReadMode ResolvePositionReadMode(
         : PositionReadMode::Standard;
 }
 
+constexpr bool ShouldRequireDecodedActorRecords(
+    PositionReadMode positionMode,
+    bool hardwareBreakpointDecrypt,
+    bool trajectoryTracking) noexcept {
+    return positionMode == PositionReadMode::Direct ||
+        hardwareBreakpointDecrypt || trajectoryTracking;
+}
+
 constexpr float ResolveDecodedCharacterZ(float decodedZ) noexcept {
     return decodedZ - kDecodedCharacterVerticalOffset;
 }
