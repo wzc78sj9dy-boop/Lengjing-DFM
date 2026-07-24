@@ -8670,6 +8670,66 @@ private:
                 memory_->ExecutionContextDiagnostic();
             const native::CoordinatePoolRuntimeProbe poolProbe =
                 ActiveCoordinatePoolProbe();
+            if (!UsesCoordinateDecrypt2Runtime()) {
+                std::fprintf(
+                    stderr,
+                    "[coordinate-context-trace] frame=%llu refreshed=%d "
+                    "ready=%d source=%u cd=%u sys=%d device_sys=%d "
+                    "ptrace_sys=%d device_requests=%zu operands=%d "
+                    "tid=%d thread_start=%llu generation=%llu tpidr=%llx "
+                    "key_available=%d oracle_available=%d pool_ready=%d "
+                    "pool_stage=%u pool_error=%u pool_sys=%d "
+                    "analysis_find=%u analysis_detail=%u "
+                    "analysis_madds=%u analysis_ring_madds=%u "
+                    "analysis_candidates=%u analysis_insn=%u "
+                    "read_stage=%u read_failure=%u read_path=%u "
+                    "bridge=%llx context=%llx entry=%llx pool=%llx "
+                    "attempts=%llu successes=%llu\n",
+                    static_cast<unsigned long long>(coordinateTraceFrame_),
+                    executionContextRefreshed ? 1 : 0,
+                    algorithmExecutionContextReady_ ? 1 : 0,
+                    static_cast<unsigned int>(diagnostic.source),
+                    static_cast<unsigned int>(diagnostic.error),
+                    diagnostic.systemError,
+                    diagnostic.deviceStatus,
+                    diagnostic.ptraceStatus,
+                    diagnostic.deviceRequestCount,
+                    diagnostic.pacgaOperandsResolved ? 1 : 0,
+                    algorithmExecutionContext_.threadId,
+                    static_cast<unsigned long long>(
+                        algorithmExecutionContext_.threadStartTimeTicks),
+                    static_cast<unsigned long long>(
+                        algorithmExecutionContext_.generation),
+                    static_cast<unsigned long long>(
+                        algorithmExecutionContext_.tpidrEl0),
+                    algorithmExecutionContext_.HasPacgaKey() ? 1 : 0,
+                    algorithmExecutionContext_.pacgaOracle.available ? 1 : 0,
+                    coordinatePoolReady_ ? 1 : 0,
+                    static_cast<unsigned int>(poolProbe.stage),
+                    static_cast<unsigned int>(poolProbe.error),
+                    poolProbe.systemError,
+                    static_cast<unsigned int>(poolProbe.analysisFindStage),
+                    static_cast<unsigned int>(poolProbe.analysisFindDetail),
+                    static_cast<unsigned int>(poolProbe.analysisMaddCount),
+                    static_cast<unsigned int>(
+                        poolProbe.analysisRingMaddCount),
+                    static_cast<unsigned int>(
+                        poolProbe.analysisCandidateCount),
+                    static_cast<unsigned int>(
+                        poolProbe.analysisFailureInstruction),
+                    static_cast<unsigned int>(poolProbe.read.stage),
+                    static_cast<unsigned int>(poolProbe.read.failure),
+                    static_cast<unsigned int>(poolProbe.read.lastPath),
+                    static_cast<unsigned long long>(poolProbe.bridge),
+                    static_cast<unsigned long long>(poolProbe.context),
+                    static_cast<unsigned long long>(poolProbe.guestEntry),
+                    static_cast<unsigned long long>(
+                        poolProbe.poolPointer.normalizedValue),
+                    static_cast<unsigned long long>(poolProbe.attempts),
+                    static_cast<unsigned long long>(poolProbe.successes));
+                std::fflush(stderr);
+                return;
+            }
             std::fprintf(
                 stderr,
                 "[coordinate-context-trace] frame=%llu refreshed=%d "

@@ -208,9 +208,7 @@ struct CoordinatePoolRuntimeProbe {
     std::uintptr_t bridge = 0;
     std::uintptr_t context = 0;
     std::uintptr_t guestEntry = 0;
-    std::uintptr_t resolvedEntry = 0;
     std::uint32_t entryInstruction = 0;
-    std::uint32_t entryTerminalInstruction = 0;
     std::uintptr_t codeBase = 0;
     std::size_t codeSize = 0;
     std::uint32_t executableMappingFragments = 0;
@@ -223,9 +221,6 @@ struct CoordinatePoolRuntimeProbe {
     std::uint16_t analysisRingMaddCount = 0;
     std::uint16_t analysisCandidateCount = 0;
     std::uint16_t analysisFailureInstruction = 0;
-    std::uint16_t analysisDecodeInstructionLimit = 0;
-    std::uint8_t entryBranchStatus = UINT8_MAX;
-    std::uint8_t entryBranchHops = 0;
     std::int32_t poolPointerOffset = 0;
     std::int64_t indexOffset = 0;
     std::uint32_t ringOffset = 0;
@@ -250,6 +245,11 @@ struct CoordinatePoolRuntimeProbe {
     int systemError = 0;
     CoordinateReadDiagnostic read{};
     CoordinatePoolPointerDiagnostic poolPointer{};
+    std::uintptr_t resolvedEntry = 0;
+    std::uint32_t entryTerminalInstruction = 0;
+    std::uint16_t analysisDecodeInstructionLimit = 0;
+    std::uint8_t entryBranchStatus = UINT8_MAX;
+    std::uint8_t entryBranchHops = 0;
 };
 
 class CoordinatePoolRuntime final {
