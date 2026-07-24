@@ -482,6 +482,13 @@ namespace coord_dec {
 	}
 
 	bool FindDec::analyze_base_index_calc() {
+		auto parse_instruction = [&](cs_insn* instruction) {
+			const int legacy_result = analyze.parse(instruction);
+			if (legacy_result == 0) return true;
+			return instruction && instruction->id == ARM64_INS_ADD &&
+				analyze.parse_add_compat(instruction) == 0;
+		};
+
 		std::vector<uint32_t> madds;
 		entry->find_all(ring_offset_madd_block, ring_offset_madd_block + 100,
 			[](finder& f) {
@@ -575,7 +582,7 @@ namespace coord_dec {
 
 				for (uint32_t j = decode->start_i(); j < decode->end_i(); j++) {
 					cs_insn* instruction = entry->get_insn(j);
-					if (analyze.parse(instruction)) {
+					if (!parse_instruction(instruction)) {
 						failure_detail_ =
 							FindDecFailureDetail::DecodeExpressionParse;
 						failure_instruction_ = static_cast<uint16_t>(
@@ -588,7 +595,7 @@ namespace coord_dec {
 			}
 			else {
 				cs_insn* instruction = entry->get_insn(i);
-				if (analyze.parse(instruction)) {
+				if (!parse_instruction(instruction)) {
 					failure_detail_ =
 						FindDecFailureDetail::IndexExpressionParse;
 					failure_instruction_ = static_cast<uint16_t>(

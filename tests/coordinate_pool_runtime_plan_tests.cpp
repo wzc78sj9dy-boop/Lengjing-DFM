@@ -7,6 +7,8 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <utility>
 
 namespace {
 
@@ -21,6 +23,34 @@ std::size_t gFreedDetails = 0;
                 ": requirement failed: " #condition);                       \
         }                                                                     \
     } while (false)
+
+std::pair<cs_insn, cs_detail> MakeAdd(
+    arm64_reg destination,
+    arm64_reg lhs,
+    arm64_reg rhs,
+    arm64_shifter shift,
+    unsigned int amount,
+    arm64_extender extender = ARM64_EXT_INVALID) {
+    cs_insn instruction{};
+    cs_detail detail{};
+    instruction.id = ARM64_INS_ADD;
+    instruction.address = UINT64_C(0x1000);
+    instruction.detail = &detail;
+    detail.arm64.op_count = 3;
+    detail.arm64.operands[0].type = ARM64_OP_REG;
+    detail.arm64.operands[0].reg = destination;
+    detail.arm64.operands[0].access = CS_AC_WRITE;
+    detail.arm64.operands[1].type = ARM64_OP_REG;
+    detail.arm64.operands[1].reg = lhs;
+    detail.arm64.operands[1].access = CS_AC_READ;
+    detail.arm64.operands[2].type = ARM64_OP_REG;
+    detail.arm64.operands[2].reg = rhs;
+    detail.arm64.operands[2].access = CS_AC_READ;
+    detail.arm64.operands[2].shift.type = shift;
+    detail.arm64.operands[2].shift.value = amount;
+    detail.arm64.operands[2].ext = extender;
+    return {instruction, detail};
+}
 
 }  // namespace
 
@@ -89,6 +119,101 @@ int main() {
 
     constexpr std::uint64_t kBase = UINT64_C(0x100000);
     std::array<std::uint8_t, 8> code{};
+
+    Analyze legacyAdd;
+    legacyAdd.setVal(ARM64_REG_X1, "legacyLhs");
+    legacyAdd.setVal(ARM64_REG_X2, "legacyRhs");
+    auto normalAdd = MakeAdd(
+        ARM64_REG_X0, ARM64_REG_X1, ARM64_REG_X2,
+        ARM64_SFT_LSL, 2);
+    normalAdd.first.detail = &normalAdd.second;
+    REQUIRE(legacyAdd.parse(&normalAdd.first) == 0);
+    std::unordered_map<std::string, std::uint64_t> legacyParams{
+        {"legacyLhs", 5},
+        {"legacyRhs", 3},
+    };
+    REQUIRE(legacyAdd.execute(ARM64_REG_X0, legacyParams) == 17);
+
+    Analyze shiftedAdd;
+    shiftedAdd.setVal(ARM64_REG_X1, "shiftedLhs");
+    shiftedAdd.setVal(ARM64_REG_X2, "shiftedRhs");
+    auto asrAdd = MakeAdd(
+        ARM64_REG_X0, ARM64_REG_X1, ARM64_REG_X2,
+        ARM64_SFT_ASR, 4);
+    asrAdd.first.detail = &asrAdd.second;
+    REQUIRE(shiftedAdd.parse(&asrAdd.first) != 0);
+    REQUIRE(shiftedAdd.parse_add_compat(&asrAdd.first) == 0);
+    std::unordered_map<std::string, std::uint64_t> shiftedParams{
+        {"shiftedLhs", 5},
+        {"shiftedRhs", UINT64_C(0xFFFFFFFFFFFFFFF0)},
+    };
+    REQUIRE(shiftedAdd.execute(ARM64_REG_X0, shiftedParams) == 4);
+
+    Analyze extendedAdd;
+    extendedAdd.setVal(ARM64_REG_X1, "extendedBase");
+    extendedAdd.setVal(ARM64_REG_W2, "extendedOffset");
+    auto sxtwAdd = MakeAdd(
+        ARM64_REG_X0, ARM64_REG_X1, ARM64_REG_W2,
+        ARM64_SFT_LSL, 2, ARM64_EXT_SXTW);
+    sxtwAdd.first.detail = &sxtwAdd.second;
+    REQUIRE(extendedAdd.parse_add_compat(&sxtwAdd.first) == 0);
+    std::unordered_map<std::string, std::uint64_t> extendedParams{
+        {"extendedBase", 10},
+        {"extendedOffset", UINT64_C(0xFFFFFFFF)},
+    };
+    REQUIRE(extendedAdd.execute(ARM64_REG_X0, extendedParams) == 6);
+
+    Analyze specialAdd;
+    specialAdd.setVal(ARM64_REG_X29, "frame");
+    auto frameLinkAdd = MakeAdd(
+        ARM64_REG_X0, ARM64_REG_X29, ARM64_REG_X30,
+        ARM64_SFT_INVALID, 0);
+    frameLinkAdd.first.detail = &frameLinkAdd.second;
+    REQUIRE(specialAdd.parse(&frameLinkAdd.first) != 0);
+    REQUIRE(specialAdd.parse_add_compat(&frameLinkAdd.first) == 0);
+    REQUIRE(specialAdd.varParams.size() == 1);
+    REQUIRE(specialAdd.varParams[0].reg == ARM64_REG_X30);
+    std::unordered_map<std::string, std::uint64_t> specialParams{
+        {"frame", 7},
+        {specialAdd.varParams[0].name, 8},
+    };
+    REQUIRE(specialAdd.execute(ARM64_REG_X0, specialParams) == 15);
+
+    Analyze stackAdd;
+    auto stackImmediate = MakeAdd(
+        ARM64_REG_X0, ARM64_REG_SP, ARM64_REG_XZR,
+        ARM64_SFT_INVALID, 0);
+    stackImmediate.first.detail = &stackImmediate.second;
+    stackImmediate.second.arm64.operands[2].type = ARM64_OP_IMM;
+    stackImmediate.second.arm64.operands[2].imm = 32;
+    REQUIRE(stackAdd.parse(&stackImmediate.first) != 0);
+    REQUIRE(stackAdd.parse_add_compat(&stackImmediate.first) == 0);
+    REQUIRE(stackAdd.varParams.size() == 1);
+    REQUIRE(stackAdd.varParams[0].reg == ARM64_REG_SP);
+    std::unordered_map<std::string, std::uint64_t> stackParams{
+        {stackAdd.varParams[0].name, UINT64_C(0x2000)},
+    };
+    REQUIRE(stackAdd.execute(ARM64_REG_X0, stackParams) ==
+        UINT64_C(0x2020));
+
+    Analyze vectorAdd;
+    vectorAdd.setVal(ARM64_REG_X1, "scalarState");
+    auto vectorInstruction = MakeAdd(
+        ARM64_REG_V0, ARM64_REG_V1, ARM64_REG_V2,
+        ARM64_SFT_INVALID, 0);
+    vectorInstruction.first.detail = &vectorInstruction.second;
+    REQUIRE(vectorAdd.parse(&vectorInstruction.first) != 0);
+    REQUIRE(vectorAdd.parse_add_compat(&vectorInstruction.first) == 0);
+    REQUIRE(vectorAdd.str(ARM64_REG_X1) == "scalarState");
+
+    Analyze invalidAdd;
+    invalidAdd.setVal(ARM64_REG_X1, "invalidLhs");
+    invalidAdd.setVal(ARM64_REG_X2, "invalidRhs");
+    auto invalidShift = MakeAdd(
+        ARM64_REG_X0, ARM64_REG_X1, ARM64_REG_X2,
+        ARM64_SFT_ROR, 1);
+    invalidShift.first.detail = &invalidShift.second;
+    REQUIRE(invalidAdd.parse_add_compat(&invalidShift.first) != 0);
 
     coord_dec::FindDec missingEntryFinder;
     REQUIRE(missingEntryFinder.set(
