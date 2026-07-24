@@ -233,6 +233,8 @@ void GameRuntime::WorkerMain(RuntimeOptions options) {
                 status_.coordinatePoolPointer =
                     probe.coordinatePoolPointer;
                 status_.coordinateEntry = probe.coordinateEntry;
+                status_.coordinateRuntimeDetail =
+                    probe.coordinateRuntimeDetail;
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
                 status_.algorithmCoordinateRequested =
                     probe.algorithmCoordinateRequested;
@@ -336,6 +338,7 @@ void GameRuntime::SetStatus(RuntimePhase phase,
     status_.coordinateRead = probe.coordinateRead;
     status_.coordinatePoolPointer = probe.coordinatePoolPointer;
     status_.coordinateEntry = probe.coordinateEntry;
+    status_.coordinateRuntimeDetail = probe.coordinateRuntimeDetail;
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
     status_.algorithmCoordinateRequested =
         probe.algorithmCoordinateRequested;

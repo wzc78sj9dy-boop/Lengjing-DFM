@@ -25,6 +25,7 @@ add_executable(lengjing_tests
     config_tests.cpp
     coordinate_pool_policy_tests.cpp
     coordinate_output_policy_tests.cpp
+    coordinate_failure_uploader_tests.cpp
     cpu_mailbox_policy_tests.cpp
     frame_projection_tests.cpp
     game_version_policy_tests.cpp
@@ -55,6 +56,7 @@ add_executable(lengjing_tests
     ../jni/src/auth/CloudLayout.cpp
     ../jni/src/auth/RemoteAuth.cpp
     ../jni/src/config/LocalConfig.cpp
+    ../jni/src/diagnostics/CoordinateFailureUploader.cpp
     ../jni/src/game/GameRuntime.cpp
     ../jni/src/game/native/RemoteElfIdentity.cpp
     ../jni/src/game/native/TrackingPageBinding.cpp

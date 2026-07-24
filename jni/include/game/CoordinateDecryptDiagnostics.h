@@ -191,6 +191,40 @@ struct CoordinateEntryDiagnostic {
     }
 };
 
+struct CoordinateRuntimeDetail {
+    std::uint8_t executionSource = 0;
+    std::uint16_t executionError = 0;
+    int executionSystemError = 0;
+    int deviceSystemError = 0;
+    int ptraceSystemError = 0;
+    std::uint32_t deviceRequestCount = 0;
+    bool pacgaOperandsResolved = false;
+    bool pacgaKeyAvailable = false;
+    bool pacgaOracleAvailable = false;
+    bool poolReady = false;
+    std::uint8_t poolStage = 0;
+    std::uint8_t poolError = 0;
+    int poolSystemError = 0;
+    std::uint8_t analysisFailure = 0;
+    std::uint8_t analysisFindStage = 0;
+    std::uint8_t analysisMode = 0;
+    std::uint16_t analysisPasses = 0;
+    std::uint32_t analysisLoadedPages = 0;
+    std::uint32_t analysisRequestedMethods = 0;
+    std::uint32_t analysisSkippedPages = 0;
+    std::uint8_t analysisSkippedFailure = 0;
+    int analysisSkippedSystemError = 0;
+    std::uint16_t decodedSlotMask = 0;
+    std::uint16_t compactPhaseMask = 0;
+    std::uint16_t extendedPhaseMask = 0;
+    std::uint8_t logicalSlotCount = 0;
+    std::uint8_t physicalSlotCount = 0;
+    std::uint8_t slotPhase = 0;
+    std::uint8_t slotLayoutKind = 0;
+    std::uint8_t compactLayoutEvidence = 0;
+    std::uint8_t extendedLayoutEvidence = 0;
+};
+
 constexpr bool operator==(const CoordinateReadDiagnostic& left,
                           const CoordinateReadDiagnostic& right) noexcept {
     return left.stage == right.stage &&

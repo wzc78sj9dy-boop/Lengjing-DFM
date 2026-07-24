@@ -39,6 +39,7 @@ struct RuntimeStatus {
     CoordinateReadDiagnostic coordinateRead{};
     CoordinatePoolPointerDiagnostic coordinatePoolPointer{};
     CoordinateEntryDiagnostic coordinateEntry{};
+    CoordinateRuntimeDetail coordinateRuntimeDetail{};
     bool algorithmCoordinateRequested = false;
     bool algorithmCoordinateActive = false;
     bool algorithmCoordinateTableReady = false;

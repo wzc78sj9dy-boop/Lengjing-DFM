@@ -4,6 +4,7 @@
 #include "app/RenderBackendSelection.h"
 #include "app/RuntimeExitPolicy.h"
 #include "app/RuntimePresentationPolicy.h"
+#include "diagnostics/CoordinateFailureUploader.h"
 #include "game/GameVersionPolicy.h"
 #include "platform/PerformanceTrace.h"
 
@@ -352,6 +353,9 @@ void AppController::StartRuntime() {
         return;
     }
     coordinateDecryptSuccessNotified_ = false;
+    if (options_.coordinateFailureUploader != nullptr) {
+        options_.coordinateFailureUploader->ResetObservation();
+    }
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
     algorithmCoordinateSuccessNotified_ = false;
 #endif
@@ -779,6 +783,12 @@ void AppController::SyncRuntimeStatus() {
         lastReportedRuntimeSystemError_ = 0;
     }
 
+    if (options_.coordinateFailureUploader != nullptr) {
+        options_.coordinateFailureUploader->Observe(
+            status,
+            model_.runtime.gameVersionIndex,
+            model_.runtime.driverIndex);
+    }
     lastStatus_ = status;
     if (IsTerminal(status.phase) && !terminalWorkerJoined_) {
         runtime_.WaitUntilStopped();

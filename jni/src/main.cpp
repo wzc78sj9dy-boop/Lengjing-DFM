@@ -12,6 +12,7 @@
 #include "app/RuntimePresentationPolicy.h"
 #include "auth/CloudLayoutStartupPolicy.h"
 #include "auth/RemoteAuth.h"
+#include "diagnostics/CoordinateFailureUploader.h"
 #include "game/native/MemoryTransport.h"
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
 #include "game/native/AlgorithmCoordinateProbePolicy.h"
@@ -26,6 +27,7 @@
 #include "ImGui/imgui.h"
 #include "native_surface/ANativeWindowCreator.h"
 #include "ui/MenuLogoData.h"
+#include "t3/t3sdk.h"
 
 #include <algorithm>
 #include <atomic>
@@ -36,6 +38,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -58,6 +61,10 @@
 
 #ifndef LENGJING_ENABLE_COORDINATE_DEBUG_LOG
 #define LENGJING_ENABLE_COORDINATE_DEBUG_LOG 0
+#endif
+
+#ifndef LENGJING_ENABLE_COORDINATE_FAILURE_UPLOAD
+#define LENGJING_ENABLE_COORDINATE_FAILURE_UPLOAD 0
 #endif
 
 namespace {
@@ -830,6 +837,37 @@ int main() {
 
     if (kRuntimeAuthEnabled && !authSession.StartHeartbeat()) return 3;
 
+    std::shared_ptr<lengjing::diagnostics::CoordinateFailureUploader>
+        coordinateFailureUploader;
+#if LENGJING_ENABLE_COORDINATE_FAILURE_UPLOAD
+    try {
+        T3HttpTransportOptions transportOptions;
+        transportOptions.connectTimeoutMilliseconds = 1500;
+        transportOptions.sendTimeoutMilliseconds = 1500;
+        transportOptions.receiveTimeoutMilliseconds = 2500;
+        transportOptions.requestTimeoutMilliseconds = 4000;
+        transportOptions.maximumResponseBytes = 32U * 1024U;
+
+        lengjing::diagnostics::CoordinateFailureUploaderOptions
+            uploadOptions;
+        uploadOptions.pendingPath =
+            "/data/adb/.lengjing_coordinate_failure.pending";
+        coordinateFailureUploader = std::make_shared<
+            lengjing::diagnostics::CoordinateFailureUploader>(
+                createT3DefaultHttpTransport(transportOptions),
+                lengjing::diagnostics::CollectCoordinateFailureMetadata(
+                    LENGJING_VERSION,
+                    lengjing::auth::ResolveDeviceCode()),
+                std::move(uploadOptions));
+    } catch (const std::exception& exception) {
+        std::fprintf(
+            stderr,
+            "[coordinate-upload] status=disabled error=%s\n",
+            exception.what());
+        std::fflush(stderr);
+    }
+#endif
+
     ANativeWindow* window = android::ANativeWindowCreator::Create(
         "lengjing-surface", surfaceWidth, surfaceHeight, false);
     if (window == nullptr) {
@@ -844,6 +882,7 @@ int main() {
     options.buildVersion = LENGJING_VERSION;
     options.cloudLayout = cloudLayout;
     options.algorithmPosition = algorithmPosition;
+    options.coordinateFailureUploader = coordinateFailureUploader;
     lengjing::app::AppController controller(std::move(options));
 
     GraphicsInitialization initialGraphics = InitializeGraphics(
@@ -1111,6 +1150,9 @@ int main() {
     }
     if (window != nullptr) {
         android::ANativeWindowCreator::Destroy(window);
+    }
+    if (coordinateFailureUploader != nullptr) {
+        coordinateFailureUploader->Stop();
     }
     return runtimeExitCode;
 }

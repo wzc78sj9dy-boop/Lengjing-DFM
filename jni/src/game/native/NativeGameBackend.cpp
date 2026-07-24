@@ -8554,6 +8554,45 @@ private:
                   0,
                   0,
               };
+        const native::ProcessExecutionContextDiagnostic contextDiagnostic =
+            memory_ != nullptr
+            ? memory_->ExecutionContextDiagnostic()
+            : native::ProcessExecutionContextDiagnostic{};
+        probe.coordinateRuntimeDetail = CoordinateRuntimeDetail{
+            static_cast<std::uint8_t>(contextDiagnostic.source),
+            CoordinateDecryptErrorCode(contextDiagnostic.error),
+            contextDiagnostic.systemError,
+            contextDiagnostic.deviceStatus,
+            contextDiagnostic.ptraceStatus,
+            static_cast<std::uint32_t>(std::min<std::size_t>(
+                contextDiagnostic.deviceRequestCount,
+                std::numeric_limits<std::uint32_t>::max())),
+            contextDiagnostic.pacgaOperandsResolved,
+            algorithmExecutionContext_.HasPacgaKey(),
+            algorithmExecutionContext_.pacgaOracle.available,
+            coordinatePoolReady_,
+            static_cast<std::uint8_t>(poolProbe.stage),
+            static_cast<std::uint8_t>(poolProbe.error),
+            poolProbe.systemError,
+            static_cast<std::uint8_t>(poolProbe.analysisFailure),
+            poolProbe.analysisFindStage,
+            poolProbe.analysisMode,
+            poolProbe.analysisPasses,
+            poolProbe.analysisLoadedPages,
+            poolProbe.analysisRequestedMethods,
+            poolProbe.analysisSkippedPages,
+            poolProbe.analysisSkippedFailure,
+            poolProbe.analysisSkippedSystemError,
+            poolProbe.decodedSlotMask,
+            poolProbe.compactPhaseMask,
+            poolProbe.extendedPhaseMask,
+            poolProbe.logicalSlotCount,
+            poolProbe.physicalSlotCount,
+            poolProbe.slotPhase,
+            poolProbe.slotLayoutKind,
+            poolProbe.compactLayoutEvidence,
+            poolProbe.extendedLayoutEvidence,
+        };
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
         probe.algorithmCoordinateRequested = algorithmDecryptRequested_;
         probe.algorithmCoordinateActive =

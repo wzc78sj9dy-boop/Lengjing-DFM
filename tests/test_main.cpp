@@ -22,6 +22,7 @@ int main() {
         RunConfigTests();
         RunCoordinatePoolPolicyTests();
         RunCoordinateOutputPolicyTests();
+        RunCoordinateFailureUploaderTests();
         RunCpuMailboxPolicyTests();
         RunFrameProjectionTests();
         RunGameVersionPolicyTests();

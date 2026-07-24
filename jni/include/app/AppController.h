@@ -17,6 +17,10 @@
 #include <string>
 #include <vector>
 
+namespace lengjing::diagnostics {
+class CoordinateFailureUploader;
+}
+
 namespace lengjing::app {
 
 struct AppOptions {
@@ -28,6 +32,8 @@ struct AppOptions {
     ui::AimInputMode inputMode = ui::AimInputMode::ReadOnly;
     std::shared_ptr<const auth::CloudLayoutDocument> cloudLayout;
     game::native::AlgorithmPositionRuntimeConfig algorithmPosition;
+    std::shared_ptr<diagnostics::CoordinateFailureUploader>
+        coordinateFailureUploader;
 };
 
 class AppController final : public ui::UiActions {

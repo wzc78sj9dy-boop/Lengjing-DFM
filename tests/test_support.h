@@ -15,6 +15,7 @@
 void RunConfigTests();
 void RunCoordinatePoolPolicyTests();
 void RunCoordinateOutputPolicyTests();
+void RunCoordinateFailureUploaderTests();
 void RunActorFrameVisitSetTests();
 void RunActorRecordRefreshPolicyTests();
 void RunActorRecordSourceTests();
