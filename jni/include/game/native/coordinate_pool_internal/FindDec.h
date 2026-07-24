@@ -60,6 +60,7 @@ namespace coord_dec {
         uint16_t ring_madd_count_ = 0;
         uint16_t candidate_count_ = 0;
         uint16_t failure_instruction_ = 0;
+        uint32_t decode_method_instruction_limit_ = 500;
 
         bool find_v87_str();
         bool analyze_base_index_calc();
@@ -107,6 +108,14 @@ namespace coord_dec {
 
         uint16_t failure_instruction() const noexcept {
             return failure_instruction_;
+        }
+
+        void set_decode_method_instruction_limit(uint32_t limit) noexcept {
+            decode_method_instruction_limit_ = limit != 0 ? limit : 500;
+        }
+
+        uint32_t decode_method_instruction_limit() const noexcept {
+            return decode_method_instruction_limit_;
         }
 
         void compact_runtime_plan() noexcept {

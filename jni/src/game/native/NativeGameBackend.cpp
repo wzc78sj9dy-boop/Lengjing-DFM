@@ -8680,9 +8680,11 @@ private:
                 "pool_stage=%u pool_error=%u pool_sys=%d "
                 "analysis_find=%u analysis_detail=%u "
                 "analysis_madds=%u analysis_ring_madds=%u "
-                "analysis_candidates=%u analysis_insn=%u "
+                "analysis_candidates=%u analysis_insn=%u decode_limit=%u "
                 "read_stage=%u read_failure=%u read_path=%u "
-                "bridge=%llx context=%llx entry=%llx pool=%llx "
+                "bridge=%llx context=%llx raw_entry=%llx "
+                "resolved_entry=%llx branch_status=%u branch_hops=%u "
+                "branch_insn=%08x branch_terminal=%08x pool=%llx "
                 "attempts=%llu successes=%llu\n",
                 static_cast<unsigned long long>(coordinateTraceFrame_),
                 executionContextRefreshed ? 1 : 0,
@@ -8716,12 +8718,20 @@ private:
                     poolProbe.analysisCandidateCount),
                 static_cast<unsigned int>(
                     poolProbe.analysisFailureInstruction),
+                static_cast<unsigned int>(
+                    poolProbe.analysisDecodeInstructionLimit),
                 static_cast<unsigned int>(poolProbe.read.stage),
                 static_cast<unsigned int>(poolProbe.read.failure),
                 static_cast<unsigned int>(poolProbe.read.lastPath),
                 static_cast<unsigned long long>(poolProbe.bridge),
                 static_cast<unsigned long long>(poolProbe.context),
                 static_cast<unsigned long long>(poolProbe.guestEntry),
+                static_cast<unsigned long long>(poolProbe.resolvedEntry),
+                static_cast<unsigned int>(poolProbe.entryBranchStatus),
+                static_cast<unsigned int>(poolProbe.entryBranchHops),
+                static_cast<unsigned int>(poolProbe.entryInstruction),
+                static_cast<unsigned int>(
+                    poolProbe.entryTerminalInstruction),
                 static_cast<unsigned long long>(
                     poolProbe.poolPointer.normalizedValue),
                 static_cast<unsigned long long>(poolProbe.attempts),

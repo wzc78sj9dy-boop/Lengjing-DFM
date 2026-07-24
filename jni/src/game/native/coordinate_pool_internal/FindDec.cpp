@@ -575,7 +575,7 @@ namespace coord_dec {
 
 				auto decode = binary_.create_method("decode", entry->imm(i, 0), [](finder& f) {
 					f.is_ret();
-					}, 500
+					}, decode_method_instruction_limit_
 				);
 
 				if (!decode) {

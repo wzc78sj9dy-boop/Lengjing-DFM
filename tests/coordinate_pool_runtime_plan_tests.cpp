@@ -1,4 +1,5 @@
 #include "game/native/coordinate_pool_internal/FindDec.h"
+#include "game/native/CoordinatePoolPolicy.h"
 #include "game/native/coordinate_pool_internal/RingIndexCandidatePolicy.h"
 
 #include <array>
@@ -90,6 +91,56 @@ int main() {
     using namespace lengjing::game::native::coordinate_pool_internal;
 
     constexpr std::uint64_t kBase = UINT64_C(0x100000);
+    REQUIRE(lengjing::game::native::CoordinatePoolMaximumAnalysisPasses(
+                false) == 8);
+    REQUIRE(lengjing::game::native::CoordinatePoolMaximumAnalysisPasses(
+                true) == 16);
+    REQUIRE(!lengjing::game::native::
+        ShouldExpandCoordinatePoolDecodeMethodScan(true, true, true));
+    REQUIRE(!lengjing::game::native::
+        ShouldExpandCoordinatePoolDecodeMethodScan(false, false, true));
+    REQUIRE(!lengjing::game::native::
+        ShouldExpandCoordinatePoolDecodeMethodScan(true, false, false));
+    REQUIRE(lengjing::game::native::
+        ShouldExpandCoordinatePoolDecodeMethodScan(true, false, true));
+    REQUIRE(lengjing::game::native::
+        CoordinatePoolRequestedMethodInstructionLimit(
+            kBase, kBase, false) ==
+        lengjing::game::native::
+            kCoordinatePoolEntryAnalysisInstructionLimit);
+    REQUIRE(lengjing::game::native::
+        CoordinatePoolRequestedMethodInstructionLimit(
+            kBase + 4U, kBase, true) ==
+        lengjing::game::native::
+            kCoordinatePoolEntryAnalysisInstructionLimit);
+    REQUIRE(lengjing::game::native::
+        CoordinatePoolRequestedMethodInstructionLimit(
+            kBase + 4U, kBase, false) ==
+        lengjing::game::native::
+            kCoordinatePoolDecodeAnalysisInstructionLimit);
+    REQUIRE(lengjing::game::native::
+        NextCoordinatePoolDecodeAnalysisInstructionLimit(0) == 500);
+    REQUIRE(lengjing::game::native::
+        NextCoordinatePoolDecodeAnalysisInstructionLimit(500) == 1000);
+    REQUIRE(lengjing::game::native::
+        NextCoordinatePoolDecodeAnalysisInstructionLimit(1000) == 2000);
+    REQUIRE(lengjing::game::native::
+        NextCoordinatePoolDecodeAnalysisInstructionLimit(2000) == 4000);
+    REQUIRE(lengjing::game::native::
+        NextCoordinatePoolDecodeAnalysisInstructionLimit(4000) == 5000);
+    REQUIRE(lengjing::game::native::
+        NextCoordinatePoolDecodeAnalysisInstructionLimit(5000) == 5000);
+    REQUIRE(lengjing::game::native::
+        CoordinatePoolRequestedMethodInstructionLimit(
+            kBase + 4U, kBase, false, 2000) == 2000);
+
+    coord_dec::FindDec decodeLimitFinder;
+    REQUIRE(decodeLimitFinder.decode_method_instruction_limit() == 500);
+    decodeLimitFinder.set_decode_method_instruction_limit(2000);
+    REQUIRE(decodeLimitFinder.decode_method_instruction_limit() == 2000);
+    decodeLimitFinder.set_decode_method_instruction_limit(0);
+    REQUIRE(decodeLimitFinder.decode_method_instruction_limit() == 500);
+
     std::array<std::uint8_t, 8> code{};
 
     const auto makeModuloEight = [](std::uint64_t increment) {
@@ -190,5 +241,6 @@ int main() {
         patchedPage.data(),
         sizeof(patchedInstruction));
     REQUIRE(patchedInstruction == kPatchedInstruction);
+
     return 0;
 }

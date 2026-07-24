@@ -184,6 +184,29 @@ add_test(
     COMMAND coordinate_pool_runtime_plan_tests
 )
 
+add_executable(coordinate_entry_branch_policy_tests
+    coordinate_entry_branch_policy_tests.cpp
+)
+
+target_include_directories(coordinate_entry_branch_policy_tests PRIVATE
+    ../jni/include
+)
+
+if(MSVC)
+    target_compile_options(coordinate_entry_branch_policy_tests PRIVATE
+        /W4 /utf-8
+    )
+else()
+    target_compile_options(coordinate_entry_branch_policy_tests PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+endif()
+
+add_test(
+    NAME coordinate_entry_branch_policy_tests
+    COMMAND coordinate_entry_branch_policy_tests
+)
+
 add_executable(thread_execution_context_provider_tests
     thread_execution_context_provider_tests.cpp
     ../jni/src/game/native/ThreadContextDeviceTransport.cpp

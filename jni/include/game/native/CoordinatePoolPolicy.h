@@ -6,6 +6,49 @@
 
 namespace lengjing::game::native {
 
+inline constexpr std::size_t kCoordinatePoolEntryAnalysisInstructionLimit =
+    5000;
+inline constexpr std::size_t kCoordinatePoolDecodeAnalysisInstructionLimit =
+    500;
+inline constexpr std::size_t
+    kCoordinatePoolMaximumDecodeAnalysisInstructionLimit = 5000;
+inline constexpr std::size_t kCoordinatePoolBaselineMaximumAnalysisPasses = 8;
+inline constexpr std::size_t kCoordinatePoolIndexedMaximumAnalysisPasses = 16;
+
+constexpr std::size_t CoordinatePoolMaximumAnalysisPasses(
+    bool indexedPointers) noexcept {
+    return indexedPointers
+        ? kCoordinatePoolIndexedMaximumAnalysisPasses
+        : kCoordinatePoolBaselineMaximumAnalysisPasses;
+}
+
+constexpr bool ShouldExpandCoordinatePoolDecodeMethodScan(
+    bool indexedPointers,
+    bool analysisComplete,
+    bool decodeFailureStage) noexcept {
+    return indexedPointers && !analysisComplete && decodeFailureStage;
+}
+
+constexpr std::size_t NextCoordinatePoolDecodeAnalysisInstructionLimit(
+    std::size_t current) noexcept {
+    if (current < 500) return 500;
+    if (current < 1000) return 1000;
+    if (current < 2000) return 2000;
+    if (current < 4000) return 4000;
+    return kCoordinatePoolMaximumDecodeAnalysisInstructionLimit;
+}
+
+constexpr std::size_t CoordinatePoolRequestedMethodInstructionLimit(
+    std::uint64_t requestedAddress,
+    std::uint64_t guestEntry,
+    bool entryMethodPending,
+    std::size_t decodeInstructionLimit =
+        kCoordinatePoolDecodeAnalysisInstructionLimit) noexcept {
+    return requestedAddress == guestEntry || entryMethodPending
+        ? kCoordinatePoolEntryAnalysisInstructionLimit
+        : decodeInstructionLimit;
+}
+
 inline constexpr std::size_t kCoordinatePoolRingSearchesPerFrame = 4;
 inline constexpr std::uint64_t kCoordinatePoolRingRetryFrames = 8;
 inline constexpr std::uint8_t kCoordinatePoolRingReadFailureThreshold = 2;
@@ -23,7 +66,14 @@ inline constexpr std::uint64_t kCoordinatePoolMaximumRemoteAddress =
 inline constexpr std::size_t kCoordinatePoolBlockProbeCount = 20;
 inline constexpr std::size_t kCoordinatePoolMaximumBlockCount =
     kCoordinatePoolBlockProbeCount - 1;
+using CoordinatePoolDecryptIndexMask = std::uint32_t;
 inline constexpr std::uint32_t kCoordinatePoolMaximumDecryptIndexOffset = 15;
+inline constexpr std::uint32_t
+    kCoordinatePoolMaximumDecryptIndexCandidateOffset =
+    static_cast<std::uint32_t>(kCoordinatePoolMaximumBlockCount - 1);
+static_assert(
+    kCoordinatePoolMaximumBlockCount <=
+    sizeof(CoordinatePoolDecryptIndexMask) * 8);
 inline constexpr std::uint8_t kCoordinatePoolUnknownDecryptIndexOffset =
     UINT8_MAX;
 inline constexpr std::size_t kCoordinatePoolDecryptIndexEvidenceLimit = 64;
@@ -133,11 +183,17 @@ constexpr bool IsCoordinatePoolDecryptIndexOffsetValid(
     return offset <= kCoordinatePoolMaximumDecryptIndexOffset;
 }
 
+constexpr bool IsCoordinatePoolDecryptIndexCandidateOffsetValid(
+    std::uint32_t offset) noexcept {
+    return offset <= kCoordinatePoolMaximumDecryptIndexCandidateOffset;
+}
+
 constexpr std::size_t SelectCoordinatePoolIndexedSlot(
     std::uint64_t decodedSlot,
     std::uint32_t decryptIndexOffset,
     std::size_t blockCount) noexcept {
-    if (!IsCoordinatePoolDecryptIndexOffsetValid(decryptIndexOffset) ||
+    if (!IsCoordinatePoolDecryptIndexCandidateOffsetValid(
+            decryptIndexOffset) ||
         blockCount == 0 || blockCount > kCoordinatePoolMaximumBlockCount) {
         return kCoordinatePoolBlockProbeCount;
     }
@@ -157,9 +213,7 @@ constexpr bool InferCoordinatePoolDecryptIndexOffset(
         changedSlot >= blockCount) {
         return false;
     }
-    for (std::uint8_t candidate = 0;
-         candidate <= kCoordinatePoolMaximumDecryptIndexOffset;
-         ++candidate) {
+    for (std::uint8_t candidate = 0; candidate < blockCount; ++candidate) {
         if (SelectCoordinatePoolIndexedSlot(
                 decodedSlot, candidate, blockCount) == changedSlot) {
             offset = candidate;
@@ -169,7 +223,8 @@ constexpr bool InferCoordinatePoolDecryptIndexOffset(
     return false;
 }
 
-constexpr std::uint16_t MatchingCoordinatePoolDecryptIndexOffsets(
+constexpr CoordinatePoolDecryptIndexMask
+MatchingCoordinatePoolDecryptIndexOffsets(
     std::uint64_t decodedSlot,
     std::uint32_t changedSlotMask,
     std::size_t blockCount) noexcept {
@@ -177,18 +232,16 @@ constexpr std::uint16_t MatchingCoordinatePoolDecryptIndexOffsets(
         blockCount > kCoordinatePoolMaximumBlockCount) {
         return 0;
     }
-    std::uint16_t matches = 0;
+    CoordinatePoolDecryptIndexMask matches = 0;
     std::uint32_t seenSlots = 0;
-    for (std::uint8_t offset = 0;
-         offset <= kCoordinatePoolMaximumDecryptIndexOffset;
-         ++offset) {
+    for (std::uint8_t offset = 0; offset < blockCount; ++offset) {
         const std::size_t slot = SelectCoordinatePoolIndexedSlot(
             decodedSlot, offset, blockCount);
         if (slot < blockCount &&
             (changedSlotMask & (UINT32_C(1) << slot)) != 0 &&
             (seenSlots & (UINT32_C(1) << slot)) == 0) {
-            matches |= static_cast<std::uint16_t>(
-                UINT16_C(1) << offset);
+            matches |= static_cast<CoordinatePoolDecryptIndexMask>(
+                UINT32_C(1) << offset);
             seenSlots |= UINT32_C(1) << slot;
         }
     }
@@ -199,11 +252,12 @@ class CoordinatePoolDecryptIndexCalibration final {
 public:
     void Observe(
         std::uintptr_t component,
-        std::uint16_t matchingOffsets) noexcept {
+        CoordinatePoolDecryptIndexMask matchingOffsets) noexcept {
         if (component == 0 || matchingOffsets == 0) return;
         if (locked_) {
-            const std::uint16_t selectedBit = static_cast<std::uint16_t>(
-                UINT16_C(1) << selected_);
+            const CoordinatePoolDecryptIndexMask selectedBit =
+                static_cast<CoordinatePoolDecryptIndexMask>(
+                    UINT32_C(1) << selected_);
             if (matchingOffsets == selectedBit) {
                 contradictionCount_ = 0;
                 contradictionComponent_ = 0;
@@ -249,15 +303,16 @@ public:
 private:
     struct Observation {
         std::uintptr_t component = 0;
-        std::uint16_t matchingOffsets = 0;
+        CoordinatePoolDecryptIndexMask matchingOffsets = 0;
     };
 
     std::size_t CountComponents(std::uint8_t offset) const noexcept {
         std::array<std::uintptr_t,
                    kCoordinatePoolDecryptIndexEvidenceLimit> components{};
         std::size_t count = 0;
-        const std::uint16_t offsetBit = static_cast<std::uint16_t>(
-            UINT16_C(1) << offset);
+        const CoordinatePoolDecryptIndexMask offsetBit =
+            static_cast<CoordinatePoolDecryptIndexMask>(
+                UINT32_C(1) << offset);
         for (std::size_t index = 0; index < evidenceCount_; ++index) {
             if ((evidence_[index].matchingOffsets & offsetBit) == 0) continue;
             bool found = false;
@@ -277,32 +332,33 @@ private:
 
     void Resolve() noexcept {
         std::array<std::size_t,
-                   kCoordinatePoolMaximumDecryptIndexOffset + 1> votes{};
+                   kCoordinatePoolMaximumBlockCount> votes{};
         for (std::size_t index = 0; index < evidenceCount_; ++index) {
             for (std::uint8_t offset = 0;
-                 offset <= kCoordinatePoolMaximumDecryptIndexOffset;
+                 offset <=
+                     kCoordinatePoolMaximumDecryptIndexCandidateOffset;
                  ++offset) {
                 if ((evidence_[index].matchingOffsets &
-                     (UINT16_C(1) << offset)) != 0) {
+                     (UINT32_C(1) << offset)) != 0) {
                     ++votes[offset];
                 }
             }
         }
 
-        std::uint16_t bestMask = 0;
+        CoordinatePoolDecryptIndexMask bestMask = 0;
         std::size_t bestEvidence = 0;
         std::size_t runnerUpEvidence = 0;
         for (std::uint8_t offset = 0;
-             offset <= kCoordinatePoolMaximumDecryptIndexOffset;
+             offset <= kCoordinatePoolMaximumDecryptIndexCandidateOffset;
              ++offset) {
             if (votes[offset] > bestEvidence) {
                 runnerUpEvidence = bestEvidence;
                 bestEvidence = votes[offset];
-                bestMask = static_cast<std::uint16_t>(
-                    UINT16_C(1) << offset);
+                bestMask = static_cast<CoordinatePoolDecryptIndexMask>(
+                    UINT32_C(1) << offset);
             } else if (votes[offset] == bestEvidence) {
-                bestMask |= static_cast<std::uint16_t>(
-                    UINT16_C(1) << offset);
+                bestMask |= static_cast<CoordinatePoolDecryptIndexMask>(
+                    UINT32_C(1) << offset);
             } else if (votes[offset] > runnerUpEvidence) {
                 runnerUpEvidence = votes[offset];
             }
@@ -310,7 +366,7 @@ private:
         if (bestEvidence == 0 || (bestMask & (bestMask - 1U)) != 0) return;
 
         std::uint8_t bestOffset = 0;
-        while ((bestMask & (UINT16_C(1) << bestOffset)) == 0) ++bestOffset;
+        while ((bestMask & (UINT32_C(1) << bestOffset)) == 0) ++bestOffset;
         const std::size_t componentCount = CountComponents(bestOffset);
         selected_ = bestOffset;
         bestEvidence_ = bestEvidence;
@@ -364,7 +420,8 @@ public:
         std::uint64_t frame,
         bool flicker) noexcept {
         if (component == 0) return {};
-        if (!IsCoordinatePoolDecryptIndexOffsetValid(observedOffset) ||
+        if (!IsCoordinatePoolDecryptIndexCandidateOffsetValid(
+                observedOffset) ||
             blockCount == 0 ||
             blockCount > kCoordinatePoolMaximumBlockCount) {
             Reset();
@@ -372,11 +429,7 @@ public:
         }
 
         const std::uint8_t candidateCount =
-            static_cast<std::uint8_t>(
-                blockCount <
-                        kCoordinatePoolMaximumDecryptIndexOffset + 1
-                    ? blockCount
-                    : kCoordinatePoolMaximumDecryptIndexOffset + 1);
+            static_cast<std::uint8_t>(blockCount);
         if (candidateCount < 2) {
             Reset();
             return {};

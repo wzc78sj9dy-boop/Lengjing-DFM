@@ -1,6 +1,7 @@
 #include "game/native/CoordinatePoolRuntime.h"
 
 #include "game/native/AlgorithmPositionRuntime.h"
+#include "game/native/CoordinateEntryBranchPolicy.h"
 #include "game/native/CoordinatePoolPolicy.h"
 #include "game/native/MemoryTransport.h"
 #include "game/native/coordinate_pool_internal/FindDec.h"
@@ -43,8 +44,6 @@ constexpr std::uint64_t kStackBase = kStackTop - kStackSize;
 constexpr std::uint64_t kArgumentPage = UINT64_C(0x7FFFF000);
 constexpr std::uint64_t kArgumentValueOffset = UINT64_C(0x200);
 constexpr std::uint64_t kMaximumCodeSize = UINT64_C(0x200000);
-constexpr std::size_t kEntryAnalysisInstructionLimit = 5000;
-constexpr std::size_t kDecodeAnalysisInstructionLimit = 500;
 constexpr std::uint32_t kArm64Nop = UINT32_C(0xD503201F);
 constexpr std::size_t kMaximumCachedPages = 4096;
 constexpr std::size_t kRootSnapshotReadLimit = 3;
@@ -210,11 +209,29 @@ struct ExecutableMappingIndex {
         return found != segments.begin() && std::prev(found)->Contains(address);
     }
 
+    bool ContainsRange(std::uint64_t address, std::size_t size) const noexcept {
+        if (size == 0 ||
+            address > std::numeric_limits<std::uint64_t>::max() -
+                    static_cast<std::uint64_t>(size)) {
+            return false;
+        }
+        const auto found = std::upper_bound(
+            segments.begin(),
+            segments.end(),
+            address,
+            [](std::uint64_t candidate,
+               const ExecutableMappingSegment& segment) {
+                return candidate < segment.start;
+            });
+        if (found == segments.begin()) return false;
+        const ExecutableMappingSegment& segment = *std::prev(found);
+        return segment.Contains(address) &&
+            address + size <= segment.end;
+    }
+
     bool ContainsPage(std::uint64_t pageAddress) const noexcept {
         return (pageAddress & (kPageSize - 1)) == 0 &&
-            pageAddress <=
-                std::numeric_limits<std::uint64_t>::max() - kPageSize &&
-            Contains(pageAddress) && Contains(pageAddress + kPageSize - 1);
+            ContainsRange(pageAddress, kPageSize);
     }
 };
 
@@ -936,7 +953,8 @@ struct CoordinatePoolRuntime::Impl {
             !executionContext.IsUsable() || !IsValidGuestAddress(component) ||
             indexed != indexedPointers ||
             (indexed &&
-             !IsCoordinatePoolDecryptIndexOffsetValid(decryptIndexOffset))) {
+             !IsCoordinatePoolDecryptIndexCandidateOffsetValid(
+                 decryptIndexOffset))) {
             SetError(CoordinatePoolRuntimeError::InvalidInput);
             return false;
         }
@@ -2025,7 +2043,7 @@ struct CoordinatePoolRuntime::Impl {
                     }
                 }
                 if (changedSlotMask != 0) {
-                    const std::uint16_t matchingOffsets =
+                    const CoordinatePoolDecryptIndexMask matchingOffsets =
                         MatchingCoordinatePoolDecryptIndexOffsets(
                             decodedPoolSlot,
                             changedSlotMask,
@@ -2580,6 +2598,12 @@ private:
         probe.analysisRingMaddCount = 0;
         probe.analysisCandidateCount = 0;
         probe.analysisFailureInstruction = 0;
+        probe.analysisDecodeInstructionLimit = 0;
+        probe.resolvedEntry = 0;
+        probe.entryInstruction = 0;
+        probe.entryTerminalInstruction = 0;
+        probe.entryBranchStatus = UINT8_MAX;
+        probe.entryBranchHops = 0;
         std::uint64_t mappingStart = 0;
         std::uint64_t mappingEnd = 0;
         int mappingStatus = 0;
@@ -2595,6 +2619,169 @@ private:
                 mappingStatus);
             return false;
         }
+
+        struct EntryBranchPage {
+            std::uint64_t address = 0;
+            std::array<std::uint8_t, kPageSize> data{};
+        };
+        std::vector<EntryBranchPage> entryBranchPages;
+        std::uint64_t analysisEntryAddress = guestEntry;
+        CoordinateEntryBranchResolution branchResolution{};
+        if (indexedPointers) {
+            auto readBranchPage = [&](std::uint64_t pageAddress,
+                                      EntryBranchPage& page) {
+                page.address = pageAddress;
+                CoordinateReadDiagnostic firstRead{};
+                if (ReadRemoteUnlocked(
+                        pageAddress,
+                        page.data.data(),
+                        page.data.size(),
+                        CoordinateReadStage::CodePage,
+                        &firstRead)) {
+                    return true;
+                }
+
+                int refreshStatus = 0;
+                ExecutableMappingIndex refreshedIndex{};
+                const bool mappingFound = BuildExecutableMappingIndex(
+                    processId,
+                    guestEntry,
+                    refreshedIndex,
+                    &refreshStatus);
+                if (mappingFound &&
+                    !SameExecutableMappingIndex(
+                        mappingIndex, refreshedIndex)) {
+                    firstRead.failure =
+                        CoordinateReadFailure::MappingChanged;
+                    firstRead.systemError = -ESTALE;
+                } else if (!mappingFound && refreshStatus == -ENOENT) {
+                    firstRead.failure =
+                        CoordinateReadFailure::MappingChanged;
+                    firstRead.systemError = -ESTALE;
+                } else if (mappingFound) {
+                    CoordinateReadDiagnostic retryRead{};
+                    if (ReadRemoteUnlocked(
+                            pageAddress,
+                            page.data.data(),
+                            page.data.size(),
+                            CoordinateReadStage::CodePage,
+                            &retryRead)) {
+                        ClearReadDiagnosticUnlocked();
+                        return true;
+                    }
+                    retryRead.attemptedPaths |= firstRead.attemptedPaths;
+                    retryRead.attemptCount += firstRead.attemptCount;
+                    retryRead.primaryPath = firstRead.primaryPath;
+                    retryRead.primaryCompleted = firstRead.primaryCompleted;
+                    retryRead.primarySystemError =
+                        firstRead.primarySystemError;
+                    firstRead = retryRead;
+                }
+                if (firstRead.failure ==
+                    CoordinateReadFailure::MappingChanged) {
+                    analysisInvalidated = true;
+                }
+                probe.read = firstRead;
+                probe.systemError = firstRead.systemError;
+                return false;
+            };
+
+            branchResolution = ResolveCoordinateEntryBranchChain(
+                guestEntry,
+                [&](std::uint64_t address, std::uint32_t& instruction) {
+                    const std::uint64_t pageAddress = address & kPageMask;
+                    auto page = std::find_if(
+                        entryBranchPages.begin(),
+                        entryBranchPages.end(),
+                        [pageAddress](const EntryBranchPage& candidate) {
+                            return candidate.address == pageAddress;
+                        });
+                    if (page == entryBranchPages.end()) {
+                        if (!mappingIndex.ContainsPage(pageAddress)) {
+                            return false;
+                        }
+                        EntryBranchPage loaded{};
+                        if (!readBranchPage(pageAddress, loaded)) {
+                            return false;
+                        }
+                        entryBranchPages.push_back(std::move(loaded));
+                        page = std::prev(entryBranchPages.end());
+                    }
+                    const std::size_t offset = static_cast<std::size_t>(
+                        address - pageAddress);
+                    if (offset > page->data.size() - sizeof(instruction)) {
+                        return false;
+                    }
+                    std::memcpy(
+                        &instruction,
+                        page->data.data() + offset,
+                        sizeof(instruction));
+                    return true;
+                },
+                [&](std::uint64_t address, std::size_t size) {
+                    return mappingIndex.ContainsRange(address, size);
+                });
+            probe.resolvedEntry = branchResolution.resolvedEntry;
+            probe.entryBranchStatus = static_cast<std::uint8_t>(
+                branchResolution.status);
+            probe.entryBranchHops = branchResolution.hopCount;
+            if (branchResolution.observationCount != 0) {
+                probe.entryInstruction =
+                    branchResolution.observations[0].instruction;
+                probe.entryTerminalInstruction =
+                    branchResolution
+                        .observations[
+                            branchResolution.observationCount - 1]
+                        .instruction;
+            }
+            if (branchResolution.status !=
+                CoordinateEntryResolveStatus::Resolved) {
+                int branchStatus = -EINVAL;
+                switch (branchResolution.status) {
+                    case CoordinateEntryResolveStatus::ReadFailed:
+                        branchStatus = probe.read.HasFailure()
+                            ? probe.read.systemError
+                            : -EIO;
+                        break;
+                    case CoordinateEntryResolveStatus::TargetOutsideExecutable:
+                        branchStatus = -ERANGE;
+                        break;
+                    case CoordinateEntryResolveStatus::Loop:
+                        branchStatus = -ELOOP;
+                        break;
+                    case CoordinateEntryResolveStatus::HopLimit:
+                        branchStatus = -E2BIG;
+                        break;
+                    case CoordinateEntryResolveStatus::Resolved:
+                    case CoordinateEntryResolveStatus::InvalidEntry:
+                        break;
+                }
+                SetError(
+                    branchResolution.status ==
+                            CoordinateEntryResolveStatus::ReadFailed
+                        ? CoordinatePoolRuntimeError::EntryCodeReadFailed
+                        : CoordinatePoolRuntimeError::EntryResolveFailed,
+                    true,
+                    branchStatus);
+                return false;
+            }
+            analysisEntryAddress = branchResolution.resolvedEntry;
+            if (analysisEntryAddress != guestEntry) {
+                ExecutableMappingIndex resolvedMappingIndex{};
+                if (!BuildExecutableMappingIndex(
+                        processId,
+                        analysisEntryAddress,
+                        resolvedMappingIndex,
+                        &mappingStatus)) {
+                    SetError(
+                        CoordinatePoolRuntimeError::EntryMappingMissing,
+                        true,
+                        mappingStatus);
+                    return false;
+                }
+                mappingIndex = std::move(resolvedMappingIndex);
+            }
+        }
         mappingStart = mappingIndex.windowStart;
         mappingEnd = mappingIndex.windowEnd;
         probe.executableMappingFragments =
@@ -2607,8 +2794,9 @@ private:
         if (mappingEnd <= mappingStart ||
             mappingEnd - mappingStart > kMaximumCodeSize ||
             (mappingEnd - mappingStart) % kPageSize != 0 ||
-            guestEntry < mappingStart || guestEntry >= mappingEnd ||
-            (guestEntry & 3U) != 0) {
+            analysisEntryAddress < mappingStart ||
+            analysisEntryAddress >= mappingEnd ||
+            (analysisEntryAddress & 3U) != 0) {
             SetError(CoordinatePoolRuntimeError::AnalysisFailed);
             return false;
         }
@@ -2635,7 +2823,7 @@ private:
             }
             probe.read = diagnostic;
             SetError(
-                diagnostic.address == (guestEntry & kPageMask)
+                diagnostic.address == (analysisEntryAddress & kPageMask)
                     ? CoordinatePoolRuntimeError::EntryPageReadFailed
                     : CoordinatePoolRuntimeError::CodeReadFailed,
                 true,
@@ -2656,48 +2844,65 @@ private:
             }
 
             std::array<std::uint8_t, kPageSize> pageData{};
-            CoordinateReadDiagnostic firstRead{};
-            if (!ReadRemoteUnlocked(
-                    pageAddress,
-                    pageData.data(),
-                    pageData.size(),
-                    CoordinateReadStage::CodePage,
-                    &firstRead)) {
-                int refreshStatus = 0;
-                ExecutableMappingIndex refreshedIndex{};
-                const bool mappingFound = BuildExecutableMappingIndex(
-                    processId,
-                    guestEntry,
-                    refreshedIndex,
-                    &refreshStatus);
-                if (mappingFound &&
-                    !SameExecutableMappingIndex(mappingIndex, refreshedIndex)) {
-                    firstRead.failure = CoordinateReadFailure::MappingChanged;
-                    firstRead.systemError = -ESTALE;
-                } else if (!mappingFound && refreshStatus == -ENOENT) {
-                    firstRead.failure = CoordinateReadFailure::MappingChanged;
-                    firstRead.systemError = -ESTALE;
-                } else if (mappingFound) {
-                    CoordinateReadDiagnostic retryRead{};
-                    if (ReadRemoteUnlocked(
-                            pageAddress,
-                            pageData.data(),
-                            pageData.size(),
-                            CoordinateReadStage::CodePage,
-                            &retryRead)) {
-                        ClearReadDiagnosticUnlocked();
-                        firstRead = {};
-                    } else {
-                        retryRead.attemptedPaths |= firstRead.attemptedPaths;
-                        retryRead.attemptCount += firstRead.attemptCount;
-                        retryRead.primaryPath = firstRead.primaryPath;
-                        retryRead.primaryCompleted = firstRead.primaryCompleted;
-                        retryRead.primarySystemError = firstRead.primarySystemError;
-                        firstRead = retryRead;
+            const auto cachedBranchPage = std::find_if(
+                entryBranchPages.begin(),
+                entryBranchPages.end(),
+                [pageAddress](const EntryBranchPage& candidate) {
+                    return candidate.address == pageAddress;
+                });
+            if (cachedBranchPage != entryBranchPages.end()) {
+                pageData = cachedBranchPage->data;
+            } else {
+                CoordinateReadDiagnostic firstRead{};
+                if (!ReadRemoteUnlocked(
+                        pageAddress,
+                        pageData.data(),
+                        pageData.size(),
+                        CoordinateReadStage::CodePage,
+                        &firstRead)) {
+                    int refreshStatus = 0;
+                    ExecutableMappingIndex refreshedIndex{};
+                    const bool mappingFound = BuildExecutableMappingIndex(
+                        processId,
+                        analysisEntryAddress,
+                        refreshedIndex,
+                        &refreshStatus);
+                    if (mappingFound &&
+                        !SameExecutableMappingIndex(
+                            mappingIndex, refreshedIndex)) {
+                        firstRead.failure =
+                            CoordinateReadFailure::MappingChanged;
+                        firstRead.systemError = -ESTALE;
+                    } else if (!mappingFound && refreshStatus == -ENOENT) {
+                        firstRead.failure =
+                            CoordinateReadFailure::MappingChanged;
+                        firstRead.systemError = -ESTALE;
+                    } else if (mappingFound) {
+                        CoordinateReadDiagnostic retryRead{};
+                        if (ReadRemoteUnlocked(
+                                pageAddress,
+                                pageData.data(),
+                                pageData.size(),
+                                CoordinateReadStage::CodePage,
+                                &retryRead)) {
+                            ClearReadDiagnosticUnlocked();
+                            firstRead = {};
+                        } else {
+                            retryRead.attemptedPaths |=
+                                firstRead.attemptedPaths;
+                            retryRead.attemptCount += firstRead.attemptCount;
+                            retryRead.primaryPath = firstRead.primaryPath;
+                            retryRead.primaryCompleted =
+                                firstRead.primaryCompleted;
+                            retryRead.primarySystemError =
+                                firstRead.primarySystemError;
+                            firstRead = retryRead;
+                        }
                     }
-                }
-                if (firstRead.failure != CoordinateReadFailure::None) {
-                    return failCodeRead(firstRead);
+                    if (firstRead.failure !=
+                        CoordinateReadFailure::None) {
+                        return failCodeRead(firstRead);
+                    }
                 }
             }
 
@@ -2706,6 +2911,25 @@ private:
             loadedPages[pageIndex] = true;
             ++loadedPageCount;
             return true;
+        };
+
+        auto recordRangeFingerprint = [&](std::uint64_t address,
+                                          std::size_t size,
+                                          std::uint64_t fingerprint) {
+            const auto existing = std::find_if(
+                rangeFingerprints.begin(),
+                rangeFingerprints.end(),
+                [address, size](const CodeRangeFingerprint& range) {
+                    return range.remoteAddress == address &&
+                        range.size == size;
+                });
+            if (existing == rangeFingerprints.end()) {
+                rangeFingerprints.push_back(CodeRangeFingerprint{
+                    address,
+                    size,
+                    fingerprint,
+                });
+            }
         };
 
         auto recordMethodRange = [&](std::uint64_t methodAddress,
@@ -2719,20 +2943,10 @@ private:
                 rangeEnd - methodAddress);
             const std::size_t offset = static_cast<std::size_t>(
                 methodAddress - mappingStart);
-            const auto existing = std::find_if(
-                rangeFingerprints.begin(),
-                rangeFingerprints.end(),
-                [methodAddress, size](const CodeRangeFingerprint& range) {
-                    return range.remoteAddress == methodAddress &&
-                        range.size == size;
-                });
-            if (existing == rangeFingerprints.end()) {
-                rangeFingerprints.push_back(CodeRangeFingerprint{
-                    methodAddress,
-                    size,
-                    CoordinatePoolCodeFingerprint(bytes.data() + offset, size),
-                });
-            }
+            recordRangeFingerprint(
+                methodAddress,
+                size,
+                CoordinatePoolCodeFingerprint(bytes.data() + offset, size));
             return true;
         };
 
@@ -2787,28 +3001,59 @@ private:
 
         EntryCodeScan entryScan{};
         if (!loadMethod(
-                guestEntry,
-                kEntryAnalysisInstructionLimit,
+                analysisEntryAddress,
+                kCoordinatePoolEntryAnalysisInstructionLimit,
                 entryScan)) {
             if (!probe.read.HasFailure()) {
                 SetError(
-                    probe.failedMethod == guestEntry
+                    probe.failedMethod == analysisEntryAddress
                         ? CoordinatePoolRuntimeError::EntryMappingFragmented
                         : CoordinatePoolRuntimeError::AnalysisFailed,
                     true,
-                    probe.failedMethod == guestEntry ? -ERANGE : -ENODATA);
+                    probe.failedMethod == analysisEntryAddress
+                        ? -ERANGE
+                        : -ENODATA);
             }
             return false;
         }
 
         std::unique_ptr<pool::coord_dec::FindDec> candidate;
         bool analysisComplete = false;
-        constexpr std::size_t kMaximumAnalysisPasses = 8;
-        for (std::size_t pass = 0; pass < kMaximumAnalysisPasses; ++pass) {
+        std::vector<std::uint64_t> loadedAnalysisMethods;
+        std::unordered_map<std::uint64_t, std::size_t>
+            pendingAnalysisMethodLimits;
+        std::size_t requiredDecodeInstructionLimit =
+            kCoordinatePoolDecodeAnalysisInstructionLimit;
+        if (indexedPointers) {
+            loadedAnalysisMethods.push_back(analysisEntryAddress);
+        }
+        const std::size_t maximumAnalysisPasses =
+            CoordinatePoolMaximumAnalysisPasses(indexedPointers);
+        for (std::size_t pass = 0; pass < maximumAnalysisPasses; ++pass) {
+            std::size_t decodeInstructionLimit =
+                kCoordinatePoolDecodeAnalysisInstructionLimit;
+            if (indexedPointers) {
+                decodeInstructionLimit = requiredDecodeInstructionLimit;
+                for (const auto& pending : pendingAnalysisMethodLimits) {
+                    decodeInstructionLimit = std::max(
+                        decodeInstructionLimit,
+                        NextCoordinatePoolDecodeAnalysisInstructionLimit(
+                            pending.second));
+                }
+            }
+            probe.analysisDecodeInstructionLimit =
+                static_cast<std::uint16_t>(decodeInstructionLimit);
             candidate = std::unique_ptr<pool::coord_dec::FindDec>(
                 new (std::nothrow) pool::coord_dec::FindDec());
-            if (candidate == nullptr ||
-                candidate->set(
+            if (candidate == nullptr) {
+                SetError(CoordinatePoolRuntimeError::AnalysisFailed);
+                return false;
+            }
+            if (indexedPointers) {
+                candidate->set_decode_method_instruction_limit(
+                    static_cast<std::uint32_t>(decodeInstructionLimit));
+            }
+            if (candidate->set(
                     mappingStart,
                     bytes.data(),
                     static_cast<std::uint32_t>(bytes.size())) != 0) {
@@ -2816,7 +3061,7 @@ private:
                 return false;
             }
 
-            const int result = candidate->find_dec(guestEntry);
+            const int result = candidate->find_dec(analysisEntryAddress);
             probe.analysisFindStage = static_cast<std::uint8_t>(
                 candidate->failure_stage());
             probe.analysisFindDetail = static_cast<std::uint8_t>(
@@ -2829,13 +3074,44 @@ private:
             const auto requestedMethods =
                 candidate->get_shellcode()->requested_method_addresses();
             const std::size_t loadedBefore = loadedPageCount;
+            const auto failureStage = candidate->failure_stage();
+            const bool entryMethodPending =
+                indexedPointers && failureStage ==
+                pool::coord_dec::FindDecFailureStage::EntryMethod;
+            const bool decodeFailureStage =
+                failureStage ==
+                    pool::coord_dec::FindDecFailureStage::RingOffset ||
+                failureStage ==
+                    pool::coord_dec::FindDecFailureStage::IndexExpression;
+            const bool decodeMethodPending =
+                ShouldExpandCoordinatePoolDecodeMethodScan(
+                    indexedPointers, result == 0, decodeFailureStage);
+            bool scanRangeExpanded = false;
             for (const std::uint64_t requestedAddress : requestedMethods) {
-                const std::size_t limit = requestedAddress == guestEntry
-                    ? kEntryAnalysisInstructionLimit
-                    : kDecodeAnalysisInstructionLimit;
+                if (indexedPointers &&
+                    std::find(
+                        loadedAnalysisMethods.begin(),
+                        loadedAnalysisMethods.end(),
+                        requestedAddress) != loadedAnalysisMethods.end()) {
+                    continue;
+                }
+                const std::size_t requestedDecodeInstructionLimit =
+                    decodeMethodPending
+                    ? decodeInstructionLimit
+                    : kCoordinatePoolDecodeAnalysisInstructionLimit;
+                const std::size_t limit = indexedPointers
+                    ? CoordinatePoolRequestedMethodInstructionLimit(
+                          requestedAddress,
+                          analysisEntryAddress,
+                          entryMethodPending,
+                          requestedDecodeInstructionLimit)
+                    : requestedAddress == guestEntry
+                        ? kCoordinatePoolEntryAnalysisInstructionLimit
+                        : kCoordinatePoolDecodeAnalysisInstructionLimit;
                 EntryCodeScan methodScan{};
-                if (!loadMethod(requestedAddress, limit, methodScan) &&
-                    probe.read.HasFailure()) {
+                const bool methodLoaded =
+                    loadMethod(requestedAddress, limit, methodScan);
+                if (!methodLoaded && probe.read.HasFailure()) {
                     return false;
                 }
                 if (probe.failedMethod != 0 &&
@@ -2846,8 +3122,29 @@ private:
                         -ERANGE);
                     return false;
                 }
+                if (!indexedPointers) continue;
+                if (methodLoaded) {
+                    loadedAnalysisMethods.push_back(requestedAddress);
+                    pendingAnalysisMethodLimits.erase(requestedAddress);
+                    if (requestedAddress != analysisEntryAddress) {
+                        requiredDecodeInstructionLimit = std::max(
+                            requiredDecodeInstructionLimit, limit);
+                    }
+                    continue;
+                }
+                if (decodeMethodPending) {
+                    std::size_t& attemptedLimit =
+                        pendingAnalysisMethodLimits[requestedAddress];
+                    if (limit > attemptedLimit) {
+                        attemptedLimit = limit;
+                        scanRangeExpanded = true;
+                    }
+                }
             }
-            if (loadedPageCount != loadedBefore) continue;
+            if (loadedPageCount != loadedBefore ||
+                (indexedPointers && scanRangeExpanded)) {
+                continue;
+            }
             if (result != 0) {
                 SetError(CoordinatePoolRuntimeError::AnalysisFailed);
                 return false;
@@ -2858,6 +3155,36 @@ private:
         if (!analysisComplete || candidate == nullptr) {
             SetError(CoordinatePoolRuntimeError::AnalysisFailed);
             return false;
+        }
+        if (indexedPointers) {
+            for (std::size_t index = 0;
+                 index < branchResolution.observationCount;
+                 ++index) {
+                const CoordinateEntryBranchObservation& observation =
+                    branchResolution.observations[index];
+                const bool covered = std::any_of(
+                    rangeFingerprints.begin(),
+                    rangeFingerprints.end(),
+                    [&observation](const CodeRangeFingerprint& range) {
+                        return range.size >=
+                                sizeof(observation.instruction) &&
+                            range.remoteAddress <= observation.address &&
+                            observation.address - range.remoteAddress <=
+                                range.size - sizeof(observation.instruction);
+                    });
+                if (covered) continue;
+                const std::array<std::uint8_t, 4> instructionBytes{{
+                    static_cast<std::uint8_t>(observation.instruction),
+                    static_cast<std::uint8_t>(observation.instruction >> 8U),
+                    static_cast<std::uint8_t>(observation.instruction >> 16U),
+                    static_cast<std::uint8_t>(observation.instruction >> 24U),
+                }};
+                recordRangeFingerprint(
+                    observation.address,
+                    instructionBytes.size(),
+                    CoordinatePoolCodeFingerprint(
+                        instructionBytes.data(), instructionBytes.size()));
+            }
         }
         if (rangeFingerprints.empty()) {
             SetError(CoordinatePoolRuntimeError::AnalysisFailed);
@@ -2899,6 +3226,7 @@ private:
         finder = std::move(candidate);
         analysisCodeFingerprints = std::move(rangeFingerprints);
         executableMappingIndex = std::move(mappingIndex);
+        analysisEntry = analysisEntryAddress;
         codeBase = mappingStart;
         codeSize = mappingSize;
         entryStart = entry->start_address();
@@ -2920,6 +3248,7 @@ private:
         probe.analysisRingMaddCount = 0;
         probe.analysisCandidateCount = 0;
         probe.analysisFailureInstruction = 0;
+        probe.analysisDecodeInstructionLimit = 0;
         probe.error = CoordinatePoolRuntimeError::None;
         probe.stage = CoordinatePoolRuntimeStage::CodeAnalyzed;
         return true;
@@ -3099,7 +3428,7 @@ private:
             ExecutableMappingIndex refreshedIndex{};
             const bool mappingFound = BuildExecutableMappingIndex(
                 processId,
-                guestEntry,
+                analysisEntry != 0 ? analysisEntry : guestEntry,
                 refreshedIndex,
                 &refreshStatus);
             if (mappingFound &&
@@ -3897,6 +4226,7 @@ private:
         bridge = 0;
         decryptContext = 0;
         guestEntry = 0;
+        analysisEntry = 0;
         codeBase = 0;
         codeSize = 0;
         entryStart = 0;
@@ -3943,7 +4273,9 @@ private:
         probe.bridge = 0;
         probe.context = 0;
         probe.guestEntry = 0;
+        probe.resolvedEntry = 0;
         probe.entryInstruction = 0;
+        probe.entryTerminalInstruction = 0;
         probe.codeBase = 0;
         probe.codeSize = 0;
         probe.executableMappingFragments = 0;
@@ -3956,6 +4288,9 @@ private:
         probe.analysisRingMaddCount = 0;
         probe.analysisCandidateCount = 0;
         probe.analysisFailureInstruction = 0;
+        probe.analysisDecodeInstructionLimit = 0;
+        probe.entryBranchStatus = UINT8_MAX;
+        probe.entryBranchHops = 0;
         probe.poolPointerOffset = 0;
         probe.indexOffset = 0;
         probe.ringOffset = 0;
@@ -4013,6 +4348,7 @@ private:
         bridge = 0;
         decryptContext = 0;
         guestEntry = 0;
+        analysisEntry = 0;
         codeBase = 0;
         codeSize = 0;
         entryStart = 0;
@@ -4075,6 +4411,7 @@ private:
     std::uint64_t bridge = 0;
     std::uint64_t decryptContext = 0;
     std::uint64_t guestEntry = 0;
+    std::uint64_t analysisEntry = 0;
     std::uint64_t codeBase = 0;
     std::size_t codeSize = 0;
     std::uint64_t entryStart = 0;
