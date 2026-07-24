@@ -875,6 +875,52 @@ struct CoordinatePoolRuntime::Impl {
         return true;
     }
 
+    bool ObserveIndexedOutputStability(
+        std::uintptr_t component,
+        std::uint32_t decryptIndexOffset,
+        std::uint8_t blockCount,
+        bool flicker) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!indexedPointers) return false;
+        const CoordinatePoolDecryptIndexSwitchDecision decision =
+            decryptIndexFlickerSwitch.Observe(
+                component,
+                decryptIndexOffset,
+                blockCount,
+                frame,
+                flicker);
+        if (!decision.requested) return false;
+        if (pendingDecryptIndexOffset !=
+                kCoordinatePoolUnknownDecryptIndexOffset &&
+            pendingDecryptIndexFrame == frame &&
+            pendingDecryptIndexOffset != decision.nextOffset) {
+            decryptIndexFlickerSwitch.Reset();
+            return false;
+        }
+
+        decryptIndexFlickerOverrideActive = true;
+        decryptIndexCalibration.Reset();
+        ResetDecryptIndexWitnessesUnlocked();
+        pendingDecryptIndexOffset = decision.nextOffset;
+        pendingDecryptIndexFrame = frame;
+        if (IsCoordinatePoolTraceEnabled()) {
+            std::fprintf(
+                stderr,
+                "[coordinate-decrypt2-auto-index] "
+                "frame=%llu from=%u to=%u evidence=%zu "
+                "components=%zu evidence_frames=%zu blocks=%u\n",
+                static_cast<unsigned long long>(frame),
+                static_cast<unsigned int>(decision.currentOffset),
+                static_cast<unsigned int>(decision.nextOffset),
+                decision.evidence,
+                decision.components,
+                decision.frames,
+                static_cast<unsigned int>(blockCount));
+            std::fflush(stderr);
+        }
+        return true;
+    }
+
     bool ReadCandidatesUnlocked(
         std::uintptr_t component,
         CoordinatePoolCandidateSet& candidates,
@@ -1778,7 +1824,10 @@ struct CoordinatePoolRuntime::Impl {
     }
 
     void ScheduleDecryptIndexOffsetUnlocked() noexcept {
-        if (!decryptIndexCalibration.IsLocked()) return;
+        if (decryptIndexFlickerOverrideActive ||
+            !decryptIndexCalibration.IsLocked()) {
+            return;
+        }
         const std::uint8_t selected = decryptIndexCalibration.Selected();
         if (selected == effectiveDecryptIndexOffset ||
             selected == pendingDecryptIndexOffset) {
@@ -1925,6 +1974,8 @@ struct CoordinatePoolRuntime::Impl {
                 if (decryptIndexCalibrationBlockCount != 0 &&
                     decryptIndexCalibrationBlockCount != predicted) {
                     decryptIndexCalibration.Reset();
+                    decryptIndexFlickerSwitch.Reset();
+                    decryptIndexFlickerOverrideActive = false;
                     effectiveDecryptIndexOffset =
                         kCoordinatePoolUnknownDecryptIndexOffset;
                     pendingDecryptIndexOffset =
@@ -3875,6 +3926,8 @@ private:
         decryptIndexCalibrationProgressFrame =
             std::numeric_limits<std::uint64_t>::max();
         decryptIndexCalibrationLastEvidence = 0;
+        decryptIndexFlickerSwitch.Reset();
+        decryptIndexFlickerOverrideActive = false;
         effectiveDecryptIndexOffset =
             kCoordinatePoolUnknownDecryptIndexOffset;
         pendingDecryptIndexOffset =
@@ -3993,6 +4046,8 @@ private:
         decryptIndexCalibrationProgressFrame =
             std::numeric_limits<std::uint64_t>::max();
         decryptIndexCalibrationLastEvidence = 0;
+        decryptIndexFlickerSwitch.Reset();
+        decryptIndexFlickerOverrideActive = false;
         effectiveDecryptIndexOffset =
             kCoordinatePoolUnknownDecryptIndexOffset;
         pendingDecryptIndexOffset =
@@ -4057,6 +4112,8 @@ private:
     std::uint64_t decryptIndexCalibrationProgressFrame =
         std::numeric_limits<std::uint64_t>::max();
     std::size_t decryptIndexCalibrationLastEvidence = 0;
+    CoordinatePoolDecryptIndexFlickerSwitch decryptIndexFlickerSwitch{};
+    bool decryptIndexFlickerOverrideActive = false;
     std::uint8_t effectiveDecryptIndexOffset =
         kCoordinatePoolUnknownDecryptIndexOffset;
     std::uint8_t pendingDecryptIndexOffset =
@@ -4177,6 +4234,23 @@ bool CoordinatePoolRuntime::ReadCandidates(
             component, decryptIndexOffset, candidates, forceRefresh);
     } catch (...) {
         candidates = {};
+        return false;
+    }
+}
+
+bool CoordinatePoolRuntime::ObserveIndexedOutputStability(
+    std::uintptr_t component,
+    std::uint32_t decryptIndexOffset,
+    std::uint8_t blockCount,
+    bool flicker) noexcept {
+    try {
+        return impl_ != nullptr &&
+            impl_->ObserveIndexedOutputStability(
+                component,
+                decryptIndexOffset,
+                blockCount,
+                flicker);
+    } catch (...) {
         return false;
     }
 }

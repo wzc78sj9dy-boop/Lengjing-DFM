@@ -4808,6 +4808,16 @@ private:
                                 IsNonzero(observedRaw);
                         }
                     }
+                    const auto observeIndexedOutputStability =
+                        [&](bool flicker) {
+                            if (!indexedDecrypt) return;
+                            static_cast<void>(coordinateDecrypt2Runtime_
+                                .ObserveOutputStability(
+                                coordinateIdentity,
+                                candidates.decryptIndexOffset,
+                                candidates.poolBlockCount,
+                                flicker));
+                        };
 
                     if (trace != nullptr) {
                         trace->raw = observedRaw;
@@ -4889,6 +4899,7 @@ private:
                         }
                     }
                     if (!observedValid) {
+                        observeIndexedOutputStability(true);
                         const bool historyRecovered = readStableHistory();
                         const bool cacheRecovered =
                             !historyRecovered && readCached();
@@ -4956,6 +4967,10 @@ private:
                                     pending.sample,
                                     coordinateTraceFrame_,
                                     now);
+                        observeIndexedOutputStability(
+                            observation.decision ==
+                            native::AlgorithmPositionOutputDecision::
+                                RetainHistory);
                         if (trace != nullptr) {
                             trace->history = history->second.position;
                             trace->stabilityDelta = std::sqrt(
@@ -4990,9 +5005,12 @@ private:
                             if (retained) ++algorithmFrameSuccessCount_;
                             return retained;
                         }
-                    } else if (trace != nullptr) {
-                        trace->stabilityDecision =
-                            CoordinateStabilityDecision::FirstNoHistory;
+                    } else {
+                        observeIndexedOutputStability(false);
+                        if (trace != nullptr) {
+                            trace->stabilityDecision =
+                                CoordinateStabilityDecision::FirstNoHistory;
+                        }
                     }
                     storeDecoded(observedRaw, CoordinateTraceSource::Pool);
                     ++algorithmFrameSuccessCount_;

@@ -19,6 +19,7 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::IsCoordinatePoolRootSnapshotInitialized;
     using lengjing::game::native::CoordinatePoolCandidateSet;
     using lengjing::game::native::CoordinatePoolDecryptIndexCalibration;
+    using lengjing::game::native::CoordinatePoolDecryptIndexFlickerSwitch;
     using lengjing::game::native::CoordinatePoolDecryptMode;
     using lengjing::game::native::CoordinatePoolStablePositionCache;
     using lengjing::game::native::IsCoordinatePoolReadRangeValid;
@@ -64,6 +65,10 @@ void RunCoordinatePoolPolicyTests() {
         kCoordinatePoolMaximumDecryptIndexOffset;
     using lengjing::game::native::
         kCoordinatePoolDecryptIndexCalibrationReadsPerFrame;
+    using lengjing::game::native::
+        kCoordinatePoolDecryptIndexFlickerGraceFrames;
+    using lengjing::game::native::
+        kCoordinatePoolDecryptIndexFlickerWindowFrames;
     using lengjing::game::native::kCoordinatePoolMinimumRemoteAddress;
     REQUIRE(!CoordinatePoolEnvironmentFlagEnabled(nullptr));
     REQUIRE(!CoordinatePoolEnvironmentFlagEnabled(""));
@@ -209,6 +214,104 @@ void RunCoordinatePoolPolicyTests() {
     }
     REQUIRE(!ambiguousCalibration.IsLocked());
     REQUIRE(ambiguousCalibration.Resolve(5) == 5);
+
+    CoordinatePoolDecryptIndexFlickerSwitch flickerSwitch;
+    auto switchDecision =
+        flickerSwitch.Observe(0x1000, 0, 10, 100, false);
+    REQUIRE(!switchDecision.requested);
+    REQUIRE(flickerSwitch.ActiveOffset() == 0);
+    for (std::uint64_t frame = 101;
+         frame < 100 + kCoordinatePoolDecryptIndexFlickerGraceFrames;
+         ++frame) {
+        REQUIRE(!flickerSwitch
+                     .Observe(0x1000, 0, 10, frame, true)
+                     .requested);
+    }
+    const std::uint64_t flickerFrame =
+        100 + kCoordinatePoolDecryptIndexFlickerGraceFrames;
+    REQUIRE(!flickerSwitch
+                 .Observe(0x1000, 0, 10, flickerFrame, true)
+                 .requested);
+    REQUIRE(!flickerSwitch
+                 .Observe(0x2000, 0, 10, flickerFrame + 1, true)
+                 .requested);
+    REQUIRE(!flickerSwitch
+                 .Observe(0x3000, 0, 10, flickerFrame + 2, true)
+                 .requested);
+    switchDecision =
+        flickerSwitch.Observe(
+            0x1000, 0, 10, flickerFrame + 3, true);
+    REQUIRE(switchDecision.requested);
+    REQUIRE(switchDecision.currentOffset == 0);
+    REQUIRE(switchDecision.nextOffset == 1);
+    REQUIRE(switchDecision.evidence == 4);
+    REQUIRE(switchDecision.components == 3);
+    REQUIRE(switchDecision.frames == 4);
+    REQUIRE(flickerSwitch.SwitchRequested());
+    REQUIRE(!flickerSwitch
+                 .Observe(
+                     0x4000, 0, 10, flickerFrame + 3, true)
+                 .requested);
+    REQUIRE(!flickerSwitch
+                 .Observe(
+                     0x1000, 1, 10, flickerFrame + 4, false)
+                 .requested);
+    REQUIRE(flickerSwitch.ActiveOffset() == 1);
+    REQUIRE(!flickerSwitch.SwitchRequested());
+
+    CoordinatePoolDecryptIndexFlickerSwitch expiringFlickerSwitch;
+    REQUIRE(!expiringFlickerSwitch
+                 .Observe(0x1000, 4, 5, 0, false)
+                 .requested);
+    const std::uint64_t expiringStart =
+        kCoordinatePoolDecryptIndexFlickerGraceFrames;
+    REQUIRE(!expiringFlickerSwitch
+                 .Observe(0x1000, 4, 5, expiringStart, true)
+                 .requested);
+    REQUIRE(!expiringFlickerSwitch
+                 .Observe(
+                     0x2000, 4, 5, expiringStart + 1, true)
+                 .requested);
+    REQUIRE(!expiringFlickerSwitch
+                 .Observe(
+                     0x3000, 4, 5, expiringStart + 2, true)
+                 .requested);
+    const std::uint64_t expiredFrame =
+        expiringStart + 2 +
+        kCoordinatePoolDecryptIndexFlickerWindowFrames;
+    REQUIRE(!expiringFlickerSwitch
+                 .Observe(
+                     0x4000,
+                     4,
+                     5,
+                     expiredFrame,
+                     true)
+                 .requested);
+    REQUIRE(expiringFlickerSwitch.Evidence() == 1);
+    REQUIRE(!expiringFlickerSwitch
+                 .Observe(
+                     0x1000,
+                     4,
+                     5,
+                     expiredFrame + 1,
+                     true)
+                 .requested);
+    REQUIRE(!expiringFlickerSwitch
+                 .Observe(
+                     0x2000,
+                     4,
+                     5,
+                     expiredFrame + 2,
+                     true)
+                 .requested);
+    switchDecision = expiringFlickerSwitch.Observe(
+        0x3000,
+        4,
+        5,
+        expiredFrame + 3,
+        true);
+    REQUIRE(switchDecision.requested);
+    REQUIRE(switchDecision.nextOffset == 0);
 
     std::array<std::uint64_t,
                kCoordinatePoolDecryptIndexCalibrationReadsPerFrame>

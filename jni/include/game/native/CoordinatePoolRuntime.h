@@ -278,6 +278,11 @@ public:
                         std::uint32_t decryptIndexOffset,
                         CoordinatePoolCandidateSet& candidates,
                         bool refresh = false) noexcept;
+    bool ObserveIndexedOutputStability(
+        std::uintptr_t component,
+        std::uint32_t decryptIndexOffset,
+        std::uint8_t blockCount,
+        bool flicker) noexcept;
     CoordinatePoolRuntimeProbe Probe() const noexcept;
     void Reset() noexcept;
 

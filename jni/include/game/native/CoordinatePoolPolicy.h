@@ -42,6 +42,18 @@ inline constexpr std::size_t
     kCoordinatePoolDecryptIndexContradictionEvidence = 3;
 inline constexpr std::size_t
     kCoordinatePoolDecryptIndexSingleComponentContradictionEvidence = 6;
+inline constexpr std::uint64_t
+    kCoordinatePoolDecryptIndexFlickerGraceFrames = 12;
+inline constexpr std::uint64_t
+    kCoordinatePoolDecryptIndexFlickerWindowFrames = 24;
+inline constexpr std::size_t
+    kCoordinatePoolDecryptIndexFlickerEvidenceLimit = 32;
+inline constexpr std::size_t
+    kCoordinatePoolDecryptIndexFlickerMinimumEvidence = 4;
+inline constexpr std::size_t
+    kCoordinatePoolDecryptIndexFlickerMinimumComponents = 3;
+inline constexpr std::size_t
+    kCoordinatePoolDecryptIndexFlickerMinimumFrames = 2;
 
 inline std::size_t ExpireCoordinatePoolDecryptIndexWitnesses(
     std::array<std::uint64_t,
@@ -330,6 +342,203 @@ private:
     std::uint8_t selected_ = kCoordinatePoolUnknownDecryptIndexOffset;
     bool contradictionHasMultipleComponents_ = false;
     bool locked_ = false;
+};
+
+struct CoordinatePoolDecryptIndexSwitchDecision {
+    bool requested = false;
+    std::uint8_t currentOffset =
+        kCoordinatePoolUnknownDecryptIndexOffset;
+    std::uint8_t nextOffset =
+        kCoordinatePoolUnknownDecryptIndexOffset;
+    std::size_t evidence = 0;
+    std::size_t components = 0;
+    std::size_t frames = 0;
+};
+
+class CoordinatePoolDecryptIndexFlickerSwitch final {
+public:
+    CoordinatePoolDecryptIndexSwitchDecision Observe(
+        std::uintptr_t component,
+        std::uint32_t observedOffset,
+        std::size_t blockCount,
+        std::uint64_t frame,
+        bool flicker) noexcept {
+        if (component == 0) return {};
+        if (!IsCoordinatePoolDecryptIndexOffsetValid(observedOffset) ||
+            blockCount == 0 ||
+            blockCount > kCoordinatePoolMaximumBlockCount) {
+            Reset();
+            return {};
+        }
+
+        const std::uint8_t candidateCount =
+            static_cast<std::uint8_t>(
+                blockCount <
+                        kCoordinatePoolMaximumDecryptIndexOffset + 1
+                    ? blockCount
+                    : kCoordinatePoolMaximumDecryptIndexOffset + 1);
+        if (candidateCount < 2) {
+            Reset();
+            return {};
+        }
+        const std::uint8_t normalizedOffset =
+            static_cast<std::uint8_t>(observedOffset % candidateCount);
+        if (!initialized_ || blockCount_ != blockCount ||
+            frame < lastObservedFrame_ ||
+            normalizedOffset != activeOffset_) {
+            ResetForOffset(
+                normalizedOffset, candidateCount, blockCount, frame);
+        }
+        lastObservedFrame_ = frame;
+        Expire(frame);
+        if (switchRequested_ ||
+            frame - activatedFrame_ <
+                kCoordinatePoolDecryptIndexFlickerGraceFrames ||
+            !flicker) {
+            return {};
+        }
+        for (std::size_t index = 0; index < observationCount_; ++index) {
+            if (observations_[index].component == component &&
+                observations_[index].frame == frame) {
+                return {};
+            }
+        }
+        if (observationCount_ == observations_.size()) {
+            for (std::size_t index = 1;
+                 index < observationCount_;
+                 ++index) {
+                observations_[index - 1] = observations_[index];
+            }
+            --observationCount_;
+        }
+        observations_[observationCount_++] = {component, frame};
+
+        std::array<std::uintptr_t,
+                   kCoordinatePoolDecryptIndexFlickerEvidenceLimit>
+            components{};
+        std::array<std::uint64_t,
+                   kCoordinatePoolDecryptIndexFlickerEvidenceLimit>
+            frames{};
+        std::size_t componentCount = 0;
+        std::size_t frameCount = 0;
+        for (std::size_t index = 0; index < observationCount_; ++index) {
+            const Observation& observation = observations_[index];
+            bool componentSeen = false;
+            for (std::size_t componentIndex = 0;
+                 componentIndex < componentCount;
+                 ++componentIndex) {
+                if (components[componentIndex] ==
+                    observation.component) {
+                    componentSeen = true;
+                    break;
+                }
+            }
+            if (!componentSeen) {
+                components[componentCount++] = observation.component;
+            }
+
+            bool frameSeen = false;
+            for (std::size_t frameIndex = 0;
+                 frameIndex < frameCount;
+                 ++frameIndex) {
+                if (frames[frameIndex] == observation.frame) {
+                    frameSeen = true;
+                    break;
+                }
+            }
+            if (!frameSeen) frames[frameCount++] = observation.frame;
+        }
+        if (observationCount_ <
+                kCoordinatePoolDecryptIndexFlickerMinimumEvidence ||
+            componentCount <
+                kCoordinatePoolDecryptIndexFlickerMinimumComponents ||
+            frameCount < kCoordinatePoolDecryptIndexFlickerMinimumFrames) {
+            return {};
+        }
+
+        CoordinatePoolDecryptIndexSwitchDecision decision{};
+        decision.requested = true;
+        decision.currentOffset = activeOffset_;
+        decision.nextOffset = static_cast<std::uint8_t>(
+            (activeOffset_ + 1) % candidateCount_);
+        decision.evidence = observationCount_;
+        decision.components = componentCount;
+        decision.frames = frameCount;
+        switchRequested_ = true;
+        observations_ = {};
+        observationCount_ = 0;
+        return decision;
+    }
+
+    void Reset() noexcept { *this = {}; }
+
+    std::uint8_t ActiveOffset() const noexcept {
+        return initialized_
+            ? activeOffset_
+            : kCoordinatePoolUnknownDecryptIndexOffset;
+    }
+
+    std::size_t Evidence() const noexcept {
+        return observationCount_;
+    }
+
+    bool SwitchRequested() const noexcept {
+        return switchRequested_;
+    }
+
+private:
+    struct Observation {
+        std::uintptr_t component = 0;
+        std::uint64_t frame = 0;
+    };
+
+    void ResetForOffset(
+        std::uint8_t offset,
+        std::uint8_t candidateCount,
+        std::size_t blockCount,
+        std::uint64_t frame) noexcept {
+        observations_ = {};
+        observationCount_ = 0;
+        activatedFrame_ = frame;
+        lastObservedFrame_ = frame;
+        blockCount_ = blockCount;
+        activeOffset_ = offset;
+        candidateCount_ = candidateCount;
+        switchRequested_ = false;
+        initialized_ = true;
+    }
+
+    void Expire(std::uint64_t frame) noexcept {
+        std::size_t retained = 0;
+        for (std::size_t index = 0; index < observationCount_; ++index) {
+            const Observation& observation = observations_[index];
+            if (frame < observation.frame ||
+                frame - observation.frame >=
+                    kCoordinatePoolDecryptIndexFlickerWindowFrames) {
+                continue;
+            }
+            observations_[retained++] = observation;
+        }
+        for (std::size_t index = retained;
+             index < observationCount_;
+             ++index) {
+            observations_[index] = {};
+        }
+        observationCount_ = retained;
+    }
+
+    std::array<Observation,
+               kCoordinatePoolDecryptIndexFlickerEvidenceLimit>
+        observations_{};
+    std::size_t observationCount_ = 0;
+    std::uint64_t activatedFrame_ = 0;
+    std::uint64_t lastObservedFrame_ = 0;
+    std::size_t blockCount_ = 0;
+    std::uint8_t activeOffset_ =
+        kCoordinatePoolUnknownDecryptIndexOffset;
+    std::uint8_t candidateCount_ = 0;
+    bool switchRequested_ = false;
+    bool initialized_ = false;
 };
 
 enum class CoordinatePoolSlotLayoutKind : std::uint8_t {

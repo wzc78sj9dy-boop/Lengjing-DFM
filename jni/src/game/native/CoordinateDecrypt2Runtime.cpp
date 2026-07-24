@@ -38,6 +38,18 @@ bool CoordinateDecrypt2Runtime::ReadCandidates(
         refresh);
 }
 
+bool CoordinateDecrypt2Runtime::ObserveOutputStability(
+    std::uintptr_t component,
+    std::uint32_t decryptIndexOffset,
+    std::uint8_t blockCount,
+    bool flicker) noexcept {
+    return runtime_.ObserveIndexedOutputStability(
+        component,
+        decryptIndexOffset,
+        blockCount,
+        flicker);
+}
+
 CoordinatePoolRuntimeProbe CoordinateDecrypt2Runtime::Probe() const noexcept {
     return runtime_.Probe();
 }
