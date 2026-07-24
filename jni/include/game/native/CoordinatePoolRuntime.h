@@ -117,9 +117,11 @@ struct CoordinatePoolCandidateSet {
     std::uint8_t changedPhysicalCount = 0;
     std::uint8_t newestPhysicalSlot = UINT8_MAX;
     std::uint8_t decryptIndexOffset = 0;
+    std::uint8_t decryptIndexEvidence = 0;
     std::uint8_t poolBlockCount = 0;
     CoordinatePoolPosition resolvedPosition{};
     std::uint8_t resolvedPoolSlot = UINT8_MAX;
+    bool decryptIndexLocked = false;
     bool resolvedValid = false;
 };
 
@@ -226,8 +228,10 @@ struct CoordinatePoolRuntimeProbe {
     std::uint8_t compactLayoutEvidence = 0;
     std::uint8_t extendedLayoutEvidence = 0;
     std::uint8_t decryptIndexOffset = 0;
+    std::uint8_t decryptIndexEvidence = 0;
     std::uint8_t poolBlockCount = 0;
     std::uint8_t selectedPoolSlot = 0;
+    bool decryptIndexLocked = false;
     std::int32_t threadId = 0;
     std::uint64_t contextGeneration = 0;
     std::uint64_t attempts = 0;

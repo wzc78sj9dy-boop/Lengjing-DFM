@@ -18,6 +18,7 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::CoordinatePoolRootSnapshotsMatch;
     using lengjing::game::native::IsCoordinatePoolRootSnapshotInitialized;
     using lengjing::game::native::CoordinatePoolCandidateSet;
+    using lengjing::game::native::CoordinatePoolDecryptIndexCalibration;
     using lengjing::game::native::CoordinatePoolDecryptMode;
     using lengjing::game::native::CoordinatePoolStablePositionCache;
     using lengjing::game::native::IsCoordinatePoolReadRangeValid;
@@ -25,6 +26,8 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::IsCoordinatePoolDecryptIndexOffsetValid;
     using lengjing::game::native::IsCoordinatePoolSelectedCandidateValid;
     using lengjing::game::native::MapDecodedCoordinatePoolSlot;
+    using lengjing::game::native::
+        MatchingCoordinatePoolDecryptIndexOffsets;
     using lengjing::game::native::MakeCoordinateDecrypt2RuntimeLayout;
     using lengjing::game::native::NextCoordinatePoolCodeValidationFrame;
     using lengjing::game::native::NormalizeCoordinatePoolIndexedPointer;
@@ -34,6 +37,7 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::
         ResolveCoordinatePoolIndexedRootAddresses;
     using lengjing::game::native::ResolveCoordinatePoolDecryptMode;
+    using lengjing::game::native::InferCoordinatePoolDecryptIndexOffset;
     using lengjing::game::native::IsCoordinatePoolDecryptRequested;
     using lengjing::game::native::IsCoordinatePoolIndexedDecrypt;
     using lengjing::game::native::
@@ -116,6 +120,91 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(SelectCoordinatePoolIndexedSlot(
         1, kCoordinatePoolMaximumDecryptIndexOffset + 1, 10) ==
         kCoordinatePoolBlockProbeCount);
+    std::uint8_t inferredDecryptIndex = UINT8_MAX;
+    REQUIRE(InferCoordinatePoolDecryptIndexOffset(
+        7,
+        SelectCoordinatePoolIndexedSlot(7, 4, 19),
+        19,
+        inferredDecryptIndex));
+    REQUIRE(inferredDecryptIndex == 4);
+    REQUIRE(InferCoordinatePoolDecryptIndexOffset(
+        UINT64_MAX,
+        SelectCoordinatePoolIndexedSlot(UINT64_MAX, 10, 19),
+        19,
+        inferredDecryptIndex));
+    REQUIRE(inferredDecryptIndex == 10);
+    REQUIRE(!InferCoordinatePoolDecryptIndexOffset(
+        7, 19, 19, inferredDecryptIndex));
+    const std::uint32_t changedOffsetSlots =
+        (UINT32_C(1) << SelectCoordinatePoolIndexedSlot(3, 2, 14)) |
+        (UINT32_C(1) << SelectCoordinatePoolIndexedSlot(3, 7, 14));
+    REQUIRE(MatchingCoordinatePoolDecryptIndexOffsets(
+        3, changedOffsetSlots, 14) ==
+        static_cast<std::uint16_t>(
+            (UINT16_C(1) << 2) | (UINT16_C(1) << 7)));
+    REQUIRE(MatchingCoordinatePoolDecryptIndexOffsets(
+        UINT64_MAX, UINT32_C(1), 1) == UINT16_C(1));
+    const std::size_t fiveBlockSlot =
+        SelectCoordinatePoolIndexedSlot(3, 7, 5);
+    REQUIRE(MatchingCoordinatePoolDecryptIndexOffsets(
+        3,
+        UINT32_C(1) << fiveBlockSlot,
+        5) == (UINT16_C(1) << 2));
+    const std::size_t tenBlockSlot =
+        SelectCoordinatePoolIndexedSlot(0, 10, 10);
+    REQUIRE(MatchingCoordinatePoolDecryptIndexOffsets(
+        0,
+        UINT32_C(1) << tenBlockSlot,
+        10) == UINT16_C(1));
+
+    CoordinatePoolDecryptIndexCalibration multiComponentCalibration;
+    REQUIRE(!multiComponentCalibration.IsLocked());
+    REQUIRE(multiComponentCalibration.Resolve(9) == 9);
+    multiComponentCalibration.Observe(0x1000, UINT16_C(1) << 4);
+    multiComponentCalibration.Observe(0x1000, UINT16_C(1) << 4);
+    REQUIRE(!multiComponentCalibration.IsLocked());
+    REQUIRE(multiComponentCalibration.Resolve(9) == 9);
+    multiComponentCalibration.Observe(0x2000, UINT16_C(1) << 4);
+    REQUIRE(multiComponentCalibration.IsLocked());
+    REQUIRE(multiComponentCalibration.Selected() == 4);
+    REQUIRE(multiComponentCalibration.Resolve(9) == 4);
+    REQUIRE(multiComponentCalibration.Evidence() == 3);
+    REQUIRE(multiComponentCalibration.ComponentCount() == 2);
+    multiComponentCalibration.Observe(0x1000, UINT16_C(1) << 6);
+    multiComponentCalibration.Observe(
+        0x4000,
+        static_cast<std::uint16_t>(
+            (UINT16_C(1) << 4) | (UINT16_C(1) << 6)));
+    REQUIRE(multiComponentCalibration.Contradictions() == 1);
+    multiComponentCalibration.Observe(0x2000, UINT16_C(1) << 6);
+    REQUIRE(multiComponentCalibration.IsLocked());
+    REQUIRE(multiComponentCalibration.Contradictions() == 2);
+    multiComponentCalibration.Observe(0x3000, UINT16_C(1) << 6);
+    REQUIRE(!multiComponentCalibration.IsLocked());
+    REQUIRE(multiComponentCalibration.Resolve(9) == 9);
+
+    CoordinatePoolDecryptIndexCalibration singleIndexCalibration;
+    for (std::size_t observation = 0; observation < 5; ++observation) {
+        singleIndexCalibration.Observe(
+            0x3000, UINT16_C(1) << 10);
+    }
+    REQUIRE(!singleIndexCalibration.IsLocked());
+    singleIndexCalibration.Observe(0x3000, UINT16_C(1) << 10);
+    REQUIRE(singleIndexCalibration.IsLocked());
+    REQUIRE(singleIndexCalibration.Resolve(0) == 10);
+    singleIndexCalibration.Reset();
+    REQUIRE(!singleIndexCalibration.IsLocked());
+    REQUIRE(singleIndexCalibration.Resolve(6) == 6);
+
+    CoordinatePoolDecryptIndexCalibration ambiguousCalibration;
+    for (std::size_t observation = 0; observation < 8; ++observation) {
+        ambiguousCalibration.Observe(
+            0x4000 + observation,
+            static_cast<std::uint16_t>(
+                (UINT16_C(1) << 1) | (UINT16_C(1) << 8)));
+    }
+    REQUIRE(!ambiguousCalibration.IsLocked());
+    REQUIRE(ambiguousCalibration.Resolve(5) == 5);
     REQUIRE(IsCoordinatePoolBlockTerminator({}));
     REQUIRE(IsCoordinatePoolBlockTerminator({-0.0f, 0.0f, -0.0f}));
     REQUIRE(!IsCoordinatePoolBlockTerminator({1.0f, 0.0f, 0.0f}));

@@ -596,6 +596,12 @@ struct CoordinatePoolRuntime::Impl {
         std::uint64_t previousDecodedSlot = 0;
         std::uint8_t previousPhysicalSlotCount = 0;
         bool hasPreviousPositions = false;
+        std::array<CoordinatePoolPosition,
+                   kCoordinatePoolBlockProbeCount> indexedPositions{};
+        std::uint8_t indexedBlockCount = 0;
+        std::uint8_t indexedResolvedOffset =
+            kCoordinatePoolUnknownDecryptIndexOffset;
+        bool hasIndexedPositions = false;
     };
 
     explicit Impl(CoordinatePoolRuntimeLayout configuredLayout)
@@ -922,6 +928,12 @@ struct CoordinatePoolRuntime::Impl {
                     slot.previousPositions = {};
                     slot.previousValid = {};
                     slot.hasPreviousPositions = false;
+                    slot.indexedPositions = {};
+                    slot.indexedBlockCount = 0;
+                    slot.indexedResolvedOffset =
+                        kCoordinatePoolUnknownDecryptIndexOffset;
+                    slot.hasIndexedPositions = false;
+                    stableIndexedPositions[component].Reset();
                 }
                 slot.ring = ring;
                 slot.stamp = frame;
@@ -1631,6 +1643,154 @@ struct CoordinatePoolRuntime::Impl {
         return true;
     }
 
+    bool TryConsumeDecryptIndexCalibrationReadUnlocked(
+        std::uint64_t component) noexcept {
+        if (decryptIndexCalibration.IsLocked() &&
+            decryptIndexCalibrationWitnessCount != 0 &&
+            decryptIndexCalibrationLastAuditFrame !=
+                std::numeric_limits<std::uint64_t>::max() &&
+            (frame < decryptIndexCalibrationLastAuditFrame ||
+             frame - decryptIndexCalibrationLastAuditFrame >=
+                 kCoordinatePoolDecryptIndexWitnessRefreshFrames)) {
+            ResetDecryptIndexWitnessesUnlocked();
+        }
+        if (decryptIndexCalibrationFrame != frame) {
+            const std::size_t previousVisitCount =
+                decryptIndexCalibrationVisitCount;
+            decryptIndexCalibrationFrame = frame;
+            decryptIndexCalibrationReads = 0;
+            decryptIndexCalibrationPreviousVisitCount =
+                previousVisitCount;
+            decryptIndexCalibrationVisitCount = 0;
+            const std::size_t evidence =
+                decryptIndexCalibration.Evidence();
+            if (decryptIndexCalibrationProgressFrame ==
+                    std::numeric_limits<std::uint64_t>::max() ||
+                evidence != decryptIndexCalibrationLastEvidence) {
+                decryptIndexCalibrationProgressFrame = frame;
+                decryptIndexCalibrationLastEvidence = evidence;
+            }
+            if (!decryptIndexCalibration.IsLocked() &&
+                decryptIndexCalibrationWitnessCount != 0 &&
+                frame >= decryptIndexCalibrationProgressFrame &&
+                frame - decryptIndexCalibrationProgressFrame >=
+                    kCoordinatePoolDecryptIndexWitnessRefreshFrames) {
+                if (previousVisitCount != 0) {
+                    decryptIndexCalibrationWindowStart =
+                        (decryptIndexCalibrationWindowStart +
+                         kCoordinatePoolDecryptIndexCalibrationReadsPerFrame) %
+                        previousVisitCount;
+                }
+                decryptIndexCalibrationWitnesses = {};
+                decryptIndexCalibrationWitnessCount = 0;
+                decryptIndexCalibrationProgressFrame = frame;
+            }
+        }
+        const std::size_t ordinal =
+            decryptIndexCalibrationVisitCount++;
+        const std::size_t readLimit =
+            decryptIndexCalibration.IsLocked()
+            ? kCoordinatePoolDecryptIndexAuditReadsPerFrame
+            : kCoordinatePoolDecryptIndexCalibrationReadsPerFrame;
+        if (decryptIndexCalibrationReads >= readLimit) {
+            return false;
+        }
+
+        std::size_t witnessIndex =
+            decryptIndexCalibrationWitnessCount;
+        for (std::size_t index = 0;
+             index < decryptIndexCalibrationWitnessCount;
+             ++index) {
+            if (decryptIndexCalibrationWitnesses[index] == component) {
+                witnessIndex = index;
+                break;
+            }
+        }
+        if (witnessIndex == decryptIndexCalibrationWitnessCount) {
+            const std::size_t witnessLimit =
+                decryptIndexCalibration.IsLocked()
+                ? std::min<std::size_t>(
+                      decryptIndexCalibrationWitnesses.size(),
+                      kCoordinatePoolDecryptIndexAuditReadsPerFrame)
+                : decryptIndexCalibrationWitnesses.size();
+            if (decryptIndexCalibrationWitnessCount >= witnessLimit) {
+                return false;
+            }
+            const std::size_t population =
+                decryptIndexCalibrationPreviousVisitCount;
+            bool selected = population == 0
+                ? ordinal <
+                    kCoordinatePoolDecryptIndexCalibrationReadsPerFrame
+                : kCoordinatePoolDecryptIndexCalibrationReadsPerFrame >=
+                    population;
+            if (!selected && population != 0 && ordinal < population) {
+                const std::size_t distance =
+                    (ordinal + population -
+                     decryptIndexCalibrationWindowStart) %
+                    population;
+                selected = distance <
+                    kCoordinatePoolDecryptIndexCalibrationReadsPerFrame;
+            }
+            if (!selected) return false;
+            witnessIndex = decryptIndexCalibrationWitnessCount++;
+            decryptIndexCalibrationWitnesses[witnessIndex] = component;
+        }
+        if (decryptIndexCalibration.IsLocked() &&
+            decryptIndexCalibrationWitnessCount > readLimit) {
+            const std::size_t auditStart =
+                ((frame % decryptIndexCalibrationWitnessCount) *
+                 readLimit) %
+                decryptIndexCalibrationWitnessCount;
+            const std::size_t distance =
+                (witnessIndex + decryptIndexCalibrationWitnessCount -
+                 auditStart) %
+                decryptIndexCalibrationWitnessCount;
+            if (distance >= readLimit) return false;
+        }
+        ++decryptIndexCalibrationReads;
+        decryptIndexCalibrationLastAuditFrame = frame;
+        return true;
+    }
+
+    void ResetDecryptIndexWitnessesUnlocked() noexcept {
+        decryptIndexCalibrationFrame =
+            std::numeric_limits<std::uint64_t>::max();
+        decryptIndexCalibrationReads = 0;
+        decryptIndexCalibrationVisitCount = 0;
+        decryptIndexCalibrationPreviousVisitCount = 0;
+        decryptIndexCalibrationWindowStart = 0;
+        decryptIndexCalibrationWitnesses = {};
+        decryptIndexCalibrationWitnessCount = 0;
+        decryptIndexCalibrationProgressFrame = frame;
+        decryptIndexCalibrationLastEvidence =
+            decryptIndexCalibration.Evidence();
+        decryptIndexCalibrationLastAuditFrame =
+            std::numeric_limits<std::uint64_t>::max();
+    }
+
+    void UpdateDecryptIndexEffectiveOffsetUnlocked() {
+        if (pendingDecryptIndexOffset ==
+                kCoordinatePoolUnknownDecryptIndexOffset ||
+            pendingDecryptIndexFrame == frame) {
+            return;
+        }
+        effectiveDecryptIndexOffset = pendingDecryptIndexOffset;
+        pendingDecryptIndexOffset =
+            kCoordinatePoolUnknownDecryptIndexOffset;
+        stableIndexedPositions.clear();
+    }
+
+    void ScheduleDecryptIndexOffsetUnlocked() noexcept {
+        if (!decryptIndexCalibration.IsLocked()) return;
+        const std::uint8_t selected = decryptIndexCalibration.Selected();
+        if (selected == effectiveDecryptIndexOffset ||
+            selected == pendingDecryptIndexOffset) {
+            return;
+        }
+        pendingDecryptIndexOffset = selected;
+        pendingDecryptIndexFrame = frame;
+    }
+
     bool ReadIndexedCandidateUnlocked(
         std::uintptr_t component,
         RingSlot& selected,
@@ -1686,10 +1846,44 @@ struct CoordinatePoolRuntime::Impl {
         if (forceRefresh) {
             predictedPoolBlockCount = 0;
             stableIndexedPositions[component].Reset();
+            selected.indexedPositions = {};
+            selected.indexedBlockCount = 0;
+            selected.indexedResolvedOffset =
+                kCoordinatePoolUnknownDecryptIndexOffset;
+            selected.hasIndexedPositions = false;
         }
-        if (predictedPoolBlockCount == 0) {
+        UpdateDecryptIndexEffectiveOffsetUnlocked();
+
+        std::uint64_t index = 0;
+        if (!ReadRemoteUnlocked(
+                indexAddress,
+                &index,
+                sizeof(index),
+                CoordinateReadStage::RingIndex)) {
+            return FinishIndexedRemoteReadFailureUnlocked();
+        }
+        std::uint64_t decodedPoolSlot =
+            finder->decode_ring_slot(index);
+        CoordinatePoolPosition current{};
+        std::uint64_t indexAfter = 0;
+        std::uint8_t resolvedDecryptIndexOffset =
+            effectiveDecryptIndexOffset !=
+                kCoordinatePoolUnknownDecryptIndexOffset
+            ? effectiveDecryptIndexOffset
+            : static_cast<std::uint8_t>(decryptIndexOffset);
+        std::size_t poolSlot = kCoordinatePoolBlockProbeCount;
+        bool calibrationSnapshotRead = false;
+        std::array<CoordinatePoolPosition,
+                   kCoordinatePoolBlockProbeCount> indexedPositions{};
+        const bool calibrating =
+            TryConsumeDecryptIndexCalibrationReadUnlocked(component);
+        if (calibrating || predictedPoolBlockCount == 0) {
+            const std::size_t blocksToRead =
+                predictedPoolBlockCount == 0
+                ? kCoordinatePoolBlockProbeCount
+                : predictedPoolBlockCount;
             const std::size_t snapshotSize =
-                kCoordinatePoolBlockProbeCount *
+                blocksToRead *
                 static_cast<std::size_t>(layout.entryStride);
             if (!IsCoordinatePoolReadRangeValid(
                     snapshotAddress, snapshotSize)) {
@@ -1705,49 +1899,125 @@ struct CoordinatePoolRuntime::Impl {
                     poolSnapshotScratch.data(),
                     snapshotSize,
                     CoordinateReadStage::Position)) {
-                SetError(CoordinatePoolRuntimeError::RingPreparationFailed);
+                SetError(
+                    predictedPoolBlockCount == 0
+                        ? CoordinatePoolRuntimeError::RingPreparationFailed
+                        : CoordinatePoolRuntimeError::PositionReadFailed);
                 return false;
             }
-            std::array<CoordinatePoolPosition,
-                       kCoordinatePoolBlockProbeCount> positions{};
-            for (std::size_t block = 0;
-                 block < positions.size();
-                 ++block) {
+            for (std::size_t block = 0; block < blocksToRead; ++block) {
                 std::memcpy(
-                    &positions[block],
+                    &indexedPositions[block],
                     poolSnapshotScratch.data() +
                         block * static_cast<std::size_t>(layout.entryStride),
-                    sizeof(positions[block]));
+                    sizeof(indexedPositions[block]));
             }
-            const std::size_t predicted =
-                PredictCoordinatePoolBlockCount(
-                    positions.data(), positions.size());
-            if (predicted == 0 ||
-                predicted > kCoordinatePoolMaximumBlockCount) {
-                SetError(
-                    CoordinatePoolRuntimeError::RingPreparationFailed,
-                    false,
-                    -ENODATA);
-                return false;
+            if (predictedPoolBlockCount == 0) {
+                const std::size_t predicted =
+                    PredictCoordinatePoolBlockCount(
+                        indexedPositions.data(),
+                        indexedPositions.size());
+                if (predicted == 0 ||
+                    predicted > kCoordinatePoolMaximumBlockCount) {
+                    SetError(
+                        CoordinatePoolRuntimeError::RingPreparationFailed,
+                        false,
+                        -ENODATA);
+                    return false;
+                }
+                if (decryptIndexCalibrationBlockCount != 0 &&
+                    decryptIndexCalibrationBlockCount != predicted) {
+                    decryptIndexCalibration.Reset();
+                    effectiveDecryptIndexOffset =
+                        kCoordinatePoolUnknownDecryptIndexOffset;
+                    pendingDecryptIndexOffset =
+                        kCoordinatePoolUnknownDecryptIndexOffset;
+                    pendingDecryptIndexFrame =
+                        std::numeric_limits<std::uint64_t>::max();
+                    stableIndexedPositions.clear();
+                    decryptIndexCalibrationWitnesses = {};
+                    decryptIndexCalibrationWitnessCount = 0;
+                    decryptIndexCalibrationProgressFrame = frame;
+                    decryptIndexCalibrationLastEvidence = 0;
+                }
+                predictedPoolBlockCount =
+                    static_cast<std::uint8_t>(predicted);
+                decryptIndexCalibrationBlockCount =
+                    predictedPoolBlockCount;
             }
-            predictedPoolBlockCount =
-                static_cast<std::uint8_t>(predicted);
+            if (!ReadRemoteUnlocked(
+                    indexAddress,
+                    &indexAfter,
+                    sizeof(indexAfter),
+                    CoordinateReadStage::RingIndex)) {
+                return FinishIndexedRemoteReadFailureUnlocked();
+            }
+            calibrationSnapshotRead = true;
+            if (index == indexAfter) {
+                std::uint32_t changedSlotMask = 0;
+                if (selected.hasIndexedPositions &&
+                    selected.indexedBlockCount ==
+                        predictedPoolBlockCount &&
+                    selected.previousIndex != index &&
+                    selected.previousDecodedSlot != decodedPoolSlot) {
+                    for (std::size_t block = 0;
+                         block < predictedPoolBlockCount;
+                         ++block) {
+                        if (std::memcmp(
+                                &selected.indexedPositions[block],
+                                &indexedPositions[block],
+                                sizeof(CoordinatePoolPosition)) != 0 &&
+                            IsFinitePosition(indexedPositions[block]) &&
+                            !IsCoordinatePoolBlockTerminator(
+                                indexedPositions[block])) {
+                            changedSlotMask |=
+                                UINT32_C(1) << block;
+                        }
+                    }
+                }
+                if (changedSlotMask != 0) {
+                    const std::uint16_t matchingOffsets =
+                        MatchingCoordinatePoolDecryptIndexOffsets(
+                            decodedPoolSlot,
+                            changedSlotMask,
+                            predictedPoolBlockCount);
+                    decryptIndexCalibration.Observe(
+                        component, matchingOffsets);
+                    ScheduleDecryptIndexOffsetUnlocked();
+                }
+                selected.indexedPositions = indexedPositions;
+                selected.indexedBlockCount = predictedPoolBlockCount;
+                selected.previousIndex = index;
+                selected.previousDecodedSlot = decodedPoolSlot;
+                selected.hasIndexedPositions = true;
+            } else {
+                index = indexAfter;
+                decodedPoolSlot = finder->decode_ring_slot(index);
+                calibrationSnapshotRead = false;
+            }
+            resolvedDecryptIndexOffset =
+                effectiveDecryptIndexOffset !=
+                    kCoordinatePoolUnknownDecryptIndexOffset
+                ? effectiveDecryptIndexOffset
+                : static_cast<std::uint8_t>(decryptIndexOffset);
+            poolSlot = SelectCoordinatePoolIndexedSlot(
+                decodedPoolSlot,
+                resolvedDecryptIndexOffset,
+                predictedPoolBlockCount);
+            if (poolSlot < predictedPoolBlockCount) {
+                current = indexedPositions[poolSlot];
+            }
+        } else {
+            resolvedDecryptIndexOffset =
+                effectiveDecryptIndexOffset !=
+                    kCoordinatePoolUnknownDecryptIndexOffset
+                ? effectiveDecryptIndexOffset
+                : static_cast<std::uint8_t>(decryptIndexOffset);
+            poolSlot = SelectCoordinatePoolIndexedSlot(
+                decodedPoolSlot,
+                resolvedDecryptIndexOffset,
+                predictedPoolBlockCount);
         }
-
-        std::uint64_t index = 0;
-        if (!ReadRemoteUnlocked(
-                indexAddress,
-                &index,
-                sizeof(index),
-                CoordinateReadStage::RingIndex)) {
-            return FinishIndexedRemoteReadFailureUnlocked();
-        }
-        const std::uint64_t decodedPoolSlot =
-            finder->decode_ring_slot(index);
-        const std::size_t poolSlot = SelectCoordinatePoolIndexedSlot(
-            decodedPoolSlot,
-            decryptIndexOffset,
-            predictedPoolBlockCount);
         if (poolSlot >= predictedPoolBlockCount) {
             SetError(
                 CoordinatePoolRuntimeError::PositionReadFailed,
@@ -1769,22 +2039,25 @@ struct CoordinatePoolRuntime::Impl {
                 -ERANGE);
             return false;
         }
-
-        CoordinatePoolPosition current{};
-        if (!ReadRemoteUnlocked(
-                coordinateAddress,
-                &current,
-                sizeof(current),
-                CoordinateReadStage::Position)) {
-            return FinishIndexedRemoteReadFailureUnlocked();
+        if (!calibrationSnapshotRead) {
+            if (!ReadRemoteUnlocked(
+                    coordinateAddress,
+                    &current,
+                    sizeof(current),
+                    CoordinateReadStage::Position) ||
+                !ReadRemoteUnlocked(
+                    indexAddress,
+                    &indexAfter,
+                    sizeof(indexAfter),
+                    CoordinateReadStage::RingIndex)) {
+                return FinishIndexedRemoteReadFailureUnlocked();
+            }
         }
-        std::uint64_t indexAfter = 0;
-        if (!ReadRemoteUnlocked(
-                indexAddress,
-                &indexAfter,
-                sizeof(indexAfter),
-                CoordinateReadStage::RingIndex)) {
-            return FinishIndexedRemoteReadFailureUnlocked();
+        if (selected.indexedResolvedOffset !=
+            resolvedDecryptIndexOffset) {
+            stableIndexedPositions[component].Reset();
+            selected.indexedResolvedOffset =
+                resolvedDecryptIndexOffset;
         }
         std::uint8_t resolvedPoolSlot = UINT8_MAX;
         current = stableIndexedPositions[component].Resolve(
@@ -1801,14 +2074,22 @@ struct CoordinatePoolRuntime::Impl {
         candidates.selectedPhysicalSlot =
             static_cast<std::uint8_t>(poolSlot);
         candidates.decryptIndexOffset =
-            static_cast<std::uint8_t>(decryptIndexOffset);
+            resolvedDecryptIndexOffset;
+        candidates.decryptIndexEvidence = static_cast<std::uint8_t>(
+            std::min<std::size_t>(
+                decryptIndexCalibration.Evidence(), UINT8_MAX));
         candidates.poolBlockCount = predictedPoolBlockCount;
         candidates.resolvedPosition = current;
         candidates.resolvedPoolSlot = resolvedPoolSlot;
+        candidates.decryptIndexLocked =
+            effectiveDecryptIndexOffset !=
+            kCoordinatePoolUnknownDecryptIndexOffset;
         candidates.resolvedValid = IsFinitePosition(current);
         probe.decryptIndexOffset = candidates.decryptIndexOffset;
+        probe.decryptIndexEvidence = candidates.decryptIndexEvidence;
         probe.poolBlockCount = candidates.poolBlockCount;
         probe.selectedPoolSlot = candidates.resolvedPoolSlot;
+        probe.decryptIndexLocked = candidates.decryptIndexLocked;
         if (!candidates.resolvedValid) {
             selected.recovery.Observe(
                 CoordinatePoolRingReadEvent::OtherFailure);
@@ -1822,7 +2103,8 @@ struct CoordinatePoolRuntime::Impl {
                 stderr,
                 "[coordinate-pool-indexed] frame=%llu component=%llx "
                 "ring=%llx index=%llx index_after=%llx decoded=%llu "
-                "offset=%u blocks=%u slot=%u stable=%d "
+                "offset=%u auto_locked=%d evidence=%u components=%zu "
+                "blocks=%u slot=%u stable=%d "
                 "address=%llx xyz=(%.3f,%.3f,%.3f)\n",
                 static_cast<unsigned long long>(frame),
                 static_cast<unsigned long long>(component),
@@ -1830,7 +2112,11 @@ struct CoordinatePoolRuntime::Impl {
                 static_cast<unsigned long long>(index),
                 static_cast<unsigned long long>(indexAfter),
                 static_cast<unsigned long long>(decodedPoolSlot),
-                static_cast<unsigned int>(decryptIndexOffset),
+                static_cast<unsigned int>(resolvedDecryptIndexOffset),
+                candidates.decryptIndexLocked ? 1 : 0,
+                static_cast<unsigned int>(
+                    candidates.decryptIndexEvidence),
+                decryptIndexCalibration.ComponentCount(),
                 static_cast<unsigned int>(predictedPoolBlockCount),
                 static_cast<unsigned int>(poolSlot),
                 index == indexAfter ? 1 : 0,
@@ -3108,8 +3394,11 @@ private:
 
     void ClearPoolPointerUnlocked() {
         lastPoolPointer = 0;
+        predictedPoolBlockCount = 0;
         ringSlots.clear();
+        stableIndexedPositions.clear();
         ringSearchBudget.Reset();
+        ResetDecryptIndexWitnessesUnlocked();
         // The slot layout belongs to the analyzed code, not a rotating
         // execution context or pool allocation.
         probe.poolPointer = {};
@@ -3207,9 +3496,11 @@ private:
                     static_cast<unsigned long long>(pointer),
                     ringSlots.size());
             }
+            predictedPoolBlockCount = 0;
             ringSlots.clear();
+            stableIndexedPositions.clear();
             ringSearchBudget.Reset();
-            // Preserve layout evidence while component rings are rediscovered.
+            ResetDecryptIndexWitnessesUnlocked();
         }
         lastPoolPointer = pointer;
     }
@@ -3551,6 +3842,27 @@ private:
         parameterFingerprint = 0;
         lastPoolPointer = 0;
         predictedPoolBlockCount = 0;
+        decryptIndexCalibrationBlockCount = 0;
+        decryptIndexCalibration.Reset();
+        decryptIndexCalibrationFrame =
+            std::numeric_limits<std::uint64_t>::max();
+        decryptIndexCalibrationReads = 0;
+        decryptIndexCalibrationVisitCount = 0;
+        decryptIndexCalibrationPreviousVisitCount = 0;
+        decryptIndexCalibrationWindowStart = 0;
+        decryptIndexCalibrationWitnesses = {};
+        decryptIndexCalibrationWitnessCount = 0;
+        decryptIndexCalibrationProgressFrame =
+            std::numeric_limits<std::uint64_t>::max();
+        decryptIndexCalibrationLastEvidence = 0;
+        decryptIndexCalibrationLastAuditFrame =
+            std::numeric_limits<std::uint64_t>::max();
+        effectiveDecryptIndexOffset =
+            kCoordinatePoolUnknownDecryptIndexOffset;
+        pendingDecryptIndexOffset =
+            kCoordinatePoolUnknownDecryptIndexOffset;
+        pendingDecryptIndexFrame =
+            std::numeric_limits<std::uint64_t>::max();
         poolPointerRefreshFrame =
             std::numeric_limits<std::uint64_t>::max();
         ringSlots.clear();
@@ -3580,8 +3892,10 @@ private:
         probe.compactLayoutEvidence = 0;
         probe.extendedLayoutEvidence = 0;
         probe.decryptIndexOffset = 0;
+        probe.decryptIndexEvidence = 0;
         probe.poolBlockCount = 0;
         probe.selectedPoolSlot = 0;
+        probe.decryptIndexLocked = false;
         UpdateSlotLayoutProbeUnlocked();
         analysisInvalidated = false;
         nextCodeValidationFrame = 0;
@@ -3641,6 +3955,27 @@ private:
         frame = 0;
         lastPoolPointer = 0;
         predictedPoolBlockCount = 0;
+        decryptIndexCalibrationBlockCount = 0;
+        decryptIndexCalibration.Reset();
+        decryptIndexCalibrationFrame =
+            std::numeric_limits<std::uint64_t>::max();
+        decryptIndexCalibrationReads = 0;
+        decryptIndexCalibrationVisitCount = 0;
+        decryptIndexCalibrationPreviousVisitCount = 0;
+        decryptIndexCalibrationWindowStart = 0;
+        decryptIndexCalibrationWitnesses = {};
+        decryptIndexCalibrationWitnessCount = 0;
+        decryptIndexCalibrationProgressFrame =
+            std::numeric_limits<std::uint64_t>::max();
+        decryptIndexCalibrationLastEvidence = 0;
+        decryptIndexCalibrationLastAuditFrame =
+            std::numeric_limits<std::uint64_t>::max();
+        effectiveDecryptIndexOffset =
+            kCoordinatePoolUnknownDecryptIndexOffset;
+        pendingDecryptIndexOffset =
+            kCoordinatePoolUnknownDecryptIndexOffset;
+        pendingDecryptIndexFrame =
+            std::numeric_limits<std::uint64_t>::max();
         poolPointerRefreshFrame =
             std::numeric_limits<std::uint64_t>::max();
         ringSlots.clear();
@@ -3681,6 +4016,29 @@ private:
     CoordinateReadDiagnostic toleratedReadFailure{};
     std::uint64_t lastPoolPointer = 0;
     std::uint8_t predictedPoolBlockCount = 0;
+    std::uint8_t decryptIndexCalibrationBlockCount = 0;
+    CoordinatePoolDecryptIndexCalibration decryptIndexCalibration{};
+    std::uint64_t decryptIndexCalibrationFrame =
+        std::numeric_limits<std::uint64_t>::max();
+    std::size_t decryptIndexCalibrationReads = 0;
+    std::size_t decryptIndexCalibrationVisitCount = 0;
+    std::size_t decryptIndexCalibrationPreviousVisitCount = 0;
+    std::size_t decryptIndexCalibrationWindowStart = 0;
+    std::array<std::uint64_t,
+               kCoordinatePoolDecryptIndexCalibrationReadsPerFrame>
+        decryptIndexCalibrationWitnesses{};
+    std::size_t decryptIndexCalibrationWitnessCount = 0;
+    std::uint64_t decryptIndexCalibrationProgressFrame =
+        std::numeric_limits<std::uint64_t>::max();
+    std::size_t decryptIndexCalibrationLastEvidence = 0;
+    std::uint64_t decryptIndexCalibrationLastAuditFrame =
+        std::numeric_limits<std::uint64_t>::max();
+    std::uint8_t effectiveDecryptIndexOffset =
+        kCoordinatePoolUnknownDecryptIndexOffset;
+    std::uint8_t pendingDecryptIndexOffset =
+        kCoordinatePoolUnknownDecryptIndexOffset;
+    std::uint64_t pendingDecryptIndexFrame =
+        std::numeric_limits<std::uint64_t>::max();
     std::uint64_t poolPointerRefreshFrame =
         std::numeric_limits<std::uint64_t>::max();
     std::unordered_map<std::uint64_t, RingSlot> ringSlots;
