@@ -17,7 +17,10 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::CoordinatePoolRootSnapshotsMatch;
     using lengjing::game::native::IsCoordinatePoolRootSnapshotInitialized;
     using lengjing::game::native::CoordinatePoolCandidateSet;
+    using lengjing::game::native::CoordinatePoolStablePositionCache;
     using lengjing::game::native::IsCoordinatePoolReadRangeValid;
+    using lengjing::game::native::IsCoordinatePoolBlockTerminator;
+    using lengjing::game::native::IsCoordinatePoolDecryptIndexOffsetValid;
     using lengjing::game::native::IsCoordinatePoolSelectedCandidateValid;
     using lengjing::game::native::MapDecodedCoordinatePoolSlot;
     using lengjing::game::native::NextCoordinatePoolCodeValidationFrame;
@@ -30,12 +33,18 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::ShouldRetryCoordinatePoolRing;
     using lengjing::game::native::ShouldRetryCoordinatePoolCompactSnapshot;
     using lengjing::game::native::ShouldValidateCoordinatePoolCode;
+    using lengjing::game::native::SelectCoordinatePoolIndexedSlot;
+    using lengjing::game::native::PredictCoordinatePoolBlockCount;
     using lengjing::game::native::kCoordinatePoolCodeValidationIdleFrame;
     using lengjing::game::native::kCoordinatePoolCodeValidationRetryFrames;
     using lengjing::game::native::kCoordinatePoolRingRetryFrames;
     using lengjing::game::native::kCoordinatePoolRingReadFailureThreshold;
     using lengjing::game::native::kCoordinatePoolRingSearchesPerFrame;
     using lengjing::game::native::kCoordinatePoolMaximumRemoteAddress;
+    using lengjing::game::native::kCoordinatePoolBlockProbeCount;
+    using lengjing::game::native::kCoordinatePoolMaximumBlockCount;
+    using lengjing::game::native::
+        kCoordinatePoolMaximumDecryptIndexOffset;
     using lengjing::game::native::kCoordinatePoolMinimumRemoteAddress;
     REQUIRE(!CoordinatePoolEnvironmentFlagEnabled(nullptr));
     REQUIRE(!CoordinatePoolEnvironmentFlagEnabled(""));
@@ -57,6 +66,78 @@ void RunCoordinatePoolPolicyTests() {
         kCoordinatePoolMaximumRemoteAddress, 1));
     REQUIRE(!IsCoordinatePoolReadRangeValid(UINT64_MAX, 1));
 
+    REQUIRE(IsCoordinatePoolDecryptIndexOffsetValid(0));
+    REQUIRE(IsCoordinatePoolDecryptIndexOffsetValid(
+        kCoordinatePoolMaximumDecryptIndexOffset));
+    REQUIRE(!IsCoordinatePoolDecryptIndexOffsetValid(
+        kCoordinatePoolMaximumDecryptIndexOffset + 1));
+    REQUIRE(SelectCoordinatePoolIndexedSlot(0, 0, 10) == 0);
+    REQUIRE(SelectCoordinatePoolIndexedSlot(9, 1, 10) == 0);
+    REQUIRE(SelectCoordinatePoolIndexedSlot(13, 10, 14) == 9);
+    REQUIRE(SelectCoordinatePoolIndexedSlot(UINT64_MAX, 10, 19) == 9);
+    REQUIRE(SelectCoordinatePoolIndexedSlot(1, 0, 0) ==
+        kCoordinatePoolBlockProbeCount);
+    REQUIRE(SelectCoordinatePoolIndexedSlot(
+        1, 0, kCoordinatePoolMaximumBlockCount + 1) ==
+        kCoordinatePoolBlockProbeCount);
+    REQUIRE(SelectCoordinatePoolIndexedSlot(
+        1, kCoordinatePoolMaximumDecryptIndexOffset + 1, 10) ==
+        kCoordinatePoolBlockProbeCount);
+    REQUIRE(IsCoordinatePoolBlockTerminator({}));
+    REQUIRE(IsCoordinatePoolBlockTerminator({-0.0f, 0.0f, -0.0f}));
+    REQUIRE(!IsCoordinatePoolBlockTerminator({1.0f, 0.0f, 0.0f}));
+    std::array<lengjing::game::native::CoordinatePoolPosition,
+               kCoordinatePoolBlockProbeCount> poolBlocks{};
+    REQUIRE(PredictCoordinatePoolBlockCount(
+        poolBlocks.data(), poolBlocks.size()) == 0);
+    for (std::size_t index = 0; index < poolBlocks.size(); ++index) {
+        poolBlocks[index] = {
+            static_cast<float>(index + 1),
+            index == 3 ? 0.0f : 1.0f,
+            1.0f,
+        };
+    }
+    REQUIRE(PredictCoordinatePoolBlockCount(
+        poolBlocks.data(), poolBlocks.size()) == 0);
+    poolBlocks[5] = {};
+    REQUIRE(PredictCoordinatePoolBlockCount(
+        poolBlocks.data(), poolBlocks.size()) == 5);
+    poolBlocks[2] = {1.0f, 0.0f, 0.0f};
+    REQUIRE(PredictCoordinatePoolBlockCount(
+        poolBlocks.data(), poolBlocks.size()) == 5);
+    poolBlocks[19] = {};
+    poolBlocks[5] = {6.0f, 1.0f, 1.0f};
+    REQUIRE(PredictCoordinatePoolBlockCount(
+        poolBlocks.data(), poolBlocks.size()) == 19);
+    REQUIRE(PredictCoordinatePoolBlockCount(
+        poolBlocks.data(), poolBlocks.size() - 1) == 0);
+
+    CoordinatePoolStablePositionCache stablePosition;
+    std::uint8_t resolvedStableSlot = 0;
+    const auto initialConflict = stablePosition.Resolve(
+        1, 2, {11.0f, 12.0f, 13.0f}, 4, resolvedStableSlot);
+    REQUIRE(IsCoordinatePoolBlockTerminator(initialConflict));
+    REQUIRE(resolvedStableSlot == UINT8_MAX);
+    const auto firstStable = stablePosition.Resolve(
+        3, 3, {21.0f, 22.0f, 23.0f}, 6, resolvedStableSlot);
+    REQUIRE(firstStable.x == 21.0f);
+    REQUIRE(resolvedStableSlot == 6);
+    const auto retained = stablePosition.Resolve(
+        4, 5, {31.0f, 32.0f, 33.0f}, 9, resolvedStableSlot);
+    REQUIRE(retained.x == 21.0f);
+    REQUIRE(retained.y == 22.0f);
+    REQUIRE(retained.z == 23.0f);
+    REQUIRE(resolvedStableSlot == 6);
+    stablePosition.Reset();
+    REQUIRE(IsCoordinatePoolBlockTerminator(
+        stablePosition.Resolve(
+            6,
+            7,
+            {41.0f, 42.0f, 43.0f},
+            12,
+            resolvedStableSlot)));
+    REQUIRE(resolvedStableSlot == UINT8_MAX);
+
     CoordinatePoolCandidateSet candidates{};
     REQUIRE(!IsCoordinatePoolSelectedCandidateValid(candidates));
     candidates.valid[3] = true;
@@ -66,6 +147,11 @@ void RunCoordinatePoolPolicyTests() {
     candidates.selectedLogicalSlot =
         static_cast<std::uint8_t>(candidates.valid.size());
     REQUIRE(!IsCoordinatePoolSelectedCandidateValid(candidates));
+    candidates.resolvedPosition = {1.0f, 2.0f, 3.0f};
+    candidates.resolvedPoolSlot = 18;
+    candidates.resolvedValid = true;
+    REQUIRE(!IsCoordinatePoolSelectedCandidateValid(candidates));
+    REQUIRE(candidates.resolvedValid);
 
     using lengjing::game::native::kCoordinatePoolCompactLayout;
     using lengjing::game::native::kCoordinatePoolExtendedLayout;
@@ -385,12 +471,15 @@ void RunCoordinatePoolPolicyTests() {
 
     constexpr std::uint64_t pointer = UINT64_C(0x0000007123456780);
     REQUIRE(NormalizeCoordinatePoolPointer(
-        UINT64_C(0xABCD007123456780)) == pointer);
+        UINT64_C(0xAB00007123456780)) == pointer);
     REQUIRE(NormalizeCoordinatePoolPointer(pointer) == pointer);
+    REQUIRE(NormalizeCoordinatePoolPointer(
+        UINT64_C(0xAB01007123456780)) ==
+        UINT64_C(0x0001007123456780));
     REQUIRE(!ShouldClearCoordinatePoolRingsAfterPointerRefresh(
         true,
-        NormalizeCoordinatePoolPointer(UINT64_C(0xABCD007123456780)),
-        NormalizeCoordinatePoolPointer(UINT64_C(0x1234007123456780))));
+        NormalizeCoordinatePoolPointer(UINT64_C(0xAB00007123456780)),
+        NormalizeCoordinatePoolPointer(UINT64_C(0x1200007123456780))));
 
     REQUIRE(ShouldValidateCoordinatePoolCode(100, 100, false));
     REQUIRE(!ShouldValidateCoordinatePoolCode(100, 101, false));

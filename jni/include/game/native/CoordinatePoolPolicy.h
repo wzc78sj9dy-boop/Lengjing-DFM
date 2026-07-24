@@ -13,11 +13,15 @@ inline constexpr std::uint64_t kCoordinatePoolCodeValidationRetryFrames = 8;
 inline constexpr std::uint64_t kCoordinatePoolCodeValidationIdleFrame =
     UINT64_MAX;
 inline constexpr std::uint64_t kCoordinatePoolPointerPayloadMask =
-    UINT64_C(0x0000FFFFFFFFFFFF);
+    UINT64_C(0x00FFFFFFFFFFFFFF);
 inline constexpr std::uint64_t kCoordinatePoolMinimumRemoteAddress =
     UINT64_C(0x10000000);
 inline constexpr std::uint64_t kCoordinatePoolMaximumRemoteAddress =
     UINT64_C(0x10000000000);
+inline constexpr std::size_t kCoordinatePoolBlockProbeCount = 20;
+inline constexpr std::size_t kCoordinatePoolMaximumBlockCount =
+    kCoordinatePoolBlockProbeCount - 1;
+inline constexpr std::uint32_t kCoordinatePoolMaximumDecryptIndexOffset = 10;
 
 inline constexpr std::size_t kCoordinatePoolCompactLogicalSlotCount = 5;
 inline constexpr std::size_t kCoordinatePoolExtendedLogicalSlotCount = 7;
@@ -34,6 +38,24 @@ inline constexpr std::size_t
 inline constexpr std::size_t kCoordinatePoolLayoutMinimumLead = 2;
 inline constexpr std::size_t
     kCoordinatePoolLayoutInvalidDecodedSlotLimit = 3;
+
+constexpr bool IsCoordinatePoolDecryptIndexOffsetValid(
+    std::uint32_t offset) noexcept {
+    return offset <= kCoordinatePoolMaximumDecryptIndexOffset;
+}
+
+constexpr std::size_t SelectCoordinatePoolIndexedSlot(
+    std::uint64_t decodedSlot,
+    std::uint32_t decryptIndexOffset,
+    std::size_t blockCount) noexcept {
+    if (!IsCoordinatePoolDecryptIndexOffsetValid(decryptIndexOffset) ||
+        blockCount == 0 || blockCount > kCoordinatePoolMaximumBlockCount) {
+        return kCoordinatePoolBlockProbeCount;
+    }
+    const std::uint64_t adjusted =
+        decodedSlot + static_cast<std::uint64_t>(decryptIndexOffset);
+    return static_cast<std::size_t>(adjusted % blockCount);
+}
 
 enum class CoordinatePoolSlotLayoutKind : std::uint8_t {
     Unknown,

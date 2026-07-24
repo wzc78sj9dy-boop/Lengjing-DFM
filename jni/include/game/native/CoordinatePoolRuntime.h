@@ -49,6 +49,53 @@ struct CoordinatePoolPosition {
     float z = 0.0f;
 };
 
+class CoordinatePoolStablePositionCache final {
+public:
+    constexpr CoordinatePoolPosition Resolve(
+        std::uint64_t indexBefore,
+        std::uint64_t indexAfter,
+        const CoordinatePoolPosition& current,
+        std::uint8_t currentSlot,
+        std::uint8_t& resolvedSlot) noexcept {
+        if (indexBefore == indexAfter) {
+            position_ = current;
+            slot_ = currentSlot;
+        }
+        resolvedSlot = slot_;
+        return position_;
+    }
+
+    constexpr void Reset() noexcept {
+        position_ = {};
+        slot_ = UINT8_MAX;
+    }
+
+private:
+    CoordinatePoolPosition position_{};
+    std::uint8_t slot_ = UINT8_MAX;
+};
+
+constexpr bool IsCoordinatePoolBlockTerminator(
+    const CoordinatePoolPosition& position) noexcept {
+    return position.x == 0.0f && position.y == 0.0f &&
+        position.z == 0.0f;
+}
+
+constexpr std::size_t PredictCoordinatePoolBlockCount(
+    const CoordinatePoolPosition* positions,
+    std::size_t positionCount) noexcept {
+    if (positions == nullptr ||
+        positionCount < kCoordinatePoolBlockProbeCount) {
+        return 0;
+    }
+    for (std::size_t index = 0;
+         index < kCoordinatePoolBlockProbeCount;
+         ++index) {
+        if (IsCoordinatePoolBlockTerminator(positions[index])) return index;
+    }
+    return 0;
+}
+
 struct CoordinatePoolCandidateSet {
     std::array<CoordinatePoolPosition,
                kCoordinatePoolLogicalCandidateCount> positions{};
@@ -69,6 +116,11 @@ struct CoordinatePoolCandidateSet {
     std::uint8_t decodedPhysicalSlot = 0;
     std::uint8_t changedPhysicalCount = 0;
     std::uint8_t newestPhysicalSlot = UINT8_MAX;
+    std::uint8_t decryptIndexOffset = 0;
+    std::uint8_t poolBlockCount = 0;
+    CoordinatePoolPosition resolvedPosition{};
+    std::uint8_t resolvedPoolSlot = UINT8_MAX;
+    bool resolvedValid = false;
 };
 
 constexpr bool IsCoordinatePoolSelectedCandidateValid(
@@ -173,6 +225,9 @@ struct CoordinatePoolRuntimeProbe {
     std::uint8_t slotLayoutKind = 0;
     std::uint8_t compactLayoutEvidence = 0;
     std::uint8_t extendedLayoutEvidence = 0;
+    std::uint8_t decryptIndexOffset = 0;
+    std::uint8_t poolBlockCount = 0;
+    std::uint8_t selectedPoolSlot = 0;
     std::int32_t threadId = 0;
     std::uint64_t contextGeneration = 0;
     std::uint64_t attempts = 0;
@@ -201,7 +256,15 @@ public:
     bool ReadPosition(std::uintptr_t component,
                       CoordinatePoolPosition& position,
                       bool refresh = false) noexcept;
+    bool ReadPosition(std::uintptr_t component,
+                      std::uint32_t decryptIndexOffset,
+                      CoordinatePoolPosition& position,
+                      bool refresh = false) noexcept;
     bool ReadCandidates(std::uintptr_t component,
+                        CoordinatePoolCandidateSet& candidates,
+                        bool refresh = false) noexcept;
+    bool ReadCandidates(std::uintptr_t component,
+                        std::uint32_t decryptIndexOffset,
                         CoordinatePoolCandidateSet& candidates,
                         bool refresh = false) noexcept;
     CoordinatePoolRuntimeProbe Probe() const noexcept;

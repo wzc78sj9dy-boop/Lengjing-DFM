@@ -1381,6 +1381,11 @@ public:
 
         const bool coordinateRequestChanged =
             algorithmPositionRequested_ != requestedCoordinateReplay;
+        const std::uint32_t requestedCoordinateDecryptIndex =
+            static_cast<std::uint32_t>(std::clamp(
+                settings.visual.coordinateDecryptIndex, 0, 10));
+        const bool coordinateDecryptIndexChanged =
+            coordinateDecryptIndex_ != requestedCoordinateDecryptIndex;
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
         const bool requestedAlgorithmCoordinate =
             settings.visual.algorithmDecrypt ||
@@ -1390,6 +1395,7 @@ public:
         algorithmDecryptRequested_ = requestedAlgorithmCoordinate;
 #endif
         algorithmPositionRequested_ = requestedCoordinateReplay;
+        coordinateDecryptIndex_ = requestedCoordinateDecryptIndex;
         if (coordinateRequestChanged) {
             algorithmReplayBackoffPolicy_.Reset();
             algorithmReplayPagePolicy_.Invalidate();
@@ -1402,7 +1408,8 @@ public:
             coordinatePoolEntry_ = 0;
         }
         bool coordinateSourceChanged = coordinateRequestChanged ||
-            hardwareBreakpointRequestChanged;
+            hardwareBreakpointRequestChanged ||
+            coordinateDecryptIndexChanged;
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
         coordinateSourceChanged =
             coordinateSourceChanged || algorithmCoordinateRequestChanged;
@@ -4701,36 +4708,19 @@ private:
                 const bool canReadPosition = coordinatePoolReady_ &&
                     memory_ != nullptr && IsValidPointer(coordinateIdentity);
                 if (canReadPosition && coordinatePoolRuntime_.ReadCandidates(
-                        coordinateIdentity, candidates)) {
+                        coordinateIdentity,
+                        coordinateDecryptIndex_,
+                        candidates)) {
                     ++algorithmSuccessCount_;
 
-                    std::uint32_t validMask = 0;
-                    for (std::size_t slot = 0;
-                         slot < candidates.positions.size();
-                         ++slot) {
-                        const auto& candidate = candidates.positions[slot];
-                        const Vec3 decoded{
-                            candidate.x,
-                            candidate.y,
-                            candidate.z,
-                        };
-                        if (candidates.valid[slot] && IsFinite(decoded) &&
-                            IsNonzero(decoded)) {
-                            validMask |= 1U << slot;
-                        }
-                    }
-
-                    const std::size_t observedSlot =
-                        candidates.selectedLogicalSlot;
-                    Vec3 observedRaw{};
-                    bool observedValid = false;
-                    if (observedSlot < candidates.positions.size()) {
-                        const auto& observed =
-                            candidates.positions[observedSlot];
-                        observedRaw = {observed.x, observed.y, observed.z};
-                        observedValid = candidates.valid[observedSlot] &&
-                            IsFinite(observedRaw) && IsNonzero(observedRaw);
-                    }
+                    const auto& observed = candidates.resolvedPosition;
+                    const Vec3 observedRaw{
+                        observed.x,
+                        observed.y,
+                        observed.z,
+                    };
+                    const bool observedValid = candidates.resolvedValid &&
+                        IsFinite(observedRaw) && IsNonzero(observedRaw);
 
                     if (trace != nullptr) {
                         trace->raw = observedRaw;
@@ -4744,9 +4734,8 @@ private:
                             stderr,
                             "[coordinate-pool-selected] frame=%llu world=%llx "
                             "actor=%llx component=%llx ring=%llx index=%llx "
-                            "decoded=%u physical=%u bank=%u selected=%u "
-                            "layout=%u/%u phase=%u "
-                            "valid_mask=%02x accepted=%d "
+                            "decoded=%u offset=%u blocks=%u slot=%u "
+                            "accepted=%d "
                             "xyz=(%.3f,%.3f,%.3f)\n",
                             static_cast<unsigned long long>(
                                 coordinateTraceFrame_),
@@ -4758,16 +4747,11 @@ private:
                             static_cast<unsigned int>(
                                 candidates.decodedPhysicalSlot),
                             static_cast<unsigned int>(
-                                candidates.selectedPhysicalSlot),
-                            static_cast<unsigned int>(candidates.activeBank),
+                                candidates.decryptIndexOffset),
                             static_cast<unsigned int>(
-                                candidates.selectedLogicalSlot),
+                                candidates.poolBlockCount),
                             static_cast<unsigned int>(
-                                candidates.logicalSlotCount),
-                            static_cast<unsigned int>(
-                                candidates.physicalSlotCount),
-                            static_cast<unsigned int>(candidates.slotPhase),
-                            static_cast<unsigned int>(validMask),
+                                candidates.resolvedPoolSlot),
                             observedValid ? 1 : 0,
                             observedRaw.x,
                             observedRaw.y,
@@ -8715,6 +8699,7 @@ private:
         algorithmFrameAgedDecodedFailure_ = false;
         decodedPositionPending_.clear();
         algorithmPositionRequested_ = false;
+        coordinateDecryptIndex_ = 0;
         hardwareBreakpointRequested_ = false;
         hardwareBreakpointRetryAfter_ = {};
         hardwareBreakpointFailure_ = {};
@@ -8801,6 +8786,7 @@ private:
     bool algorithmEntryReady_ = false;
     bool algorithmReplayAllowedThisFrame_ = true;
     bool algorithmPositionRequested_ = false;
+    std::uint32_t coordinateDecryptIndex_ = 0;
     bool hardwareBreakpointRequested_ = false;
     std::chrono::steady_clock::time_point
         hardwareBreakpointRetryAfter_{};

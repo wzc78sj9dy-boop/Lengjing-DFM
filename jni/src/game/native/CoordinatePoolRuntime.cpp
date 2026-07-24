@@ -769,7 +769,9 @@ struct CoordinatePoolRuntime::Impl {
                 component,
                 candidates,
                 forceRefresh,
-                validationWasRequested)) {
+                validationWasRequested,
+                false,
+                0)) {
             FinishFailedReadUnlocked(validationWasRequested);
             return false;
         }
@@ -779,6 +781,34 @@ struct CoordinatePoolRuntime::Impl {
             return false;
         }
         position = candidates.positions[candidates.selectedLogicalSlot];
+        FinishReadUnlocked(validationWasRequested);
+        return true;
+    }
+
+    bool ReadPosition(std::uintptr_t component,
+                      std::uint32_t decryptIndexOffset,
+                      CoordinatePoolPosition& position,
+                      bool forceRefresh = false) {
+        std::lock_guard<std::mutex> lock(mutex);
+        position = {};
+        CoordinatePoolCandidateSet candidates{};
+        bool validationWasRequested = false;
+        if (!ReadCandidatesUnlocked(
+                component,
+                candidates,
+                forceRefresh,
+                validationWasRequested,
+                true,
+                decryptIndexOffset)) {
+            FinishFailedReadUnlocked(validationWasRequested);
+            return false;
+        }
+        if (!candidates.resolvedValid) {
+            SetError(CoordinatePoolRuntimeError::PositionNotFinite);
+            FinishFailedReadUnlocked(validationWasRequested);
+            return false;
+        }
+        position = candidates.resolvedPosition;
         FinishReadUnlocked(validationWasRequested);
         return true;
     }
@@ -793,7 +823,30 @@ struct CoordinatePoolRuntime::Impl {
                 component,
                 candidates,
                 forceRefresh,
-                validationWasRequested)) {
+                validationWasRequested,
+                false,
+                0)) {
+            FinishFailedReadUnlocked(validationWasRequested);
+            return false;
+        }
+        FinishReadUnlocked(validationWasRequested);
+        return true;
+    }
+
+    bool ReadCandidates(std::uintptr_t component,
+                        std::uint32_t decryptIndexOffset,
+                        CoordinatePoolCandidateSet& candidates,
+                        bool forceRefresh = false) {
+        std::lock_guard<std::mutex> lock(mutex);
+        candidates = {};
+        bool validationWasRequested = false;
+        if (!ReadCandidatesUnlocked(
+                component,
+                candidates,
+                forceRefresh,
+                validationWasRequested,
+                true,
+                decryptIndexOffset)) {
             FinishFailedReadUnlocked(validationWasRequested);
             return false;
         }
@@ -805,13 +858,17 @@ struct CoordinatePoolRuntime::Impl {
         std::uintptr_t component,
         CoordinatePoolCandidateSet& candidates,
         bool forceRefresh,
-        bool& validationWasRequested) {
+        bool& validationWasRequested,
+        bool indexed,
+        std::uint32_t decryptIndexOffset) {
         ClearReadDiagnosticUnlocked();
         candidates = {};
         ++probe.attempts;
         validationWasRequested = codeValidationRequested;
         if (memory == nullptr || finder == nullptr || engine == nullptr ||
-            !executionContext.IsUsable() || !IsValidGuestAddress(component)) {
+            !executionContext.IsUsable() || !IsValidGuestAddress(component) ||
+            (indexed &&
+             !IsCoordinatePoolDecryptIndexOffsetValid(decryptIndexOffset))) {
             SetError(CoordinatePoolRuntimeError::InvalidInput);
             return false;
         }
@@ -895,6 +952,15 @@ struct CoordinatePoolRuntime::Impl {
         } else {
             SetError(CoordinatePoolRuntimeError::RingSearchFailed);
             return false;
+        }
+
+        if (indexed) {
+            return ReadIndexedCandidateUnlocked(
+                component,
+                *selected,
+                decryptIndexOffset,
+                candidates,
+                forceRefresh);
         }
 
         std::uint64_t rawIndexAddress = 0;
@@ -1548,6 +1614,222 @@ struct CoordinatePoolRuntime::Impl {
         }
 
         return true;
+    }
+
+    bool ReadIndexedCandidateUnlocked(
+        std::uintptr_t component,
+        RingSlot& selected,
+        std::uint32_t decryptIndexOffset,
+        CoordinatePoolCandidateSet& candidates,
+        bool forceRefresh) {
+        std::uint64_t rawIndexAddress = 0;
+        if (!AddSignedOffset(
+                selected.ring, finder->index_offset, rawIndexAddress)) {
+            SetError(
+                CoordinatePoolRuntimeError::PositionReadFailed,
+                true,
+                -ERANGE);
+            return false;
+        }
+        const std::uint64_t indexAddress =
+            NormalizePointer(rawIndexAddress);
+        if (!IsCoordinatePoolReadRangeValid(
+                indexAddress, sizeof(std::uint64_t))) {
+            SetError(
+                CoordinatePoolRuntimeError::PositionReadFailed,
+                true,
+                -ERANGE);
+            return false;
+        }
+
+        std::uint64_t relativeAddress = 0;
+        std::uint64_t rawSnapshotAddress = 0;
+        if (!AddUnsignedOffset(
+                finder->get_ring_offset(),
+                layout.poolHeadSkip,
+                relativeAddress) ||
+            !AddUnsignedOffset(
+                selected.ring,
+                relativeAddress,
+                rawSnapshotAddress)) {
+            SetError(
+                CoordinatePoolRuntimeError::PositionReadFailed,
+                true,
+                -ERANGE);
+            return false;
+        }
+        const std::uint64_t snapshotAddress =
+            NormalizePointer(rawSnapshotAddress);
+        if (!IsRemoteAddress(snapshotAddress)) {
+            SetError(
+                CoordinatePoolRuntimeError::PositionReadFailed,
+                true,
+                -ERANGE);
+            return false;
+        }
+
+        if (forceRefresh) {
+            predictedPoolBlockCount = 0;
+            stableIndexedPositions[component].Reset();
+        }
+        if (predictedPoolBlockCount == 0) {
+            const std::size_t snapshotSize =
+                kCoordinatePoolBlockProbeCount *
+                static_cast<std::size_t>(layout.entryStride);
+            if (!IsCoordinatePoolReadRangeValid(
+                    snapshotAddress, snapshotSize)) {
+                SetError(
+                    CoordinatePoolRuntimeError::RingPreparationFailed,
+                    false,
+                    -ERANGE);
+                return false;
+            }
+            poolSnapshotScratch.resize(snapshotSize);
+            if (!ReadRemoteUnlocked(
+                    snapshotAddress,
+                    poolSnapshotScratch.data(),
+                    snapshotSize,
+                    CoordinateReadStage::Position)) {
+                SetError(CoordinatePoolRuntimeError::RingPreparationFailed);
+                return false;
+            }
+            std::array<CoordinatePoolPosition,
+                       kCoordinatePoolBlockProbeCount> positions{};
+            for (std::size_t block = 0;
+                 block < positions.size();
+                 ++block) {
+                std::memcpy(
+                    &positions[block],
+                    poolSnapshotScratch.data() +
+                        block * static_cast<std::size_t>(layout.entryStride),
+                    sizeof(positions[block]));
+            }
+            const std::size_t predicted =
+                PredictCoordinatePoolBlockCount(
+                    positions.data(), positions.size());
+            if (predicted == 0 ||
+                predicted > kCoordinatePoolMaximumBlockCount) {
+                SetError(
+                    CoordinatePoolRuntimeError::RingPreparationFailed,
+                    false,
+                    -ENODATA);
+                return false;
+            }
+            predictedPoolBlockCount =
+                static_cast<std::uint8_t>(predicted);
+        }
+
+        std::uint64_t index = 0;
+        if (!ReadRemoteUnlocked(
+                indexAddress,
+                &index,
+                sizeof(index),
+                CoordinateReadStage::RingIndex)) {
+            return FinishIndexedRemoteReadFailureUnlocked();
+        }
+        const std::uint64_t decodedPoolSlot =
+            finder->decode_ring_slot(index);
+        const std::size_t poolSlot = SelectCoordinatePoolIndexedSlot(
+            decodedPoolSlot,
+            decryptIndexOffset,
+            predictedPoolBlockCount);
+        if (poolSlot >= predictedPoolBlockCount) {
+            SetError(
+                CoordinatePoolRuntimeError::PositionReadFailed,
+                false,
+                -ERANGE);
+            return false;
+        }
+        const std::uint64_t slotOffset =
+            poolSlot * static_cast<std::uint64_t>(layout.entryStride);
+        std::uint64_t coordinateAddress = 0;
+        if (!AddUnsignedOffset(
+                snapshotAddress, slotOffset, coordinateAddress) ||
+            !IsCoordinatePoolReadRangeValid(
+                coordinateAddress,
+                sizeof(CoordinatePoolPosition))) {
+            SetError(
+                CoordinatePoolRuntimeError::PositionReadFailed,
+                true,
+                -ERANGE);
+            return false;
+        }
+
+        CoordinatePoolPosition current{};
+        if (!ReadRemoteUnlocked(
+                coordinateAddress,
+                &current,
+                sizeof(current),
+                CoordinateReadStage::Position)) {
+            return FinishIndexedRemoteReadFailureUnlocked();
+        }
+        std::uint64_t indexAfter = 0;
+        if (!ReadRemoteUnlocked(
+                indexAddress,
+                &indexAfter,
+                sizeof(indexAfter),
+                CoordinateReadStage::RingIndex)) {
+            return FinishIndexedRemoteReadFailureUnlocked();
+        }
+        std::uint8_t resolvedPoolSlot = UINT8_MAX;
+        current = stableIndexedPositions[component].Resolve(
+            index,
+            indexAfter,
+            current,
+            static_cast<std::uint8_t>(poolSlot),
+            resolvedPoolSlot);
+
+        candidates.ring = selected.ring;
+        candidates.index = index;
+        candidates.decodedPhysicalSlot =
+            static_cast<std::uint8_t>(decodedPoolSlot);
+        candidates.selectedPhysicalSlot =
+            static_cast<std::uint8_t>(poolSlot);
+        candidates.decryptIndexOffset =
+            static_cast<std::uint8_t>(decryptIndexOffset);
+        candidates.poolBlockCount = predictedPoolBlockCount;
+        candidates.resolvedPosition = current;
+        candidates.resolvedPoolSlot = resolvedPoolSlot;
+        candidates.resolvedValid = IsFinitePosition(current);
+        probe.decryptIndexOffset = candidates.decryptIndexOffset;
+        probe.poolBlockCount = candidates.poolBlockCount;
+        probe.selectedPoolSlot = candidates.resolvedPoolSlot;
+        if (!candidates.resolvedValid) {
+            selected.recovery.Observe(
+                CoordinatePoolRingReadEvent::OtherFailure);
+            SetError(CoordinatePoolRuntimeError::PositionNotFinite);
+            return false;
+        }
+        selected.recovery.Observe(CoordinatePoolRingReadEvent::Success);
+
+        if (IsCoordinatePoolTraceEnabled()) {
+            std::fprintf(
+                stderr,
+                "[coordinate-pool-indexed] frame=%llu component=%llx "
+                "ring=%llx index=%llx index_after=%llx decoded=%llu "
+                "offset=%u blocks=%u slot=%u stable=%d "
+                "address=%llx xyz=(%.3f,%.3f,%.3f)\n",
+                static_cast<unsigned long long>(frame),
+                static_cast<unsigned long long>(component),
+                static_cast<unsigned long long>(selected.ring),
+                static_cast<unsigned long long>(index),
+                static_cast<unsigned long long>(indexAfter),
+                static_cast<unsigned long long>(decodedPoolSlot),
+                static_cast<unsigned int>(decryptIndexOffset),
+                static_cast<unsigned int>(predictedPoolBlockCount),
+                static_cast<unsigned int>(poolSlot),
+                index == indexAfter ? 1 : 0,
+                static_cast<unsigned long long>(coordinateAddress),
+                current.x,
+                current.y,
+                current.z);
+        }
+        return true;
+    }
+
+    bool FinishIndexedRemoteReadFailureUnlocked() {
+        SetError(CoordinatePoolRuntimeError::PositionReadFailed);
+        return false;
     }
 
     void UpdateSlotLayoutProbeUnlocked() noexcept {
@@ -3188,9 +3470,11 @@ private:
         parameterFrame = std::numeric_limits<std::uint64_t>::max();
         parameterFingerprint = 0;
         lastPoolPointer = 0;
+        predictedPoolBlockCount = 0;
         poolPointerRefreshFrame =
             std::numeric_limits<std::uint64_t>::max();
         ringSlots.clear();
+        stableIndexedPositions.clear();
         ringSearchBudget.Reset();
         slotLayoutCalibration.Reset();
         probe.bridge = 0;
@@ -3215,6 +3499,9 @@ private:
         probe.slotLayoutKind = 0;
         probe.compactLayoutEvidence = 0;
         probe.extendedLayoutEvidence = 0;
+        probe.decryptIndexOffset = 0;
+        probe.poolBlockCount = 0;
+        probe.selectedPoolSlot = 0;
         UpdateSlotLayoutProbeUnlocked();
         analysisInvalidated = false;
         nextCodeValidationFrame = 0;
@@ -3272,9 +3559,11 @@ private:
         codeValidationRequested = false;
         frame = 0;
         lastPoolPointer = 0;
+        predictedPoolBlockCount = 0;
         poolPointerRefreshFrame =
             std::numeric_limits<std::uint64_t>::max();
         ringSlots.clear();
+        stableIndexedPositions.clear();
         ringSearchBudget.Reset();
         slotLayoutCalibration.Reset();
         probe = {};
@@ -3310,9 +3599,12 @@ private:
     std::uint64_t frame = 0;
     CoordinateReadDiagnostic toleratedReadFailure{};
     std::uint64_t lastPoolPointer = 0;
+    std::uint8_t predictedPoolBlockCount = 0;
     std::uint64_t poolPointerRefreshFrame =
         std::numeric_limits<std::uint64_t>::max();
     std::unordered_map<std::uint64_t, RingSlot> ringSlots;
+    std::unordered_map<std::uint64_t, CoordinatePoolStablePositionCache>
+        stableIndexedPositions;
     CoordinatePoolRingSearchBudget ringSearchBudget;
     CoordinatePoolSlotLayoutCalibration slotLayoutCalibration;
     std::vector<std::uint8_t> poolSnapshotScratch;
@@ -3375,6 +3667,21 @@ bool CoordinatePoolRuntime::ReadPosition(
     }
 }
 
+bool CoordinatePoolRuntime::ReadPosition(
+    std::uintptr_t component,
+    std::uint32_t decryptIndexOffset,
+    CoordinatePoolPosition& position,
+    bool forceRefresh) noexcept {
+    position = {};
+    try {
+        return impl_ != nullptr && impl_->ReadPosition(
+            component, decryptIndexOffset, position, forceRefresh);
+    } catch (...) {
+        position = {};
+        return false;
+    }
+}
+
 bool CoordinatePoolRuntime::ReadCandidates(
     std::uintptr_t component,
     CoordinatePoolCandidateSet& candidates,
@@ -3383,6 +3690,21 @@ bool CoordinatePoolRuntime::ReadCandidates(
     try {
         return impl_ != nullptr && impl_->ReadCandidates(
             component, candidates, forceRefresh);
+    } catch (...) {
+        candidates = {};
+        return false;
+    }
+}
+
+bool CoordinatePoolRuntime::ReadCandidates(
+    std::uintptr_t component,
+    std::uint32_t decryptIndexOffset,
+    CoordinatePoolCandidateSet& candidates,
+    bool forceRefresh) noexcept {
+    candidates = {};
+    try {
+        return impl_ != nullptr && impl_->ReadCandidates(
+            component, decryptIndexOffset, candidates, forceRefresh);
     } catch (...) {
         candidates = {};
         return false;
