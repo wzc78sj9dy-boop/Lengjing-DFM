@@ -434,7 +434,6 @@ bool ParseLayout(const Json& object,
                      "layout.coordinate_replay_entry", failure)) {
         return false;
     }
-
     const Json& geometry = object.at("geometry_instances");
     if (!geometry.is_array() || geometry.size() !=
             layout.geometryInstancePointerOffsets.size()) {

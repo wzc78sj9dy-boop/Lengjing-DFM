@@ -28,11 +28,10 @@
 #include "game/native/CoordinateDecrypt2Runtime.h"
 #include "game/native/CoordinateOutputPolicy.h"
 #include "game/native/CoordinatePoolRuntime.h"
-#if 0
 #include "game/native/ExecutionVeneerLocator.h"
-#endif
 #include "game/native/FrameProjection.h"
 #include "game/native/GeometryRuntime.h"
+#include "game/native/GeometrySceneBuildPolicy.h"
 #if 0
 #include "game/native/HardwareBreakpointCoordinateRuntime.h"
 #endif
@@ -94,32 +93,12 @@ constexpr std::uintptr_t kMaximumRemoteAddress = 0x10000000000ULL;
 constexpr std::int32_t kMaximumActorCount = 10000;
 constexpr std::int32_t kMaximumWorldObjectCount = 65536;
 constexpr std::size_t kMaximumNameLength = 249;
+constexpr std::uint64_t kCoordinateTraceIntervalFrames = 30;
 
-#if 0
-constexpr std::uintptr_t kCoordinateIdOffset = 0x2D8;
-
-struct CoordinateExecutionProfile {
-    std::string_view buildId;
-    std::uintptr_t firstVeneerRva = 0;
-};
-
-constexpr std::array<CoordinateExecutionProfile, 1>
-    kCoordinateExecutionProfiles{{
-        {
-            "8187ddb9edbc9d5201201ffd7b008df3bfe533db",
-            UINT64_C(0x0E7F5514),
-        },
-    }};
-
-const CoordinateExecutionProfile* FindCoordinateExecutionProfile(
-    std::string_view buildId) noexcept {
-    for (const CoordinateExecutionProfile& profile :
-         kCoordinateExecutionProfiles) {
-        if (profile.buildId == buildId) return &profile;
-    }
-    return nullptr;
+constexpr bool ShouldWriteCoordinateFrameTrace(
+    std::uint64_t frame) noexcept {
+    return frame < 5 || (frame % kCoordinateTraceIntervalFrames) == 0;
 }
-#endif
 
 std::uintptr_t ForcedCoordinateProbeComponent() noexcept {
 #if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
@@ -1019,6 +998,20 @@ bool IsBotClass(std::string_view name) {
            IsRangeTargetClass(name);
 }
 
+struct FNameClassTraits {
+    bool character = false;
+    bool rangeTarget = false;
+    bool bot = false;
+};
+
+FNameClassTraits ClassifyFName(std::string_view name) {
+    return FNameClassTraits{
+        IsCharacterClass(name),
+        IsRangeTargetClass(name),
+        IsBotClass(name),
+    };
+}
+
 bool IsPickupClass(std::string_view name) {
     return name.find("Pickup_C") != std::string_view::npos ||
         name.find("PickUp_") != std::string_view::npos ||
@@ -1359,7 +1352,11 @@ public:
             error = "目标游戏进程已结束";
             return false;
         }
-        UpdateGeometryRuntime(settings);
+        {
+            platform::PerformanceTraceScope geometryUpdateTrace(
+                platform::PerformancePhase::GeometryUpdate);
+            UpdateGeometryRuntime(settings);
+        }
 
         const bool requestedHardwareBreakpoint =
             settings.visual.hardwareBreakpointDecrypt;
@@ -1477,6 +1474,8 @@ public:
             UsesAnyCoordinatePoolRuntime();
         if (!coordinatePoolSelected ||
             ForcedCoordinateProbeComponent() != 0) {
+            platform::PerformanceTraceScope entryRefreshTrace(
+                platform::PerformancePhase::CoordinateEntryRefresh);
             RefreshAlgorithmEntry(false);
         }
         const auto algorithmFrameNow = std::chrono::steady_clock::now();
@@ -1490,6 +1489,8 @@ public:
         }
         if (!algorithmPositionRequested_ ||
             algorithmReplayAllowedThisFrame_) {
+            platform::PerformanceTraceScope contextRefreshTrace(
+                platform::PerformancePhase::CoordinateContextRefresh);
             RefreshAlgorithmExecutionContext();
         }
         const bool infrastructureProbeFailed =
@@ -1539,6 +1540,9 @@ public:
                 error);
         }
         if (!frameContextReady) {
+            if (geometryRuntime_.IsRunning()) {
+                geometryValidationPending_ = true;
+            }
             SetRuntimeFailure(
                 probe,
                 frameDiagnostic.error != RuntimeError::None
@@ -1555,7 +1559,23 @@ public:
         if (world_ != context.world) {
             ResetWorldState();
             world_ = context.world;
-            RequestGeometryRefresh();
+        }
+        if (geometryWorld_ != context.world) {
+            const bool refreshExistingWorld =
+                native::ShouldRequestGeometryRefresh(
+                    geometryWorld_, context.world);
+            geometryWorld_ = context.world;
+            if (refreshExistingWorld) {
+                RequestGeometryRefresh();
+            }
+            geometryValidationPending_ = false;
+        } else if (geometryValidationPending_) {
+            geometryValidationPending_ = false;
+            if (geometryRuntime_.IsRunning()) {
+                geometrySnapshotReady_ = false;
+                geometryValidationEpoch_ =
+                    geometryRuntime_.RequestValidation();
+            }
         }
 #if 0
         if (hardwareBreakpointRequested_ &&
@@ -1613,6 +1633,10 @@ public:
             frame.crosshair = crosshair;
         }
 
+        float radarForwardX = 0.0f;
+        float radarForwardY = 0.0f;
+        float radarRightX = 0.0f;
+        float radarRightY = 0.0f;
         if (settings.radar.overlay) {
             RadarVisual radar{};
             const float size = std::clamp(settings.radar.overlaySize, 90.0f, 800.0f);
@@ -1622,6 +1646,10 @@ public:
             radar.radius = size * 0.5f;
             radar.maxDistanceMeters = std::max(1.0f, settings.radar.overlayRangeMeters);
             radar.viewHeadingRadians = context.view.rotation.yaw * kPi / 180.0f;
+            radarForwardX = std::cos(radar.viewHeadingRadians);
+            radarForwardY = std::sin(radar.viewHeadingRadians);
+            radarRightX = -radarForwardY;
+            radarRightY = radarForwardX;
             radar.showSelf = settings.radar.showSelf;
             frame.radar = std::move(radar);
         }
@@ -1816,7 +1844,13 @@ public:
             if (!className.empty()) {
                 ++decodedNameCount;
             }
-            bool character = IsCharacterClass(className);
+            FNameClassTraits classTraits{};
+            {
+                platform::PerformanceTraceScope classificationTrace(
+                    platform::PerformancePhase::ActorClassification, 64);
+                classTraits = ResolveClassTraits(nameIndex, className);
+            }
+            bool character = classTraits.character;
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
             character = character || trackingPlayerClass;
 #endif
@@ -1844,12 +1878,12 @@ public:
             }
             ++characterActorCount;
             const bool rangeTargetClass =
-                IsRangeTargetClass(className)
+                classTraits.rangeTarget
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
                 || trackingRangeTarget
 #endif
                 ;
-            const bool namedBotClass = IsBotClass(className);
+            const bool namedBotClass = classTraits.bot;
             const std::uintptr_t playerState = ReadPointer(actor + 0x390);
             const bool playerStateAvailable = IsValidPointer(playerState);
             const bool botClass = namedBotClass
@@ -2132,6 +2166,7 @@ public:
                 !HasReadableBoneArray(actorRecord)) {
                 continue;
             }
+            const bool inFrontOfCamera = cameraPoint.forward > 0.01f;
             native::PlayerScreenBounds anchorBounds{};
             const bool anchorBoundsReady =
                 native::CalculatePlayerAnchorBounds(
@@ -2140,7 +2175,6 @@ public:
                     native::PlayerBoneScreenPoint{
                         bodyTop.x, bodyTop.y, topProjected},
                     anchorBounds);
-            const bool inFrontOfCamera = cameraPoint.forward > 0.01f;
             bool onScreen = inFrontOfCamera && anchorBoundsReady &&
                 native::IsReliablePlayerScreenBounds(
                     anchorBounds,
@@ -2496,6 +2530,10 @@ public:
                         false,
                         settings.visual.visibilityColor,
                         playerVisibility),
+                    radarForwardX,
+                    radarForwardY,
+                    radarRightX,
+                    radarRightY,
                     *frame.radar);
             }
             if (!onScreen && warningInRange &&
@@ -3068,6 +3106,23 @@ private:
         std::chrono::steady_clock::time_point alignedSince{};
     };
 
+    struct GeometryReadRoute {
+        native::MemoryTransport* shared = nullptr;
+        native::MemoryTransport* dedicated = nullptr;
+        std::atomic<bool> useDedicated{false};
+        std::atomic<std::uint32_t> consecutiveFallbacks{0};
+        std::atomic<std::int64_t> nextProbeNanoseconds{0};
+    };
+
+    void ReleaseGeometryTransport() noexcept {
+        geometryReadRoute_.reset();
+        if (geometryMemory_ != nullptr) {
+            geometryMemory_->Close();
+            geometryMemory_.reset();
+        }
+        geometryTransportDedicated_ = false;
+    }
+
     void UpdateGeometryRuntime(const FeatureSettings& settings) {
         const bool needed =
             (settings.visual.enabled &&
@@ -3086,8 +3141,11 @@ private:
               settings.aim.requireVisibility));
         if (!needed) {
             if (geometryRuntime_.IsRunning()) geometryRuntime_.Stop();
+            ReleaseGeometryTransport();
             geometrySnapshotReady_ = false;
             geometryRefreshEpoch_ = 0;
+            geometryValidationEpoch_ = 0;
+            geometryValidationPending_ = false;
             geometryRetryAfter_ = {};
             return;
         }
@@ -3107,32 +3165,171 @@ private:
                     config.instancePointerSlots.push_back(slot);
                 }
             }
-            auto readBytes = [this](std::uintptr_t address,
-                                    void* destination,
-                                    std::size_t size) {
-                return memory_ != nullptr &&
-                    IsValidReadAddress(address) &&
-                    size != 0 &&
-                    size <= kMaximumRemoteAddress - address &&
-                    memory_->Read(address, destination, size);
+            if (geometryMemory_ == nullptr || !geometryMemory_->IsOpen()) {
+                geometryMemory_.reset();
+                auto candidate =
+                    std::make_unique<native::MemoryTransport>();
+                RuntimeDiagnostic geometryDiagnostic{};
+                std::string geometryError;
+                bool candidateReady = candidate->OpenReadOnly(
+                        options_.driverIndex,
+                        processId_,
+                        layout_.processName,
+                        geometryDiagnostic,
+                        geometryError);
+                std::array<std::uint8_t, 4> candidateSignature{};
+                candidateReady = candidateReady &&
+                    candidate->ReadGeometry(
+                        moduleBase_, candidateSignature.data(),
+                        candidateSignature.size()) &&
+                    candidateSignature[0] == 0x7FU &&
+                    candidateSignature[1] == 'E' &&
+                    candidateSignature[2] == 'L' &&
+                    candidateSignature[3] == 'F';
+                bool instanceSlotReadable = false;
+                for (const std::uintptr_t slot :
+                     config.instancePointerSlots) {
+                    std::uintptr_t ignoredInstance = 0;
+                    if (candidateReady && candidate->ReadGeometry(
+                            slot, &ignoredInstance,
+                            sizeof(ignoredInstance))) {
+                        instanceSlotReadable = true;
+                        break;
+                    }
+                }
+                if (candidateReady && instanceSlotReadable) {
+                    geometryMemory_ = std::move(candidate);
+                    geometryTransportDedicated_ = true;
+                } else {
+                    geometryTransportDedicated_ = false;
+                }
+            }
+            auto readRoute = std::make_shared<GeometryReadRoute>();
+            readRoute->shared = memory_.get();
+            readRoute->dedicated =
+                geometryTransportDedicated_ && geometryMemory_ != nullptr
+                ? geometryMemory_.get()
+                : nullptr;
+            readRoute->useDedicated.store(
+                readRoute->dedicated != nullptr,
+                std::memory_order_release);
+            geometryReadRoute_ = readRoute;
+            auto readBytes = [readRoute](
+                                 std::uintptr_t address,
+                                 void* destination,
+                                 std::size_t size) {
+                if (!IsValidReadAddress(address) || size == 0 ||
+                    size > kMaximumRemoteAddress - address) {
+                    return false;
+                }
+                bool dedicatedActive = readRoute->useDedicated.load(
+                    std::memory_order_acquire);
+                bool dedicatedProbe = false;
+                std::int64_t nowNanoseconds = 0;
+                if (!dedicatedActive && readRoute->dedicated != nullptr) {
+                    nowNanoseconds =
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now()
+                                .time_since_epoch())
+                            .count();
+                    std::int64_t nextProbe =
+                        readRoute->nextProbeNanoseconds.load(
+                            std::memory_order_acquire);
+                    constexpr std::int64_t kProbeIntervalNanoseconds =
+                        5'000'000'000LL;
+                    if (nowNanoseconds >= nextProbe &&
+                        readRoute->nextProbeNanoseconds
+                            .compare_exchange_strong(
+                                nextProbe,
+                                nowNanoseconds + kProbeIntervalNanoseconds,
+                                std::memory_order_acq_rel,
+                                std::memory_order_acquire)) {
+                        dedicatedProbe = true;
+                    }
+                }
+                if ((dedicatedActive || dedicatedProbe) &&
+                    readRoute->dedicated != nullptr) {
+                    platform::RecordPerformanceCount(
+                        platform::PerformanceCounter::GeometryDedicatedReads);
+                    if (readRoute->dedicated->ReadGeometry(
+                            address, destination, size)) {
+                        readRoute->consecutiveFallbacks.store(
+                            0, std::memory_order_relaxed);
+                        if (!dedicatedActive) {
+                            readRoute->useDedicated.store(
+                                true, std::memory_order_release);
+                            readRoute->nextProbeNanoseconds.store(
+                                0, std::memory_order_release);
+                            platform::RecordPerformanceCount(
+                                platform::PerformanceCounter::
+                                    GeometryTransportRecoveries);
+                        }
+                        return true;
+                    }
+                    if (readRoute->shared == nullptr) return false;
+                    platform::RecordPerformanceCount(
+                        platform::PerformanceCounter::GeometrySharedReads);
+                    const bool fallback = readRoute->shared->ReadGeometry(
+                        address, destination, size);
+                    if (fallback && dedicatedActive) {
+                        constexpr std::uint32_t kFallbackLimit = 3;
+                        const std::uint32_t fallbackCount =
+                            readRoute->consecutiveFallbacks.fetch_add(
+                                1, std::memory_order_relaxed) + 1;
+                        if (fallbackCount >= kFallbackLimit &&
+                            readRoute->useDedicated.exchange(
+                                false, std::memory_order_acq_rel)) {
+                            constexpr std::int64_t
+                                kProbeIntervalNanoseconds =
+                                    5'000'000'000LL;
+                            if (nowNanoseconds == 0) {
+                                nowNanoseconds =
+                                    std::chrono::duration_cast<
+                                        std::chrono::nanoseconds>(
+                                        std::chrono::steady_clock::now()
+                                            .time_since_epoch())
+                                        .count();
+                            }
+                            readRoute->nextProbeNanoseconds.store(
+                                nowNanoseconds +
+                                    kProbeIntervalNanoseconds,
+                                std::memory_order_release);
+                            platform::RecordPerformanceCount(
+                                platform::PerformanceCounter::
+                                    GeometryTransportDemotions);
+                        }
+                    }
+                    return fallback;
+                }
+                if (readRoute->shared == nullptr) return false;
+                platform::RecordPerformanceCount(
+                    platform::PerformanceCounter::GeometrySharedReads);
+                return readRoute->shared->ReadGeometry(
+                    address, destination, size);
             };
             if (config.instancePointerSlots.empty() ||
                 !geometryRuntime_.Start(std::move(readBytes), std::move(config))) {
+                ReleaseGeometryTransport();
                 geometrySnapshotReady_ = false;
                 geometryRefreshEpoch_ = 0;
+                geometryValidationEpoch_ = 0;
+                geometryValidationPending_ = false;
                 geometryRetryAfter_ = now + std::chrono::seconds(2);
                 return;
             }
             geometryRetryAfter_ = {};
             geometrySnapshotReady_ = false;
-            geometryRefreshEpoch_ = geometryRuntime_.RequestRefresh();
+            geometryValidationPending_ = false;
+            geometryRefreshEpoch_ = geometryRuntime_.CurrentRefreshEpoch();
+            geometryValidationEpoch_ = 0;
         }
 
         const std::shared_ptr<const native::GeometrySnapshot> current =
             geometryRuntime_.GetSnapshot();
         if (!geometrySnapshotReady_ && current != nullptr &&
             current->available &&
-            current->refreshEpoch >= geometryRefreshEpoch_) {
+            current->refreshEpoch >= geometryRefreshEpoch_ &&
+            current->validationEpoch >= geometryValidationEpoch_) {
             geometrySnapshotReady_ = true;
         }
     }
@@ -3140,6 +3337,7 @@ private:
     void RequestGeometryRefresh() {
         if (!geometryRuntime_.IsRunning()) return;
         geometrySnapshotReady_ = false;
+        geometryValidationEpoch_ = 0;
         geometryRefreshEpoch_ = geometryRuntime_.RequestRefresh();
     }
 
@@ -3295,7 +3493,8 @@ private:
             actorRecordSnapshot_.decodedRecordSourceReady &&
             (!decodedRequired || currentDecodedRecordsReady);
 
-        if (IsCoordinateTraceEnabled()) {
+        if (IsCoordinateTraceEnabled() &&
+            ShouldWriteCoordinateFrameTrace(coordinateTraceFrame_)) {
             std::fprintf(
                 stderr,
                 "[coordinate-trace-snapshot] frame=%llu decoded_required=%d "
@@ -3983,8 +4182,9 @@ private:
     bool IsStaticWorldObjectCandidate(
         std::uintptr_t actor,
         const std::string& className,
+        bool characterClass,
         const FeatureSettings& settings) {
-        if (className.empty() || IsCharacterClass(className)) return false;
+        if (className.empty() || characterClass) return false;
         if (settings.visual.enabled && settings.visual.classNameDebug) {
             return true;
         }
@@ -4046,8 +4246,13 @@ private:
                 }
                 std::string className =
                     DecodeName(nameIndex, context.namePool);
+                const FNameClassTraits classTraits =
+                    ResolveClassTraits(nameIndex, className);
                 if (!IsStaticWorldObjectCandidate(
-                        actor, className, staticSettings)) {
+                        actor,
+                        className,
+                        classTraits.character,
+                        staticSettings)) {
                     continue;
                 }
                 discovered.push_back(CachedWorldActor{
@@ -4434,9 +4639,29 @@ private:
             return false;
         }
         native::HardwareBreakpointCoordinate coordinate{};
-        if (!hardwareBreakpointRequested_ ||
-            !hardwareBreakpointRuntime_.Lookup(
-                coordinateId, world_, coordinate)) {
+        const bool found =
+            hardwareBreakpointRequested_ &&
+            hardwareBreakpointRuntime_.Lookup(
+                coordinateId, mesh, world_, coordinate);
+        if (IsCoordinateTraceEnabled() &&
+            ShouldWriteCoordinateFrameTrace(coordinateTraceFrame_)) {
+            std::fprintf(
+                stderr,
+                "[hwbp-coordinate] frame=%llu mesh=%llx id=%u "
+                "found=%d base=%llx published=%zu xyz=(%.3f,%.3f,%.3f)\n",
+                static_cast<unsigned long long>(coordinateTraceFrame_),
+                static_cast<unsigned long long>(mesh),
+                static_cast<unsigned int>(coordinateId),
+                found ? 1 : 0,
+                static_cast<unsigned long long>(
+                    hardwareBreakpointRuntime_.RecordsBase()),
+                hardwareBreakpointRuntime_.PublishedCoordinateCount(),
+                coordinate.x,
+                coordinate.y,
+                coordinate.z);
+            std::fflush(stderr);
+        }
+        if (!found) {
             return false;
         }
         const Vec3 candidate{
@@ -5958,8 +6183,28 @@ private:
         const std::uintptr_t healthComponent = ReadPointer(actor + 0x10C8);
         const std::uintptr_t healthSet = ReadPointer(healthComponent + 0x280);
         if (!IsValidPointer(healthSet)) return false;
-        if (!ReadValue(healthSet + 0x3C, state.health) ||
-            !ReadValue(healthSet + 0x54, state.maxHealth) ||
+        constexpr std::size_t kHealthSnapshotSize = 0x1C;
+        std::array<std::byte, kHealthSnapshotSize> healthSnapshot{};
+        bool healthValuesRead = memory_ != nullptr &&
+            memory_->Read(
+                healthSet + 0x3C,
+                healthSnapshot.data(),
+                healthSnapshot.size());
+        if (healthValuesRead) {
+            std::memcpy(
+                &state.health,
+                healthSnapshot.data(),
+                sizeof(state.health));
+            std::memcpy(
+                &state.maxHealth,
+                healthSnapshot.data() + 0x18,
+                sizeof(state.maxHealth));
+        } else {
+            healthValuesRead =
+                ReadValue(healthSet + 0x3C, state.health) &&
+                ReadValue(healthSet + 0x54, state.maxHealth);
+        }
+        if (!healthValuesRead ||
             !std::isfinite(state.health) || !std::isfinite(state.maxHealth) ||
             state.maxHealth <= 0.0f || state.maxHealth > 100000.0f) {
             return false;
@@ -5983,8 +6228,25 @@ private:
         }
         float downedHealth = 0.0f;
         float maximumDownedHealth = 0.0f;
-        ReadValue(healthSet + 0x114, downedHealth);
-        ReadValue(healthSet + 0x124, maximumDownedHealth);
+        constexpr std::size_t kDownedSnapshotSize = 0x14;
+        std::array<std::byte, kDownedSnapshotSize> downedSnapshot{};
+        if (memory_ != nullptr &&
+            memory_->Read(
+                healthSet + 0x114,
+                downedSnapshot.data(),
+                downedSnapshot.size())) {
+            std::memcpy(
+                &downedHealth,
+                downedSnapshot.data(),
+                sizeof(downedHealth));
+            std::memcpy(
+                &maximumDownedHealth,
+                downedSnapshot.data() + 0x10,
+                sizeof(maximumDownedHealth));
+        } else {
+            ReadValue(healthSet + 0x114, downedHealth);
+            ReadValue(healthSet + 0x124, maximumDownedHealth);
+        }
         const bool downedPoolValid =
             std::isfinite(downedHealth) &&
             std::isfinite(maximumDownedHealth);
@@ -6009,22 +6271,60 @@ private:
                 mask, native::kPlayerEquipmentLevelReadMask)) {
             std::int32_t helmetDefinition = 0;
             std::int32_t armorDefinition = 0;
-            ReadValue(equipment + 0x30, helmetDefinition);
-            ReadValue(equipment + 0xF0, armorDefinition);
+            constexpr std::size_t kDefinitionSnapshotSize = 0xC4;
+            std::array<std::byte, kDefinitionSnapshotSize>
+                definitionSnapshot{};
+            if (memory_ != nullptr &&
+                memory_->Read(
+                    equipment + 0x30,
+                    definitionSnapshot.data(),
+                    definitionSnapshot.size())) {
+                std::memcpy(
+                    &helmetDefinition,
+                    definitionSnapshot.data(),
+                    sizeof(helmetDefinition));
+                std::memcpy(
+                    &armorDefinition,
+                    definitionSnapshot.data() + 0xC0,
+                    sizeof(armorDefinition));
+            } else {
+                ReadValue(equipment + 0x30, helmetDefinition);
+                ReadValue(equipment + 0xF0, armorDefinition);
+            }
             state.helmetLevel = EquipmentLevel(helmetDefinition);
             state.armorLevel = EquipmentLevel(armorDefinition);
         }
         if (native::HasPlayerDetailReadField(
                 mask,
                 native::PlayerDetailReadField::HelmetDurability)) {
-            ReadValue(equipment + 0x48, state.helmet);
-            ReadValue(equipment + 0x4C, state.maxHelmet);
+            std::array<float, 2> durability{};
+            if (memory_ != nullptr &&
+                memory_->Read(
+                    equipment + 0x48,
+                    durability.data(),
+                    sizeof(durability))) {
+                state.helmet = durability[0];
+                state.maxHelmet = durability[1];
+            } else {
+                ReadValue(equipment + 0x48, state.helmet);
+                ReadValue(equipment + 0x4C, state.maxHelmet);
+            }
         }
         if (native::HasPlayerDetailReadField(
                 mask,
                 native::PlayerDetailReadField::ArmorDurability)) {
-            ReadValue(equipment + 0x108, state.armor);
-            ReadValue(equipment + 0x10C, state.maxArmor);
+            std::array<float, 2> durability{};
+            if (memory_ != nullptr &&
+                memory_->Read(
+                    equipment + 0x108,
+                    durability.data(),
+                    sizeof(durability))) {
+                state.armor = durability[0];
+                state.maxArmor = durability[1];
+            } else {
+                ReadValue(equipment + 0x108, state.armor);
+                ReadValue(equipment + 0x10C, state.maxArmor);
+            }
         }
         if (native::HasPlayerDetailReadField(
                 mask,
@@ -6101,10 +6401,24 @@ private:
             bytes.clear();
         }
         if (!bytes.empty()) {
-            if (nameCache_.size() > 8192) nameCache_.clear();
+            if (nameCache_.size() > 8192) {
+                nameCache_.clear();
+                classTraitsCache_.clear();
+            }
             nameCache_[index] = bytes;
         }
         return bytes;
+    }
+
+    FNameClassTraits ResolveClassTraits(
+        std::int32_t index,
+        std::string_view className) {
+        if (className.empty()) return {};
+        const auto cached = classTraitsCache_.find(index);
+        if (cached != classTraitsCache_.end()) return cached->second;
+        const FNameClassTraits traits = ClassifyFName(className);
+        classTraitsCache_.emplace(index, traits);
+        return traits;
     }
 
     static std::uint8_t AlternatingNameKey(std::size_t length,
@@ -6900,6 +7214,40 @@ private:
         model.segments.reserve(kMaximumRenderedTriangles * 3);
         const std::size_t triangleCount = hit.mesh->indices.size() / 3;
 
+        struct CachedVertexProjection {
+            Vec2 screen{};
+            std::uint32_t generation = 0;
+            bool valid = false;
+        };
+        thread_local std::vector<CachedVertexProjection> projectedVertices;
+        thread_local std::uint32_t projectionGeneration = 0;
+        if (projectedVertices.size() < hit.mesh->vertices.size()) {
+            projectedVertices.resize(hit.mesh->vertices.size());
+        }
+        ++projectionGeneration;
+        if (projectionGeneration == 0) {
+            for (CachedVertexProjection& cached : projectedVertices) {
+                cached.generation = 0;
+            }
+            projectionGeneration = 1;
+        }
+        const auto projectVertex =
+            [&](std::uint32_t vertexIndex, Vec2& screen) {
+                CachedVertexProjection& cached =
+                    projectedVertices[vertexIndex];
+                if (cached.generation != projectionGeneration) {
+                    const auto& world = hit.mesh->vertices[vertexIndex];
+                    cached.valid = ProjectToScreen(
+                        Vec3{world.x, world.y, world.z},
+                        prepared,
+                        cached.screen);
+                    cached.generation = projectionGeneration;
+                }
+                if (!cached.valid) return false;
+                screen = cached.screen;
+                return true;
+            };
+
         const auto appendTriangle = [&](std::size_t triangleIndex) {
             if (triangleIndex >= triangleCount ||
                 model.segments.size() >= kMaximumRenderedTriangles * 3) {
@@ -6914,24 +7262,12 @@ private:
                 thirdIndex >= hit.mesh->vertices.size()) {
                 return;
             }
-            const auto& firstWorld = hit.mesh->vertices[firstIndex];
-            const auto& secondWorld = hit.mesh->vertices[secondIndex];
-            const auto& thirdWorld = hit.mesh->vertices[thirdIndex];
             Vec2 first{};
             Vec2 second{};
             Vec2 third{};
-            if (!ProjectToScreen(
-                    Vec3{firstWorld.x, firstWorld.y, firstWorld.z},
-                    prepared,
-                    first) ||
-                !ProjectToScreen(
-                    Vec3{secondWorld.x, secondWorld.y, secondWorld.z},
-                    prepared,
-                    second) ||
-                !ProjectToScreen(
-                    Vec3{thirdWorld.x, thirdWorld.y, thirdWorld.z},
-                    prepared,
-                    third)) {
+            if (!projectVertex(firstIndex, first) ||
+                !projectVertex(secondIndex, second) ||
+                !projectVertex(thirdIndex, third)) {
                 return;
             }
             constexpr float kProjectionMargin = 160.0f;
@@ -8032,13 +8368,12 @@ private:
                       float headingRadians,
                       bool headingValid,
                       SemanticTone tone,
+                      float forwardX,
+                      float forwardY,
+                      float rightX,
+                      float rightY,
                       RadarVisual& radar) {
         const Vec3 delta = Subtract(position, context.localPosition);
-        const float yaw = context.view.rotation.yaw * kPi / 180.0f;
-        const float forwardX = std::cos(yaw);
-        const float forwardY = std::sin(yaw);
-        const float rightX = -forwardY;
-        const float rightY = forwardX;
         const float rangeCentimeters = std::max(1.0f, radar.maxDistanceMeters) * 100.0f;
         RadarBlip blip{};
         blip.normalizedPosition = ImVec2(
@@ -8146,6 +8481,7 @@ private:
         decodedPositionPending_.clear();
         boneCache_.clear();
         nameCache_.clear();
+        classTraitsCache_.clear();
         itemMetadata_.clear();
         worldObjectFrameCache_.Clear();
         worldObjectActors_.clear();
@@ -8287,7 +8623,9 @@ private:
         } else {
             coordinatePoolReady_ = false;
         }
-        if (IsCoordinateTraceEnabled()) {
+        if (IsCoordinateTraceEnabled() &&
+            (executionContextRefreshed ||
+             ShouldWriteCoordinateFrameTrace(coordinateTraceFrame_))) {
             const native::ProcessExecutionContextDiagnostic diagnostic =
                 memory_->ExecutionContextDiagnostic();
             const native::CoordinatePoolRuntimeProbe poolProbe =
@@ -8300,6 +8638,9 @@ private:
                 "tid=%d thread_start=%llu generation=%llu tpidr=%llx "
                 "key_available=%d oracle_available=%d pool_ready=%d "
                 "pool_stage=%u pool_error=%u pool_sys=%d "
+                "analysis_find=%u analysis_detail=%u "
+                "analysis_madds=%u analysis_ring_madds=%u "
+                "analysis_candidates=%u analysis_insn=%u "
                 "read_stage=%u read_failure=%u read_path=%u "
                 "bridge=%llx context=%llx entry=%llx pool=%llx "
                 "attempts=%llu successes=%llu\n",
@@ -8326,6 +8667,15 @@ private:
                 static_cast<unsigned int>(poolProbe.stage),
                 static_cast<unsigned int>(poolProbe.error),
                 poolProbe.systemError,
+                static_cast<unsigned int>(poolProbe.analysisFindStage),
+                static_cast<unsigned int>(poolProbe.analysisFindDetail),
+                static_cast<unsigned int>(poolProbe.analysisMaddCount),
+                static_cast<unsigned int>(
+                    poolProbe.analysisRingMaddCount),
+                static_cast<unsigned int>(
+                    poolProbe.analysisCandidateCount),
+                static_cast<unsigned int>(
+                    poolProbe.analysisFailureInstruction),
                 static_cast<unsigned int>(poolProbe.read.stage),
                 static_cast<unsigned int>(poolProbe.read.failure),
                 static_cast<unsigned int>(poolProbe.read.lastPath),
@@ -8686,42 +9036,6 @@ private:
             coordinatePoolSelected
             ? ActiveCoordinatePoolProbe()
             : native::CoordinatePoolRuntimeProbe{};
-#if 0
-        if (hardwareBreakpointRequested_) {
-            probe.coordinateRequested = true;
-            probe.coordinateEntryReady =
-                hardwareBreakpointRuntime_.IsActive();
-            probe.coordinateContextReady =
-                hardwareBreakpointRuntime_.IsActive();
-            probe.coordinateThreadId = 0;
-            probe.coordinateGuestPc =
-                hardwareBreakpointRuntime_.BreakpointAddress();
-            probe.coordinateContextGeneration = 0;
-            probe.coordinateAttempts =
-                hardwareBreakpointRuntime_.PollCount();
-            probe.coordinateSuccesses =
-                hardwareBreakpointRuntime_.PublishedCoordinateCount();
-            probe.coordinateError =
-                hardwareBreakpointFailure_.error !=
-                        CoordinateDecryptError::None
-                    ? hardwareBreakpointFailure_.error
-                    : (hardwareBreakpointRuntime_.IsActive()
-                           ? CoordinateDecryptError::None
-                           : CoordinateDecryptError::EntryResolveFailed);
-            probe.coordinateSystemError =
-                hardwareBreakpointFailure_.systemError;
-            probe.coordinateRead =
-                hardwareBreakpointFailure_.read;
-            probe.coordinatePoolPointer = {};
-            probe.coordinateEntry = CoordinateEntryDiagnostic{
-                hardwareBreakpointRuntime_.BreakpointAddress(),
-                0,
-                0,
-                0,
-                0,
-            };
-        } else
-#endif
         {
             const CoordinateFailure failure = CurrentCoordinateFailure();
             probe.coordinateRequested =
@@ -8819,6 +9133,13 @@ private:
         opened_ = false;
         aimController_.Stop();
         geometryRuntime_.Stop();
+        ReleaseGeometryTransport();
+        geometrySnapshotReady_ = false;
+        geometryRefreshEpoch_ = 0;
+        geometryValidationEpoch_ = 0;
+        geometryValidationPending_ = false;
+        geometryRetryAfter_ = {};
+        geometryWorld_ = 0;
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
         bool hookStopped = false;
         for (int attempt = 0; attempt < 3 && !hookStopped; ++attempt) {
@@ -8829,9 +9150,6 @@ private:
             return false;
         }
 #endif
-        geometrySnapshotReady_ = false;
-        geometryRefreshEpoch_ = 0;
-        geometryRetryAfter_ = {};
 #if 0
         if (!StopHardwareBreakpointRuntime()) {
             aimEnabled_.store(false, std::memory_order_release);
@@ -8932,6 +9250,9 @@ private:
     RuntimeOptions options_{};
     VersionLayout layout_{};
     std::unique_ptr<native::MemoryTransport> memory_;
+    std::unique_ptr<native::MemoryTransport> geometryMemory_;
+    std::shared_ptr<GeometryReadRoute> geometryReadRoute_;
+    bool geometryTransportDedicated_ = false;
     native::AlgorithmPositionRuntime algorithmPositionRuntime_{};
     native::CoordinatePoolRuntime coordinatePoolRuntime_{};
     native::CoordinateDecrypt2Runtime coordinateDecrypt2Runtime_{};
@@ -9037,6 +9358,7 @@ private:
     std::unordered_map<std::uintptr_t, BoneCacheEntry> boneCache_;
     std::chrono::steady_clock::time_point lastBoneAuditLogAt_{};
     std::unordered_map<std::int32_t, std::string> nameCache_;
+    std::unordered_map<std::int32_t, FNameClassTraits> classTraitsCache_;
     std::unordered_map<std::uint64_t, std::pair<int, int>> itemMetadata_;
     WorldObjectFrameCache worldObjectFrameCache_{};
     std::vector<CachedWorldActor> worldObjectActors_;
@@ -9066,8 +9388,11 @@ private:
 #endif
     native::GeometryRuntime geometryRuntime_{};
     bool geometrySnapshotReady_ = false;
+    bool geometryValidationPending_ = false;
     std::uint64_t geometryRefreshEpoch_ = 0;
+    std::uint64_t geometryValidationEpoch_ = 0;
     std::chrono::steady_clock::time_point geometryRetryAfter_{};
+    std::uintptr_t geometryWorld_ = 0;
     std::uint64_t lockedAimIdentity_ = 0;
     int lockedAimBone_ = -1;
 #if LENGJING_ENABLE_PROJECTILE_TRACKING

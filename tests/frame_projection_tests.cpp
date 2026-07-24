@@ -239,6 +239,17 @@ void RunFrameProjectionTests() {
 
     constexpr std::size_t kRingSegmentCount = 36;
     constexpr float kTwoPi = 6.28318530717958647692f;
+    const auto& ringUnitPoints =
+        projection_detail::HorizontalRingUnitPoints();
+    REQUIRE(ringUnitPoints.size() == kRingSegmentCount);
+    for (std::size_t index = 0; index < ringUnitPoints.size(); ++index) {
+        const float angle = kTwoPi * static_cast<float>(index) /
+            static_cast<float>(ringUnitPoints.size());
+        REQUIRE(ringUnitPoints[index].x == std::cos(angle));
+        REQUIRE(ringUnitPoints[index].y == std::sin(angle));
+        REQUIRE(ringUnitPoints[index].z == 0.0f);
+    }
+
     std::array<ScreenProjection, kRingSegmentCount> partialPoints{};
     for (std::size_t index = 0; index < partialPoints.size(); ++index) {
         const float angle = kTwoPi * static_cast<float>(index) /

@@ -161,17 +161,26 @@ std::string FormatValue(int value) {
     return buffer;
 }
 
-std::string FitText(const std::string& text, float maximumWidth, float fontSize) {
+struct FittedText {
+    std::string text;
+    ImVec2 extent{};
+};
+
+FittedText FitTextWithExtent(const std::string& text,
+                             float maximumWidth,
+                             float fontSize) {
     if (text.empty() || maximumWidth <= 0.0f) return {};
-    if (TextExtent(text, fontSize).x <= maximumWidth) {
-        return text;
+    const ImVec2 originalExtent = TextExtent(text, fontSize);
+    if (originalExtent.x <= maximumWidth) {
+        return FittedText{text, originalExtent};
     }
 
     constexpr char suffix[] = "...";
-    const float suffixWidth = TextExtent(suffix, fontSize).x;
-    if (suffixWidth >= maximumWidth) return {};
+    const ImVec2 suffixExtent = TextExtent(suffix, fontSize);
+    if (suffixExtent.x >= maximumWidth) return {};
 
     std::size_t accepted = 0;
+    ImVec2 acceptedExtent = suffixExtent;
     for (std::size_t offset = 0; offset < text.size();) {
         const unsigned char lead = static_cast<unsigned char>(text[offset]);
         std::size_t sequenceLength = 1;
@@ -180,11 +189,22 @@ std::string FitText(const std::string& text, float maximumWidth, float fontSize)
         else if ((lead & 0xf8U) == 0xf0U) sequenceLength = 4;
         const std::size_t next = std::min(text.size(), offset + sequenceLength);
         const std::string candidate = text.substr(0, next) + suffix;
-        if (TextExtent(candidate, fontSize).x > maximumWidth) break;
+        const ImVec2 candidateExtent = TextExtent(candidate, fontSize);
+        if (candidateExtent.x > maximumWidth) break;
         accepted = next;
+        acceptedExtent = candidateExtent;
         offset = next;
     }
-    return text.substr(0, accepted) + suffix;
+    return FittedText{
+        text.substr(0, accepted) + suffix,
+        acceptedExtent,
+    };
+}
+
+std::string FitText(const std::string& text,
+                    float maximumWidth,
+                    float fontSize) {
+    return FitTextWithExtent(text, maximumWidth, fontSize).text;
 }
 
 void DrawOutlinedLine(ImDrawList* drawList,
@@ -305,17 +325,15 @@ void OverlayRenderer::DrawPlayerPlate(ImDrawList* drawList,
     const float maximumTextWidth = std::max(
         1.0f,
         std::min(300.0f * scale, viewport.Width() - margin * 2.0f));
-    const std::string title = hasTitle
-        ? FitText(player.name, maximumTextWidth, titleSize)
-        : std::string{};
-    const std::string detail = hasDetail
-        ? FitText(player.detail, maximumTextWidth, detailSize)
-        : std::string{};
-    const ImVec2 titleExtent = TextExtent(title, titleSize);
-    const ImVec2 detailExtent = TextExtent(detail, detailSize);
+    const FittedText title = hasTitle
+        ? FitTextWithExtent(player.name, maximumTextWidth, titleSize)
+        : FittedText{};
+    const FittedText detail = hasDetail
+        ? FitTextWithExtent(player.detail, maximumTextWidth, detailSize)
+        : FittedText{};
     const float textHeight =
-        (title.empty() ? 0.0f : titleSize) +
-        (detail.empty() ? 0.0f : detailSize) + textGap;
+        (title.text.empty() ? 0.0f : titleSize) +
+        (detail.text.empty() ? 0.0f : detailSize) + textGap;
     const float textTop = std::clamp(
         player.bounds.top - textHeight - 5.0f * scale,
         viewport.top + margin,
@@ -325,30 +343,30 @@ void OverlayRenderer::DrawPlayerPlate(ImDrawList* drawList,
     const ImU32 textShadow = WithAlpha(style_.colors.shadow, 0.62f);
 
     float cursorY = textTop;
-    if (!title.empty()) {
+    if (!title.text.empty()) {
         const float titleX = std::clamp(
-            centerX - titleExtent.x * 0.5f,
+            centerX - title.extent.x * 0.5f,
             viewport.left + margin,
-            viewport.right - margin - titleExtent.x);
+            viewport.right - margin - title.extent.x);
         DrawText(drawList,
                  ImVec2(titleX, cursorY),
                  player.visible ? style_.colors.text : style_.colors.textMuted,
                  textShadow,
                  titleSize,
-                 title);
+                 title.text);
         cursorY += titleSize + textGap;
     }
-    if (!detail.empty()) {
+    if (!detail.text.empty()) {
         const float detailX = std::clamp(
-            centerX - detailExtent.x * 0.5f,
+            centerX - detail.extent.x * 0.5f,
             viewport.left + margin,
-            viewport.right - margin - detailExtent.x);
+            viewport.right - margin - detail.extent.x);
         DrawText(drawList,
                  ImVec2(detailX, cursorY),
                  style_.colors.textMuted,
                  textShadow,
                  detailSize,
-                 detail);
+                 detail.text);
     }
 
 }
@@ -699,12 +717,12 @@ void OverlayRenderer::DrawProjectile(ImDrawList* drawList,
         const float maximumWidth = std::max(
             1.0f,
             std::min(300.0f * scale, viewport.Width() - margin * 2.0f));
-        const std::string fitted = FitText(caption, maximumWidth, fontSize);
-        const ImVec2 extent = TextExtent(fitted, fontSize);
+        const FittedText fitted =
+            FitTextWithExtent(caption, maximumWidth, fontSize);
         const float x = std::clamp(
-            projectile.center.x - extent.x * 0.5f,
+            projectile.center.x - fitted.extent.x * 0.5f,
             viewport.left + margin,
-            viewport.right - margin - extent.x);
+            viewport.right - margin - fitted.extent.x);
         const float y = std::clamp(
             projectile.center.y - fontSize - 9.0f * scale,
             viewport.top + margin,
@@ -714,7 +732,7 @@ void OverlayRenderer::DrawProjectile(ImDrawList* drawList,
                  color,
                  WithAlpha(style_.colors.shadow, 0.62f),
                  fontSize,
-                 fitted);
+                 fitted.text);
     }
 }
 
@@ -1004,15 +1022,14 @@ void OverlayRenderer::DrawWorldLabel(ImDrawList* drawList,
         1.0f,
         std::min((screenAlert ? 420.0f : 260.0f) * scale,
                  viewport.Width() - margin * 2.0f));
-    const std::string title = FitText(label.title, maximumWidth, titleSize);
-    const std::string detail = label.detail.empty()
-        ? std::string{}
-        : FitText(label.detail, maximumWidth, detailSize);
-    const ImVec2 titleExtent = TextExtent(title, titleSize);
-    const ImVec2 detailExtent = TextExtent(detail, detailSize);
-    const float gap = detail.empty() ? 0.0f : 1.0f * scale;
+    const FittedText title =
+        FitTextWithExtent(label.title, maximumWidth, titleSize);
+    const FittedText detail = label.detail.empty()
+        ? FittedText{}
+        : FitTextWithExtent(label.detail, maximumWidth, detailSize);
+    const float gap = detail.text.empty() ? 0.0f : 1.0f * scale;
     const float textHeight = titleSize +
-        (detail.empty() ? 0.0f : detailSize + gap);
+        (detail.text.empty() ? 0.0f : detailSize + gap);
     const ImVec2 anchor = ClampPoint(label.anchor, viewport, margin);
     const float top = ClampFinite(
         anchor.y - textHeight * 0.5f,
@@ -1020,26 +1037,26 @@ void OverlayRenderer::DrawWorldLabel(ImDrawList* drawList,
         viewport.bottom - margin - textHeight);
     const ImU32 textShadow = WithAlpha(style_.colors.shadow, 0.62f);
     const float titleX = ClampFinite(
-        anchor.x - titleExtent.x * 0.5f,
+        anchor.x - title.extent.x * 0.5f,
         viewport.left + margin,
-        viewport.right - margin - titleExtent.x);
+        viewport.right - margin - title.extent.x);
     DrawText(drawList,
              ImVec2(titleX, top),
              color,
              textShadow,
              titleSize,
-             title);
-    if (!detail.empty()) {
+             title.text);
+    if (!detail.text.empty()) {
         const float detailX = ClampFinite(
-            anchor.x - detailExtent.x * 0.5f,
+            anchor.x - detail.extent.x * 0.5f,
             viewport.left + margin,
-            viewport.right - margin - detailExtent.x);
+            viewport.right - margin - detail.extent.x);
         DrawText(drawList,
                  ImVec2(detailX, top + titleSize + gap),
                  screenAlert ? style_.colors.text : style_.colors.textMuted,
                  textShadow,
                  detailSize,
-                 detail);
+                 detail.text);
     }
 }
 

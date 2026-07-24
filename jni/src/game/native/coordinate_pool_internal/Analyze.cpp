@@ -14,6 +14,30 @@ static arm64_reg normalizeReg(arm64_reg reg) {
     return isW(reg) ? (arm64_reg) (reg - ARM64_REG_W0 + ARM64_REG_X0) : reg;
 }
 
+static bool isCompatW(arm64_reg reg) {
+    return (reg >= ARM64_REG_W0 && reg <= ARM64_REG_W30) ||
+        reg == ARM64_REG_WSP || reg == ARM64_REG_WZR;
+}
+
+static arm64_reg normalizeCompatReg(arm64_reg reg) {
+    if (reg >= ARM64_REG_W0 && reg <= ARM64_REG_W28) {
+        return static_cast<arm64_reg>(
+            reg - ARM64_REG_W0 + ARM64_REG_X0);
+    }
+    if (reg == ARM64_REG_W29) return ARM64_REG_X29;
+    if (reg == ARM64_REG_W30) return ARM64_REG_X30;
+    if (reg == ARM64_REG_WSP) return ARM64_REG_SP;
+    if (reg == ARM64_REG_WZR) return ARM64_REG_XZR;
+    return reg;
+}
+
+static bool isCompatScalarReg(arm64_reg reg) {
+    reg = normalizeCompatReg(reg);
+    return (reg >= ARM64_REG_X0 && reg <= ARM64_REG_X28) ||
+        reg == ARM64_REG_X29 || reg == ARM64_REG_X30 ||
+        reg == ARM64_REG_SP || reg == ARM64_REG_XZR;
+}
+
 void Analyze::str(arm64_reg reg, std::vector<std::string>& expr) {
     uint32_t var_number = 0;
     std::unordered_map<std::shared_ptr<Expr>, uint32_t> exprs;
@@ -399,6 +423,209 @@ int Analyze::parse(cs_insn *insn) {
             }
             break;
     }
+    return 0;
+}
+
+int Analyze::parse_add_compat(cs_insn *insn) {
+    if (!insn || !insn->detail || insn->id != ARM64_INS_ADD) {
+        return -1;
+    }
+
+    cur_addr = insn->address;
+    cs_arm64_op *op = insn->detail->arm64.operands;
+    const uint8_t op_count = insn->detail->arm64.op_count;
+    if (op_count < 3 || op[0].type != ARM64_OP_REG) {
+        return -1;
+    }
+    if (!isCompatScalarReg(op[0].reg)) {
+        return 0;
+    }
+
+    auto truncate_expr = [&](std::shared_ptr<Expr> expr,
+        unsigned int width) -> std::shared_ptr<Expr> {
+        if (!expr || width == 0 || width > 64) return nullptr;
+        if (width == 64) return expr;
+        return make_binary(
+            OP_AND, std::move(expr),
+            make_const((UINT64_C(1) << width) - 1));
+    };
+
+    auto sign_extend_expr = [&](std::shared_ptr<Expr> expr,
+        unsigned int width) -> std::shared_ptr<Expr> {
+        expr = truncate_expr(std::move(expr), width);
+        if (!expr || width == 0 || width > 64) return nullptr;
+        if (width == 64) return expr;
+        const std::uint64_t sign = UINT64_C(1) << (width - 1);
+        return make_binary(
+            OP_SUB,
+            make_binary(OP_XOR, std::move(expr), make_const(sign)),
+            make_const(sign));
+    };
+
+    auto runtime_expr = [&](arm64_reg source) -> std::shared_ptr<Expr> {
+        const arm64_reg normalized = normalizeCompatReg(source);
+        const char *prefix = normalized == ARM64_REG_SP
+            ? "SP"
+            : normalized == ARM64_REG_X30 ? "X30" : "X29";
+        const std::string name = coordinate_pool_format::Format(
+            "{}_0x{:X}", prefix, cur_addr);
+        const bool exists = std::any_of(
+            varParams.begin(), varParams.end(),
+            [&](const VarParam& param) {
+                return param.name == name;
+            });
+        if (!exists) {
+            varParams.push_back({name, cur_addr, normalized, 0});
+        }
+        return std::make_shared<VarExpr>(name, cur_addr);
+    };
+
+    auto source_expr = [&](arm64_reg source) -> std::shared_ptr<Expr> {
+        const arm64_reg normalized = normalizeCompatReg(source);
+        if (normalized == ARM64_REG_XZR) {
+            return make_const(0);
+        }
+        if (normalized == ARM64_REG_SP || normalized == ARM64_REG_X30) {
+            return runtime_expr(source);
+        }
+
+        auto it = regs.find(normalized);
+        if (it != regs.end()) {
+            return it->second;
+        }
+        if (source == ARM64_REG_W29 || source == ARM64_REG_W30) {
+            const arm64_reg legacy = normalizeReg(source);
+            it = regs.find(legacy);
+            if (it != regs.end()) {
+                return it->second;
+            }
+        }
+        if (normalized == ARM64_REG_X29) {
+            return runtime_expr(source);
+        }
+        if (normalized >= ARM64_REG_X0 && normalized <= ARM64_REG_X28) {
+            return get_expr(normalized);
+        }
+        return nullptr;
+    };
+
+    auto add_runtime_param = [&](const std::shared_ptr<Expr>& expr,
+        arm64_reg source) {
+        if (!expr || expr->kind() != EXPR_MEMORY) return;
+        auto *memory = static_cast<MemVarExpr *>(expr.get());
+        if (!memory->runtime_) return;
+        const bool exists = std::any_of(
+            varParams.begin(), varParams.end(),
+            [&](const VarParam& param) {
+                return param.name == memory->name;
+            });
+        if (!exists) {
+            varParams.push_back({
+                memory->name, cur_addr, normalizeCompatReg(source), 0});
+        }
+    };
+
+    auto operand_expr = [&](const cs_arm64_op& operand)
+        -> std::shared_ptr<Expr> {
+        std::shared_ptr<Expr> expr;
+        if (operand.type == ARM64_OP_IMM) {
+            expr = make_const(static_cast<std::uint64_t>(operand.imm));
+        }
+        else if (operand.type == ARM64_OP_REG) {
+            if (!isCompatScalarReg(operand.reg)) return nullptr;
+            expr = source_expr(operand.reg);
+            add_runtime_param(expr, operand.reg);
+            if (expr && isCompatW(operand.reg)) {
+                expr = truncate_expr(std::move(expr), 32);
+            }
+        }
+        else {
+            return nullptr;
+        }
+
+        switch (operand.ext) {
+            case ARM64_EXT_INVALID:
+            case ARM64_EXT_UXTX:
+                break;
+            case ARM64_EXT_UXTB:
+                expr = truncate_expr(std::move(expr), 8);
+                break;
+            case ARM64_EXT_UXTH:
+                expr = truncate_expr(std::move(expr), 16);
+                break;
+            case ARM64_EXT_UXTW:
+                expr = truncate_expr(std::move(expr), 32);
+                break;
+            case ARM64_EXT_SXTB:
+                expr = sign_extend_expr(std::move(expr), 8);
+                break;
+            case ARM64_EXT_SXTH:
+                expr = sign_extend_expr(std::move(expr), 16);
+                break;
+            case ARM64_EXT_SXTW:
+                expr = sign_extend_expr(std::move(expr), 32);
+                break;
+            case ARM64_EXT_SXTX:
+                expr = sign_extend_expr(std::move(expr), 64);
+                break;
+            default:
+                return nullptr;
+        }
+
+        if (!expr || operand.shift.value == 0) {
+            return expr;
+        }
+        if (operand.ext != ARM64_EXT_INVALID) {
+            if (operand.shift.type != ARM64_SFT_LSL ||
+                operand.shift.value > 4) {
+                return nullptr;
+            }
+        }
+        else if ((operand.type == ARM64_OP_REG &&
+                  isCompatW(operand.reg) && operand.shift.value >= 32) ||
+                 operand.shift.value >= 64) {
+            return nullptr;
+        }
+
+        ShiftOp shift_op;
+        if (operand.shift.type == ARM64_SFT_LSL) {
+            shift_op = SHIFT_OP_LSL;
+        }
+        else if (operand.shift.type == ARM64_SFT_LSR) {
+            shift_op = SHIFT_OP_LSR;
+        }
+        else if (operand.shift.type == ARM64_SFT_ASR) {
+            if (operand.type == ARM64_OP_REG &&
+                isCompatW(operand.reg) &&
+                operand.ext == ARM64_EXT_INVALID) {
+                expr = sign_extend_expr(std::move(expr), 32);
+            }
+            shift_op = SHIFT_OP_ASR;
+        }
+        else {
+            return nullptr;
+        }
+        return make_shift(shift_op, std::move(expr), operand.shift.value);
+    };
+
+    std::shared_ptr<Expr> lhs = operand_expr(op[1]);
+    std::shared_ptr<Expr> rhs = operand_expr(op[2]);
+    std::shared_ptr<Expr> result = make_binary(
+        OP_ADD, std::move(lhs), std::move(rhs));
+    if (!result) {
+        return -1;
+    }
+    if (isCompatW(op[0].reg)) {
+        result = truncate_expr(std::move(result), 32);
+    }
+
+    const arm64_reg destination = normalizeCompatReg(op[0].reg);
+    if (destination == ARM64_REG_XZR ||
+        destination == ARM64_REG_SP ||
+        destination == ARM64_REG_X30) {
+        return 0;
+    }
+    regs[destination] = std::move(result);
     return 0;
 }
 

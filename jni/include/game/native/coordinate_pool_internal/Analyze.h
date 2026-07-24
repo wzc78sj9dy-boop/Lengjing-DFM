@@ -39,6 +39,7 @@ public:
 	}
 	void setVal(arm64_reg reg, const char* name);
 	int parse(cs_insn* insn);
+	int parse_add_compat(cs_insn* insn);
 	std::string str(arm64_reg reg);
 	void str(arm64_reg reg, std::vector<std::string>& expr);
 	uint64_t execute(arm64_reg reg, std::unordered_map<std::string, uint64_t> &params);

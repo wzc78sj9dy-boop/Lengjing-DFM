@@ -2,6 +2,7 @@
 
 #include "config/LocalConfig.h"
 #include "game/aim/CoverSelectionPolicy.h"
+#include "game/native/MemoryTransport.h"
 #include "render/render_types.h"
 
 #include <array>
@@ -126,6 +127,10 @@ void RunConfigTests() {
     REQUIRE(
         lengjing::ui::UiModel{}.aim.inputMode ==
         lengjing::ui::AimInputMode::ReadOnly);
+    REQUIRE(lengjing::game::native::kMemoryTransportModeCount == 2);
+    REQUIRE(lengjing::game::native::IsValidMemoryTransportMode(0));
+    REQUIRE(lengjing::game::native::IsValidMemoryTransportMode(1));
+    REQUIRE(!lengjing::game::native::IsValidMemoryTransportMode(2));
 
     lengjing::ui::UiModel expected;
     expected.runtime.gameVersionIndex = 2;
@@ -323,7 +328,7 @@ void RunConfigTests() {
     REQUIRE(config.Save(expected, &error));
     actual.runtime.driverIndex = 0;
     REQUIRE(config.Load(actual, &error));
-    REQUIRE(actual.runtime.driverIndex == 2);
+    REQUIRE(actual.runtime.driverIndex == 1);
 
     expected.system.renderBackend = lengjing::ui::RenderBackend::OpenGl;
     REQUIRE(config.Save(expected, &error));
@@ -367,7 +372,7 @@ void RunConfigTests() {
     REQUIRE(actual.visual.coordinateDecrypt2Index == 10);
     REQUIRE(!actual.visual.algorithmDecrypt);
     REQUIRE(actual.visual.warningSize == 1000.0f);
-    REQUIRE(actual.runtime.driverIndex == 2);
+    REQUIRE(actual.runtime.driverIndex == 1);
     REQUIRE(actual.aim.inputMode == lengjing::ui::AimInputMode::ReadOnly);
     REQUIRE(!actual.aim.trajectoryTracking);
     REQUIRE(actual.aim.requireVisibility);
@@ -452,7 +457,8 @@ void RunConfigTests() {
         menuText.find("visual.coordinateDecrypt = false;") !=
         std::string::npos);
     REQUIRE(
-        menuText.find("&visual.coordinateDecrypt2Index") !=
+        menuText.find(
+            "&visual.coordinateDecrypt2Index") !=
         std::string::npos);
     for (const char* inputModeName : {
              "只读", "写入触摸（不推荐）", "程序陀螺仪", "内核触摸", "内核陀螺仪"}) {
@@ -464,7 +470,7 @@ void RunConfigTests() {
     const std::filesystem::path mainSource =
         std::filesystem::path(__FILE__).parent_path().parent_path() /
         "jni" / "src" / "main.cpp";
-    REQUIRE(ReadText(mainSource).find("内核 RPC") != std::string::npos);
+    REQUIRE(ReadText(mainSource).find("内核 RPC") == std::string::npos);
 
     {
         std::ofstream invalid(path, std::ios::binary | std::ios::trunc);

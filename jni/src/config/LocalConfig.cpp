@@ -252,7 +252,7 @@ void Apply(const Json& root, ui::UiModel& model) {
     const Json& runtime = root.value("runtime", Json::object());
     model.runtime.gameVersionIndex = ReadNumber(runtime, "game_version", model.runtime.gameVersionIndex, 0, 2);
     model.runtime.driverIndex = ReadNumber(
-        runtime, "driver", model.runtime.driverIndex, 0, 2);
+        runtime, "driver", model.runtime.driverIndex, 0, 1);
 
     const Json& visual = root.value("visual", Json::object());
 #define LOAD_VISUAL_BOOL(field, key) model.visual.field = ReadBool(visual, key, model.visual.field)

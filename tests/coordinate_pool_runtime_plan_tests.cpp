@@ -1,10 +1,12 @@
 #include "game/native/coordinate_pool_internal/FindDec.h"
+#include "game/native/coordinate_pool_internal/RingIndexCandidatePolicy.h"
 
 #include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 
@@ -89,6 +91,42 @@ int main() {
 
     constexpr std::uint64_t kBase = UINT64_C(0x100000);
     std::array<std::uint8_t, 8> code{};
+
+    const auto makeModuloEight = [](std::uint64_t increment) {
+        std::shared_ptr<Expr> value =
+            std::make_shared<VarExpr>("index", 0);
+        if (increment != 0) {
+            value = std::make_shared<BinaryExpr>(
+                OP_ADD,
+                std::move(value),
+                std::make_shared<ConstExpr>(increment, 0),
+                0);
+        }
+        return std::make_shared<BinaryExpr>(
+            OP_AND,
+            std::move(value),
+            std::make_shared<ConstExpr>(7, 0),
+            0);
+    };
+    const std::set<std::string> indexDependencies{"index"};
+    const auto currentIndex = makeModuloEight(0);
+    const auto nextIndex = makeModuloEight(1);
+    const auto skippedIndex = makeModuloEight(2);
+    const auto forwardRelation =
+        coord_dec::DetectRingIndexSuccessorRelation(
+            currentIndex, nextIndex, indexDependencies);
+    REQUIRE(forwardRelation.currentCandidate == 0);
+    REQUIRE(forwardRelation.modulus == 8);
+    const auto reverseRelation =
+        coord_dec::DetectRingIndexSuccessorRelation(
+            nextIndex, currentIndex, indexDependencies);
+    REQUIRE(reverseRelation.currentCandidate == 1);
+    REQUIRE(reverseRelation.modulus == 8);
+    const auto unrelatedRelation =
+        coord_dec::DetectRingIndexSuccessorRelation(
+            currentIndex, skippedIndex, indexDependencies);
+    REQUIRE(unrelatedRelation.currentCandidate == -1);
+    REQUIRE(unrelatedRelation.modulus == 0);
     coord_dec::FindDec finder;
     shellcode* binary = finder.get_shellcode();
     REQUIRE(binary->parse(kBase, code.data(), code.size()) == 0);

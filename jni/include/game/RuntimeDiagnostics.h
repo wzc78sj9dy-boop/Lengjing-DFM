@@ -18,11 +18,6 @@ enum class RuntimeError : std::uint16_t {
     MemoryModeInvalid = 1201,
     KernelDriverSetupFailed = 1202,
     KernelInterfaceCreateFailed = 1203,
-    PrivateRpcCreateFailed = 1204,
-    PrivateRpcProcessLookupFailed = 1205,
-    PrivateRpcProcessMismatch = 1206,
-    PrivateRpcAttachUnsupported = 1207,
-    PrivateRpcAttachFailed = 1208,
 
     ModuleBaseUnavailable = 1301,
     ModuleReadFailed = 1302,

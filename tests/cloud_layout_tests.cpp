@@ -342,10 +342,11 @@ void RunCloudLayoutTests() {
                 if (snapshot != nullptr &&
                     (snapshot->schemaVersion != kCloudLayoutSchemaVersion ||
                      snapshot->revision == 0 ||
-                     snapshot->identity.buildId != kBuildId ||
-                     snapshot->layout.namePoolOffset != 0x12001000ULL ||
-                     snapshot->layout.worldOffset != 0x13002000ULL ||
-                     snapshot->layout.coordinatePool.rootRva != 0x1a009000ULL ||
+                      snapshot->identity.buildId != kBuildId ||
+                      snapshot->layout.namePoolOffset != 0x12001000ULL ||
+                      snapshot->layout.worldOffset != 0x13002000ULL ||
+                      snapshot->layout.coordinatePool.rootRva !=
+                          0x1a009000ULL ||
                      snapshot->layout.coordinatePool.entryOffset != 0xb0)) {
                     invalidSnapshot.store(true, std::memory_order_release);
                     break;

@@ -3,32 +3,18 @@
 #include "game/native/HardwareBreakpointCoordinateRuntime.h"
 
 #include <cmath>
-#include <cstring>
 #include <limits>
 #include <utility>
-#include <vector>
 
 namespace lengjing::game::native {
 namespace {
 
-constexpr std::uintptr_t kManagerOffset = 0x1B8;
-constexpr std::uintptr_t kIdArrayOffset = 0xF98;
-constexpr std::uintptr_t kCountOffset = 0xFA0;
-constexpr std::size_t kCoordinateRecordStride = 0x40;
-constexpr std::size_t kCoordinateXOffset = 0x30;
-constexpr std::size_t kCoordinateYOffset = 0x34;
-constexpr std::size_t kCoordinateZOffset = 0x38;
-constexpr std::int32_t kMinimumCoordinateCount = 15;
-constexpr std::int32_t kMaximumCoordinateCount = 16384;
-constexpr float kCoordinateZAdjustment = 80.0f;
+constexpr std::uintptr_t kCoordinateValueOffset = 0x80;
+constexpr std::uintptr_t kCoordinateIdOffset = 0x2D8;
 constexpr std::uintptr_t kPointerPayloadMask =
     UINT64_C(0x00FFFFFFFFFFFFFF);
-constexpr std::uintptr_t kRejectedCandidateMask = UINT64_C(0xFFFF0000);
-constexpr std::uintptr_t kRejectedCandidateValue = UINT64_C(0xDEAD0000);
 
 static_assert(sizeof(HardwareBreakpointCoordinate) == 12);
-static_assert(kCoordinateZOffset + sizeof(float) <=
-              kCoordinateRecordStride);
 
 bool AddOffset(std::uintptr_t base,
                std::uintptr_t offset,
@@ -69,28 +55,6 @@ bool IsValidCoordinate(
         (coordinate.x != 0.0f ||
          coordinate.y != 0.0f ||
          coordinate.z != 0.0f);
-}
-
-std::uintptr_t MostFrequentCandidate(
-    const std::array<std::uintptr_t, 10>& candidates,
-    std::size_t count) noexcept {
-    if (count == 0 || count > candidates.size()) return 0;
-
-    std::uintptr_t best = 0;
-    std::size_t bestCount = 0;
-    for (std::size_t index = 0; index < count; ++index) {
-        const std::uintptr_t candidate = candidates[index];
-        if (candidate == 0) continue;
-        std::size_t occurrences = 0;
-        for (std::size_t other = 0; other < count; ++other) {
-            if (candidates[other] == candidate) ++occurrences;
-        }
-        if (occurrences > bestCount) {
-            best = candidate;
-            bestCount = occurrences;
-        }
-    }
-    return best;
 }
 
 }  // namespace
@@ -164,23 +128,20 @@ bool HardwareBreakpointCoordinateRuntime::Poll(
     if (!active_ || world == 0) return false;
     ++pollCount_;
     ResetWorld(world);
-
-    if (!SampleRecordsBase() || recordsBase_ == 0) return false;
-
-    if (manager == 0) {
-        std::uintptr_t managerAddress = 0;
-        if (!AddOffset(world, kManagerOffset, managerAddress) ||
-            !ReadMemory(
-                callbacks_, managerAddress, &manager, sizeof(manager))) {
-            return false;
-        }
-    }
-    if (manager == 0) return false;
-    return RefreshCoordinateTable(world, manager);
+    static_cast<void>(manager);
+    return SampleRecordsBase();
 }
 
 bool HardwareBreakpointCoordinateRuntime::Lookup(
     std::uint32_t id,
+    std::uintptr_t world,
+    HardwareBreakpointCoordinate& coordinate) noexcept {
+    return Lookup(id, 0, world, coordinate);
+}
+
+bool HardwareBreakpointCoordinateRuntime::Lookup(
+    std::uint32_t id,
+    std::uintptr_t mesh,
     std::uintptr_t world,
     HardwareBreakpointCoordinate& coordinate) noexcept {
     coordinate = {};
@@ -189,7 +150,11 @@ bool HardwareBreakpointCoordinateRuntime::Lookup(
     }
     const auto found = coordinates_.find(id);
     if (found == coordinates_.end()) return false;
-    coordinate = found->second;
+    const std::uintptr_t normalizedMesh = mesh & kPointerPayloadMask;
+    if (normalizedMesh != 0 && found->second.mesh != normalizedMesh) {
+        return false;
+    }
+    coordinate = found->second.value;
     return true;
 }
 
@@ -246,8 +211,7 @@ bool HardwareBreakpointCoordinateRuntime::SampleRecordsBase() noexcept {
         return false;
     }
 
-    if ((lastHitAddress_ != 0 && lastHitAddress_ != hitAddress) ||
-        totalRecords < lastTotalRecords_) {
+    if (lastHitAddress_ != 0 && lastHitAddress_ != hitAddress) {
         ClearWorldState();
     }
     lastHitAddress_ = hitAddress;
@@ -270,7 +234,9 @@ bool HardwareBreakpointCoordinateRuntime::SampleRecordsBase() noexcept {
         for (const SeenRecord& previous : seenRecords_) {
             if (previous.valid && previous.tid == record.tid &&
                 previous.hitCount == record.hitCount &&
-                previous.pc == record.pc) {
+                previous.pc == record.pc &&
+                previous.x20 == record.x20 &&
+                previous.x21 == record.x21) {
                 seen = true;
                 break;
             }
@@ -279,139 +245,71 @@ bool HardwareBreakpointCoordinateRuntime::SampleRecordsBase() noexcept {
             record.tid,
             record.hitCount,
             record.pc,
+            record.x20,
+            record.x21,
             true,
         };
         if (seen) continue;
 
-        const std::uintptr_t candidate =
-            record.x23 & kPointerPayloadMask;
-        std::uint64_t probe = 0;
-        if (candidate == 0 ||
-            (candidate & kRejectedCandidateMask) ==
-                kRejectedCandidateValue ||
-            !ReadMemory(
-                callbacks_, candidate, &probe, sizeof(probe))) {
+        const std::uintptr_t coordinateBase =
+            record.x20 & kPointerPayloadMask;
+        const std::uintptr_t mesh =
+            record.x21 & kPointerPayloadMask;
+        std::uintptr_t coordinateAddress = 0;
+        std::uintptr_t idAddress = 0;
+        if (!AddOffset(
+                coordinateBase,
+                kCoordinateValueOffset,
+                coordinateAddress) ||
+            !AddOffset(mesh, kCoordinateIdOffset, idAddress)) {
             continue;
         }
-        candidateRing_[candidateWriteIndex_] = candidate;
-        candidateWriteIndex_ =
-            (candidateWriteIndex_ + 1) % candidateRing_.size();
-        if (candidateCount_ < candidateRing_.size()) {
-            ++candidateCount_;
-        }
-        ++acceptedSampleCount_;
-    }
 
-    const std::uintptr_t selected =
-        MostFrequentCandidate(candidateRing_, candidateCount_);
-    if (selected != recordsBase_) {
-        recordsBase_ = selected;
-        coordinates_.clear();
+        std::uint32_t firstId = 0;
+        std::uint32_t secondId = 0;
+        HardwareBreakpointCoordinate coordinate{};
+        if (!ReadMemory(
+                callbacks_, idAddress, &firstId, sizeof(firstId)) ||
+            firstId == 0 ||
+            !ReadMemory(
+                callbacks_,
+                coordinateAddress,
+                &coordinate,
+                sizeof(coordinate)) ||
+            !ReadMemory(
+                callbacks_, idAddress, &secondId, sizeof(secondId)) ||
+            firstId != secondId || !IsValidCoordinate(coordinate)) {
+            continue;
+        }
+
+        const auto previousId = meshIds_.find(mesh);
+        if (previousId != meshIds_.end() &&
+            previousId->second != firstId) {
+            const auto previousCoordinate =
+                coordinates_.find(previousId->second);
+            if (previousCoordinate != coordinates_.end() &&
+                previousCoordinate->second.mesh == mesh) {
+                coordinates_.erase(previousCoordinate);
+            }
+        }
+        const auto previousMesh = coordinates_.find(firstId);
+        if (previousMesh != coordinates_.end() &&
+            previousMesh->second.mesh != mesh) {
+            meshIds_.erase(previousMesh->second.mesh);
+        }
+        meshIds_[mesh] = firstId;
+        coordinates_[firstId] = PublishedCoordinate{mesh, coordinate};
+        recordsBase_ = coordinateBase;
+        ++acceptedSampleCount_;
     }
     return true;
 }
 
-bool HardwareBreakpointCoordinateRuntime::RefreshCoordinateTable(
-    std::uintptr_t world,
-    std::uintptr_t manager) noexcept {
-    std::uintptr_t idArrayAddress = 0;
-    std::uintptr_t countAddress = 0;
-    if (!AddOffset(manager, kIdArrayOffset, idArrayAddress) ||
-        !AddOffset(manager, kCountOffset, countAddress)) {
-        return false;
-    }
-
-    std::uintptr_t idArray = 0;
-    std::int32_t count = 0;
-    if (!ReadMemory(
-            callbacks_, idArrayAddress, &idArray, sizeof(idArray)) ||
-        !ReadMemory(callbacks_, countAddress, &count, sizeof(count)) ||
-        idArray == 0 || count < kMinimumCoordinateCount ||
-        count > kMaximumCoordinateCount) {
-        return false;
-    }
-
-    const std::size_t itemCount = static_cast<std::size_t>(count);
-    const std::size_t recordsSize =
-        itemCount * kCoordinateRecordStride;
-    const std::size_t idsSize = itemCount * sizeof(std::uint32_t);
-    if (!IsReadableRange(recordsBase_, recordsSize) ||
-        !IsReadableRange(idArray, idsSize)) {
-        return false;
-    }
-
-    try {
-        std::vector<std::uint8_t> records(recordsSize);
-        std::vector<std::uint32_t> ids(itemCount);
-        if (!ReadMemory(
-                callbacks_, recordsBase_, records.data(), records.size()) ||
-            !ReadMemory(callbacks_, idArray, ids.data(), idsSize)) {
-            return false;
-        }
-
-        std::uintptr_t managerAddress = 0;
-        std::uintptr_t verifiedManager = 0;
-        std::uintptr_t verifiedIdArray = 0;
-        std::int32_t verifiedCount = 0;
-        if (!AddOffset(world, kManagerOffset, managerAddress) ||
-            !ReadMemory(
-                callbacks_, managerAddress, &verifiedManager,
-                sizeof(verifiedManager)) ||
-            !ReadMemory(
-                callbacks_, idArrayAddress, &verifiedIdArray,
-                sizeof(verifiedIdArray)) ||
-            !ReadMemory(
-                callbacks_, countAddress, &verifiedCount,
-                sizeof(verifiedCount)) ||
-            verifiedManager != manager ||
-            verifiedIdArray != idArray ||
-            verifiedCount != count) {
-            return false;
-        }
-
-        std::unordered_map<std::uint32_t, HardwareBreakpointCoordinate>
-            next;
-        next.reserve(itemCount);
-        for (std::size_t index = 0; index < itemCount; ++index) {
-            const std::uint32_t id = ids[index];
-            if (id == 0) continue;
-
-            const std::size_t recordOffset =
-                index * kCoordinateRecordStride;
-            HardwareBreakpointCoordinate coordinate{};
-            std::memcpy(
-                &coordinate.x,
-                records.data() + recordOffset + kCoordinateXOffset,
-                sizeof(coordinate.x));
-            std::memcpy(
-                &coordinate.y,
-                records.data() + recordOffset + kCoordinateYOffset,
-                sizeof(coordinate.y));
-            std::memcpy(
-                &coordinate.z,
-                records.data() + recordOffset + kCoordinateZOffset,
-                sizeof(coordinate.z));
-            if (!IsValidCoordinate(coordinate)) continue;
-            coordinate.z += kCoordinateZAdjustment;
-            if (!std::isfinite(coordinate.z)) continue;
-            next[id] = coordinate;
-        }
-
-        if (world != world_) return false;
-        coordinates_.swap(next);
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
 void HardwareBreakpointCoordinateRuntime::ClearWorldState() noexcept {
     seenRecords_.fill({});
-    candidateRing_.fill(0);
     coordinates_.clear();
+    meshIds_.clear();
     recordsBase_ = 0;
-    candidateWriteIndex_ = 0;
-    candidateCount_ = 0;
     lastTotalRecords_ = 0;
     lastHitAddress_ = 0;
 }

@@ -17,7 +17,6 @@ namespace lengjing::game::native {
 enum class MemoryTransportMode : int {
     ProcessVm = 0,
     KernelDriver = 1,
-    PrivateRpc = 2,
     Count,
 };
 
@@ -30,8 +29,7 @@ constexpr bool IsValidMemoryTransportMode(int mode) noexcept {
 
 constexpr bool IsKernelMemoryTransportMode(
     MemoryTransportMode mode) noexcept {
-    return mode == MemoryTransportMode::KernelDriver ||
-        mode == MemoryTransportMode::PrivateRpc;
+    return mode == MemoryTransportMode::KernelDriver;
 }
 
 struct CoordinateReplayTransportLayout {
@@ -133,6 +131,8 @@ struct ExecutionBreakpointRecord {
     std::uintptr_t pc = 0;
     std::uintptr_t sp = 0;
     std::uintptr_t x0 = 0;
+    std::uintptr_t x20 = 0;
+    std::uintptr_t x21 = 0;
     std::uintptr_t x23 = 0;
 };
 #endif
@@ -150,9 +150,17 @@ public:
               std::string_view processName,
               RuntimeDiagnostic& diagnostic,
               std::string& error);
+    bool OpenReadOnly(int modeIndex,
+                      pid_t processId,
+                      std::string_view processName,
+                      RuntimeDiagnostic& diagnostic,
+                      std::string& error);
     void Close() noexcept;
 
     bool Read(std::uintptr_t address, void* destination, std::size_t size);
+    bool ReadGeometry(std::uintptr_t address,
+                      void* destination,
+                      std::size_t size);
     bool ReadCoordinateMemory(
         std::uintptr_t address,
         void* destination,
@@ -181,6 +189,18 @@ public:
         std::uintptr_t& hitAddress,
         std::size_t& totalRecords) noexcept;
     bool RemoveExecutionBreakpoints() noexcept;
+#endif
+#if 0
+    bool SupportsPageExecutionBreakpoints() const noexcept;
+    bool ConfigurePageExecutionBreakpoint(
+        std::uintptr_t address) noexcept;
+    bool ReadPageExecutionBreakpointRecords(
+        ExecutionBreakpointRecord* records,
+        std::size_t capacity,
+        std::size_t& recordsRead,
+        std::uintptr_t& hitAddress,
+        std::size_t& totalRecords) noexcept;
+    bool RemovePageExecutionBreakpoints() noexcept;
 #endif
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
     bool CanWrite() const noexcept;

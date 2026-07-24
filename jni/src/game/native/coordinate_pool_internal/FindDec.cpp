@@ -1,5 +1,8 @@
 ﻿#include "game/native/coordinate_pool_internal/FindDec.h"
+#include "game/native/coordinate_pool_internal/RingIndexCandidatePolicy.h"
 #include <algorithm>
+#include <cstdio>
+#include <limits>
 #include <set>
 #include <unordered_map>
 #include <vector>
@@ -419,9 +422,11 @@ namespace coord_dec {
 	}
 
 	bool FindDec::analyze_hash_binary_search() {
+		failure_stage_ = FindDecFailureStage::HashSearch;
 		if (!find_binary_search_end()) {
 			return false;
 		}
+		failure_stage_ = FindDecFailureStage::PoolPointer;
 		if (!find_pool_ptr_offset()) {
 			return false;
 		}
@@ -479,14 +484,24 @@ namespace coord_dec {
 	}
 
 	bool FindDec::analyze_base_index_calc() {
+		auto parse_instruction = [&](cs_insn* instruction) {
+			const int legacy_result = analyze.parse(instruction);
+			if (legacy_result == 0) return true;
+			return instruction && instruction->id == ARM64_INS_ADD &&
+				analyze.parse_add_compat(instruction) == 0;
+		};
+
 		std::vector<uint32_t> madds;
 		entry->find_all(ring_offset_madd_block, ring_offset_madd_block + 100,
 			[](finder& f) {
 				f.is(0, ARM64_INS_MADD, ARM64_INS_UMADDL);
 				f.break_when_b();
 			}, madds);
+		madd_count_ = static_cast<uint16_t>(std::min<std::size_t>(
+			madds.size(), std::numeric_limits<uint16_t>::max()));
 
 		if (madds.empty()) {
+			failure_detail_ = FindDecFailureDetail::MaddScanEmpty;
 			return false;
 		}
 
@@ -517,16 +532,21 @@ namespace coord_dec {
 				pool_disp = candidate_disp;
 			}
 		}
+		ring_madd_count_ = static_cast<uint16_t>(std::min<std::size_t>(
+			ring_madds.size(), std::numeric_limits<uint16_t>::max()));
 
 		if (ring_madds.empty()) {
+			failure_detail_ = FindDecFailureDetail::RingStrideMissing;
 			return false;
 		}
 
 		if (ring_madds.size() != 2) {
+			failure_detail_ = FindDecFailureDetail::RingStrideCount;
 			return false;
 		}
 
 		if (!ring_base_madd || !pool_ldr) {
+			failure_detail_ = FindDecFailureDetail::PoolLoadMissing;
 			return false;
 		}
 
@@ -563,19 +583,37 @@ namespace coord_dec {
 				}
 
 				for (uint32_t j = decode->start_i(); j < decode->end_i(); j++) {
-					if (analyze.parse(entry->get_insn(j))) {
+					cs_insn* instruction = entry->get_insn(j);
+					if (!parse_instruction(instruction)) {
+						failure_detail_ =
+							FindDecFailureDetail::DecodeExpressionParse;
+						failure_instruction_ = static_cast<uint16_t>(
+							std::min<unsigned int>(
+								instruction->id,
+								std::numeric_limits<uint16_t>::max()));
 						return false;
 					}
 				}
 			}
-			else if (analyze.parse(entry->get_insn(i))) {
-				return false;
+			else {
+				cs_insn* instruction = entry->get_insn(i);
+				if (!parse_instruction(instruction)) {
+					failure_detail_ =
+						FindDecFailureDetail::IndexExpressionParse;
+					failure_instruction_ = static_cast<uint16_t>(
+						std::min<unsigned int>(
+							instruction->id,
+							std::numeric_limits<uint16_t>::max()));
+					return false;
+				}
 			}
 
 			if (count < ring_madds.size() && i == ring_madds[count] - 1) {
 				count++;
 				auto candidate_expr = analyze.get_expr(entry->reg(i + 1, 1));
 				if (!candidate_expr) {
+					failure_detail_ =
+						FindDecFailureDetail::CandidateExpressionMissing;
 					return false;
 				}
 
@@ -587,8 +625,11 @@ namespace coord_dec {
 				candidates.push_back(std::move(candidate));
 			}
 		}
+		candidate_count_ = static_cast<uint16_t>(std::min<std::size_t>(
+			candidates.size(), std::numeric_limits<uint16_t>::max()));
 
 		if (candidates.size() != 2) {
+			failure_detail_ = FindDecFailureDetail::CandidateCount;
 			return false;
 		}
 
@@ -599,15 +640,47 @@ namespace coord_dec {
 				});
 		};
 
-		const bool first_is_current = uses_ring_index(candidates[0]) &&
+		const bool first_uses_ring = uses_ring_index(candidates[0]);
+		const bool second_uses_ring = uses_ring_index(candidates[1]);
+		const bool first_is_current = first_uses_ring &&
 			is_strict_subset(candidates[0].dependencies, candidates[1].dependencies);
-		const bool second_is_current = uses_ring_index(candidates[1]) &&
+		const bool second_is_current = second_uses_ring &&
 			is_strict_subset(candidates[1].dependencies, candidates[0].dependencies);
-		if (first_is_current == second_is_current) {
+		int current_candidate = first_is_current ? 0 :
+			(second_is_current ? 1 : -1);
+		RingIndexSuccessorRelation successor_relation;
+		if (current_candidate < 0 &&
+			first_uses_ring && second_uses_ring &&
+			candidates[0].dependencies == candidates[1].dependencies &&
+			candidates[1].madd == candidates[0].madd + 1 &&
+			entry->reg(candidates[0].madd, 2) ==
+				entry->reg(candidates[1].madd, 2) &&
+			entry->reg(candidates[0].madd, 3) ==
+				entry->reg(candidates[1].madd, 3)) {
+			successor_relation = DetectRingIndexSuccessorRelation(
+				candidates[0].expr,
+				candidates[1].expr,
+				candidates[0].dependencies);
+			current_candidate = successor_relation.currentCandidate;
+		}
+#if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
+		if (successor_relation.currentCandidate >= 0) {
+			std::fprintf(
+				stderr,
+				"[coordinate-index-fallback] current=%d modulus=%u\n",
+				successor_relation.currentCandidate,
+				successor_relation.modulus);
+			std::fflush(stderr);
+		}
+#endif
+		if (current_candidate < 0) {
+			failure_detail_ =
+				FindDecFailureDetail::CandidateDependencyAmbiguous;
 			return false;
 		}
 
-		const RingIndexCandidate& current = candidates[first_is_current ? 0 : 1];
+		const RingIndexCandidate& current =
+			candidates[static_cast<std::size_t>(current_candidate)];
 		index_expr = current.expr;
 		analyze.retain_var_params(current.dependencies);
 
@@ -631,17 +704,21 @@ namespace coord_dec {
 		}
 
 		if (!for_index || ring_index_param.empty() || index_offset != pool_disp) {
+			failure_detail_ = FindDecFailureDetail::IndexParameterMissing;
 			return false;
 		}
 
+		failure_detail_ = FindDecFailureDetail::None;
 		return true;
 	}
 
 	bool FindDec::analyze_index_calc() {
+		failure_stage_ = FindDecFailureStage::RingOffset;
 		if (!find_ring_offset()) {
 			return false;
 		}
 
+		failure_stage_ = FindDecFailureStage::IndexExpression;
 		if (!analyze_base_index_calc()) {
 			return false;
 		}
@@ -721,6 +798,7 @@ namespace coord_dec {
 			}, indexes);
 
 		if (indexes.empty()) {
+			failure_detail_ = FindDecFailureDetail::PatchZeroStoreMissing;
 			return false;
 		}
 
@@ -751,20 +829,53 @@ namespace coord_dec {
 		}
 
 		if (!str) {
+			failure_detail_ = FindDecFailureDetail::PatchGuardMissing;
 			return false;
 		}
 
 
-		uint64_t addr = entry->find_reverse([](finder& f) {
-			f.is_b();
-			}, str, 20);
+		uint64_t addr = 0;
+		uint32_t matched_window = 0;
+		constexpr uint32_t kPatchBranchWindows[] = {
+			48U, 64U, 96U, 128U,
+		};
+		for (const uint32_t window : kPatchBranchWindows) {
+			addr = entry->find_reverse(
+				[](finder& f) {
+					f.is_b();
+				},
+				str,
+				window);
+			if (addr != 0) {
+				matched_window = window;
+				break;
+			}
+		}
+		static_cast<void>(matched_window);
 
-		if (!addr) return false;
+		if (!addr) {
+			failure_detail_ = FindDecFailureDetail::PatchBranchMissing;
+			return false;
+		}
 
+#if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
+		std::fprintf(
+			stderr,
+			"[coordinate-patch-branch] store=%u branch=%llu window=%u\n",
+			str,
+			static_cast<unsigned long long>(addr),
+			matched_window);
+		std::fflush(stderr);
+#endif
 		addr = entry->address(addr + 1);
 
 		for (const auto& i : patch_svc) {
 			uint32_t patch_b = generate_branch(addr - entry->address(i));
+			if (patch_b == 0) {
+				failure_detail_ =
+					FindDecFailureDetail::PatchBranchOutOfRange;
+				return false;
+			}
 			binary_.patch(i, &patch_b, 4);
 		}
 
@@ -789,6 +900,12 @@ namespace coord_dec {
 		hash_end_madd = 0;
 		index_offset = 0;
 		pool_ptr_offset = 0;
+		failure_stage_ = FindDecFailureStage::EntryMethod;
+		failure_detail_ = FindDecFailureDetail::None;
+		madd_count_ = 0;
+		ring_madd_count_ = 0;
+		candidate_count_ = 0;
+		failure_instruction_ = 0;
 
 
 		finder f;
@@ -800,6 +917,7 @@ namespace coord_dec {
 		}
 
 
+		failure_stage_ = FindDecFailureStage::V87Marker;
 		if (!find_v87_str()) {
 			return -1;
 		}
@@ -814,6 +932,7 @@ namespace coord_dec {
 		if (!analyze_index_calc()) {
 			return -1;
 		}
+		failure_stage_ = FindDecFailureStage::Patch;
 		if (!patch()) {
 			return -1;
 		}
@@ -822,6 +941,7 @@ namespace coord_dec {
 
 
 
+		failure_stage_ = FindDecFailureStage::None;
 		return 0;
 	}
 }

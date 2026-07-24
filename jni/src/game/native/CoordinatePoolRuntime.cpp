@@ -525,6 +525,7 @@ int CapstoneXRegisterId(arm64_reg value) noexcept {
     }
     if (value == ARM64_REG_X29) return UC_ARM64_REG_X29;
     if (value == ARM64_REG_X30) return UC_ARM64_REG_X30;
+    if (value == ARM64_REG_SP) return UC_ARM64_REG_SP;
     if (value == ARM64_REG_XZR) return UC_ARM64_REG_XZR;
     return UC_ARM64_REG_INVALID;
 }
@@ -2239,6 +2240,12 @@ private:
     }
 
     bool AnalyzeCodeAttemptUnlocked() {
+        probe.analysisFindStage = 0;
+        probe.analysisFindDetail = 0;
+        probe.analysisMaddCount = 0;
+        probe.analysisRingMaddCount = 0;
+        probe.analysisCandidateCount = 0;
+        probe.analysisFailureInstruction = 0;
         std::uint64_t mappingStart = 0;
         std::uint64_t mappingEnd = 0;
         int mappingStatus = 0;
@@ -2476,6 +2483,15 @@ private:
             }
 
             const int result = candidate->find_dec(guestEntry);
+            probe.analysisFindStage = static_cast<std::uint8_t>(
+                candidate->failure_stage());
+            probe.analysisFindDetail = static_cast<std::uint8_t>(
+                candidate->failure_detail());
+            probe.analysisMaddCount = candidate->madd_count();
+            probe.analysisRingMaddCount = candidate->ring_madd_count();
+            probe.analysisCandidateCount = candidate->candidate_count();
+            probe.analysisFailureInstruction =
+                candidate->failure_instruction();
             const auto requestedMethods =
                 candidate->get_shellcode()->requested_method_addresses();
             const std::size_t loadedBefore = loadedPageCount;
@@ -2564,6 +2580,12 @@ private:
         probe.ringOffset = finder->get_ring_offset();
         finder->compact_runtime_plan();
         ClearReadDiagnosticUnlocked();
+        probe.analysisFindStage = 0;
+        probe.analysisFindDetail = 0;
+        probe.analysisMaddCount = 0;
+        probe.analysisRingMaddCount = 0;
+        probe.analysisCandidateCount = 0;
+        probe.analysisFailureInstruction = 0;
         probe.error = CoordinatePoolRuntimeError::None;
         probe.stage = CoordinatePoolRuntimeStage::CodeAnalyzed;
         return true;
@@ -3567,6 +3589,12 @@ private:
         probe.executableMappingStart = 0;
         probe.executableMappingEnd = 0;
         probe.failedMethod = 0;
+        probe.analysisFindStage = 0;
+        probe.analysisFindDetail = 0;
+        probe.analysisMaddCount = 0;
+        probe.analysisRingMaddCount = 0;
+        probe.analysisCandidateCount = 0;
+        probe.analysisFailureInstruction = 0;
         probe.poolPointerOffset = 0;
         probe.indexOffset = 0;
         probe.ringOffset = 0;

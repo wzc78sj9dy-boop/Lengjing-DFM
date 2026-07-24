@@ -55,6 +55,10 @@ public:
     bool Lookup(std::uint32_t id,
                 std::uintptr_t world,
                 HardwareBreakpointCoordinate& coordinate) noexcept;
+    bool Lookup(std::uint32_t id,
+                std::uintptr_t mesh,
+                std::uintptr_t world,
+                HardwareBreakpointCoordinate& coordinate) noexcept;
     void ResetWorld(std::uintptr_t world) noexcept;
 
     bool IsActive() const noexcept;
@@ -69,13 +73,17 @@ private:
         pid_t tid = -1;
         std::uint64_t hitCount = 0;
         std::uintptr_t pc = 0;
+        std::uintptr_t x20 = 0;
+        std::uintptr_t x21 = 0;
         bool valid = false;
     };
 
+    struct PublishedCoordinate {
+        std::uintptr_t mesh = 0;
+        HardwareBreakpointCoordinate value{};
+    };
+
     bool SampleRecordsBase() noexcept;
-    bool RefreshCoordinateTable(
-        std::uintptr_t world,
-        std::uintptr_t manager) noexcept;
     void ClearWorldState() noexcept;
     void ClearSamplingState() noexcept;
 
@@ -83,14 +91,12 @@ private:
     std::array<ExecutionBreakpointRecord, kExecutionBreakpointRecordLimit>
         records_{};
     std::array<SeenRecord, kExecutionBreakpointRecordLimit> seenRecords_{};
-    std::array<std::uintptr_t, 10> candidateRing_{};
-    std::unordered_map<std::uint32_t, HardwareBreakpointCoordinate>
+    std::unordered_map<std::uint32_t, PublishedCoordinate>
         coordinates_;
+    std::unordered_map<std::uintptr_t, std::uint32_t> meshIds_;
     std::uintptr_t breakpointAddress_ = 0;
     std::uintptr_t recordsBase_ = 0;
     std::uintptr_t world_ = 0;
-    std::size_t candidateWriteIndex_ = 0;
-    std::size_t candidateCount_ = 0;
     std::size_t lastTotalRecords_ = 0;
     std::uintptr_t lastHitAddress_ = 0;
     std::uint64_t pollCount_ = 0;

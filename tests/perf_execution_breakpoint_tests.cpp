@@ -30,6 +30,8 @@ void TestArm64RegisterMapping() {
     Append(payload, UINT64_C(2));
     Append(payload, UINT64_C(0x1000000000000001));
     Append(payload, UINT64_C(0x7000000000000007));
+    Append(payload, UINT64_C(0x2000000000000020));
+    Append(payload, UINT64_C(0x2100000000000021));
     Append(payload, UINT64_C(0x2300000000000023));
     Append(payload, UINT64_C(0x3100000000000031));
     Append(payload, UINT64_C(0x3200000000000032));
@@ -45,6 +47,8 @@ void TestArm64RegisterMapping() {
     REQUIRE(sample.threadId == 654);
     REQUIRE(sample.ip == UINT64_C(0x123456789ABCDEF0));
     REQUIRE(sample.x0 == UINT64_C(0x1000000000000001));
+    REQUIRE(sample.x20 == UINT64_C(0x2000000000000020));
+    REQUIRE(sample.x21 == UINT64_C(0x2100000000000021));
     REQUIRE(sample.x23 == UINT64_C(0x2300000000000023));
     REQUIRE(sample.sp == UINT64_C(0x3100000000000031));
     REQUIRE(sample.pc == UINT64_C(0x3200000000000032));
@@ -69,6 +73,8 @@ void TestPayloadValidation() {
     Append(payload, UINT32_C(101));
     Append(payload, UINT64_C(2));
     Append(payload, UINT64_C(10));
+    Append(payload, UINT64_C(20));
+    Append(payload, UINT64_C(21));
     Append(payload, UINT64_C(23));
     Append(payload, UINT64_C(31));
     Append(payload, UINT64_C(32));
@@ -91,6 +97,20 @@ void TestPayloadValidation() {
         payload.size(),
         kSampleIp | kSampleTid,
         kArm64RegisterMask,
+        sample));
+    REQUIRE(!ParseArm64SamplePayload(
+        payload.data(),
+        payload.size(),
+        kConfiguredSampleType,
+        kArm64RegisterMask &
+            ~(UINT64_C(1) << kArm64RegisterX20),
+        sample));
+    REQUIRE(!ParseArm64SamplePayload(
+        payload.data(),
+        payload.size(),
+        kConfiguredSampleType,
+        kArm64RegisterMask &
+            ~(UINT64_C(1) << kArm64RegisterX21),
         sample));
     REQUIRE(!ParseArm64SamplePayload(
         payload.data(),

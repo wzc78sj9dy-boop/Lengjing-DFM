@@ -407,6 +407,7 @@ public:
 enum ShiftOp {
 	SHIFT_OP_LSL,
 	SHIFT_OP_LSR,
+	SHIFT_OP_ASR,
 };
 
 class ShiftExpr : public Expr {
@@ -439,10 +440,25 @@ public:
 		if (op == SHIFT_OP_LSL)
 			return v << amount;
 
-		return v >> amount;
+		if (op == SHIFT_OP_LSR)
+			return v >> amount;
+
+		if (amount == 0)
+			return v;
+		uint64_t shifted = v >> amount;
+		if ((v & UINT64_C(0x8000000000000000)) != 0)
+			shifted |= UINT64_MAX << (64 - amount);
+		return shifted;
 	}
 
 	std::string str(std::vector<std::string>& expr_str) override {
+		if (op == SHIFT_OP_ASR) {
+			return "("
+				+ expr->str(expr_str)
+				+ " asr "
+				+ std::to_string(amount)
+				+ ")";
+		}
 		return "("
 			+ expr->str(expr_str)
 			+ (op == SHIFT_OP_LSR ? " >> " : " << ")

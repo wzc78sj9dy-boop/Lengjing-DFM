@@ -99,6 +99,8 @@ bool ParseArm64SamplePayload(
     }
 
     bool foundX0 = false;
+    bool foundX20 = false;
+    bool foundX21 = false;
     bool foundX23 = false;
     bool foundSp = false;
     bool foundPc = false;
@@ -110,6 +112,14 @@ bool ParseArm64SamplePayload(
             case kArm64RegisterX0:
                 sample.x0 = value;
                 foundX0 = true;
+                break;
+            case kArm64RegisterX20:
+                sample.x20 = value;
+                foundX20 = true;
+                break;
+            case kArm64RegisterX21:
+                sample.x21 = value;
+                foundX21 = true;
                 break;
             case kArm64RegisterX23:
                 sample.x23 = value;
@@ -127,8 +137,8 @@ bool ParseArm64SamplePayload(
                 break;
         }
     }
-    if (remaining != 0 || !foundX0 || !foundX23 || !foundSp ||
-        !foundPc) {
+    if (remaining != 0 || !foundX0 || !foundX20 || !foundX21 ||
+        !foundX23 || !foundSp || !foundPc) {
         sample = {};
         return false;
     }
@@ -209,7 +219,8 @@ struct PerfExecutionBreakpoint::Impl {
     std::uintptr_t address = 0;
     std::size_t pageSize = 0;
     std::map<pid_t, std::unique_ptr<ThreadEvent>> events;
-    std::map<pid_t, SavedRecord> records;
+    std::map<std::uintptr_t, SavedRecord> records;
+    std::map<pid_t, std::uint64_t> threadHitCounts;
     std::uint64_t updateSequence = 0;
     std::chrono::steady_clock::time_point nextDiscovery{};
     bool configured = false;
@@ -266,9 +277,9 @@ struct PerfExecutionBreakpoint::Impl {
         }
         event->threadId = threadId;
         event->descriptor = descriptor;
-        const auto saved = records.find(threadId);
-        if (saved != records.end()) {
-            event->hitCount = saved->second.record.hitCount;
+        const auto saved = threadHitCounts.find(threadId);
+        if (saved != threadHitCounts.end()) {
+            event->hitCount = saved->second;
         }
         event->mappingSize =
             pageSize * (1 + kPerfDataPageCount);
@@ -350,6 +361,8 @@ struct PerfExecutionBreakpoint::Impl {
                 ++iterator;
                 continue;
             }
+            threadHitCounts[iterator->first] =
+                iterator->second->hitCount;
             CloseEvent(*iterator->second);
             iterator = events.erase(iterator);
         }
@@ -397,7 +410,10 @@ struct PerfExecutionBreakpoint::Impl {
         const perf_execution_breakpoint_internal::ParsedSample& sample)
         noexcept {
         event.hitCount = SaturatingAdd(event.hitCount, 1);
-        auto iterator = records.find(event.threadId);
+        threadHitCounts[event.threadId] = event.hitCount;
+        const std::uintptr_t identity =
+            static_cast<std::uintptr_t>(sample.x21);
+        auto iterator = records.find(identity);
         if (iterator == records.end() &&
             records.size() >= kExecutionBreakpointRecordLimit) {
             auto oldest = records.begin();
@@ -410,13 +426,15 @@ struct PerfExecutionBreakpoint::Impl {
             }
             records.erase(oldest);
         }
-        SavedRecord& saved = records[event.threadId];
+        SavedRecord& saved = records[identity];
         saved.record = {
             event.threadId,
             event.hitCount,
             static_cast<std::uintptr_t>(sample.pc),
             static_cast<std::uintptr_t>(sample.sp),
             static_cast<std::uintptr_t>(sample.x0),
+            static_cast<std::uintptr_t>(sample.x20),
+            static_cast<std::uintptr_t>(sample.x21),
             static_cast<std::uintptr_t>(sample.x23),
         };
         saved.updateSequence = SaturatingAdd(updateSequence, 1);
@@ -588,6 +606,7 @@ struct PerfExecutionBreakpoint::Impl {
         }
         events.clear();
         records.clear();
+        threadHitCounts.clear();
         processId = -1;
         address = 0;
         pageSize = 0;

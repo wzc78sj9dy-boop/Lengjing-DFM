@@ -1,11 +1,10 @@
 #include "game/native/MemoryTransport.h"
 
 #include "game/native/KernelModuleLoader.h"
-#include "game/native/KernelRpcTransport.h"
+#include "game/native/PacgaOperandResolver.h"
 #if 0
 #include "game/native/PerfExecutionBreakpoint.h"
 #endif
-#include "game/native/PacgaOperandResolver.h"
 #include "game/native/PtraceExecutionContextProvider.h"
 #include "game/native/ThreadContextDeviceTransport.h"
 #include "game/native/ThreadExecutionContextProvider.h"
@@ -322,15 +321,6 @@ std::string MutableName(std::string_view value) {
     return std::string(value.begin(), value.end());
 }
 
-std::string RpcFailureText(int result) {
-    if (result >= 0) return std::to_string(result);
-    const int errorNumber = -result;
-    const char* message = std::strerror(errorNumber);
-    return message != nullptr
-        ? std::string(message)
-        : std::to_string(result);
-}
-
 std::size_t ThreadContextRequestCount() {
     const char* value = std::getenv("LENGJING_THREAD_CONTEXT_REQUEST_COUNT");
     if (value != nullptr && std::string_view(value) == "0x400") {
@@ -474,9 +464,12 @@ struct MemoryTransport::Impl {
     MemoryTransportMode mode = MemoryTransportMode::ProcessVm;
     pid_t processId = -1;
     paradise_driver* kernel = nullptr;
-    std::unique_ptr<KernelRpcTransport> privateRpc;
-    kernel_rpc_abi::ProcessHandle privateProcessHandle =
-        kernel_rpc_abi::kInvalidProcessHandle;
+#if 0
+    bool pageExecutionBreakpointConfigured = false;
+    std::uintptr_t pageExecutionBreakpointAddress = 0;
+    std::array<hwbp_record, HWBP_MAX_RECORDS>
+        pageExecutionBreakpointRecordBuffer{};
+#endif
 #if 0
     PerfExecutionBreakpoint perfExecutionBreakpoint;
     ExecutionBreakpointBackend executionBreakpointBackend =
@@ -535,15 +528,12 @@ struct MemoryTransport::Impl {
         coordinateReplayLayout = {};
         coordinateBatchDisabled = false;
 #if 0
+        static_cast<void>(
+            RemovePageExecutionBreakpointsUnlocked());
+#endif
+#if 0
         static_cast<void>(RemoveExecutionBreakpointsUnlocked());
 #endif
-        if (privateRpc != nullptr &&
-            privateProcessHandle != kernel_rpc_abi::kInvalidProcessHandle) {
-            static_cast<void>(privateRpc->ReleaseProcessHandle(
-                privateProcessHandle));
-        }
-        privateRpc.reset();
-        privateProcessHandle = kernel_rpc_abi::kInvalidProcessHandle;
         if (processMemFd >= 0) {
             ::close(processMemFd);
             processMemFd = -1;
@@ -958,7 +948,9 @@ struct MemoryTransport::Impl {
               pid_t targetProcessId,
               std::string_view processName,
               RuntimeDiagnostic& diagnostic,
-              std::string& error) {
+              std::string& error,
+              bool initializeExecutionContext) {
+        static_cast<void>(processName);
         std::lock_guard<std::mutex> lock(ioMutex);
         ResetUnlocked();
         diagnostic = {};
@@ -1001,60 +993,6 @@ struct MemoryTransport::Impl {
                 writable = true;
 #endif
                 break;
-            case MemoryTransportMode::PrivateRpc: {
-                privateRpc.reset(new (std::nothrow) KernelRpcTransport());
-                if (privateRpc == nullptr) {
-                    error = "无法创建内核 RPC 接口";
-                    diagnostic = {
-                        RuntimeError::PrivateRpcCreateFailed,
-                        -ENOMEM,
-                    };
-                    ResetUnlocked();
-                    return false;
-                }
-                std::int32_t resolvedProcessId = -1;
-                const int result = privateRpc->FindProcessId(
-                    processName, resolvedProcessId);
-                if (result != 0) {
-                    error = "内核 RPC 接口不可用: " +
-                        RpcFailureText(result);
-                    diagnostic = {
-                        RuntimeError::PrivateRpcProcessLookupFailed,
-                        result,
-                    };
-                    ResetUnlocked();
-                    return false;
-                }
-                if (resolvedProcessId != processId) {
-                    error = "内核 RPC 返回的进程标识不匹配";
-                    diagnostic = {
-                        RuntimeError::PrivateRpcProcessMismatch,
-                        -ESRCH,
-                    };
-                    ResetUnlocked();
-                    return false;
-                }
-                const int attachResult = privateRpc->AttachProcess(
-                    resolvedProcessId, privateProcessHandle);
-                if (attachResult != 0) {
-                    error = attachResult == -ENOTSUP
-                        ? "内核 RPC 进程附加协议尚未解析"
-                        : "内核 RPC 无法附加目标进程: " +
-                            RpcFailureText(attachResult);
-                    diagnostic = {
-                        attachResult == -ENOTSUP
-                            ? RuntimeError::PrivateRpcAttachUnsupported
-                            : RuntimeError::PrivateRpcAttachFailed,
-                        attachResult,
-                    };
-                    ResetUnlocked();
-                    return false;
-                }
-#if LENGJING_ENABLE_PROJECTILE_TRACKING
-                writable = true;
-#endif
-                break;
-            }
             case MemoryTransportMode::Count:
             default:
                 error = "内存读取模式参数无效";
@@ -1066,7 +1004,12 @@ struct MemoryTransport::Impl {
                 return false;
         }
 
-        static_cast<void>(OpenThreadContextUnlocked());
+#if LENGJING_ENABLE_PROJECTILE_TRACKING
+        if (!initializeExecutionContext) writable = false;
+#endif
+        if (initializeExecutionContext) {
+            static_cast<void>(OpenThreadContextUnlocked());
+        }
         open = true;
         diagnostic = {};
         error.clear();
@@ -1404,28 +1347,195 @@ struct MemoryTransport::Impl {
             return kernel != nullptr &&
                 kernel->read_fast(address, destination, size);
         }
-        return mode == MemoryTransportMode::PrivateRpc &&
-            privateRpc != nullptr &&
-            privateProcessHandle != kernel_rpc_abi::kInvalidProcessHandle &&
-             privateRpc->ReadMemory(
-                 privateProcessHandle, address, destination, size) == 0;
+        return false;
     }
 
-    bool Read(std::uintptr_t address, void* destination, std::size_t size) {
+    bool ReadWithKind(std::uintptr_t address,
+                      void* destination,
+                      std::size_t size,
+                      platform::PerformancePhase phase,
+                      platform::PerformanceReadKind kind) {
         if (!platform::PerformanceTraceEnabled()) {
             std::lock_guard<std::mutex> lock(ioMutex);
             return ReadUnlocked(address, destination, size);
         }
         platform::PerformanceTraceScope trace(
-            platform::PerformancePhase::RemoteRead, 64);
+            phase, 64);
         std::lock_guard<std::mutex> lock(ioMutex);
         const bool read = ReadUnlocked(address, destination, size);
         platform::RecordPerformanceRead(
-            platform::PerformanceReadKind::Standard,
+            kind,
             size,
             read);
         return read;
     }
+
+    bool Read(std::uintptr_t address, void* destination, std::size_t size) {
+        return ReadWithKind(
+            address,
+            destination,
+            size,
+            platform::PerformancePhase::RemoteRead,
+            platform::PerformanceReadKind::Standard);
+    }
+
+#if 0
+    bool SupportsPageExecutionBreakpoints() const noexcept {
+        std::lock_guard<std::mutex> lock(ioMutex);
+        if (!open || processId <= 0 ||
+            mode != MemoryTransportMode::KernelDriver ||
+            kernel == nullptr) {
+            return false;
+        }
+        std::uint64_t breakpointCount = 0;
+        std::uint64_t watchpointCount = 0;
+        try {
+            return kernel->ptebp_get_info(
+                       &breakpointCount, &watchpointCount) &&
+                breakpointCount != 0;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    bool RemovePageExecutionBreakpointsUnlocked() noexcept {
+        if (!pageExecutionBreakpointConfigured) return true;
+        bool removed = false;
+        if (kernel != nullptr && processId > 0) {
+            try {
+                removed = kernel->ptebp_remove(processId);
+            } catch (...) {
+                removed = false;
+            }
+        }
+        pageExecutionBreakpointConfigured = false;
+        pageExecutionBreakpointAddress = 0;
+        pageExecutionBreakpointRecordBuffer.fill({});
+        return removed;
+    }
+
+    bool ConfigurePageExecutionBreakpoint(
+        std::uintptr_t address) noexcept {
+        std::lock_guard<std::mutex> lock(ioMutex);
+        if (!open || processId <= 0 ||
+            mode != MemoryTransportMode::KernelDriver ||
+            kernel == nullptr ||
+            !IsRemoteRangeValid(address, 4) ||
+            (address & 3U) != 0) {
+            return false;
+        }
+        if (pageExecutionBreakpointConfigured &&
+            pageExecutionBreakpointAddress == address) {
+            return true;
+        }
+        if (!RemovePageExecutionBreakpointsUnlocked()) return false;
+
+        std::uint64_t breakpointCount = 0;
+        std::uint64_t watchpointCount = 0;
+        try {
+            if (!kernel->ptebp_get_info(
+                    &breakpointCount,
+                    &watchpointCount) ||
+                breakpointCount == 0) {
+                return false;
+            }
+        } catch (...) {
+            return false;
+        }
+
+        hwbp_point_config point{};
+        point.bt = HWBP_BREAKPOINT_X;
+        point.bl = HWBP_BREAKPOINT_LEN_4;
+        point.bs = SCOPE_ALL_THREADS;
+        point.hit_addr = static_cast<std::uint64_t>(address);
+        try {
+            if (!kernel->ptebp_set(processId, &point, 1)) {
+                static_cast<void>(kernel->ptebp_remove(processId));
+                return false;
+            }
+        } catch (...) {
+            try {
+                static_cast<void>(kernel->ptebp_remove(processId));
+            } catch (...) {
+            }
+            return false;
+        }
+
+        pageExecutionBreakpointConfigured = true;
+        pageExecutionBreakpointAddress = address;
+        return true;
+    }
+
+    bool ReadPageExecutionBreakpointRecords(
+        ExecutionBreakpointRecord* records,
+        std::size_t capacity,
+        std::size_t& recordsRead,
+        std::uintptr_t& hitAddress,
+        std::size_t& totalRecords) noexcept {
+        recordsRead = 0;
+        hitAddress = 0;
+        totalRecords = 0;
+        std::lock_guard<std::mutex> lock(ioMutex);
+        if (!open || processId <= 0 ||
+            mode != MemoryTransportMode::KernelDriver ||
+            kernel == nullptr ||
+            !pageExecutionBreakpointConfigured ||
+            records == nullptr || capacity == 0) {
+            return false;
+        }
+
+        const std::size_t requested = std::min(
+            capacity, static_cast<std::size_t>(HWBP_MAX_RECORDS));
+        std::uint64_t nativeHitAddress = 0;
+        int nativeTotalRecords = 0;
+        try {
+            const int copied = kernel->ptebp_read_records(
+                processId,
+                0,
+                pageExecutionBreakpointRecordBuffer.data(),
+                static_cast<int>(requested),
+                &nativeHitAddress,
+                &nativeTotalRecords);
+            if (copied < 0 ||
+                static_cast<std::size_t>(copied) > requested ||
+                nativeTotalRecords < 0 ||
+                nativeTotalRecords > HWBP_MAX_RECORDS) {
+                return false;
+            }
+            for (int index = 0; index < copied; ++index) {
+                const hwbp_record& source =
+                    pageExecutionBreakpointRecordBuffer[
+                        static_cast<std::size_t>(index)];
+                records[static_cast<std::size_t>(index)] = {
+                    source.tid,
+                    source.hit_count,
+                    static_cast<std::uintptr_t>(source.pc),
+                    static_cast<std::uintptr_t>(source.sp),
+                    static_cast<std::uintptr_t>(source.x0),
+                    static_cast<std::uintptr_t>(source.x20),
+                    static_cast<std::uintptr_t>(source.x21),
+                    static_cast<std::uintptr_t>(source.x23),
+                };
+            }
+            recordsRead = static_cast<std::size_t>(copied);
+            hitAddress =
+                static_cast<std::uintptr_t>(nativeHitAddress);
+            totalRecords =
+                static_cast<std::size_t>(nativeTotalRecords);
+            return true;
+        } catch (...) {
+            recordsRead = 0;
+            hitAddress = 0;
+            totalRecords = 0;
+            return false;
+        }
+    }
+
+    bool RemovePageExecutionBreakpoints() noexcept {
+        std::lock_guard<std::mutex> lock(ioMutex);
+        return RemovePageExecutionBreakpointsUnlocked();
+    }
+#endif
 
 #if 0
     bool SupportsExecutionBreakpoints() const noexcept {
@@ -1568,6 +1678,8 @@ struct MemoryTransport::Impl {
                     static_cast<std::uintptr_t>(source.pc),
                     static_cast<std::uintptr_t>(source.sp),
                     static_cast<std::uintptr_t>(source.x0),
+                    static_cast<std::uintptr_t>(source.x20),
+                    static_cast<std::uintptr_t>(source.x21),
                     static_cast<std::uintptr_t>(source.x23),
                 };
             }
@@ -1614,6 +1726,17 @@ struct MemoryTransport::Impl {
     }
 #endif
 
+    bool ReadGeometry(std::uintptr_t address,
+                      void* destination,
+                      std::size_t size) {
+        return ReadWithKind(
+            address,
+            destination,
+            size,
+            platform::PerformancePhase::GeometryRemoteRead,
+            platform::PerformanceReadKind::Geometry);
+    }
+
     bool ReadCoordinateMemory(
         std::uintptr_t address,
         void* destination,
@@ -1656,53 +1779,38 @@ struct MemoryTransport::Impl {
                 requestedBytes += requests[index].size;
             }
         }
-        if (traceEnabled) {
-            platform::RecordPerformanceRead(
-                platform::PerformanceReadKind::Batch,
-                requestedBytes,
-                true,
-                count);
-        }
+        const auto finish = [&](std::size_t successful) {
+            if (traceEnabled) {
+                platform::RecordPerformanceRead(
+                    platform::PerformanceReadKind::Batch,
+                    requestedBytes,
+                    successful == count,
+                    count);
+            }
+            return successful;
+        };
         std::unique_lock<std::mutex> lock(ioMutex);
-        if (count == 0) return 0;
+        if (count == 0) return finish(0);
         if (itemStatus != nullptr) {
             std::fill_n(itemStatus, count, static_cast<std::uint8_t>(0));
         }
-        if (!open || requests == nullptr) return 0;
+        if (!open || requests == nullptr) return finish(0);
 
         for (std::size_t index = 0; index < count; ++index) {
             if (requests[index].localBuffer == nullptr ||
                 !IsRemoteRangeValid(
                     requests[index].remoteAddress, requests[index].size)) {
-                return 0;
+                return finish(0);
             }
         }
 
         const std::uint64_t batchGeneration = ioGeneration;
-        if (mode == MemoryTransportMode::PrivateRpc &&
-            privateRpc != nullptr &&
-            privateProcessHandle != kernel_rpc_abi::kInvalidProcessHandle) {
-            try {
-                std::vector<MutableMemoryTransfer> transfers;
-                transfers.reserve(count);
-                for (std::size_t index = 0; index < count; ++index) {
-                    transfers.push_back(MutableMemoryTransfer{
-                        requests[index].remoteAddress,
-                        requests[index].localBuffer,
-                        requests[index].size,
-                    });
-                }
-                const int result = privateRpc->ReadMemoryBatch(
-                    privateProcessHandle,
-                    transfers.data(),
-                    transfers.size(),
-                    itemStatus);
-                return result > 0 ? static_cast<std::size_t>(result) : 0;
-            } catch (...) {
-                return 0;
-            }
-        }
-
+        platform::RecordPerformanceCount(
+            mode == MemoryTransportMode::ProcessVm
+                ? platform::PerformanceCounter::BatchProcessVmCalls
+                : platform::PerformanceCounter::BatchKernelDriverCalls);
+        platform::RecordPerformanceCount(
+            platform::PerformanceCounter::BatchFallbackItems, count);
         lock.unlock();
         std::size_t successful = 0;
         for (std::size_t index = 0; index < count; ++index) {
@@ -1717,7 +1825,7 @@ struct MemoryTransport::Impl {
             if (itemStatus != nullptr) itemStatus[index] = read ? 1 : 0;
             if (read) ++successful;
         }
-        return successful;
+        return finish(successful);
     }
 
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
@@ -1743,11 +1851,7 @@ struct MemoryTransport::Impl {
                     const_cast<void*>(source),
                     size);
         }
-        return mode == MemoryTransportMode::PrivateRpc &&
-            privateRpc != nullptr &&
-            privateProcessHandle != kernel_rpc_abi::kInvalidProcessHandle &&
-            privateRpc->WriteMemory(
-                privateProcessHandle, address, source, size) == 0;
+        return false;
     }
 #endif
 
@@ -1758,15 +1862,6 @@ struct MemoryTransport::Impl {
         if (mode == MemoryTransportMode::KernelDriver) {
             return kernel != nullptr
                 ? kernel->get_module_base(name.c_str())
-                : 0;
-        }
-        if (mode == MemoryTransportMode::PrivateRpc &&
-            privateRpc != nullptr &&
-            privateProcessHandle != kernel_rpc_abi::kInvalidProcessHandle) {
-            std::uint64_t moduleBase = 0;
-            return privateRpc->FindModuleBase(
-                       privateProcessHandle, moduleName, moduleBase) == 0
-                ? static_cast<std::uintptr_t>(moduleBase)
                 : 0;
         }
         return 0;
@@ -1785,11 +1880,8 @@ struct MemoryTransport::Impl {
 
     bool UsesKernelBackend() const noexcept {
         std::lock_guard<std::mutex> lock(ioMutex);
-        if (!open || !IsKernelMemoryTransportMode(mode)) return false;
-        return mode == MemoryTransportMode::KernelDriver
-            ? kernel != nullptr
-            : privateRpc != nullptr &&
-                privateProcessHandle != kernel_rpc_abi::kInvalidProcessHandle;
+        return open && mode == MemoryTransportMode::KernelDriver &&
+            kernel != nullptr;
     }
 #endif
 
@@ -2159,7 +2251,25 @@ bool MemoryTransport::Open(int modeIndex,
         error.clear();
         return false;
     }
-    return impl_->Open(modeIndex, processId, processName, diagnostic, error);
+    return impl_->Open(
+        modeIndex, processId, processName, diagnostic, error, true);
+}
+
+bool MemoryTransport::OpenReadOnly(int modeIndex,
+                                   pid_t processId,
+                                   std::string_view processName,
+                                   RuntimeDiagnostic& diagnostic,
+                                   std::string& error) {
+    if (impl_ == nullptr) {
+        diagnostic = {
+            RuntimeError::BackendUnavailable,
+            -ENODEV,
+        };
+        error.clear();
+        return false;
+    }
+    return impl_->Open(
+        modeIndex, processId, processName, diagnostic, error, false);
 }
 
 void MemoryTransport::Close() noexcept {
@@ -2171,6 +2281,14 @@ bool MemoryTransport::Read(
     void* destination,
     std::size_t size) {
     return impl_ != nullptr && impl_->Read(address, destination, size);
+}
+
+bool MemoryTransport::ReadGeometry(
+    std::uintptr_t address,
+    void* destination,
+    std::size_t size) {
+    return impl_ != nullptr &&
+        impl_->ReadGeometry(address, destination, size);
 }
 
 bool MemoryTransport::ReadCoordinateMemory(
@@ -2236,6 +2354,44 @@ std::uintptr_t MemoryTransport::ModuleBase(std::string_view moduleName) {
 bool MemoryTransport::IsOpen() const noexcept {
     return impl_ != nullptr && impl_->IsOpen();
 }
+
+#if 0
+bool MemoryTransport::SupportsPageExecutionBreakpoints() const noexcept {
+    return impl_ != nullptr &&
+        impl_->SupportsPageExecutionBreakpoints();
+}
+
+bool MemoryTransport::ConfigurePageExecutionBreakpoint(
+    std::uintptr_t address) noexcept {
+    return impl_ != nullptr &&
+        impl_->ConfigurePageExecutionBreakpoint(address);
+}
+
+bool MemoryTransport::ReadPageExecutionBreakpointRecords(
+    ExecutionBreakpointRecord* records,
+    std::size_t capacity,
+    std::size_t& recordsRead,
+    std::uintptr_t& hitAddress,
+    std::size_t& totalRecords) noexcept {
+    if (impl_ == nullptr) {
+        recordsRead = 0;
+        hitAddress = 0;
+        totalRecords = 0;
+        return false;
+    }
+    return impl_->ReadPageExecutionBreakpointRecords(
+        records,
+        capacity,
+        recordsRead,
+        hitAddress,
+        totalRecords);
+}
+
+bool MemoryTransport::RemovePageExecutionBreakpoints() noexcept {
+    return impl_ == nullptr ||
+        impl_->RemovePageExecutionBreakpoints();
+}
+#endif
 
 #if 0
 bool MemoryTransport::SupportsExecutionBreakpoints() const noexcept {

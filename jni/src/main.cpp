@@ -312,7 +312,6 @@ int RunAlgorithmCoordinateProbe(
     options.screenHeight = height;
     options.programDirectory = programDirectory;
     options.cloudLayout = std::move(cloudLayout);
-
     lengjing::game::FeatureSettings settings;
     settings.visual.coordinateDecrypt = false;
     settings.visual.algorithmDecrypt = true;
@@ -538,7 +537,6 @@ std::vector<std::string> DriverOptions() {
     return {
         "纯C（支持虚拟机）",
         "棱镜内核驱动（推荐）",
-        "内核 RPC",
     };
 }
 

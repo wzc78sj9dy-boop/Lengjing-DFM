@@ -21,11 +21,15 @@ inline constexpr std::uint64_t kConfiguredSampleType =
     kSampleIp | kSampleTid | kSampleRegsUser;
 
 inline constexpr unsigned int kArm64RegisterX0 = 0;
+inline constexpr unsigned int kArm64RegisterX20 = 20;
+inline constexpr unsigned int kArm64RegisterX21 = 21;
 inline constexpr unsigned int kArm64RegisterX23 = 23;
 inline constexpr unsigned int kArm64RegisterSp = 31;
 inline constexpr unsigned int kArm64RegisterPc = 32;
 inline constexpr std::uint64_t kArm64RegisterMask =
     (UINT64_C(1) << kArm64RegisterX0) |
+    (UINT64_C(1) << kArm64RegisterX20) |
+    (UINT64_C(1) << kArm64RegisterX21) |
     (UINT64_C(1) << kArm64RegisterX23) |
     (UINT64_C(1) << kArm64RegisterSp) |
     (UINT64_C(1) << kArm64RegisterPc);
@@ -37,6 +41,8 @@ struct ParsedSample {
     std::uint64_t pc = 0;
     std::uint64_t sp = 0;
     std::uint64_t x0 = 0;
+    std::uint64_t x20 = 0;
+    std::uint64_t x21 = 0;
     std::uint64_t x23 = 0;
 };
 
