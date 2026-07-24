@@ -882,6 +882,7 @@ public:
         }
         rtcSetSceneFlags(scene_, static_cast<RTCSceneFlags>(sceneFlags));
 
+        geometryById_.reserve(meshes_.size());
         for (const auto& mesh : meshes_) {
             if (!mesh || mesh->vertices.size() < 3 ||
                 mesh->indices.size() < 3 ||
