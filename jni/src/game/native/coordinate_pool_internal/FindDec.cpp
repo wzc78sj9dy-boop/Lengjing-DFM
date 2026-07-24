@@ -1,5 +1,6 @@
 ﻿#include "game/native/coordinate_pool_internal/FindDec.h"
 #include <algorithm>
+#include <limits>
 #include <set>
 #include <unordered_map>
 #include <vector>
@@ -487,8 +488,11 @@ namespace coord_dec {
 				f.is(0, ARM64_INS_MADD, ARM64_INS_UMADDL);
 				f.break_when_b();
 			}, madds);
+		madd_count_ = static_cast<uint16_t>(std::min<std::size_t>(
+			madds.size(), std::numeric_limits<uint16_t>::max()));
 
 		if (madds.empty()) {
+			failure_detail_ = FindDecFailureDetail::MaddScanEmpty;
 			return false;
 		}
 
@@ -519,16 +523,21 @@ namespace coord_dec {
 				pool_disp = candidate_disp;
 			}
 		}
+		ring_madd_count_ = static_cast<uint16_t>(std::min<std::size_t>(
+			ring_madds.size(), std::numeric_limits<uint16_t>::max()));
 
 		if (ring_madds.empty()) {
+			failure_detail_ = FindDecFailureDetail::RingStrideMissing;
 			return false;
 		}
 
 		if (ring_madds.size() != 2) {
+			failure_detail_ = FindDecFailureDetail::RingStrideCount;
 			return false;
 		}
 
 		if (!ring_base_madd || !pool_ldr) {
+			failure_detail_ = FindDecFailureDetail::PoolLoadMissing;
 			return false;
 		}
 
@@ -565,19 +574,37 @@ namespace coord_dec {
 				}
 
 				for (uint32_t j = decode->start_i(); j < decode->end_i(); j++) {
-					if (analyze.parse(entry->get_insn(j))) {
+					cs_insn* instruction = entry->get_insn(j);
+					if (analyze.parse(instruction)) {
+						failure_detail_ =
+							FindDecFailureDetail::DecodeExpressionParse;
+						failure_instruction_ = static_cast<uint16_t>(
+							std::min<unsigned int>(
+								instruction->id,
+								std::numeric_limits<uint16_t>::max()));
 						return false;
 					}
 				}
 			}
-			else if (analyze.parse(entry->get_insn(i))) {
-				return false;
+			else {
+				cs_insn* instruction = entry->get_insn(i);
+				if (analyze.parse(instruction)) {
+					failure_detail_ =
+						FindDecFailureDetail::IndexExpressionParse;
+					failure_instruction_ = static_cast<uint16_t>(
+						std::min<unsigned int>(
+							instruction->id,
+							std::numeric_limits<uint16_t>::max()));
+					return false;
+				}
 			}
 
 			if (count < ring_madds.size() && i == ring_madds[count] - 1) {
 				count++;
 				auto candidate_expr = analyze.get_expr(entry->reg(i + 1, 1));
 				if (!candidate_expr) {
+					failure_detail_ =
+						FindDecFailureDetail::CandidateExpressionMissing;
 					return false;
 				}
 
@@ -589,8 +616,11 @@ namespace coord_dec {
 				candidates.push_back(std::move(candidate));
 			}
 		}
+		candidate_count_ = static_cast<uint16_t>(std::min<std::size_t>(
+			candidates.size(), std::numeric_limits<uint16_t>::max()));
 
 		if (candidates.size() != 2) {
+			failure_detail_ = FindDecFailureDetail::CandidateCount;
 			return false;
 		}
 
@@ -606,6 +636,8 @@ namespace coord_dec {
 		const bool second_is_current = uses_ring_index(candidates[1]) &&
 			is_strict_subset(candidates[1].dependencies, candidates[0].dependencies);
 		if (first_is_current == second_is_current) {
+			failure_detail_ =
+				FindDecFailureDetail::CandidateDependencyAmbiguous;
 			return false;
 		}
 
@@ -633,9 +665,11 @@ namespace coord_dec {
 		}
 
 		if (!for_index || ring_index_param.empty() || index_offset != pool_disp) {
+			failure_detail_ = FindDecFailureDetail::IndexParameterMissing;
 			return false;
 		}
 
+		failure_detail_ = FindDecFailureDetail::None;
 		return true;
 	}
 
@@ -794,6 +828,11 @@ namespace coord_dec {
 		index_offset = 0;
 		pool_ptr_offset = 0;
 		failure_stage_ = FindDecFailureStage::EntryMethod;
+		failure_detail_ = FindDecFailureDetail::None;
+		madd_count_ = 0;
+		ring_madd_count_ = 0;
+		candidate_count_ = 0;
+		failure_instruction_ = 0;
 
 
 		finder f;

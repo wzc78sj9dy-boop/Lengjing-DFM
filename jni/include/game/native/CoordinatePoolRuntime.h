@@ -176,6 +176,11 @@ struct CoordinatePoolRuntimeProbe {
     CoordinatePoolAnalysisFailure analysisFailure =
         CoordinatePoolAnalysisFailure::None;
     std::uint8_t analysisFindStage = 0;
+    std::uint8_t analysisFindDetail = 0;
+    std::uint16_t analysisMaddCount = 0;
+    std::uint16_t analysisRingMaddCount = 0;
+    std::uint16_t analysisCandidateCount = 0;
+    std::uint16_t analysisFailureInstruction = 0;
     std::uint8_t analysisMode = 0;
     std::uint16_t analysisPasses = 0;
     std::uint32_t analysisLoadedPages = 0;

@@ -96,6 +96,8 @@ int main() {
     REQUIRE(missingEntryFinder.find_dec(kBase + code.size()) != 0);
     REQUIRE(missingEntryFinder.failure_stage() ==
         coord_dec::FindDecFailureStage::EntryMethod);
+    REQUIRE(missingEntryFinder.failure_detail() ==
+        coord_dec::FindDecFailureDetail::None);
 
     coord_dec::FindDec missingMarkerFinder;
     REQUIRE(missingMarkerFinder.set(
@@ -103,6 +105,12 @@ int main() {
     REQUIRE(missingMarkerFinder.find_dec(kBase) != 0);
     REQUIRE(missingMarkerFinder.failure_stage() ==
         coord_dec::FindDecFailureStage::V87Marker);
+    REQUIRE(missingMarkerFinder.failure_detail() ==
+        coord_dec::FindDecFailureDetail::None);
+    REQUIRE(missingMarkerFinder.madd_count() == 0);
+    REQUIRE(missingMarkerFinder.ring_madd_count() == 0);
+    REQUIRE(missingMarkerFinder.candidate_count() == 0);
+    REQUIRE(missingMarkerFinder.failure_instruction() == 0);
 
     coord_dec::FindDec finder;
     shellcode* binary = finder.get_shellcode();

@@ -169,6 +169,11 @@ std::string BuildCoordinateFailureFingerprint(
         << detail.poolSystemError << '|'
         << static_cast<unsigned>(detail.analysisFailure) << '|'
         << static_cast<unsigned>(detail.analysisFindStage) << '|'
+        << static_cast<unsigned>(detail.analysisFindDetail) << '|'
+        << detail.analysisMaddCount << '|'
+        << detail.analysisRingMaddCount << '|'
+        << detail.analysisCandidateCount << '|'
+        << detail.analysisFailureInstruction << '|'
         << static_cast<unsigned>(detail.analysisMode) << '|'
         << detail.analysisSkippedPages << '|'
         << static_cast<unsigned>(detail.analysisSkippedFailure) << '|'
@@ -285,6 +290,14 @@ std::string BuildCoordinateFailurePayload(
                   {"system_error", detail.poolSystemError},
                   {"analysis_failure", detail.analysisFailure},
                   {"analysis_find_stage", detail.analysisFindStage},
+                  {"analysis_find_detail", detail.analysisFindDetail},
+                  {"analysis_madd_count", detail.analysisMaddCount},
+                  {"analysis_ring_madd_count",
+                   detail.analysisRingMaddCount},
+                  {"analysis_candidate_count",
+                   detail.analysisCandidateCount},
+                  {"analysis_failure_instruction",
+                   detail.analysisFailureInstruction},
                   {"analysis_mode", detail.analysisMode},
                   {"analysis_passes", detail.analysisPasses},
                   {"analysis_loaded_pages", detail.analysisLoadedPages},

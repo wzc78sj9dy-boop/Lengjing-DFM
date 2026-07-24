@@ -109,6 +109,11 @@ lengjing::game::RuntimeStatus FailedStatus() {
     status.coordinateRuntimeDetail.poolError = 10;
     status.coordinateRuntimeDetail.analysisFailure = 4;
     status.coordinateRuntimeDetail.analysisFindStage = 2;
+    status.coordinateRuntimeDetail.analysisFindDetail = 9;
+    status.coordinateRuntimeDetail.analysisMaddCount = 6;
+    status.coordinateRuntimeDetail.analysisRingMaddCount = 3;
+    status.coordinateRuntimeDetail.analysisCandidateCount = 2;
+    status.coordinateRuntimeDetail.analysisFailureInstruction = 411;
     status.coordinateRuntimeDetail.analysisMode = 1;
     status.coordinateRuntimeDetail.analysisPasses = 3;
     status.coordinateRuntimeDetail.analysisLoadedPages = 17;
@@ -147,6 +152,19 @@ void RunCoordinateFailureUploaderTests() {
     REQUIRE(report.at("coordinate").at("error") == 1005);
     REQUIRE(
         report.at("coordinate").at("pool").at("analysis_failure") == 4);
+    REQUIRE(
+        report.at("coordinate").at("pool").at("analysis_find_detail") == 9);
+    REQUIRE(
+        report.at("coordinate").at("pool").at("analysis_madd_count") == 6);
+    REQUIRE(
+        report.at("coordinate").at("pool").at(
+            "analysis_ring_madd_count") == 3);
+    REQUIRE(
+        report.at("coordinate").at("pool").at(
+            "analysis_candidate_count") == 2);
+    REQUIRE(
+        report.at("coordinate").at("pool").at(
+            "analysis_failure_instruction") == 411);
     REQUIRE(
         report.at("coordinate").at("pool").at("analysis_loaded_pages") ==
         17);

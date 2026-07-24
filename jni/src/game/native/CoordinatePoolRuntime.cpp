@@ -1915,6 +1915,11 @@ private:
         probe.failedMethod = 0;
         probe.analysisFailure = CoordinatePoolAnalysisFailure::None;
         probe.analysisFindStage = 0;
+        probe.analysisFindDetail = 0;
+        probe.analysisMaddCount = 0;
+        probe.analysisRingMaddCount = 0;
+        probe.analysisCandidateCount = 0;
+        probe.analysisFailureInstruction = 0;
         probe.analysisMode = 0;
         probe.analysisPasses = 0;
         probe.analysisLoadedPages = 0;
@@ -2184,6 +2189,13 @@ private:
             const int result = candidate->find_dec(guestEntry);
             probe.analysisFindStage = static_cast<std::uint8_t>(
                 candidate->failure_stage());
+            probe.analysisFindDetail = static_cast<std::uint8_t>(
+                candidate->failure_detail());
+            probe.analysisMaddCount = candidate->madd_count();
+            probe.analysisRingMaddCount = candidate->ring_madd_count();
+            probe.analysisCandidateCount = candidate->candidate_count();
+            probe.analysisFailureInstruction =
+                candidate->failure_instruction();
             const auto requestedMethods =
                 candidate->get_shellcode()->requested_method_addresses();
             probe.analysisRequestedMethods =
@@ -2323,6 +2335,11 @@ private:
         ClearReadDiagnosticUnlocked();
         probe.analysisFailure = CoordinatePoolAnalysisFailure::None;
         probe.analysisFindStage = 0;
+        probe.analysisFindDetail = 0;
+        probe.analysisMaddCount = 0;
+        probe.analysisRingMaddCount = 0;
+        probe.analysisCandidateCount = 0;
+        probe.analysisFailureInstruction = 0;
         probe.error = CoordinatePoolRuntimeError::None;
         probe.stage = CoordinatePoolRuntimeStage::CodeAnalyzed;
         return true;
@@ -3330,6 +3347,11 @@ private:
         probe.failedMethod = 0;
         probe.analysisFailure = CoordinatePoolAnalysisFailure::None;
         probe.analysisFindStage = 0;
+        probe.analysisFindDetail = 0;
+        probe.analysisMaddCount = 0;
+        probe.analysisRingMaddCount = 0;
+        probe.analysisCandidateCount = 0;
+        probe.analysisFailureInstruction = 0;
         probe.analysisMode = 0;
         probe.analysisPasses = 0;
         probe.analysisLoadedPages = 0;

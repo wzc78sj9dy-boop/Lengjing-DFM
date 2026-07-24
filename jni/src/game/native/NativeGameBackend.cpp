@@ -1833,7 +1833,10 @@ public:
                 settings.visual.antiFlicker,
                 position,
                 &positionSource);
-            if (IsCoordinateTraceEnabled()) {
+            if (IsCoordinateTraceEnabled() &&
+                (algorithmPositionRequested_ ||
+                 coordinateTraceFrame_ <= 3 ||
+                 coordinateTraceFrame_ % 120 == 0)) {
                 auto& trace = coordinateTraceRecords_[actor];
                 trace.recordRoot = actorRecord.root;
                 trace.ordinaryRoot = actorRecord.ordinaryRoot;
@@ -1843,6 +1846,31 @@ public:
                 trace.output = position;
             }
             if (!coordinateAvailable) {
+                if (IsCoordinateTraceEnabled() &&
+                    algorithmPositionRequested_ &&
+                    coordinateTraceFrame_ % 120 == 0) {
+                    const auto trace = coordinateTraceRecords_.find(actor);
+                    if (trace != coordinateTraceRecords_.end()) {
+                        std::fprintf(
+                            stderr,
+                            "[coordinate-suppressed] frame=%llu actor=%llx "
+                            "resolver=%d encrypted=%d root=%llx "
+                            "component=%llx source=%s error=%u sys=%d\n",
+                            static_cast<unsigned long long>(
+                                coordinateTraceFrame_),
+                            static_cast<unsigned long long>(actor),
+                            trace->second.resolverRecord ? 1 : 0,
+                            trace->second.encryptedRecord ? 1 : 0,
+                            static_cast<unsigned long long>(
+                                trace->second.root),
+                            static_cast<unsigned long long>(
+                                trace->second.component),
+                            CoordinateTraceSourceName(
+                                trace->second.source),
+                            static_cast<unsigned int>(trace->second.error),
+                            trace->second.systemError);
+                    }
+                }
                 continue;
             }
             HealthState health{};
@@ -3371,7 +3399,10 @@ private:
             actorRecordSnapshot_.decodedRecordSourceReady &&
             (!decodedRequired || currentDecodedRecordsReady);
 
-        if (IsCoordinateTraceEnabled()) {
+        if (IsCoordinateTraceEnabled() &&
+            (metadataRefreshed ||
+             coordinateTraceFrame_ <= 3 ||
+             coordinateTraceFrame_ % 120 == 0)) {
             std::fprintf(
                 stderr,
                 "[coordinate-trace-snapshot] frame=%llu decoded_required=%d "
@@ -5133,7 +5164,10 @@ private:
         }
         position = Vec3{coordinate[0], coordinate[1], coordinate[2]};
         if (!IsFinite(position) || !IsNonzero(position)) return false;
-        if (IsCoordinateTraceEnabled()) {
+        if (IsCoordinateTraceEnabled() &&
+            (algorithmPositionRequested_ ||
+             coordinateTraceFrame_ <= 3 ||
+             coordinateTraceFrame_ % 120 == 0)) {
             auto& trace = coordinateTraceRecords_[actor];
             trace = CoordinateTraceRecord{};
             trace.root = decodedRoot;
@@ -8126,7 +8160,10 @@ private:
         } else {
             coordinatePoolReady_ = false;
         }
-        if (IsCoordinateTraceEnabled()) {
+        if (IsCoordinateTraceEnabled() &&
+            (executionContextRefreshed ||
+             coordinateTraceFrame_ <= 3 ||
+             coordinateTraceFrame_ % 120 == 0)) {
             const native::ProcessExecutionContextDiagnostic diagnostic =
                 memory_->ExecutionContextDiagnostic();
             const native::CoordinatePoolRuntimeProbe poolProbe =
@@ -8139,7 +8176,9 @@ private:
                 "tid=%d thread_start=%llu generation=%llu tpidr=%llx "
                 "key_available=%d oracle_available=%d pool_ready=%d "
                 "pool_stage=%u pool_error=%u pool_sys=%d "
-                "analysis_failure=%u analysis_find=%u analysis_mode=%u "
+                "analysis_failure=%u analysis_find=%u analysis_detail=%u "
+                "analysis_madds=%u analysis_ring_madds=%u "
+                "analysis_candidates=%u analysis_insn=%u analysis_mode=%u "
                 "analysis_passes=%u analysis_pages=%u analysis_methods=%u "
                 "analysis_skipped=%u analysis_skip_failure=%u "
                 "analysis_skip_sys=%d "
@@ -8171,6 +8210,12 @@ private:
                 poolProbe.systemError,
                 static_cast<unsigned int>(poolProbe.analysisFailure),
                 static_cast<unsigned int>(poolProbe.analysisFindStage),
+                static_cast<unsigned int>(poolProbe.analysisFindDetail),
+                static_cast<unsigned int>(poolProbe.analysisMaddCount),
+                static_cast<unsigned int>(poolProbe.analysisRingMaddCount),
+                static_cast<unsigned int>(poolProbe.analysisCandidateCount),
+                static_cast<unsigned int>(
+                    poolProbe.analysisFailureInstruction),
                 static_cast<unsigned int>(poolProbe.analysisMode),
                 static_cast<unsigned int>(poolProbe.analysisPasses),
                 static_cast<unsigned int>(poolProbe.analysisLoadedPages),
@@ -8576,6 +8621,11 @@ private:
             poolProbe.systemError,
             static_cast<std::uint8_t>(poolProbe.analysisFailure),
             poolProbe.analysisFindStage,
+            poolProbe.analysisFindDetail,
+            poolProbe.analysisMaddCount,
+            poolProbe.analysisRingMaddCount,
+            poolProbe.analysisCandidateCount,
+            poolProbe.analysisFailureInstruction,
             poolProbe.analysisMode,
             poolProbe.analysisPasses,
             poolProbe.analysisLoadedPages,
