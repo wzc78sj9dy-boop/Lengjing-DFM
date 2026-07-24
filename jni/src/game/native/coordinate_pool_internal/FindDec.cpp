@@ -14,9 +14,13 @@ namespace {
 	constexpr uint32_t kRingStrideSearchBack = 128;
 
 	arm64_reg normalize_gp_reg(arm64_reg reg) {
-		if (reg >= ARM64_REG_W0 && reg <= ARM64_REG_W30) {
+		if (reg >= ARM64_REG_W0 && reg <= ARM64_REG_W28) {
 			return static_cast<arm64_reg>(reg - ARM64_REG_W0 + ARM64_REG_X0);
 		}
+		if (reg == ARM64_REG_W29) return ARM64_REG_X29;
+		if (reg == ARM64_REG_W30) return ARM64_REG_X30;
+		if (reg == ARM64_REG_WSP) return ARM64_REG_SP;
+		if (reg == ARM64_REG_WZR) return ARM64_REG_XZR;
 		return reg;
 	}
 

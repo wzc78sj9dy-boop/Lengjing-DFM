@@ -7,6 +7,8 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <utility>
 
 namespace {
 
@@ -89,6 +91,223 @@ int main() {
 
     constexpr std::uint64_t kBase = UINT64_C(0x100000);
     std::array<std::uint8_t, 8> code{};
+
+    auto makeAdd = [](arm64_reg destination, arm64_reg lhs, arm64_reg rhs,
+        arm64_shifter shift, unsigned int amount,
+        arm64_extender extender = ARM64_EXT_INVALID) {
+        cs_insn instruction{};
+        cs_detail detail{};
+        instruction.id = ARM64_INS_ADD;
+        instruction.address = UINT64_C(0x1000);
+        instruction.detail = &detail;
+        detail.arm64.op_count = 3;
+        detail.arm64.operands[0].type = ARM64_OP_REG;
+        detail.arm64.operands[0].reg = destination;
+        detail.arm64.operands[0].access = CS_AC_WRITE;
+        detail.arm64.operands[1].type = ARM64_OP_REG;
+        detail.arm64.operands[1].reg = lhs;
+        detail.arm64.operands[1].access = CS_AC_READ;
+        detail.arm64.operands[2].type = ARM64_OP_REG;
+        detail.arm64.operands[2].reg = rhs;
+        detail.arm64.operands[2].access = CS_AC_READ;
+        detail.arm64.operands[2].shift.type = shift;
+        detail.arm64.operands[2].shift.value = amount;
+        detail.arm64.operands[2].ext = extender;
+        return std::pair<cs_insn, cs_detail>(instruction, detail);
+    };
+
+    Analyze shifted;
+    shifted.setVal(ARM64_REG_X1, "lhs");
+    shifted.setVal(ARM64_REG_X2, "rhs");
+    auto asrAdd = makeAdd(
+        ARM64_REG_X0, ARM64_REG_X1, ARM64_REG_X2,
+        ARM64_SFT_ASR, 4);
+    asrAdd.first.detail = &asrAdd.second;
+    REQUIRE(shifted.parse(&asrAdd.first) == 0);
+    std::unordered_map<std::string, std::uint64_t> shiftedParams{
+        {"lhs", 5},
+        {"rhs", UINT64_C(0xFFFFFFFFFFFFFFF0)},
+    };
+    REQUIRE(shifted.execute(ARM64_REG_X0, shiftedParams) == 4);
+
+    Analyze shifted32;
+    shifted32.setVal(ARM64_REG_W1, "lhs32");
+    shifted32.setVal(ARM64_REG_W2, "rhs32");
+    auto asrAdd32 = makeAdd(
+        ARM64_REG_W0, ARM64_REG_W1, ARM64_REG_W2,
+        ARM64_SFT_ASR, 31);
+    asrAdd32.first.detail = &asrAdd32.second;
+    REQUIRE(shifted32.parse(&asrAdd32.first) == 0);
+    std::unordered_map<std::string, std::uint64_t> shifted32Params{
+        {"lhs32", 2},
+        {"rhs32", UINT64_C(0x80000000)},
+    };
+    REQUIRE(shifted32.execute(ARM64_REG_W0, shifted32Params) == 1);
+
+    Analyze extended;
+    extended.setVal(ARM64_REG_X1, "base");
+    extended.setVal(ARM64_REG_W2, "offset");
+    auto sxtwAdd = makeAdd(
+        ARM64_REG_X0, ARM64_REG_X1, ARM64_REG_W2,
+        ARM64_SFT_LSL, 2, ARM64_EXT_SXTW);
+    sxtwAdd.first.detail = &sxtwAdd.second;
+    REQUIRE(extended.parse(&sxtwAdd.first) == 0);
+    std::unordered_map<std::string, std::uint64_t> extendedParams{
+        {"base", 10},
+        {"offset", UINT64_C(0xFFFFFFFF)},
+    };
+    REQUIRE(extended.execute(ARM64_REG_X0, extendedParams) == 6);
+
+    Analyze unsignedExtended;
+    unsignedExtended.setVal(ARM64_REG_X1, "unsignedBase");
+    unsignedExtended.setVal(ARM64_REG_W2, "unsignedOffset");
+    auto uxtwAdd = makeAdd(
+        ARM64_REG_X0, ARM64_REG_X1, ARM64_REG_W2,
+        ARM64_SFT_LSL, 2, ARM64_EXT_UXTW);
+    uxtwAdd.first.detail = &uxtwAdd.second;
+    REQUIRE(unsignedExtended.parse(&uxtwAdd.first) == 0);
+    std::unordered_map<std::string, std::uint64_t> unsignedParams{
+        {"unsignedBase", 0},
+        {"unsignedOffset", UINT64_C(0x40000000)},
+    };
+    REQUIRE(unsignedExtended.execute(ARM64_REG_X0, unsignedParams) ==
+        UINT64_C(0x100000000));
+
+    Analyze specialRegisters;
+    specialRegisters.setVal(ARM64_REG_W29, "frame");
+    auto frameLinkAdd = makeAdd(
+        ARM64_REG_X0, ARM64_REG_X29, ARM64_REG_X30,
+        ARM64_SFT_INVALID, 0);
+    frameLinkAdd.first.detail = &frameLinkAdd.second;
+    REQUIRE(specialRegisters.parse(&frameLinkAdd.first) == 0);
+    REQUIRE(specialRegisters.varParams.size() == 1);
+    REQUIRE(specialRegisters.varParams[0].reg == ARM64_REG_X30);
+    std::unordered_map<std::string, std::uint64_t> specialParams{
+        {"frame", 7},
+        {specialRegisters.varParams[0].name, 8},
+    };
+    REQUIRE(specialRegisters.execute(ARM64_REG_X0, specialParams) == 15);
+
+    specialRegisters.setVal(ARM64_REG_X1, "zeroBase");
+    auto zeroSourceAdd = makeAdd(
+        ARM64_REG_X2, ARM64_REG_X1, ARM64_REG_XZR,
+        ARM64_SFT_INVALID, 0);
+    zeroSourceAdd.first.detail = &zeroSourceAdd.second;
+    REQUIRE(specialRegisters.parse(&zeroSourceAdd.first) == 0);
+    specialParams["zeroBase"] = 23;
+    REQUIRE(specialRegisters.execute(ARM64_REG_X2, specialParams) == 23);
+
+    cs_insn zeroMove{};
+    cs_detail zeroMoveDetail{};
+    zeroMove.id = ARM64_INS_MOV;
+    zeroMove.address = UINT64_C(0x1008);
+    zeroMove.detail = &zeroMoveDetail;
+    zeroMoveDetail.arm64.op_count = 2;
+    zeroMoveDetail.arm64.operands[0].type = ARM64_OP_REG;
+    zeroMoveDetail.arm64.operands[0].reg = ARM64_REG_XZR;
+    zeroMoveDetail.arm64.operands[0].access = CS_AC_WRITE;
+    zeroMoveDetail.arm64.operands[1].type = ARM64_OP_REG;
+    zeroMoveDetail.arm64.operands[1].reg = ARM64_REG_X1;
+    zeroMoveDetail.arm64.operands[1].access = CS_AC_READ;
+    REQUIRE(specialRegisters.parse(&zeroMove) == 0);
+
+    cs_insn zeroLoad{};
+    cs_detail zeroLoadDetail{};
+    zeroLoad.id = ARM64_INS_LDR;
+    zeroLoad.address = UINT64_C(0x100C);
+    zeroLoad.detail = &zeroLoadDetail;
+    zeroLoadDetail.arm64.op_count = 2;
+    zeroLoadDetail.arm64.operands[0].type = ARM64_OP_REG;
+    zeroLoadDetail.arm64.operands[0].reg = ARM64_REG_XZR;
+    zeroLoadDetail.arm64.operands[0].access = CS_AC_WRITE;
+    zeroLoadDetail.arm64.operands[1].type = ARM64_OP_MEM;
+    zeroLoadDetail.arm64.operands[1].mem.base = ARM64_REG_SP;
+    zeroLoadDetail.arm64.operands[1].mem.disp = 16;
+    zeroLoadDetail.arm64.operands[1].access = CS_AC_READ;
+    REQUIRE(specialRegisters.parse(&zeroLoad) == 0);
+
+    auto zeroDestinationAdd = makeAdd(
+        ARM64_REG_XZR, ARM64_REG_X1, ARM64_REG_X2,
+        ARM64_SFT_INVALID, 0);
+    zeroDestinationAdd.first.detail = &zeroDestinationAdd.second;
+    REQUIRE(specialRegisters.parse(&zeroDestinationAdd.first) == 0);
+    REQUIRE(specialRegisters.str(ARM64_REG_XZR) == "[null]");
+
+    Analyze stack;
+    cs_insn stackAdd{};
+    cs_detail stackDetail{};
+    stackAdd.id = ARM64_INS_ADD;
+    stackAdd.address = UINT64_C(0x1004);
+    stackAdd.detail = &stackDetail;
+    stackDetail.arm64.op_count = 3;
+    stackDetail.arm64.operands[0].type = ARM64_OP_REG;
+    stackDetail.arm64.operands[0].reg = ARM64_REG_X0;
+    stackDetail.arm64.operands[0].access = CS_AC_WRITE;
+    stackDetail.arm64.operands[1].type = ARM64_OP_REG;
+    stackDetail.arm64.operands[1].reg = ARM64_REG_SP;
+    stackDetail.arm64.operands[1].access = CS_AC_READ;
+    stackDetail.arm64.operands[2].type = ARM64_OP_IMM;
+    stackDetail.arm64.operands[2].imm = 32;
+    stackDetail.arm64.operands[2].access = CS_AC_READ;
+    REQUIRE(stack.parse(&stackAdd) == 0);
+    REQUIRE(stack.varParams.size() == 1);
+    REQUIRE(stack.varParams[0].reg == ARM64_REG_SP);
+    std::unordered_map<std::string, std::uint64_t> stackParams{
+        {stack.varParams[0].name, UINT64_C(0x2000)},
+    };
+    REQUIRE(stack.execute(ARM64_REG_X0, stackParams) ==
+        UINT64_C(0x2020));
+
+    Analyze stackWriteback;
+    stackWriteback.setVal(ARM64_REG_SP, "staleStack");
+    cs_insn writebackLoad{};
+    cs_detail writebackDetail{};
+    writebackLoad.id = ARM64_INS_LDR;
+    writebackLoad.address = UINT64_C(0x1010);
+    writebackLoad.detail = &writebackDetail;
+    writebackDetail.arm64.op_count = 2;
+    writebackDetail.arm64.writeback = true;
+    writebackDetail.arm64.operands[0].type = ARM64_OP_REG;
+    writebackDetail.arm64.operands[0].reg = ARM64_REG_X0;
+    writebackDetail.arm64.operands[0].access = CS_AC_WRITE;
+    writebackDetail.arm64.operands[1].type = ARM64_OP_MEM;
+    writebackDetail.arm64.operands[1].mem.base = ARM64_REG_SP;
+    writebackDetail.arm64.operands[1].mem.disp = 16;
+    writebackDetail.arm64.operands[1].access =
+        static_cast<std::uint8_t>(CS_AC_READ | CS_AC_WRITE);
+    REQUIRE(stackWriteback.parse(&writebackLoad) == 0);
+    REQUIRE(stackWriteback.str(ARM64_REG_SP) == "[null]");
+
+    Analyze vector;
+    vector.setVal(ARM64_REG_X1, "scalarState");
+    auto vectorAdd = makeAdd(
+        ARM64_REG_V0, ARM64_REG_V1, ARM64_REG_V2,
+        ARM64_SFT_INVALID, 0);
+    vectorAdd.first.detail = &vectorAdd.second;
+    REQUIRE(vector.parse(&vectorAdd.first) == 0);
+    REQUIRE(vector.str(ARM64_REG_V0) == "[null]");
+    REQUIRE(vector.str(ARM64_REG_X1) == "scalarState");
+
+    Analyze unsupportedShift;
+    unsupportedShift.setVal(ARM64_REG_X1, "unsupportedLhs");
+    unsupportedShift.setVal(ARM64_REG_X2, "unsupportedRhs");
+    auto rorAdd = makeAdd(
+        ARM64_REG_X0, ARM64_REG_X1, ARM64_REG_X2,
+        ARM64_SFT_ROR, 1);
+    rorAdd.first.detail = &rorAdd.second;
+    REQUIRE(unsupportedShift.parse(&rorAdd.first) != 0);
+
+    auto oversizedWShift = makeAdd(
+        ARM64_REG_W0, ARM64_REG_W1, ARM64_REG_W2,
+        ARM64_SFT_LSL, 32);
+    oversizedWShift.first.detail = &oversizedWShift.second;
+    REQUIRE(unsupportedShift.parse(&oversizedWShift.first) != 0);
+
+    auto oversizedExtendShift = makeAdd(
+        ARM64_REG_X0, ARM64_REG_X1, ARM64_REG_W2,
+        ARM64_SFT_LSL, 5, ARM64_EXT_UXTW);
+    oversizedExtendShift.first.detail = &oversizedExtendShift.second;
+    REQUIRE(unsupportedShift.parse(&oversizedExtendShift.first) != 0);
 
     coord_dec::FindDec missingEntryFinder;
     REQUIRE(missingEntryFinder.set(
