@@ -23,6 +23,7 @@ add_executable(lengjing_tests
     character_component_transform_tests.cpp
     cloud_layout_startup_policy_tests.cpp
     cloud_layout_tests.cpp
+    coordinate_pool_cloud_layout_standalone_tests.cpp
     config_tests.cpp
     coordinate_pool_policy_tests.cpp
     coordinate_output_policy_tests.cpp
@@ -57,6 +58,7 @@ add_executable(lengjing_tests
     test_main.cpp
     ../jni/lib/t3/t3sdk.cpp
     ../jni/src/auth/CloudLayout.cpp
+    ../jni/src/auth/CoordinatePoolCloudLayout.cpp
     ../jni/src/auth/RemoteAuth.cpp
     ../jni/src/config/LocalConfig.cpp
     ../jni/src/game/GameRuntime.cpp

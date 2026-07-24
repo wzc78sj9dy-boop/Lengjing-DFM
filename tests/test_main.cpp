@@ -24,6 +24,7 @@ int main() {
         RunCharacterComponentTransformTests();
         RunCloudLayoutStartupPolicyTests();
         RunCloudLayoutTests();
+        RunCoordinatePoolCloudLayoutStandaloneTests();
         RunConfigTests();
         RunCoordinatePoolPolicyTests();
         RunCoordinateOutputPolicyTests();

@@ -653,16 +653,26 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(cloudLayout.IsValid());
     const auto decrypt2Layout =
         MakeCoordinateDecrypt2RuntimeLayout(cloudLayout);
-    REQUIRE(decrypt2Layout.rootRva == 0x0E738950);
-    REQUIRE(decrypt2Layout.bridgeOffset == 0x0C);
-    REQUIRE(decrypt2Layout.entryOffset == 0xA0);
-    REQUIRE(decrypt2Layout.contextOffset == -8);
-    REQUIRE(decrypt2Layout.componentKeyOffset == 0x210);
-    REQUIRE(decrypt2Layout.entryStride == 0x30);
-    REQUIRE(decrypt2Layout.poolHeadSkip == 0x10);
-    REQUIRE(decrypt2Layout.ringRefreshFrames == 90);
-    REQUIRE(kCoordinatePoolBlockProbeCount * decrypt2Layout.entryStride ==
-        0x3C0);
+    REQUIRE(decrypt2Layout.rootRva == cloudLayout.rootRva);
+    REQUIRE(decrypt2Layout.bridgeOffset == cloudLayout.bridgeOffset);
+    REQUIRE(decrypt2Layout.entryOffset == cloudLayout.entryOffset);
+    REQUIRE(decrypt2Layout.contextOffset == cloudLayout.contextOffset);
+    REQUIRE(decrypt2Layout.componentKeyOffset ==
+            cloudLayout.componentKeyOffset);
+    REQUIRE(decrypt2Layout.entryStride == cloudLayout.entryStride);
+    REQUIRE(decrypt2Layout.poolHeadSkip == cloudLayout.poolHeadSkip);
+    REQUIRE(decrypt2Layout.ringRefreshFrames ==
+            cloudLayout.ringRefreshFrames);
+    const auto builtInDecrypt2Layout =
+        MakeCoordinateDecrypt2RuntimeLayout({});
+    REQUIRE(builtInDecrypt2Layout.rootRva == 0x0E738950);
+    REQUIRE(builtInDecrypt2Layout.bridgeOffset == 0x0C);
+    REQUIRE(builtInDecrypt2Layout.contextOffset == -8);
+    REQUIRE(builtInDecrypt2Layout.entryOffset == 0xA0);
+    REQUIRE(builtInDecrypt2Layout.componentKeyOffset == 0x210);
+    REQUIRE(builtInDecrypt2Layout.entryStride == 0x30);
+    REQUIRE(builtInDecrypt2Layout.poolHeadSkip == 0x10);
+    REQUIRE(builtInDecrypt2Layout.ringRefreshFrames == 60);
     REQUIRE(!ShouldClearCoordinatePoolRingsAfterPointerRefresh(
         true,
         NormalizeCoordinatePoolPointer(UINT64_C(0xABCD007123456780)),

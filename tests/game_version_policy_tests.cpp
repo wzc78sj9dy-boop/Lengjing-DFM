@@ -43,4 +43,16 @@ void RunGameVersionPolicyTests() {
                 cloudLayout, 2) == cloudLayout);
     REQUIRE(game::SelectCloudLayoutForGameVersion(
                 cloudLayout, 0) == nullptr);
+
+    const auto decrypt2Layout =
+        std::make_shared<auth::CoordinatePoolCloudLayoutDocument>();
+    decrypt2Layout->identity.packageName = "com.tencent.tmgp.dfm";
+    REQUIRE(game::CoordinatePoolCloudLayoutMatchesGameVersion(
+        decrypt2Layout.get(), 0));
+    REQUIRE(!game::CoordinatePoolCloudLayoutMatchesGameVersion(
+        decrypt2Layout.get(), 1));
+    REQUIRE(game::SelectCoordinatePoolCloudLayoutForGameVersion(
+                decrypt2Layout, 0) == decrypt2Layout);
+    REQUIRE(game::SelectCoordinatePoolCloudLayoutForGameVersion(
+                decrypt2Layout, 2) == nullptr);
 }

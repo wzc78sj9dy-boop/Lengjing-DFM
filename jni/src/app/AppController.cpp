@@ -224,7 +224,10 @@ int AppController::RuntimeExitCode() const {
     return ResolveRuntimeExitCode(
         game::CloudLayoutMatchesGameVersion(
             options_.cloudLayout.get(),
-            model_.runtime.gameVersionIndex),
+            model_.runtime.gameVersionIndex) ||
+            game::CoordinatePoolCloudLayoutMatchesGameVersion(
+                options_.coordinateDecrypt2Layout.get(),
+                model_.runtime.gameVersionIndex),
         status.phase,
         status.failureKind);
 }
@@ -564,6 +567,10 @@ game::RuntimeOptions AppController::BuildRuntimeOptions() const {
     options.cloudLayout = game::SelectCloudLayoutForGameVersion(
         options_.cloudLayout,
         options.gameVersionIndex);
+    options.coordinateDecrypt2Layout =
+        game::SelectCoordinatePoolCloudLayoutForGameVersion(
+            options_.coordinateDecrypt2Layout,
+            options.gameVersionIndex);
     options.algorithmPosition = options_.algorithmPosition;
     return options;
 }
