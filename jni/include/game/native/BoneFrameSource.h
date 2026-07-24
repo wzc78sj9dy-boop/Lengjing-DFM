@@ -28,6 +28,12 @@ struct BoneFrameSourceSelection {
     }
 };
 
+constexpr bool IsResolvedBoneTransformEnabled(
+    bool firstDecryptEnabled,
+    bool secondDecryptEnabled) noexcept {
+    return firstDecryptEnabled || secondDecryptEnabled;
+}
+
 constexpr bool PreferBoneFrameCandidate(
     std::size_t currentValidCount,
     bool currentUsable,
@@ -50,13 +56,17 @@ constexpr bool ShouldReadSecondaryBoneArray(
 inline BoneFrameSourceSelection SelectPreferredBoneFrameSource(
     const BoneFrameRecordSource& record,
     std::uintptr_t ordinaryRoot,
-    std::uintptr_t ordinaryMesh) noexcept {
+    std::uintptr_t ordinaryMesh,
+    bool resolvedBoneTransformEnabled) noexcept {
     if (ordinaryMesh != 0) {
         return BoneFrameSourceSelection{
             ordinaryRoot,
             ordinaryMesh,
             false,
         };
+    }
+    if (record.encryptedRecord && !resolvedBoneTransformEnabled) {
+        return {};
     }
     return BoneFrameSourceSelection{
         record.root,
@@ -68,13 +78,19 @@ inline BoneFrameSourceSelection SelectPreferredBoneFrameSource(
 inline BoneFrameSourceSelection SelectFallbackBoneFrameSource(
     const BoneFrameRecordSource& record,
     std::uintptr_t ordinaryRoot,
-    std::uintptr_t ordinaryMesh) noexcept {
+    std::uintptr_t ordinaryMesh,
+    bool resolvedBoneTransformEnabled) noexcept {
     if (ordinaryMesh == 0 || record.mesh == 0 ||
-        !record.resolverRecord) {
+        !record.resolverRecord ||
+        (record.encryptedRecord && !resolvedBoneTransformEnabled)) {
         return {};
     }
     const BoneFrameSourceSelection preferred =
-        SelectPreferredBoneFrameSource(record, ordinaryRoot, ordinaryMesh);
+        SelectPreferredBoneFrameSource(
+            record,
+            ordinaryRoot,
+            ordinaryMesh,
+            resolvedBoneTransformEnabled);
     if (preferred.root == record.root && preferred.mesh == record.mesh &&
         preferred.rebuildResolvedTransform == record.encryptedRecord) {
         return {};
@@ -88,8 +104,14 @@ inline BoneFrameSourceSelection SelectFallbackBoneFrameSource(
 
 inline std::uintptr_t SelectBoneFrameMesh(
     const BoneFrameRecordSource& record,
-    std::uintptr_t ordinaryMesh) noexcept {
-    return SelectPreferredBoneFrameSource(record, 0, ordinaryMesh).mesh;
+    std::uintptr_t ordinaryMesh,
+    bool resolvedBoneTransformEnabled) noexcept {
+    return SelectPreferredBoneFrameSource(
+               record,
+               0,
+               ordinaryMesh,
+               resolvedBoneTransformEnabled)
+        .mesh;
 }
 
 inline bool MatchesBoneFrameCacheSource(
@@ -121,14 +143,21 @@ inline bool IsBoneFrameCacheSourceCompatible(
     const BoneFrameRecordSource& record,
     std::uintptr_t ordinaryRoot,
     std::uintptr_t ordinaryMesh,
+    bool resolvedBoneTransformEnabled,
     const BoneFrameCacheSource& cache) noexcept {
     return MatchesBoneFrameCacheSource(
                SelectPreferredBoneFrameSource(
-                   record, ordinaryRoot, ordinaryMesh),
+                   record,
+                   ordinaryRoot,
+                   ordinaryMesh,
+                   resolvedBoneTransformEnabled),
                cache) ||
         MatchesBoneFrameCacheSource(
             SelectFallbackBoneFrameSource(
-                record, ordinaryRoot, ordinaryMesh),
+                record,
+                ordinaryRoot,
+                ordinaryMesh,
+                resolvedBoneTransformEnabled),
             cache);
 }
 

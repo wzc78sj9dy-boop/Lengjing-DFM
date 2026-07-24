@@ -12,6 +12,7 @@ void RunPlayerBoundsTests() {
     using lengjing::game::native::DoesPlayerScreenBoundsIntersectViewport;
     using lengjing::game::native::IsBoneFrameCacheSourceCompatible;
     using lengjing::game::native::IsReliablePlayerScreenBounds;
+    using lengjing::game::native::IsResolvedBoneTransformEnabled;
     using lengjing::game::native::kPlayerBoundsBoneCount;
     using lengjing::game::native::BoneFrameCacheSource;
     using lengjing::game::native::BoneFrameRecordSource;
@@ -196,28 +197,49 @@ void RunPlayerBoundsTests() {
         1920.0f, 1080.0f, selected));
 
     const BoneFrameRecordSource ordinaryRecord{0x1000, 0x2000, false};
-    REQUIRE(SelectBoneFrameMesh(ordinaryRecord, 0x3000) == 0x3000);
-    REQUIRE(SelectBoneFrameMesh(ordinaryRecord, 0) == 0x2000);
+    REQUIRE(!IsResolvedBoneTransformEnabled(false, false));
+    REQUIRE(IsResolvedBoneTransformEnabled(true, false));
+    REQUIRE(IsResolvedBoneTransformEnabled(false, true));
+    REQUIRE(IsResolvedBoneTransformEnabled(true, true));
+    REQUIRE(SelectBoneFrameMesh(ordinaryRecord, 0x3000, false) == 0x3000);
+    REQUIRE(SelectBoneFrameMesh(ordinaryRecord, 0, false) == 0x2000);
     const BoneFrameRecordSource encryptedRecord{
         0x4000, 0x5000, true, true};
-    REQUIRE(SelectBoneFrameMesh(encryptedRecord, 0x6000) == 0x6000);
+    REQUIRE(SelectBoneFrameMesh(encryptedRecord, 0x6000, false) == 0x6000);
+    REQUIRE(SelectBoneFrameMesh(encryptedRecord, 0, false) == 0);
+    const auto firstDecryptPreferred = SelectPreferredBoneFrameSource(
+        encryptedRecord,
+        0,
+        0,
+        IsResolvedBoneTransformEnabled(true, false));
+    REQUIRE(firstDecryptPreferred.mesh == 0x5000);
+    REQUIRE(firstDecryptPreferred.rebuildResolvedTransform);
+    const auto secondDecryptPreferred = SelectPreferredBoneFrameSource(
+        encryptedRecord,
+        0,
+        0,
+        IsResolvedBoneTransformEnabled(false, true));
+    REQUIRE(secondDecryptPreferred.mesh == 0x5000);
+    REQUIRE(secondDecryptPreferred.rebuildResolvedTransform);
 
     const auto ordinaryPreferred = SelectPreferredBoneFrameSource(
-        encryptedRecord, 0x7000, 0x6000);
+        encryptedRecord, 0x7000, 0x6000, false);
     REQUIRE(ordinaryPreferred.root == 0x7000);
     REQUIRE(ordinaryPreferred.mesh == 0x6000);
     REQUIRE(!ordinaryPreferred.rebuildResolvedTransform);
     const auto encryptedFallback = SelectFallbackBoneFrameSource(
-        encryptedRecord, 0x7000, 0x6000);
+        encryptedRecord, 0x7000, 0x6000, true);
     REQUIRE(encryptedFallback.root == 0x4000);
     REQUIRE(encryptedFallback.mesh == 0x5000);
     REQUIRE(encryptedFallback.rebuildResolvedTransform);
     REQUIRE(!SelectFallbackBoneFrameSource(
-        encryptedRecord, 0, 0));
+        encryptedRecord, 0x7000, 0x6000, false));
+    REQUIRE(!SelectFallbackBoneFrameSource(
+        encryptedRecord, 0, 0, true));
     const BoneFrameRecordSource plainResolver{
         0x8000, 0x9000, false, true};
     const auto plainFallback = SelectFallbackBoneFrameSource(
-        plainResolver, 0xA000, 0xB000);
+        plainResolver, 0xA000, 0xB000, false);
     REQUIRE(plainFallback.root == 0x8000);
     REQUIRE(plainFallback.mesh == 0x9000);
     REQUIRE(!plainFallback.rebuildResolvedTransform);
@@ -259,30 +281,42 @@ void RunPlayerBoundsTests() {
         ordinaryRecord,
         0,
         0x3000,
+        false,
         BoneFrameCacheSource{0, 0x3000, false}));
     REQUIRE(!IsBoneFrameCacheSourceCompatible(
         ordinaryRecord,
         0,
         0x3000,
+        false,
         BoneFrameCacheSource{0, 0x2000, false}));
     REQUIRE(IsBoneFrameCacheSourceCompatible(
         encryptedRecord,
         0x7000,
         0x6000,
+        false,
         BoneFrameCacheSource{0x7000, 0x6000, false}));
+    REQUIRE(!IsBoneFrameCacheSourceCompatible(
+        encryptedRecord,
+        0x7000,
+        0x6000,
+        false,
+        BoneFrameCacheSource{0x4000, 0x5000, true}));
     REQUIRE(IsBoneFrameCacheSourceCompatible(
         encryptedRecord,
         0x7000,
         0x6000,
+        true,
         BoneFrameCacheSource{0x4000, 0x5000, true}));
     REQUIRE(!IsBoneFrameCacheSourceCompatible(
         encryptedRecord,
         0x7000,
         0x6000,
+        true,
         BoneFrameCacheSource{0x4001, 0x5000, true}));
     REQUIRE(!IsBoneFrameCacheSourceCompatible(
         encryptedRecord,
         0x7000,
         0x6000,
+        true,
         BoneFrameCacheSource{0x4000, 0x5000, false}));
 }

@@ -6130,16 +6130,22 @@ private:
             actorRecord.encryptedRecord,
             actorRecord.resolverRecord,
         };
+        const bool resolvedBoneTransformEnabled =
+            native::IsResolvedBoneTransformEnabled(
+                algorithmPositionRequested_,
+                hardwareBreakpointRequested_);
         const native::BoneFrameSourceSelection preferredSource =
             native::SelectPreferredBoneFrameSource(
                 boneRecord,
                 actorRecord.ordinaryRoot,
-                ordinaryMesh);
+                ordinaryMesh,
+                resolvedBoneTransformEnabled);
         const native::BoneFrameSourceSelection fallbackSource =
             native::SelectFallbackBoneFrameSource(
                 boneRecord,
                 actorRecord.ordinaryRoot,
-                ordinaryMesh);
+                ordinaryMesh,
+                resolvedBoneTransformEnabled);
         if (!preferredSource && !fallbackSource) {
             if (readStatus != nullptr) {
                 *readStatus = BoneFrameReadStatus::NoSource;
@@ -6152,6 +6158,7 @@ private:
                 boneRecord,
                 actorRecord.ordinaryRoot,
                 ordinaryMesh,
+                resolvedBoneTransformEnabled,
                 native::BoneFrameCacheSource{
                     cached->second.root,
                     cached->second.mesh,
