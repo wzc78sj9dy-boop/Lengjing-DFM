@@ -60,6 +60,11 @@ if errorlevel 1 (
     echo [ERROR] Algorithm coordinate code is not disabled in this build.
     exit /b 1
 )
+findstr /B /C:"LENGJING_ENABLE_COORDINATE_DEBUG_LOG:BOOL=ON" "%BUILD_DIR%\CMakeCache.txt" >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Coordinate diagnostic logging is not enabled in this build.
+    exit /b 1
+)
 if not exist "%BUILD_DIR%\compile_commands.json" (
     echo [ERROR] Compile command database not found. Run 1_build.bat first.
     exit /b 1
@@ -67,6 +72,16 @@ if not exist "%BUILD_DIR%\compile_commands.json" (
 findstr /C:"LENGJING_ENABLE_ALGORITHM_COORDINATE=1" "%BUILD_DIR%\compile_commands.json" >nul 2>&1
 if not errorlevel 1 (
     echo [ERROR] Algorithm coordinate code is enabled in the compile commands.
+    exit /b 1
+)
+findstr /C:"LENGJING_ENABLE_COORDINATE_DEBUG_LOG=1" "%BUILD_DIR%\compile_commands.json" >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Coordinate diagnostic logging is disabled in the compile commands.
+    exit /b 1
+)
+findstr /C:"LENGJING_ENABLE_COORDINATE_DEBUG_LOG=0" "%BUILD_DIR%\compile_commands.json" >nul 2>&1
+if not errorlevel 1 (
+    echo [ERROR] Mixed coordinate diagnostic logging settings were found.
     exit /b 1
 )
 
