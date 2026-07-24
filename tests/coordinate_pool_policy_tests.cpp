@@ -38,6 +38,8 @@ void RunCoordinatePoolPolicyTests() {
         ResolveCoordinatePoolIndexedRootAddresses;
     using lengjing::game::native::ResolveCoordinatePoolDecryptMode;
     using lengjing::game::native::InferCoordinatePoolDecryptIndexOffset;
+    using lengjing::game::native::
+        ExpireCoordinatePoolDecryptIndexWitnesses;
     using lengjing::game::native::IsCoordinatePoolDecryptRequested;
     using lengjing::game::native::IsCoordinatePoolIndexedDecrypt;
     using lengjing::game::native::
@@ -60,6 +62,8 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::kCoordinatePoolMaximumBlockCount;
     using lengjing::game::native::
         kCoordinatePoolMaximumDecryptIndexOffset;
+    using lengjing::game::native::
+        kCoordinatePoolDecryptIndexCalibrationReadsPerFrame;
     using lengjing::game::native::kCoordinatePoolMinimumRemoteAddress;
     REQUIRE(!CoordinatePoolEnvironmentFlagEnabled(nullptr));
     REQUIRE(!CoordinatePoolEnvironmentFlagEnabled(""));
@@ -205,6 +209,30 @@ void RunCoordinatePoolPolicyTests() {
     }
     REQUIRE(!ambiguousCalibration.IsLocked());
     REQUIRE(ambiguousCalibration.Resolve(5) == 5);
+
+    std::array<std::uint64_t,
+               kCoordinatePoolDecryptIndexCalibrationReadsPerFrame>
+        auditWitnesses{0x1000, 0x2000, 0, 0};
+    std::array<std::uint64_t,
+               kCoordinatePoolDecryptIndexCalibrationReadsPerFrame>
+        auditWitnessFrames{99, 70, 0, 0};
+    std::size_t auditWitnessCount =
+        ExpireCoordinatePoolDecryptIndexWitnesses(
+            auditWitnesses, auditWitnessFrames, 2, 100);
+    REQUIRE(auditWitnessCount == 1);
+    REQUIRE(auditWitnesses[0] == 0x1000);
+    REQUIRE(auditWitnessFrames[0] == 99);
+    auditWitnesses[auditWitnessCount] = 0x3000;
+    auditWitnessFrames[auditWitnessCount++] = 100;
+    REQUIRE(auditWitnessCount == 2);
+    REQUIRE(auditWitnesses[1] == 0x3000);
+    REQUIRE(auditWitnessFrames[1] == 100);
+    auditWitnessCount = ExpireCoordinatePoolDecryptIndexWitnesses(
+        auditWitnesses, auditWitnessFrames, auditWitnessCount, 101);
+    REQUIRE(auditWitnessCount == 2);
+    auditWitnessCount = ExpireCoordinatePoolDecryptIndexWitnesses(
+        auditWitnesses, auditWitnessFrames, auditWitnessCount, 98);
+    REQUIRE(auditWitnessCount == 0);
     REQUIRE(IsCoordinatePoolBlockTerminator({}));
     REQUIRE(IsCoordinatePoolBlockTerminator({-0.0f, 0.0f, -0.0f}));
     REQUIRE(!IsCoordinatePoolBlockTerminator({1.0f, 0.0f, 0.0f}));

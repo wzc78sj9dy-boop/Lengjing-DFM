@@ -43,6 +43,38 @@ inline constexpr std::size_t
 inline constexpr std::size_t
     kCoordinatePoolDecryptIndexSingleComponentContradictionEvidence = 6;
 
+inline std::size_t ExpireCoordinatePoolDecryptIndexWitnesses(
+    std::array<std::uint64_t,
+               kCoordinatePoolDecryptIndexCalibrationReadsPerFrame>&
+        witnesses,
+    std::array<std::uint64_t,
+               kCoordinatePoolDecryptIndexCalibrationReadsPerFrame>&
+        lastSeenFrames,
+    std::size_t witnessCount,
+    std::uint64_t frame) noexcept {
+    const std::size_t boundedCount =
+        witnessCount < witnesses.size() ? witnessCount : witnesses.size();
+    std::size_t retainedCount = 0;
+    for (std::size_t index = 0; index < boundedCount; ++index) {
+        const std::uint64_t lastSeen = lastSeenFrames[index];
+        if (frame < lastSeen ||
+            frame - lastSeen >=
+                kCoordinatePoolDecryptIndexWitnessRefreshFrames) {
+            continue;
+        }
+        witnesses[retainedCount] = witnesses[index];
+        lastSeenFrames[retainedCount] = lastSeen;
+        ++retainedCount;
+    }
+    for (std::size_t index = retainedCount;
+         index < witnesses.size();
+         ++index) {
+        witnesses[index] = 0;
+        lastSeenFrames[index] = 0;
+    }
+    return retainedCount;
+}
+
 inline constexpr std::size_t kCoordinatePoolCompactLogicalSlotCount = 5;
 inline constexpr std::size_t kCoordinatePoolExtendedLogicalSlotCount = 7;
 inline constexpr std::size_t kCoordinatePoolBankCount = 2;
