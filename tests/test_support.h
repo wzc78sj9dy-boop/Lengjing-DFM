@@ -34,11 +34,15 @@ void RunCpuMailboxPolicyTests();
 void RunFrameProjectionTests();
 void RunGameVersionPolicyTests();
 void RunGeometrySceneBuildPolicyTests();
+#if 0
 void RunHardwareBreakpointCoordinateRuntimeTests();
+#endif
 void RunHudMapTests();
 void RunKernelModuleCatalogTests();
 void RunOverlayContrastPolicyTests();
+#if 0
 void RunPerfExecutionBreakpointTests();
+#endif
 void RunPlayerBoundsTests();
 void RunPlayerDetailReadPolicyTests();
 void RunPlayerTracerPolicyTests();

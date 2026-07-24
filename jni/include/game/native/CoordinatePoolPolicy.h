@@ -13,6 +13,8 @@ inline constexpr std::uint64_t kCoordinatePoolCodeValidationRetryFrames = 8;
 inline constexpr std::uint64_t kCoordinatePoolCodeValidationIdleFrame =
     UINT64_MAX;
 inline constexpr std::uint64_t kCoordinatePoolPointerPayloadMask =
+    UINT64_C(0x0000FFFFFFFFFFFF);
+inline constexpr std::uint64_t kCoordinatePoolIndexedPointerPayloadMask =
     UINT64_C(0x00FFFFFFFFFFFFFF);
 inline constexpr std::uint64_t kCoordinatePoolMinimumRemoteAddress =
     UINT64_C(0x10000000);
@@ -38,6 +40,31 @@ inline constexpr std::size_t
 inline constexpr std::size_t kCoordinatePoolLayoutMinimumLead = 2;
 inline constexpr std::size_t
     kCoordinatePoolLayoutInvalidDecodedSlotLimit = 3;
+
+enum class CoordinatePoolDecryptMode : std::uint8_t {
+    None,
+    Legacy,
+    Indexed,
+};
+
+constexpr CoordinatePoolDecryptMode ResolveCoordinatePoolDecryptMode(
+    bool legacyRequested,
+    bool indexedRequested) noexcept {
+    if (indexedRequested) return CoordinatePoolDecryptMode::Indexed;
+    return legacyRequested
+        ? CoordinatePoolDecryptMode::Legacy
+        : CoordinatePoolDecryptMode::None;
+}
+
+constexpr bool IsCoordinatePoolDecryptRequested(
+    CoordinatePoolDecryptMode mode) noexcept {
+    return mode != CoordinatePoolDecryptMode::None;
+}
+
+constexpr bool IsCoordinatePoolIndexedDecrypt(
+    CoordinatePoolDecryptMode mode) noexcept {
+    return mode == CoordinatePoolDecryptMode::Indexed;
+}
 
 constexpr bool IsCoordinatePoolDecryptIndexOffsetValid(
     std::uint32_t offset) noexcept {
@@ -588,6 +615,31 @@ private:
 constexpr std::uint64_t NormalizeCoordinatePoolPointer(
     std::uint64_t value) noexcept {
     return value & kCoordinatePoolPointerPayloadMask;
+}
+
+constexpr std::uint64_t NormalizeCoordinatePoolIndexedPointer(
+    std::uint64_t value) noexcept {
+    return value & kCoordinatePoolIndexedPointerPayloadMask;
+}
+
+constexpr bool ResolveCoordinatePoolIndexedPointerAddress(
+    std::uint64_t pointer,
+    std::int64_t offset,
+    std::uint64_t& address) noexcept {
+    const std::uint64_t base =
+        NormalizeCoordinatePoolIndexedPointer(pointer);
+    if (offset >= 0) {
+        const std::uint64_t addition =
+            static_cast<std::uint64_t>(offset);
+        if (addition > UINT64_MAX - base) return false;
+        address = base + addition;
+        return true;
+    }
+    const std::uint64_t subtraction =
+        static_cast<std::uint64_t>(-(offset + 1)) + 1;
+    if (subtraction > base) return false;
+    address = base - subtraction;
+    return true;
 }
 
 inline std::uint64_t CoordinatePoolCodeFingerprint(

@@ -3,7 +3,9 @@
 #include <exception>
 #include <iostream>
 
+#if 0
 void RunExecutionVeneerLocatorTests();
+#endif
 
 int main() {
     try {
@@ -26,15 +28,21 @@ int main() {
         RunCoordinatePoolPolicyTests();
         RunCoordinateOutputPolicyTests();
         RunCpuMailboxPolicyTests();
+#if 0
         RunExecutionVeneerLocatorTests();
+#endif
         RunFrameProjectionTests();
         RunGameVersionPolicyTests();
         RunGeometrySceneBuildPolicyTests();
+#if 0
         RunHardwareBreakpointCoordinateRuntimeTests();
+#endif
         RunHudMapTests();
         RunKernelModuleCatalogTests();
         RunOverlayContrastPolicyTests();
+#if 0
         RunPerfExecutionBreakpointTests();
+#endif
         RunPlayerBoundsTests();
         RunPlayerDetailReadPolicyTests();
         RunPlayerTracerPolicyTests();

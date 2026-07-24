@@ -605,6 +605,16 @@ struct CoordinatePoolRuntime::Impl {
         CloseEngineUnlocked();
     }
 
+    std::uint64_t NormalizePointer(std::uint64_t value) const noexcept {
+        return indexedPointers
+            ? NormalizeCoordinatePoolIndexedPointer(value)
+            : NormalizeCoordinatePoolPointer(value);
+    }
+
+    bool IsValidGuestAddress(std::uint64_t value) const noexcept {
+        return IsRemoteAddress(NormalizePointer(value));
+    }
+
     bool Configure(const CoordinatePoolRuntimeLayout& configuredLayout) {
         if (!configuredLayout.IsValid()) return false;
         std::lock_guard<std::mutex> lock(mutex);
@@ -617,7 +627,8 @@ struct CoordinatePoolRuntime::Impl {
                  pid_t targetProcessId,
                  std::uintptr_t targetModuleBase,
                  const ProcessExecutionContext& targetExecutionContext,
-                 std::uint64_t targetFrame) {
+                 std::uint64_t targetFrame,
+                 bool targetIndexedPointers) {
         std::lock_guard<std::mutex> lock(mutex);
         ClearReadDiagnosticUnlocked();
         if (!layout.IsValid() || targetProcessId <= 0 ||
@@ -628,7 +639,9 @@ struct CoordinatePoolRuntime::Impl {
 
         const bool bindingChanged = memory != &targetMemory ||
             processId != targetProcessId || moduleBase != targetModuleBase;
-        if (bindingChanged) {
+        const bool pointerModeChanged =
+            indexedPointers != targetIndexedPointers;
+        if (bindingChanged || pointerModeChanged) {
             const std::uint64_t attempts = probe.attempts;
             const std::uint64_t successes = probe.successes;
             ResetUnlocked();
@@ -637,6 +650,7 @@ struct CoordinatePoolRuntime::Impl {
             memory = &targetMemory;
             processId = targetProcessId;
             moduleBase = targetModuleBase;
+            indexedPointers = targetIndexedPointers;
         }
 
         const CoordinatePoolRootSnapshot previousRoot{
@@ -867,6 +881,7 @@ struct CoordinatePoolRuntime::Impl {
         validationWasRequested = codeValidationRequested;
         if (memory == nullptr || finder == nullptr || engine == nullptr ||
             !executionContext.IsUsable() || !IsValidGuestAddress(component) ||
+            indexed != indexedPointers ||
             (indexed &&
              !IsCoordinatePoolDecryptIndexOffsetValid(decryptIndexOffset))) {
             SetError(CoordinatePoolRuntimeError::InvalidInput);
@@ -1984,9 +1999,93 @@ private:
             IsRemoteAddress(rootAddress);
     }
 
+    bool ReadAcceptedIndexedRootSnapshotUnlocked(
+        const CoordinatePoolRootSnapshot& accepted,
+        CoordinatePoolRootSnapshot& snapshot) {
+        snapshot = {};
+        if (!IsCoordinatePoolRootSnapshotInitialized(accepted) ||
+            !IsRemoteAddress(accepted.bridge)) {
+            return false;
+        }
+
+        std::uint64_t rootAddress = 0;
+        std::uint64_t entryAddress = 0;
+        if (!ResolveRootPointerAddressUnlocked(rootAddress) ||
+            !ResolveCoordinatePoolIndexedPointerAddress(
+                accepted.bridge,
+                static_cast<std::int64_t>(layout.entryOffset),
+                entryAddress) ||
+            !IsRemoteAddress(entryAddress)) {
+            return false;
+        }
+
+        std::uint64_t rawBridgeBefore = 0;
+        std::uint64_t rawEntry = 0;
+        const std::array<MemoryReadRequest, 2> firstRequests{{
+            {rootAddress, &rawBridgeBefore, sizeof(rawBridgeBefore)},
+            {entryAddress, &rawEntry, sizeof(rawEntry)},
+        }};
+        const std::array<CoordinateReadStage, 2> firstStages{{
+            CoordinateReadStage::Root,
+            CoordinateReadStage::Entry,
+        }};
+        std::size_t failedIndex = firstRequests.size();
+        if (!ReadRemoteBatchUnlocked(
+                firstRequests.data(),
+                firstRequests.size(),
+                firstStages.data(),
+                failedIndex)) {
+            return false;
+        }
+
+        std::uint64_t contextAddress = 0;
+        if (!ResolveCoordinatePoolIndexedPointerAddress(
+                rawEntry,
+                static_cast<std::int64_t>(layout.contextOffset),
+                contextAddress) ||
+            !IsRemoteAddress(contextAddress)) {
+            return false;
+        }
+
+        std::uint64_t rawContext = 0;
+        std::uint64_t rawBridgeAfter = 0;
+        const std::array<MemoryReadRequest, 2> secondRequests{{
+            {contextAddress, &rawContext, sizeof(rawContext)},
+            {rootAddress, &rawBridgeAfter, sizeof(rawBridgeAfter)},
+        }};
+        const std::array<CoordinateReadStage, 2> secondStages{{
+            CoordinateReadStage::Context,
+            CoordinateReadStage::Root,
+        }};
+        failedIndex = secondRequests.size();
+        if (!ReadRemoteBatchUnlocked(
+                secondRequests.data(),
+                secondRequests.size(),
+                secondStages.data(),
+                failedIndex)) {
+            return false;
+        }
+
+        snapshot = {
+            NormalizePointer(rawBridgeBefore),
+            rawContext,
+            NormalizePointer(rawEntry),
+        };
+        const std::uint64_t trailingBridge =
+            NormalizePointer(rawBridgeAfter);
+        return IsValidGuestAddress(snapshot.context) &&
+            IsRemoteAddress(snapshot.entry) && (snapshot.entry & 3U) == 0 &&
+            CoordinatePoolGuardedRootSnapshotMatches(
+                accepted, snapshot, trailingBridge);
+    }
+
     bool ReadAcceptedRootSnapshotUnlocked(
         const CoordinatePoolRootSnapshot& accepted,
         CoordinatePoolRootSnapshot& snapshot) {
+        if (indexedPointers) {
+            return ReadAcceptedIndexedRootSnapshotUnlocked(
+                accepted, snapshot);
+        }
         snapshot = {};
         if (!IsCoordinatePoolRootSnapshotInitialized(accepted) ||
             !IsRemoteAddress(accepted.bridge)) {
@@ -2044,7 +2143,71 @@ private:
                 accepted, snapshot, trailingBridge);
     }
 
+    bool ReadIndexedRootSnapshotUnlocked(
+        CoordinatePoolRootSnapshot& snapshot) {
+        snapshot = {};
+        std::uint64_t rootAddress = 0;
+        if (!ResolveRootPointerAddressUnlocked(rootAddress)) return false;
+
+        std::uint64_t rawBridge = 0;
+        if (!ReadRemoteUnlocked(
+                rootAddress,
+                &rawBridge,
+                sizeof(rawBridge),
+                CoordinateReadStage::Root)) {
+            return false;
+        }
+        const std::uint64_t nextBridge = NormalizePointer(rawBridge);
+        std::uint64_t entryAddress = 0;
+        if (!IsRemoteAddress(nextBridge) ||
+            !ResolveCoordinatePoolIndexedPointerAddress(
+                rawBridge,
+                static_cast<std::int64_t>(layout.entryOffset),
+                entryAddress) ||
+            !IsRemoteAddress(entryAddress)) {
+            return false;
+        }
+
+        std::uint64_t rawEntry = 0;
+        if (!ReadRemoteUnlocked(
+                entryAddress,
+                &rawEntry,
+                sizeof(rawEntry),
+                CoordinateReadStage::Entry)) {
+            return false;
+        }
+        const std::uint64_t nextEntry = NormalizePointer(rawEntry);
+        std::uint64_t contextAddress = 0;
+        if (!IsRemoteAddress(nextEntry) ||
+            !ResolveCoordinatePoolIndexedPointerAddress(
+                rawEntry,
+                static_cast<std::int64_t>(layout.contextOffset),
+                contextAddress) ||
+            !IsRemoteAddress(contextAddress)) {
+            return false;
+        }
+
+        std::uint64_t rawContext = 0;
+        if (!ReadRemoteUnlocked(
+                contextAddress,
+                &rawContext,
+                sizeof(rawContext),
+                CoordinateReadStage::Context)) {
+            return false;
+        }
+        snapshot = {
+            nextBridge,
+            rawContext,
+            nextEntry,
+        };
+        return IsValidGuestAddress(snapshot.context) &&
+            IsRemoteAddress(snapshot.entry) && (snapshot.entry & 3U) == 0;
+    }
+
     bool ReadRootSnapshotUnlocked(CoordinatePoolRootSnapshot& snapshot) {
+        if (indexedPointers) {
+            return ReadIndexedRootSnapshotUnlocked(snapshot);
+        }
         snapshot = {};
         std::uint64_t rootAddress = 0;
         if (!ResolveRootPointerAddressUnlocked(rootAddress)) return false;
@@ -3531,6 +3694,7 @@ private:
     void ResetUnlocked() {
         const CoordinatePoolRuntimeLayout configuredLayout = layout;
         CloseEngineUnlocked();
+        indexedPointers = false;
         finder.reset();
         analysisCodeFingerprints.clear();
         executableMappingIndex = {};
@@ -3622,6 +3786,7 @@ private:
     bool hookFailed = false;
     bool captureParameters = false;
     bool allowMissingRemotePages = false;
+    bool indexedPointers = false;
 };
 
 CoordinatePoolRuntime::CoordinatePoolRuntime(
@@ -3644,10 +3809,16 @@ bool CoordinatePoolRuntime::Refresh(
     pid_t processId,
     std::uintptr_t moduleBase,
     const ProcessExecutionContext& executionContext,
-    std::uint64_t frame) noexcept {
+    std::uint64_t frame,
+    bool indexedPointers) noexcept {
     try {
         return impl_ != nullptr && impl_->Refresh(
-            memory, processId, moduleBase, executionContext, frame);
+            memory,
+            processId,
+            moduleBase,
+            executionContext,
+            frame,
+            indexedPointers);
     } catch (...) {
         return false;
     }

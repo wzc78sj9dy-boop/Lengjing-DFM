@@ -14,7 +14,9 @@ enum class CharacterPositionSource : std::uint8_t {
     None,
     Standard,
     Decoded,
+#if 0
     HardwareBreakpoint,
+#endif
     AlgorithmObject,
     AlgorithmTable,
 };
@@ -106,7 +108,9 @@ FinalizeAlgorithmCharacterCoordinate(
 constexpr bool ShouldAlignBoneFrameToCharacterPosition(
     CharacterPositionSource source) noexcept {
     return source == CharacterPositionSource::Decoded ||
+#if 0
         source == CharacterPositionSource::HardwareBreakpoint ||
+#endif
         source == CharacterPositionSource::AlgorithmObject ||
         source == CharacterPositionSource::AlgorithmTable;
 }

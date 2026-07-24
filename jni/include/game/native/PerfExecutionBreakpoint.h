@@ -1,5 +1,7 @@
 #pragma once
 
+#if 0
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -78,3 +80,5 @@ private:
 };
 
 }  // namespace lengjing::game::native
+
+#endif

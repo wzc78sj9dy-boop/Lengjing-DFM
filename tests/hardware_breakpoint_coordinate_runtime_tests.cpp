@@ -1,5 +1,7 @@
 #include "test_support.h"
 
+#if 0
+
 #include "game/native/HardwareBreakpointCoordinateRuntime.h"
 
 #include <cmath>
@@ -453,3 +455,5 @@ void RunHardwareBreakpointCoordinateRuntimeTests() {
     TestTenSlotModeAndFirstTie();
     TestCountBoundariesAndZeroCandidate();
 }
+
+#endif

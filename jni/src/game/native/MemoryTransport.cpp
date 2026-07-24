@@ -2,7 +2,9 @@
 
 #include "game/native/KernelModuleLoader.h"
 #include "game/native/KernelRpcTransport.h"
+#if 0
 #include "game/native/PerfExecutionBreakpoint.h"
+#endif
 #include "game/native/PacgaOperandResolver.h"
 #include "game/native/PtraceExecutionContextProvider.h"
 #include "game/native/ThreadContextDeviceTransport.h"
@@ -36,12 +38,14 @@
 namespace lengjing::game::native {
 namespace {
 
+#if 0
 static_assert(sizeof(hwbp_point_config) == 24,
               "unexpected Paradise breakpoint point layout");
 static_assert(sizeof(hwbp_record) == 848,
               "unexpected Paradise breakpoint record layout");
 static_assert(HWBP_MAX_RECORDS == kExecutionBreakpointRecordLimit,
               "Paradise breakpoint record limit mismatch");
+#endif
 
 constexpr std::uintptr_t kMinimumRemoteAddress = 0x10000000ULL;
 constexpr std::uintptr_t kMaximumRemoteAddress = 0x10000000000ULL;
@@ -413,11 +417,13 @@ bool FindExecutableMapping(pid_t processId,
 }  // namespace
 
 struct MemoryTransport::Impl {
+#if 0
     enum class ExecutionBreakpointBackend : std::uint8_t {
         None,
         Kernel,
         Perf,
     };
+#endif
 
     struct PtraceOracleRootSnapshot {
         std::uintptr_t bridge = 0;
@@ -471,6 +477,7 @@ struct MemoryTransport::Impl {
     std::unique_ptr<KernelRpcTransport> privateRpc;
     kernel_rpc_abi::ProcessHandle privateProcessHandle =
         kernel_rpc_abi::kInvalidProcessHandle;
+#if 0
     PerfExecutionBreakpoint perfExecutionBreakpoint;
     ExecutionBreakpointBackend executionBreakpointBackend =
         ExecutionBreakpointBackend::None;
@@ -478,6 +485,7 @@ struct MemoryTransport::Impl {
     std::uintptr_t executionBreakpointAddress = 0;
     std::array<hwbp_record, HWBP_MAX_RECORDS>
         executionBreakpointRecordBuffer{};
+#endif
     int processMemFd = -1;
     int threadContextFd = -1;
     std::unique_ptr<ThreadContextDeviceTransport> threadContextTransport;
@@ -526,7 +534,9 @@ struct MemoryTransport::Impl {
         nextPtraceOracleResolve = {};
         coordinateReplayLayout = {};
         coordinateBatchDisabled = false;
+#if 0
         static_cast<void>(RemoveExecutionBreakpointsUnlocked());
+#endif
         if (privateRpc != nullptr &&
             privateProcessHandle != kernel_rpc_abi::kInvalidProcessHandle) {
             static_cast<void>(privateRpc->ReleaseProcessHandle(
@@ -1417,6 +1427,7 @@ struct MemoryTransport::Impl {
         return read;
     }
 
+#if 0
     bool SupportsExecutionBreakpoints() const noexcept {
         std::lock_guard<std::mutex> lock(ioMutex);
         if (!open || processId <= 0) {
@@ -1601,6 +1612,7 @@ struct MemoryTransport::Impl {
         std::lock_guard<std::mutex> lock(ioMutex);
         return RemoveExecutionBreakpointsUnlocked();
     }
+#endif
 
     bool ReadCoordinateMemory(
         std::uintptr_t address,
@@ -2225,6 +2237,7 @@ bool MemoryTransport::IsOpen() const noexcept {
     return impl_ != nullptr && impl_->IsOpen();
 }
 
+#if 0
 bool MemoryTransport::SupportsExecutionBreakpoints() const noexcept {
     return impl_ != nullptr && impl_->SupportsExecutionBreakpoints();
 }
@@ -2253,6 +2266,7 @@ bool MemoryTransport::ReadExecutionBreakpointRecords(
 bool MemoryTransport::RemoveExecutionBreakpoints() noexcept {
     return impl_ != nullptr && impl_->RemoveExecutionBreakpoints();
 }
+#endif
 
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
 bool MemoryTransport::CanWrite() const noexcept {

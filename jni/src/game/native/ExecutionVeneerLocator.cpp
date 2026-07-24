@@ -1,3 +1,5 @@
+#if 0
+
 #include "game/native/ExecutionVeneerLocator.h"
 
 #include <array>
@@ -289,3 +291,5 @@ bool LocateSecondExecutionVeneer(
 }
 
 }  // namespace lengjing::game::native
+
+#endif

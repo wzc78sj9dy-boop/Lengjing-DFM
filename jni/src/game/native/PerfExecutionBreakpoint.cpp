@@ -1,3 +1,5 @@
+#if 0
+
 #include "game/native/PerfExecutionBreakpoint.h"
 
 #include "game/native/MemoryTransport.h"
@@ -687,3 +689,5 @@ bool PerfExecutionBreakpoint::IsConfigured() const noexcept {
 }
 
 }  // namespace lengjing::game::native
+
+#endif

@@ -132,7 +132,7 @@ void RunConfigTests() {
     expected.runtime.driverIndex = 1;
     expected.visual.modelGeometry = true;
     expected.visual.coordinateDecrypt = false;
-    expected.visual.coordinateDecryptIndex = 7;
+    expected.visual.coordinateDecrypt2Index = 7;
     expected.visual.hardwareBreakpointDecrypt = true;
     expected.visual.algorithmDecrypt = true;
     expected.visual.crosshair = true;
@@ -183,7 +183,9 @@ void RunConfigTests() {
     const std::string serialized = ReadText(path);
     REQUIRE(serialized.find("\"coordinate_decrypt2\": true") !=
         std::string::npos);
-    REQUIRE(serialized.find("\"coordinate_decrypt_index\": 7") !=
+    REQUIRE(serialized.find("\"coordinate_decrypt2_index\": 7") !=
+        std::string::npos);
+    REQUIRE(serialized.find("\"coordinate_decrypt_index\"") ==
         std::string::npos);
     REQUIRE(serialized.find("algorithm_decrypt") == std::string::npos);
     REQUIRE(serialized.find("\"cover\"") != std::string::npos);
@@ -206,8 +208,8 @@ void RunConfigTests() {
     REQUIRE(actual.visual.modelGeometry == expected.visual.modelGeometry);
     REQUIRE(!actual.visual.coordinateDecrypt);
     REQUIRE(
-        actual.visual.coordinateDecryptIndex ==
-        expected.visual.coordinateDecryptIndex);
+        actual.visual.coordinateDecrypt2Index ==
+        expected.visual.coordinateDecrypt2Index);
     REQUIRE(actual.visual.hardwareBreakpointDecrypt);
     REQUIRE(!actual.visual.algorithmDecrypt);
     REQUIRE(actual.visual.crosshair == expected.visual.crosshair);
@@ -263,6 +265,26 @@ void RunConfigTests() {
     REQUIRE(config.Load(actual, &error));
     REQUIRE(!actual.visual.coordinateDecrypt);
     REQUIRE(actual.visual.hardwareBreakpointDecrypt);
+
+    {
+        std::ofstream legacyDecrypt2Index(
+            path, std::ios::binary | std::ios::trunc);
+        legacyDecrypt2Index <<
+            R"({"schema_version":1,"visual":{"coordinate_decrypt_index":8}})";
+    }
+    actual = {};
+    REQUIRE(config.Load(actual, &error));
+    REQUIRE(actual.visual.coordinateDecrypt2Index == 8);
+
+    {
+        std::ofstream preferredDecrypt2Index(
+            path, std::ios::binary | std::ios::trunc);
+        preferredDecrypt2Index <<
+            R"({"schema_version":1,"visual":{"coordinate_decrypt_index":3,"coordinate_decrypt2_index":9}})";
+    }
+    actual = {};
+    REQUIRE(config.Load(actual, &error));
+    REQUIRE(actual.visual.coordinateDecrypt2Index == 9);
 
     {
         std::ofstream legacy(path, std::ios::binary | std::ios::trunc);
@@ -330,7 +352,7 @@ void RunConfigTests() {
         conflicting <<
             R"({"schema_version":1,"runtime":{"driver":9},)"
             R"("visual":{"coordinate_decrypt":true,)"
-            R"("coordinate_decrypt_index":99,)"
+            R"("coordinate_decrypt2_index":99,)"
             R"("algorithm_decrypt":true,"warning_size":1200},)"
             R"("aim":{"input_mode":9,"hit_percentage":1000,)"
             R"("tracking_bone_preset":99,)"
@@ -342,7 +364,7 @@ void RunConfigTests() {
     REQUIRE(config.Load(actual, &error));
     REQUIRE(error.empty());
     REQUIRE(actual.visual.coordinateDecrypt);
-    REQUIRE(actual.visual.coordinateDecryptIndex == 10);
+    REQUIRE(actual.visual.coordinateDecrypt2Index == 10);
     REQUIRE(!actual.visual.algorithmDecrypt);
     REQUIRE(actual.visual.warningSize == 1000.0f);
     REQUIRE(actual.runtime.driverIndex == 2);
@@ -430,8 +452,7 @@ void RunConfigTests() {
         menuText.find("visual.coordinateDecrypt = false;") !=
         std::string::npos);
     REQUIRE(
-        menuText.find(
-            "\"解密索引偏移\", &visual.coordinateDecryptIndex, 0, 10") !=
+        menuText.find("&visual.coordinateDecrypt2Index") !=
         std::string::npos);
     for (const char* inputModeName : {
              "只读", "写入触摸（不推荐）", "程序陀螺仪", "内核触摸", "内核陀螺仪"}) {

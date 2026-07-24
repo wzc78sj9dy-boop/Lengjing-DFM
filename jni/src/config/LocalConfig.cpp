@@ -159,8 +159,8 @@ Json Serialize(const ui::UiModel& model) {
             {"model_geometry", model.visual.modelGeometry},
             {"visibility_color", model.visual.visibilityColor},
             {"coordinate_decrypt", model.visual.coordinateDecrypt},
-            {"coordinate_decrypt_index", model.visual.coordinateDecryptIndex},
             {"coordinate_decrypt2", model.visual.hardwareBreakpointDecrypt},
+            {"coordinate_decrypt2_index", model.visual.coordinateDecrypt2Index},
             {"box", model.visual.box},
             {"snapline", model.visual.snapline},
             {"skeleton", model.visual.skeleton},
@@ -262,10 +262,16 @@ void Apply(const Json& root, ui::UiModel& model) {
     LOAD_VISUAL_BOOL(modelGeometry, "model_geometry");
     LOAD_VISUAL_BOOL(visibilityColor, "visibility_color");
     LOAD_VISUAL_BOOL(coordinateDecrypt, "coordinate_decrypt");
-    model.visual.coordinateDecryptIndex = ReadNumber(
+    const int legacyCoordinateDecrypt2Index = ReadNumber(
         visual,
         "coordinate_decrypt_index",
-        model.visual.coordinateDecryptIndex,
+        model.visual.coordinateDecrypt2Index,
+        0,
+        10);
+    model.visual.coordinateDecrypt2Index = ReadNumber(
+        visual,
+        "coordinate_decrypt2_index",
+        legacyCoordinateDecrypt2Index,
         0,
         10);
     model.visual.hardwareBreakpointDecrypt =

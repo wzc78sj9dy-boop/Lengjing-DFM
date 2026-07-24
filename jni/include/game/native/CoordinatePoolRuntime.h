@@ -252,7 +252,8 @@ public:
                  pid_t processId,
                  std::uintptr_t moduleBase,
                  const ProcessExecutionContext& executionContext,
-                 std::uint64_t frame) noexcept;
+                 std::uint64_t frame,
+                 bool indexedPointers = false) noexcept;
     bool ReadPosition(std::uintptr_t component,
                       CoordinatePoolPosition& position,
                       bool refresh = false) noexcept;

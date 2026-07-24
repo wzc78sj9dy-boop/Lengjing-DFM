@@ -27,15 +27,15 @@ add_executable(lengjing_tests
     coordinate_pool_policy_tests.cpp
     coordinate_output_policy_tests.cpp
     cpu_mailbox_policy_tests.cpp
-    execution_veneer_locator_tests.cpp
+    # execution_veneer_locator_tests.cpp
     frame_projection_tests.cpp
     game_version_policy_tests.cpp
     geometry_scene_build_policy_tests.cpp
-    hardware_breakpoint_coordinate_runtime_tests.cpp
+    # hardware_breakpoint_coordinate_runtime_tests.cpp
     hud_map_tests.cpp
     kernel_module_catalog_tests.cpp
     overlay_contrast_policy_tests.cpp
-    perf_execution_breakpoint_tests.cpp
+    # perf_execution_breakpoint_tests.cpp
     player_bounds_tests.cpp
     player_detail_read_policy_tests.cpp
     player_tracer_policy_tests.cpp
@@ -60,9 +60,9 @@ add_executable(lengjing_tests
     ../jni/src/auth/RemoteAuth.cpp
     ../jni/src/config/LocalConfig.cpp
     ../jni/src/game/GameRuntime.cpp
-    ../jni/src/game/native/ExecutionVeneerLocator.cpp
-    ../jni/src/game/native/HardwareBreakpointCoordinateRuntime.cpp
-    ../jni/src/game/native/PerfExecutionBreakpoint.cpp
+    # ../jni/src/game/native/ExecutionVeneerLocator.cpp
+    # ../jni/src/game/native/HardwareBreakpointCoordinateRuntime.cpp
+    # ../jni/src/game/native/PerfExecutionBreakpoint.cpp
     ../jni/src/game/native/RemoteElfIdentity.cpp
     ../jni/src/game/native/TrackingPageBinding.cpp
     ../jni/src/platform/PerformanceTrace.cpp

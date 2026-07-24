@@ -124,6 +124,7 @@ struct MemoryReadRequest {
 };
 
 inline constexpr std::size_t kCoordinateMemoryBatchRequestLimit = 4;
+#if 0
 inline constexpr std::size_t kExecutionBreakpointRecordLimit = 0x100;
 
 struct ExecutionBreakpointRecord {
@@ -134,6 +135,7 @@ struct ExecutionBreakpointRecord {
     std::uintptr_t x0 = 0;
     std::uintptr_t x23 = 0;
 };
+#endif
 
 class MemoryTransport final {
 public:
@@ -169,6 +171,7 @@ public:
 #endif
     std::uintptr_t ModuleBase(std::string_view moduleName);
     bool IsOpen() const noexcept;
+#if 0
     bool SupportsExecutionBreakpoints() const noexcept;
     bool ConfigureExecutionBreakpoint(std::uintptr_t address) noexcept;
     bool ReadExecutionBreakpointRecords(
@@ -178,6 +181,7 @@ public:
         std::uintptr_t& hitAddress,
         std::size_t& totalRecords) noexcept;
     bool RemoveExecutionBreakpoints() noexcept;
+#endif
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
     bool CanWrite() const noexcept;
     bool UsesKernelBackend() const noexcept;

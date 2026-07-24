@@ -1,3 +1,4 @@
+#include "game/native/CoordinateDecrypt2Runtime.h"
 #include "game/native/CoordinatePoolPolicy.h"
 #include "game/native/CoordinatePoolRuntime.h"
 #include "test_support.h"
@@ -17,14 +18,22 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::CoordinatePoolRootSnapshotsMatch;
     using lengjing::game::native::IsCoordinatePoolRootSnapshotInitialized;
     using lengjing::game::native::CoordinatePoolCandidateSet;
+    using lengjing::game::native::CoordinatePoolDecryptMode;
     using lengjing::game::native::CoordinatePoolStablePositionCache;
     using lengjing::game::native::IsCoordinatePoolReadRangeValid;
     using lengjing::game::native::IsCoordinatePoolBlockTerminator;
     using lengjing::game::native::IsCoordinatePoolDecryptIndexOffsetValid;
     using lengjing::game::native::IsCoordinatePoolSelectedCandidateValid;
     using lengjing::game::native::MapDecodedCoordinatePoolSlot;
+    using lengjing::game::native::MakeCoordinateDecrypt2RuntimeLayout;
     using lengjing::game::native::NextCoordinatePoolCodeValidationFrame;
+    using lengjing::game::native::NormalizeCoordinatePoolIndexedPointer;
     using lengjing::game::native::NormalizeCoordinatePoolPointer;
+    using lengjing::game::native::
+        ResolveCoordinatePoolIndexedPointerAddress;
+    using lengjing::game::native::ResolveCoordinatePoolDecryptMode;
+    using lengjing::game::native::IsCoordinatePoolDecryptRequested;
+    using lengjing::game::native::IsCoordinatePoolIndexedDecrypt;
     using lengjing::game::native::
         ShouldClearCoordinatePoolRingsAfterPointerRefresh;
     using lengjing::game::native::ShouldSearchCoordinatePoolRing;
@@ -51,6 +60,28 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(!CoordinatePoolEnvironmentFlagEnabled("0"));
     REQUIRE(CoordinatePoolEnvironmentFlagEnabled("1"));
     REQUIRE(CoordinatePoolEnvironmentFlagEnabled("1-full"));
+    REQUIRE(
+        ResolveCoordinatePoolDecryptMode(false, false) ==
+        CoordinatePoolDecryptMode::None);
+    REQUIRE(
+        ResolveCoordinatePoolDecryptMode(true, false) ==
+        CoordinatePoolDecryptMode::Legacy);
+    REQUIRE(
+        ResolveCoordinatePoolDecryptMode(false, true) ==
+        CoordinatePoolDecryptMode::Indexed);
+    REQUIRE(
+        ResolveCoordinatePoolDecryptMode(true, true) ==
+        CoordinatePoolDecryptMode::Indexed);
+    REQUIRE(IsCoordinatePoolDecryptRequested(
+        CoordinatePoolDecryptMode::Legacy));
+    REQUIRE(IsCoordinatePoolDecryptRequested(
+        CoordinatePoolDecryptMode::Indexed));
+    REQUIRE(!IsCoordinatePoolDecryptRequested(
+        CoordinatePoolDecryptMode::None));
+    REQUIRE(!IsCoordinatePoolIndexedDecrypt(
+        CoordinatePoolDecryptMode::Legacy));
+    REQUIRE(IsCoordinatePoolIndexedDecrypt(
+        CoordinatePoolDecryptMode::Indexed));
 
     REQUIRE(!IsCoordinatePoolReadRangeValid(
         kCoordinatePoolMinimumRemoteAddress, 0));
@@ -109,6 +140,13 @@ void RunCoordinatePoolPolicyTests() {
     poolBlocks[5] = {6.0f, 1.0f, 1.0f};
     REQUIRE(PredictCoordinatePoolBlockCount(
         poolBlocks.data(), poolBlocks.size()) == 19);
+    poolBlocks[1] = {};
+    poolBlocks[7] = {};
+    REQUIRE(PredictCoordinatePoolBlockCount(
+        poolBlocks.data(), poolBlocks.size()) == 1);
+    poolBlocks[0] = {};
+    REQUIRE(PredictCoordinatePoolBlockCount(
+        poolBlocks.data(), poolBlocks.size()) == 0);
     REQUIRE(PredictCoordinatePoolBlockCount(
         poolBlocks.data(), poolBlocks.size() - 1) == 0);
 
@@ -128,6 +166,16 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(retained.y == 22.0f);
     REQUIRE(retained.z == 23.0f);
     REQUIRE(resolvedStableSlot == 6);
+    const auto secondStable = stablePosition.Resolve(
+        8, 8, {41.0f, 42.0f, 43.0f}, 12, resolvedStableSlot);
+    REQUIRE(secondStable.x == 41.0f);
+    REQUIRE(resolvedStableSlot == 12);
+    const auto secondRetained = stablePosition.Resolve(
+        9, 10, {51.0f, 52.0f, 53.0f}, 14, resolvedStableSlot);
+    REQUIRE(secondRetained.x == 41.0f);
+    REQUIRE(secondRetained.y == 42.0f);
+    REQUIRE(secondRetained.z == 43.0f);
+    REQUIRE(resolvedStableSlot == 12);
     stablePosition.Reset();
     REQUIRE(IsCoordinatePoolBlockTerminator(
         stablePosition.Resolve(
@@ -471,15 +519,55 @@ void RunCoordinatePoolPolicyTests() {
 
     constexpr std::uint64_t pointer = UINT64_C(0x0000007123456780);
     REQUIRE(NormalizeCoordinatePoolPointer(
-        UINT64_C(0xAB00007123456780)) == pointer);
+        UINT64_C(0xABCD007123456780)) == pointer);
     REQUIRE(NormalizeCoordinatePoolPointer(pointer) == pointer);
-    REQUIRE(NormalizeCoordinatePoolPointer(
+    REQUIRE(NormalizeCoordinatePoolIndexedPointer(
+        UINT64_C(0xAB00007123456780)) == pointer);
+    REQUIRE(NormalizeCoordinatePoolIndexedPointer(
         UINT64_C(0xAB01007123456780)) ==
         UINT64_C(0x0001007123456780));
+    std::uint64_t indexedEntryAddress = 0;
+    REQUIRE(ResolveCoordinatePoolIndexedPointerAddress(
+        UINT64_C(0xAB00007123456000),
+        0xA0,
+        indexedEntryAddress));
+    REQUIRE(indexedEntryAddress == UINT64_C(0x00000071234560A0));
+    std::uint64_t indexedContextAddress = 0;
+    REQUIRE(ResolveCoordinatePoolIndexedPointerAddress(
+        UINT64_C(0xCD00007123457000),
+        -8,
+        indexedContextAddress));
+    REQUIRE(indexedContextAddress == UINT64_C(0x0000007123456FF8));
+    REQUIRE(!ResolveCoordinatePoolIndexedPointerAddress(
+        4, -8, indexedContextAddress));
+
+    const lengjing::game::native::CoordinatePoolRuntimeLayout cloudLayout{
+        0x1A009000,
+        0x14,
+        -16,
+        0xB0,
+        0x220,
+        64,
+        24,
+        90,
+    };
+    REQUIRE(cloudLayout.IsValid());
+    const auto decrypt2Layout =
+        MakeCoordinateDecrypt2RuntimeLayout(cloudLayout);
+    REQUIRE(decrypt2Layout.rootRva == 0x0E738950);
+    REQUIRE(decrypt2Layout.bridgeOffset == 0x0C);
+    REQUIRE(decrypt2Layout.entryOffset == 0xA0);
+    REQUIRE(decrypt2Layout.contextOffset == -8);
+    REQUIRE(decrypt2Layout.componentKeyOffset == 0x210);
+    REQUIRE(decrypt2Layout.entryStride == 0x30);
+    REQUIRE(decrypt2Layout.poolHeadSkip == 0x10);
+    REQUIRE(decrypt2Layout.ringRefreshFrames == 90);
+    REQUIRE(kCoordinatePoolBlockProbeCount * decrypt2Layout.entryStride ==
+        0x3C0);
     REQUIRE(!ShouldClearCoordinatePoolRingsAfterPointerRefresh(
         true,
-        NormalizeCoordinatePoolPointer(UINT64_C(0xAB00007123456780)),
-        NormalizeCoordinatePoolPointer(UINT64_C(0x1200007123456780))));
+        NormalizeCoordinatePoolPointer(UINT64_C(0xABCD007123456780)),
+        NormalizeCoordinatePoolPointer(UINT64_C(0x1234007123456780))));
 
     REQUIRE(ShouldValidateCoordinatePoolCode(100, 100, false));
     REQUIRE(!ShouldValidateCoordinatePoolCode(100, 101, false));

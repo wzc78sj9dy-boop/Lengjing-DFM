@@ -1,5 +1,7 @@
 #pragma once
 
+#if 0
+
 #include "game/native/MemoryTransport.h"
 
 #include <array>
@@ -97,3 +99,5 @@ private:
 };
 
 }  // namespace lengjing::game::native
+
+#endif

@@ -139,7 +139,7 @@ int CoordinateProbeDriver() {
         : 0;
 }
 
-bool HardwareBreakpointCoordinateProbe() {
+bool CoordinateDecrypt2Probe() {
     const char* value =
         std::getenv("LENGJING_COORDINATE_PROBE_DECRYPT2");
     return value != nullptr && value[0] == '1' && value[1] == '\0';
@@ -166,7 +166,7 @@ int RunCoordinateProbe(
     options.algorithmPosition = algorithmPosition;
     lengjing::game::FeatureSettings settings;
     settings.visual.hardwareBreakpointDecrypt =
-        HardwareBreakpointCoordinateProbe();
+        CoordinateDecrypt2Probe();
     settings.visual.coordinateDecrypt =
         !settings.visual.hardwareBreakpointDecrypt;
     lengjing::game::GameRuntime runtime(
