@@ -23,7 +23,7 @@ inline constexpr std::uint64_t kCoordinatePoolMaximumRemoteAddress =
 inline constexpr std::size_t kCoordinatePoolBlockProbeCount = 20;
 inline constexpr std::size_t kCoordinatePoolMaximumBlockCount =
     kCoordinatePoolBlockProbeCount - 1;
-inline constexpr std::uint32_t kCoordinatePoolMaximumDecryptIndexOffset = 10;
+inline constexpr std::uint32_t kCoordinatePoolMaximumDecryptIndexOffset = 15;
 inline constexpr std::uint8_t kCoordinatePoolUnknownDecryptIndexOffset =
     UINT8_MAX;
 inline constexpr std::size_t kCoordinatePoolDecryptIndexEvidenceLimit = 64;

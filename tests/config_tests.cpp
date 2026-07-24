@@ -369,7 +369,7 @@ void RunConfigTests() {
     REQUIRE(config.Load(actual, &error));
     REQUIRE(error.empty());
     REQUIRE(actual.visual.coordinateDecrypt);
-    REQUIRE(actual.visual.coordinateDecrypt2Index == 10);
+    REQUIRE(actual.visual.coordinateDecrypt2Index == 15);
     REQUIRE(!actual.visual.algorithmDecrypt);
     REQUIRE(actual.visual.warningSize == 1000.0f);
     REQUIRE(actual.runtime.driverIndex == 1);

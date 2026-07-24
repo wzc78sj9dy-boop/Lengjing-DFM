@@ -113,6 +113,7 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(!IsCoordinatePoolReadRangeValid(UINT64_MAX, 1));
 
     REQUIRE(IsCoordinatePoolDecryptIndexOffsetValid(0));
+    REQUIRE(kCoordinatePoolMaximumDecryptIndexOffset == 15);
     REQUIRE(IsCoordinatePoolDecryptIndexOffsetValid(
         kCoordinatePoolMaximumDecryptIndexOffset));
     REQUIRE(!IsCoordinatePoolDecryptIndexOffsetValid(
@@ -121,6 +122,7 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(SelectCoordinatePoolIndexedSlot(9, 1, 10) == 0);
     REQUIRE(SelectCoordinatePoolIndexedSlot(13, 10, 14) == 9);
     REQUIRE(SelectCoordinatePoolIndexedSlot(UINT64_MAX, 10, 19) == 9);
+    REQUIRE(SelectCoordinatePoolIndexedSlot(4, 15, 19) == 0);
     REQUIRE(SelectCoordinatePoolIndexedSlot(1, 0, 0) ==
         kCoordinatePoolBlockProbeCount);
     REQUIRE(SelectCoordinatePoolIndexedSlot(
@@ -142,6 +144,12 @@ void RunCoordinatePoolPolicyTests() {
         19,
         inferredDecryptIndex));
     REQUIRE(inferredDecryptIndex == 10);
+    REQUIRE(InferCoordinatePoolDecryptIndexOffset(
+        2,
+        SelectCoordinatePoolIndexedSlot(2, 15, 19),
+        19,
+        inferredDecryptIndex));
+    REQUIRE(inferredDecryptIndex == 15);
     REQUIRE(!InferCoordinatePoolDecryptIndexOffset(
         7, 19, 19, inferredDecryptIndex));
     const std::uint32_t changedOffsetSlots =
@@ -165,6 +173,12 @@ void RunCoordinatePoolPolicyTests() {
         0,
         UINT32_C(1) << tenBlockSlot,
         10) == UINT16_C(1));
+    const std::size_t maximumOffsetSlot =
+        SelectCoordinatePoolIndexedSlot(2, 15, 19);
+    REQUIRE(MatchingCoordinatePoolDecryptIndexOffsets(
+        2,
+        UINT32_C(1) << maximumOffsetSlot,
+        19) == (UINT16_C(1) << 15));
 
     CoordinatePoolDecryptIndexCalibration multiComponentCalibration;
     REQUIRE(!multiComponentCalibration.IsLocked());
@@ -204,6 +218,12 @@ void RunCoordinatePoolPolicyTests() {
     singleIndexCalibration.Reset();
     REQUIRE(!singleIndexCalibration.IsLocked());
     REQUIRE(singleIndexCalibration.Resolve(6) == 6);
+    for (std::size_t observation = 0; observation < 6; ++observation) {
+        singleIndexCalibration.Observe(
+            0x3000, UINT16_C(1) << 15);
+    }
+    REQUIRE(singleIndexCalibration.IsLocked());
+    REQUIRE(singleIndexCalibration.Resolve(0) == 15);
 
     CoordinatePoolDecryptIndexCalibration ambiguousCalibration;
     for (std::size_t observation = 0; observation < 8; ++observation) {
@@ -258,6 +278,46 @@ void RunCoordinatePoolPolicyTests() {
                  .requested);
     REQUIRE(flickerSwitch.ActiveOffset() == 1);
     REQUIRE(!flickerSwitch.SwitchRequested());
+
+    CoordinatePoolDecryptIndexFlickerSwitch maximumRangeFlickerSwitch;
+    REQUIRE(!maximumRangeFlickerSwitch
+                 .Observe(0x1000, 15, 19, 0, false)
+                 .requested);
+    const std::uint64_t maximumRangeFlickerFrame =
+        kCoordinatePoolDecryptIndexFlickerGraceFrames;
+    REQUIRE(!maximumRangeFlickerSwitch
+                 .Observe(
+                     0x1000,
+                     15,
+                     19,
+                     maximumRangeFlickerFrame,
+                     true)
+                 .requested);
+    REQUIRE(!maximumRangeFlickerSwitch
+                 .Observe(
+                     0x2000,
+                     15,
+                     19,
+                     maximumRangeFlickerFrame + 1,
+                     true)
+                 .requested);
+    REQUIRE(!maximumRangeFlickerSwitch
+                 .Observe(
+                     0x3000,
+                     15,
+                     19,
+                     maximumRangeFlickerFrame + 2,
+                     true)
+                 .requested);
+    switchDecision = maximumRangeFlickerSwitch.Observe(
+        0x1000,
+        15,
+        19,
+        maximumRangeFlickerFrame + 3,
+        true);
+    REQUIRE(switchDecision.requested);
+    REQUIRE(switchDecision.currentOffset == 15);
+    REQUIRE(switchDecision.nextOffset == 0);
 
     CoordinatePoolDecryptIndexFlickerSwitch expiringFlickerSwitch;
     REQUIRE(!expiringFlickerSwitch

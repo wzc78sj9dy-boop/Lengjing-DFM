@@ -1,6 +1,7 @@
 #include "config/LocalConfig.h"
 
 #include "game/ProjectileTrackingFeature.h"
+#include "game/native/CoordinatePoolPolicy.h"
 #include "vendor/json.hpp"
 
 #include <algorithm>
@@ -267,13 +268,15 @@ void Apply(const Json& root, ui::UiModel& model) {
         "coordinate_decrypt_index",
         model.visual.coordinateDecrypt2Index,
         0,
-        10);
+        static_cast<int>(
+            game::native::kCoordinatePoolMaximumDecryptIndexOffset));
     model.visual.coordinateDecrypt2Index = ReadNumber(
         visual,
         "coordinate_decrypt2_index",
         legacyCoordinateDecrypt2Index,
         0,
-        10);
+        static_cast<int>(
+            game::native::kCoordinatePoolMaximumDecryptIndexOffset));
     model.visual.hardwareBreakpointDecrypt =
         ReadBool(visual, "coordinate_decrypt2", false);
     if (model.visual.hardwareBreakpointDecrypt) {

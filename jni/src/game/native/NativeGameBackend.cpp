@@ -1414,7 +1414,10 @@ public:
             algorithmPositionRequested_ != requestedCoordinateReplay;
         const std::uint32_t requestedCoordinateDecrypt2Index =
             static_cast<std::uint32_t>(std::clamp(
-                settings.visual.coordinateDecrypt2Index, 0, 10));
+                settings.visual.coordinateDecrypt2Index,
+                0,
+                static_cast<int>(
+                    native::kCoordinatePoolMaximumDecryptIndexOffset)));
         const bool coordinateDecrypt2IndexChanged =
             requestedHardwareBreakpoint &&
             coordinateDecrypt2Index_ != requestedCoordinateDecrypt2Index;
