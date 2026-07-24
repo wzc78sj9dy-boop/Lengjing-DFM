@@ -517,22 +517,15 @@ int XRegisterId(std::uint32_t index) noexcept {
 }
 
 int CapstoneXRegisterId(arm64_reg value) noexcept {
-    if (value >= ARM64_REG_W0 && value <= ARM64_REG_W28) {
+    if (value >= ARM64_REG_W0 && value <= ARM64_REG_W30) {
         value = static_cast<arm64_reg>(
             value - ARM64_REG_W0 + ARM64_REG_X0);
     }
-    if (value == ARM64_REG_W29) value = ARM64_REG_X29;
-    if (value == ARM64_REG_W30) value = ARM64_REG_X30;
-    if (value == ARM64_REG_WZR) value = ARM64_REG_XZR;
-    if (value == ARM64_REG_WSP) value = ARM64_REG_SP;
     if (value >= ARM64_REG_X0 && value <= ARM64_REG_X28) {
         return UC_ARM64_REG_X0 + static_cast<int>(value - ARM64_REG_X0);
     }
     if (value == ARM64_REG_X29) return UC_ARM64_REG_X29;
     if (value == ARM64_REG_X30) return UC_ARM64_REG_X30;
-    if (value == ARM64_REG_SP || value == ARM64_REG_WSP) {
-        return UC_ARM64_REG_SP;
-    }
     if (value == ARM64_REG_XZR) return UC_ARM64_REG_XZR;
     return UC_ARM64_REG_INVALID;
 }

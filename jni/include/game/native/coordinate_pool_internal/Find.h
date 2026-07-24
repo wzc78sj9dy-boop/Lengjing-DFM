@@ -1085,16 +1085,7 @@ namespace lengjing::game::native::coordinate_pool_internal {
         }
 
         static arm64_reg toW(arm64_reg reg) {
-            if (isW(reg)) return reg;
-            if (reg >= ARM64_REG_X0 && reg <= ARM64_REG_X28) {
-                return static_cast<arm64_reg>(
-                    reg + ARM64_REG_W0 - ARM64_REG_X0);
-            }
-            if (reg == ARM64_REG_X29) return ARM64_REG_W29;
-            if (reg == ARM64_REG_X30) return ARM64_REG_W30;
-            if (reg == ARM64_REG_SP) return ARM64_REG_WSP;
-            if (reg == ARM64_REG_XZR) return ARM64_REG_WZR;
-            return reg;
+            return isW(reg) ? reg : (arm64_reg)(reg + ARM64_REG_W0 - ARM64_REG_X0);
         }
     };
 

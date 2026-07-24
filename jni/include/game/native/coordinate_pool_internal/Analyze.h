@@ -43,28 +43,16 @@ public:
 	void str(arm64_reg reg, std::vector<std::string>& expr);
 	uint64_t execute(arm64_reg reg, std::unordered_map<std::string, uint64_t> &params);
 	bool list_mem_param(arm64_reg reg, std::set<mem_param>& p) {
-		if (reg >= ARM64_REG_W0 && reg <= ARM64_REG_W28) {
+		if (reg >= ARM64_REG_W0 && reg <= ARM64_REG_W30) {
 			reg = static_cast<arm64_reg>(
 				reg - ARM64_REG_W0 + ARM64_REG_X0);
 		}
-		else if (reg == ARM64_REG_W29) reg = ARM64_REG_X29;
-		else if (reg == ARM64_REG_W30) reg = ARM64_REG_X30;
-		else if (reg == ARM64_REG_WSP) reg = ARM64_REG_SP;
-		else if (reg == ARM64_REG_WZR) reg = ARM64_REG_XZR;
 		auto it = regs.find(reg);
 		if (it == regs.end() || !it->second) return false;
 		it->second->param(p);
 		return true;
 	}
 	void list_expr(arm64_reg reg, std::unordered_map<std::shared_ptr<Expr>, uint32_t>& list) {
-		if (reg >= ARM64_REG_W0 && reg <= ARM64_REG_W28) {
-			reg = static_cast<arm64_reg>(
-				reg - ARM64_REG_W0 + ARM64_REG_X0);
-		}
-		else if (reg == ARM64_REG_W29) reg = ARM64_REG_X29;
-		else if (reg == ARM64_REG_W30) reg = ARM64_REG_X30;
-		else if (reg == ARM64_REG_WSP) reg = ARM64_REG_SP;
-		else if (reg == ARM64_REG_WZR) reg = ARM64_REG_XZR;
 		auto it = regs.find(reg);
 		if (it == regs.end())return;
 		list[it->second]++;
