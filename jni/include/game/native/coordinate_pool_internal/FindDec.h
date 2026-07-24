@@ -5,6 +5,35 @@
 namespace lengjing::game::native::coordinate_pool_internal {
 namespace coord_dec {
 
+    enum class FindDecFailureStage : uint8_t {
+        None = 0,
+        EntryMethod = 1,
+        V87Marker = 2,
+        HashSearch = 3,
+        PoolPointer = 4,
+        RingOffset = 5,
+        IndexExpression = 6,
+        Patch = 7,
+    };
+
+    enum class FindDecFailureDetail : uint8_t {
+        None = 0,
+        MaddScanEmpty = 1,
+        RingStrideMissing = 2,
+        RingStrideCount = 3,
+        PoolLoadMissing = 4,
+        DecodeExpressionParse = 5,
+        IndexExpressionParse = 6,
+        CandidateExpressionMissing = 7,
+        CandidateCount = 8,
+        CandidateDependencyAmbiguous = 9,
+        IndexParameterMissing = 10,
+        PatchZeroStoreMissing = 11,
+        PatchGuardMissing = 12,
+        PatchBranchMissing = 13,
+        PatchBranchOutOfRange = 14,
+    };
+
     struct param {
         std::string name;
         uint32_t size;
@@ -25,6 +54,12 @@ namespace coord_dec {
         std::string ring_index_param;
 
         std::unordered_map<std::string, uint64_t> params;
+        FindDecFailureStage failure_stage_ = FindDecFailureStage::None;
+        FindDecFailureDetail failure_detail_ = FindDecFailureDetail::None;
+        uint16_t madd_count_ = 0;
+        uint16_t ring_madd_count_ = 0;
+        uint16_t candidate_count_ = 0;
+        uint16_t failure_instruction_ = 0;
 
         bool find_v87_str();
         bool analyze_base_index_calc();
@@ -49,6 +84,30 @@ namespace coord_dec {
         }
 
         int find_dec(uint64_t entry_address);
+
+        FindDecFailureStage failure_stage() const noexcept {
+            return failure_stage_;
+        }
+
+        FindDecFailureDetail failure_detail() const noexcept {
+            return failure_detail_;
+        }
+
+        uint16_t madd_count() const noexcept {
+            return madd_count_;
+        }
+
+        uint16_t ring_madd_count() const noexcept {
+            return ring_madd_count_;
+        }
+
+        uint16_t candidate_count() const noexcept {
+            return candidate_count_;
+        }
+
+        uint16_t failure_instruction() const noexcept {
+            return failure_instruction_;
+        }
 
         void compact_runtime_plan() noexcept {
             entry = nullptr;

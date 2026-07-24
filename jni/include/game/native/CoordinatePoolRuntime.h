@@ -215,6 +215,12 @@ struct CoordinatePoolRuntimeProbe {
     std::uintptr_t executableMappingStart = 0;
     std::uintptr_t executableMappingEnd = 0;
     std::uintptr_t failedMethod = 0;
+    std::uint8_t analysisFindStage = 0;
+    std::uint8_t analysisFindDetail = 0;
+    std::uint16_t analysisMaddCount = 0;
+    std::uint16_t analysisRingMaddCount = 0;
+    std::uint16_t analysisCandidateCount = 0;
+    std::uint16_t analysisFailureInstruction = 0;
     std::int32_t poolPointerOffset = 0;
     std::int64_t indexOffset = 0;
     std::uint32_t ringOffset = 0;
