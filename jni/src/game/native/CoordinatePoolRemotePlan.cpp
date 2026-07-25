@@ -58,10 +58,6 @@ bool ReadUnsigned(const Json& value, std::uint64_t& result) {
 }
 
 bool ReadSigned(const Json& value, std::int64_t& result) {
-    if (value.is_number_integer()) {
-        result = value.get<std::int64_t>();
-        return true;
-    }
     if (value.is_number_unsigned()) {
         const std::uint64_t unsignedValue = value.get<std::uint64_t>();
         if (unsignedValue >
@@ -70,6 +66,10 @@ bool ReadSigned(const Json& value, std::int64_t& result) {
             return false;
         }
         result = static_cast<std::int64_t>(unsignedValue);
+        return true;
+    }
+    if (value.is_number_integer()) {
+        result = value.get<std::int64_t>();
         return true;
     }
     return false;

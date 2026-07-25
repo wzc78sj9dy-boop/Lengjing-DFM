@@ -397,6 +397,19 @@ int main() {
     REQUIRE(remotePlan.plan.variableParameters.size() == 1);
     REQUIRE(remotePlan.plan.patches.size() == 1);
 
+    nlohmann::json oversizedSignedPlan =
+        nlohmann::json::parse(remotePayload);
+    oversizedSignedPlan["data"]["B"] = UINT64_MAX;
+    const auto rejectedSignedPlan =
+        lengjing::game::native::ParseCoordinatePoolRemotePlan(
+            oversizedSignedPlan.dump(),
+            kRemoteMappingBase,
+            kRemotePlanCodeSize,
+            kRemoteEntry);
+    REQUIRE(!rejectedSignedPlan.Ok());
+    REQUIRE(rejectedSignedPlan.error ==
+        lengjing::game::native::CoordinatePoolRemotePlanError::MissingField);
+
     std::array<std::uint8_t, kRemotePlanCodeSize> remoteCode{};
     coord_dec::FindDec remoteFinder;
     REQUIRE(remoteFinder.set(
