@@ -786,20 +786,35 @@ void RenderRuntime(UiModel& model, UiActions& actions) {
             "##coordinate_decrypt_modes", 2,
             ImGuiTableFlags_SizingStretchSame |
                 ImGuiTableFlags_NoSavedSettings)) {
-        ImGui::TableNextColumn();
-        if (Toggle("解密1", visual.coordinateDecrypt)) {
-            if (visual.coordinateDecrypt) {
-                visual.hardwareBreakpointDecrypt = false;
+        const auto coordinateMode = [&](
+            const char* label,
+            bool& enabled,
+            CoordinateDecryptSelection selection) {
+            ImGui::TableNextColumn();
+            if (!Toggle(label, enabled)) return;
+            if (enabled) {
+                SelectCoordinateDecrypt(visual, selection);
             }
             actions.SettingsChanged(SettingsDomain::Visual);
-        }
-        ImGui::TableNextColumn();
-        if (Toggle("解密2", visual.hardwareBreakpointDecrypt)) {
-            if (visual.hardwareBreakpointDecrypt) {
-                visual.coordinateDecrypt = false;
-            }
-            actions.SettingsChanged(SettingsDomain::Visual);
-        }
+        };
+        coordinateMode(
+            "解密1", visual.coordinateDecrypt,
+            CoordinateDecryptSelection::Decrypt1);
+        coordinateMode(
+            "解密2", visual.hardwareBreakpointDecrypt,
+            CoordinateDecryptSelection::Decrypt2);
+        coordinateMode(
+            "解密3", visual.coordinateDecrypt3,
+            CoordinateDecryptSelection::Decrypt3);
+        coordinateMode(
+            "解密4", visual.coordinateDecrypt4,
+            CoordinateDecryptSelection::Decrypt4);
+        coordinateMode(
+            "解密5", visual.coordinateDecrypt5,
+            CoordinateDecryptSelection::Decrypt5);
+        coordinateMode(
+            "解密6", visual.coordinateDecrypt6,
+            CoordinateDecryptSelection::Decrypt6);
         ImGui::EndTable();
     }
     ImGui::Dummy(ImVec2(0.0f, 4.0f));

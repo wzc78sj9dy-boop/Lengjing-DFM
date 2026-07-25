@@ -31,9 +31,10 @@ constexpr PositionReadMode ResolvePositionReadMode(
 constexpr bool ShouldRequireDecodedActorRecords(
     PositionReadMode positionMode,
     bool hardwareBreakpointDecrypt,
-    bool trajectoryTracking) noexcept {
+    bool trajectoryTracking,
+    bool coordinateExecution = false) noexcept {
     return positionMode == PositionReadMode::Direct ||
-        hardwareBreakpointDecrypt || trajectoryTracking;
+        hardwareBreakpointDecrypt || trajectoryTracking || coordinateExecution;
 }
 
 constexpr float ResolveDecodedCharacterZ(float decodedZ) noexcept {

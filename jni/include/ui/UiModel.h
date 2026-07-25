@@ -90,6 +90,16 @@ struct RuntimeModel {
     std::string buildVersion;
 };
 
+enum class CoordinateDecryptSelection : std::uint8_t {
+    None = 0,
+    Decrypt1,
+    Decrypt2,
+    Decrypt3,
+    Decrypt4,
+    Decrypt5,
+    Decrypt6,
+};
+
 struct VisualSettings {
     bool enabled = true;
     bool playerCount = true;
@@ -99,6 +109,10 @@ struct VisualSettings {
     bool coordinateDecrypt = false;
     int coordinateDecrypt2Index = 0;
     bool hardwareBreakpointDecrypt = false;
+    bool coordinateDecrypt3 = false;
+    bool coordinateDecrypt4 = false;
+    bool coordinateDecrypt5 = false;
+    bool coordinateDecrypt6 = false;
     bool algorithmDecrypt = false;
 
     bool box = true;
@@ -135,6 +149,51 @@ struct VisualSettings {
     float lineThickness = 1.0f;
     float fontScale = 1.0f;
 };
+
+constexpr CoordinateDecryptSelection ResolveCoordinateDecryptSelection(
+    const VisualSettings& visual) noexcept {
+    if (visual.coordinateDecrypt6) {
+        return CoordinateDecryptSelection::Decrypt6;
+    }
+    if (visual.coordinateDecrypt5) {
+        return CoordinateDecryptSelection::Decrypt5;
+    }
+    if (visual.coordinateDecrypt4) {
+        return CoordinateDecryptSelection::Decrypt4;
+    }
+    if (visual.coordinateDecrypt3) {
+        return CoordinateDecryptSelection::Decrypt3;
+    }
+    if (visual.hardwareBreakpointDecrypt) {
+        return CoordinateDecryptSelection::Decrypt2;
+    }
+    return visual.coordinateDecrypt
+        ? CoordinateDecryptSelection::Decrypt1
+        : CoordinateDecryptSelection::None;
+}
+
+constexpr bool AnyCoordinateDecrypt(
+    const VisualSettings& visual) noexcept {
+    return ResolveCoordinateDecryptSelection(visual) !=
+        CoordinateDecryptSelection::None;
+}
+
+constexpr void SelectCoordinateDecrypt(
+    VisualSettings& visual,
+    CoordinateDecryptSelection selection) noexcept {
+    visual.coordinateDecrypt =
+        selection == CoordinateDecryptSelection::Decrypt1;
+    visual.hardwareBreakpointDecrypt =
+        selection == CoordinateDecryptSelection::Decrypt2;
+    visual.coordinateDecrypt3 =
+        selection == CoordinateDecryptSelection::Decrypt3;
+    visual.coordinateDecrypt4 =
+        selection == CoordinateDecryptSelection::Decrypt4;
+    visual.coordinateDecrypt5 =
+        selection == CoordinateDecryptSelection::Decrypt5;
+    visual.coordinateDecrypt6 =
+        selection == CoordinateDecryptSelection::Decrypt6;
+}
 
 enum class ContainerKind : std::uint8_t {
     ComputerCase,

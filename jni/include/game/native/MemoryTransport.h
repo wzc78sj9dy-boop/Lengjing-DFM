@@ -224,6 +224,23 @@ private:
 
 pid_t FindProcessId(std::string_view processName);
 bool IsProcessAlive(pid_t processId);
+
+struct MappedModuleRange {
+    std::uintptr_t begin = 0;
+    std::uintptr_t end = 0;
+
+    constexpr bool IsValid() const noexcept {
+        return begin != 0 && end > begin;
+    }
+
+    constexpr std::size_t Size() const noexcept {
+        return IsValid() ? static_cast<std::size_t>(end - begin) : 0;
+    }
+};
+
+bool FindMappedModuleRange(pid_t processId,
+                           std::string_view moduleName,
+                           MappedModuleRange& range);
 std::uintptr_t FindMappedModuleBase(pid_t processId, std::string_view moduleName);
 
 }  // namespace lengjing::game::native

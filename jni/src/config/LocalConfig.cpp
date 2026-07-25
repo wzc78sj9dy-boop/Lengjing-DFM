@@ -162,6 +162,10 @@ Json Serialize(const ui::UiModel& model) {
             {"coordinate_decrypt", model.visual.coordinateDecrypt},
             {"coordinate_decrypt2", model.visual.hardwareBreakpointDecrypt},
             {"coordinate_decrypt2_index", model.visual.coordinateDecrypt2Index},
+            {"coordinate_decrypt3", model.visual.coordinateDecrypt3},
+            {"coordinate_decrypt4", model.visual.coordinateDecrypt4},
+            {"coordinate_decrypt5", model.visual.coordinateDecrypt5},
+            {"coordinate_decrypt6", model.visual.coordinateDecrypt6},
             {"box", model.visual.box},
             {"snapline", model.visual.snapline},
             {"skeleton", model.visual.skeleton},
@@ -279,9 +283,17 @@ void Apply(const Json& root, ui::UiModel& model) {
             game::native::kCoordinatePoolMaximumDecryptIndexOffset));
     model.visual.hardwareBreakpointDecrypt =
         ReadBool(visual, "coordinate_decrypt2", false);
-    if (model.visual.hardwareBreakpointDecrypt) {
-        model.visual.coordinateDecrypt = false;
-    }
+    model.visual.coordinateDecrypt3 =
+        ReadBool(visual, "coordinate_decrypt3", false);
+    model.visual.coordinateDecrypt4 =
+        ReadBool(visual, "coordinate_decrypt4", false);
+    model.visual.coordinateDecrypt5 =
+        ReadBool(visual, "coordinate_decrypt5", false);
+    model.visual.coordinateDecrypt6 =
+        ReadBool(visual, "coordinate_decrypt6", false);
+    ui::SelectCoordinateDecrypt(
+        model.visual,
+        ui::ResolveCoordinateDecryptSelection(model.visual));
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
     LOAD_VISUAL_BOOL(algorithmDecrypt, "algorithm_decrypt");
 #else

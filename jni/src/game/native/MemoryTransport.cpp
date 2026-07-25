@@ -2515,28 +2515,55 @@ bool IsProcessAlive(pid_t processId) {
 std::uintptr_t FindMappedModuleBase(
     pid_t processId,
     std::string_view moduleName) {
-    if (processId <= 0 || moduleName.empty()) return 0;
+    MappedModuleRange range{};
+    return FindMappedModuleRange(processId, moduleName, range)
+        ? range.begin
+        : 0;
+}
+
+bool FindMappedModuleRange(pid_t processId,
+                           std::string_view moduleName,
+                           MappedModuleRange& range) {
+    range = {};
+    if (processId <= 0 || moduleName.empty()) return false;
     char path[64]{};
     std::snprintf(path, sizeof(path), "/proc/%d/maps", processId);
     std::ifstream input(path);
-    if (!input) return 0;
+    if (!input) return false;
 
     std::string line;
     while (std::getline(input, line)) {
         if (line.find(moduleName) == std::string::npos) continue;
         const std::size_t separator = line.find('-');
         if (separator == std::string::npos) continue;
-        const std::string start = line.substr(0, separator);
-        char* end = nullptr;
-        const unsigned long long value =
-            std::strtoull(start.c_str(), &end, 16);
-        if (end != start.c_str() &&
-            value >= kMinimumRemoteAddress &&
-            value < kMaximumRemoteAddress) {
-            return static_cast<std::uintptr_t>(value);
+        const std::size_t addressEnd = line.find(' ', separator + 1);
+        if (addressEnd == std::string::npos) continue;
+
+        const std::string beginText = line.substr(0, separator);
+        const std::string endText = line.substr(
+            separator + 1, addressEnd - separator - 1);
+        char* parsedBeginEnd = nullptr;
+        char* parsedEndEnd = nullptr;
+        const unsigned long long begin = std::strtoull(
+            beginText.c_str(), &parsedBeginEnd, 16);
+        const unsigned long long end = std::strtoull(
+            endText.c_str(), &parsedEndEnd, 16);
+        if (parsedBeginEnd == beginText.c_str() ||
+            parsedEndEnd == endText.c_str() ||
+            *parsedBeginEnd != '\0' || *parsedEndEnd != '\0' ||
+            begin < kMinimumRemoteAddress ||
+            begin >= kMaximumRemoteAddress ||
+            end <= begin || end > kMaximumRemoteAddress) {
+            continue;
         }
+        const auto mappingBegin = static_cast<std::uintptr_t>(begin);
+        const auto mappingEnd = static_cast<std::uintptr_t>(end);
+        range.begin = range.begin == 0
+            ? mappingBegin
+            : std::min(range.begin, mappingBegin);
+        range.end = std::max(range.end, mappingEnd);
     }
-    return 0;
+    return range.IsValid();
 }
 
 }  // namespace lengjing::game::native

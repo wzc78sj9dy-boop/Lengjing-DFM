@@ -132,6 +132,27 @@ void RunConfigTests() {
     REQUIRE(lengjing::game::native::IsValidMemoryTransportMode(1));
     REQUIRE(!lengjing::game::native::IsValidMemoryTransportMode(2));
 
+    {
+        lengjing::ui::VisualSettings visual{};
+        lengjing::ui::SelectCoordinateDecrypt(
+            visual,
+            lengjing::ui::CoordinateDecryptSelection::Decrypt4);
+        REQUIRE(!visual.coordinateDecrypt);
+        REQUIRE(!visual.hardwareBreakpointDecrypt);
+        REQUIRE(!visual.coordinateDecrypt3);
+        REQUIRE(visual.coordinateDecrypt4);
+        REQUIRE(!visual.coordinateDecrypt5);
+        REQUIRE(!visual.coordinateDecrypt6);
+        REQUIRE(lengjing::ui::AnyCoordinateDecrypt(visual));
+        REQUIRE(
+            lengjing::ui::ResolveCoordinateDecryptSelection(visual) ==
+            lengjing::ui::CoordinateDecryptSelection::Decrypt4);
+        lengjing::ui::SelectCoordinateDecrypt(
+            visual,
+            lengjing::ui::CoordinateDecryptSelection::None);
+        REQUIRE(!lengjing::ui::AnyCoordinateDecrypt(visual));
+    }
+
     lengjing::ui::UiModel expected;
     expected.runtime.gameVersionIndex = 2;
     expected.runtime.driverIndex = 1;
@@ -190,6 +211,14 @@ void RunConfigTests() {
         std::string::npos);
     REQUIRE(serialized.find("\"coordinate_decrypt2_index\": 7") !=
         std::string::npos);
+    REQUIRE(serialized.find("\"coordinate_decrypt3\": false") !=
+        std::string::npos);
+    REQUIRE(serialized.find("\"coordinate_decrypt4\": false") !=
+        std::string::npos);
+    REQUIRE(serialized.find("\"coordinate_decrypt5\": false") !=
+        std::string::npos);
+    REQUIRE(serialized.find("\"coordinate_decrypt6\": false") !=
+        std::string::npos);
     REQUIRE(serialized.find("\"coordinate_decrypt_index\"") ==
         std::string::npos);
     REQUIRE(serialized.find("algorithm_decrypt") == std::string::npos);
@@ -216,6 +245,10 @@ void RunConfigTests() {
         actual.visual.coordinateDecrypt2Index ==
         expected.visual.coordinateDecrypt2Index);
     REQUIRE(actual.visual.hardwareBreakpointDecrypt);
+    REQUIRE(!actual.visual.coordinateDecrypt3);
+    REQUIRE(!actual.visual.coordinateDecrypt4);
+    REQUIRE(!actual.visual.coordinateDecrypt5);
+    REQUIRE(!actual.visual.coordinateDecrypt6);
     REQUIRE(!actual.visual.algorithmDecrypt);
     REQUIRE(actual.visual.crosshair == expected.visual.crosshair);
     REQUIRE(actual.visual.playerViewRay == expected.visual.playerViewRay);
@@ -270,6 +303,21 @@ void RunConfigTests() {
     REQUIRE(config.Load(actual, &error));
     REQUIRE(!actual.visual.coordinateDecrypt);
     REQUIRE(actual.visual.hardwareBreakpointDecrypt);
+
+    {
+        std::ofstream conflictingAllDecrypts(
+            path, std::ios::binary | std::ios::trunc);
+        conflictingAllDecrypts <<
+            R"({"schema_version":1,"visual":{"coordinate_decrypt":true,"coordinate_decrypt2":true,"coordinate_decrypt3":true,"coordinate_decrypt4":true,"coordinate_decrypt5":true,"coordinate_decrypt6":true}})";
+    }
+    actual = {};
+    REQUIRE(config.Load(actual, &error));
+    REQUIRE(!actual.visual.coordinateDecrypt);
+    REQUIRE(!actual.visual.hardwareBreakpointDecrypt);
+    REQUIRE(!actual.visual.coordinateDecrypt3);
+    REQUIRE(!actual.visual.coordinateDecrypt4);
+    REQUIRE(!actual.visual.coordinateDecrypt5);
+    REQUIRE(actual.visual.coordinateDecrypt6);
 
     {
         std::ofstream legacyDecrypt2Index(
@@ -443,18 +491,20 @@ void RunConfigTests() {
         std::filesystem::path(__FILE__).parent_path().parent_path() /
         "jni" / "src" / "ui" / "MenuView.cpp";
     const std::string menuText = ReadText(menuSource);
-    REQUIRE(
-        menuText.find("Toggle(\"解密1\", visual.coordinateDecrypt)") !=
+    REQUIRE(menuText.find("\"解密1\", visual.coordinateDecrypt") !=
         std::string::npos);
-    REQUIRE(
-        menuText.find("visual.hardwareBreakpointDecrypt = false;") !=
+    REQUIRE(menuText.find(
+        "\"解密2\", visual.hardwareBreakpointDecrypt") !=
         std::string::npos);
-    REQUIRE(
-        menuText.find(
-            "Toggle(\"解密2\", visual.hardwareBreakpointDecrypt)") !=
+    REQUIRE(menuText.find("\"解密3\", visual.coordinateDecrypt3") !=
         std::string::npos);
-    REQUIRE(
-        menuText.find("visual.coordinateDecrypt = false;") !=
+    REQUIRE(menuText.find("\"解密4\", visual.coordinateDecrypt4") !=
+        std::string::npos);
+    REQUIRE(menuText.find("\"解密5\", visual.coordinateDecrypt5") !=
+        std::string::npos);
+    REQUIRE(menuText.find("\"解密6\", visual.coordinateDecrypt6") !=
+        std::string::npos);
+    REQUIRE(menuText.find("SelectCoordinateDecrypt(visual, selection)") !=
         std::string::npos);
     REQUIRE(
         menuText.find("&visual.coordinateDecrypt2Index") ==

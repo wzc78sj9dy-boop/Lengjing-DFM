@@ -175,10 +175,11 @@ int RunCoordinateProbe(
         std::move(coordinateDecrypt2Layout);
     options.algorithmPosition = algorithmPosition;
     lengjing::game::FeatureSettings settings;
-    settings.visual.hardwareBreakpointDecrypt =
-        CoordinateDecrypt2Probe();
-    settings.visual.coordinateDecrypt =
-        !settings.visual.hardwareBreakpointDecrypt;
+    lengjing::ui::SelectCoordinateDecrypt(
+        settings.visual,
+        CoordinateDecrypt2Probe()
+            ? lengjing::ui::CoordinateDecryptSelection::Decrypt2
+            : lengjing::ui::CoordinateDecryptSelection::Decrypt1);
     lengjing::game::GameRuntime runtime(
         lengjing::game::CreateNativeGameBackend());
     runtime.UpdateSettings(settings);
@@ -330,7 +331,9 @@ int RunAlgorithmCoordinateProbe(
         std::move(coordinateDecrypt2Layout);
 
     lengjing::game::FeatureSettings settings;
-    settings.visual.coordinateDecrypt = false;
+    lengjing::ui::SelectCoordinateDecrypt(
+        settings.visual,
+        lengjing::ui::CoordinateDecryptSelection::None);
     settings.visual.algorithmDecrypt = true;
     lengjing::game::GameRuntime runtime(
         lengjing::game::CreateNativeGameBackend());
@@ -1005,7 +1008,9 @@ int main() {
     if (algorithmVisualAutostart != nullptr &&
         algorithmVisualAutostart[0] != '\0' &&
         algorithmVisualAutostart[0] != '0') {
-        controller.Model().visual.coordinateDecrypt = false;
+        lengjing::ui::SelectCoordinateDecrypt(
+            controller.Model().visual,
+            lengjing::ui::CoordinateDecryptSelection::None);
         controller.Model().visual.algorithmDecrypt = true;
         controller.StartRuntime();
         const char* showAlgorithmValidationMenu =

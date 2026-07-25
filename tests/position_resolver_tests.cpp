@@ -59,6 +59,8 @@ void RunPositionResolverTests() {
         PositionReadMode::Standard, true, false));
     REQUIRE(ShouldRequireDecodedActorRecords(
         PositionReadMode::Standard, false, true));
+    REQUIRE(ShouldRequireDecodedActorRecords(
+        PositionReadMode::Standard, false, false, true));
     REQUIRE(ResolveDecodedCharacterZ(1000.0f) == 910.0f);
     REQUIRE(ResolveDecodedCharacterZ(90.0f) == 0.0f);
     REQUIRE(ResolveDecodedCharacterZ(-10.0f) == -100.0f);
