@@ -48,6 +48,10 @@
 #define LENGJING_VERSION "dev"
 #endif
 
+#ifndef LENGJING_BUILD_COMMIT
+#define LENGJING_BUILD_COMMIT "unknown"
+#endif
+
 #ifndef LENGJING_AUTH_VERSION
 #define LENGJING_AUTH_VERSION "1000"
 #endif
@@ -896,9 +900,10 @@ int main() {
     }
     std::fprintf(
         stderr,
-        "[coordinate-debug-start] schema=4 version=%s pid=%d "
+        "[coordinate-debug-start] schema=4 version=%s build=%s pid=%d "
         "trace=1 candidates_full=0 phase_calibration=1\n",
         LENGJING_VERSION,
+        LENGJING_BUILD_COMMIT,
         static_cast<int>(getpid()));
     std::fflush(stderr);
 #else
