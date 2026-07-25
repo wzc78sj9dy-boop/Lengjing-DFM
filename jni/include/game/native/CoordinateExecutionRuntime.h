@@ -205,11 +205,14 @@ constexpr bool ContainsCoordinateExecutionCodeAddress(
 constexpr CoordinateExecutionPlan BuildCoordinateExecutionPlan(
     std::uint64_t moduleBase,
     std::size_t moduleSize,
+    std::uint64_t codeBase,
+    std::size_t codeSize,
     std::uint64_t subject,
     const CoordinateExecutionRequest& request) noexcept {
     CoordinateExecutionPlan plan{};
     if (!IsCoordinateExecutionMode(request.mode) || moduleBase == 0 ||
-        moduleSize == 0 || !IsCoordinateExecutionPointer(subject)) {
+        moduleSize == 0 || codeBase == 0 || codeSize == 0 ||
+        !IsCoordinateExecutionPointer(subject)) {
         return plan;
     }
 
@@ -218,9 +221,9 @@ constexpr CoordinateExecutionPlan BuildCoordinateExecutionPlan(
         const auto& candidate = request.candidate;
         if (candidate.q1 == 0 ||
             (request.candidateKnown && candidate.q0 == 0) ||
-            !CoordinateExecutionAdd(moduleBase, candidate.q1, plan.hookPc) ||
+            !CoordinateExecutionAdd(codeBase, candidate.q1, plan.hookPc) ||
             !ContainsCoordinateExecutionCodeAddress(
-                moduleBase, moduleSize, plan.hookPc)) {
+                codeBase, codeSize, plan.hookPc)) {
             return CoordinateExecutionPlan{};
         }
 
@@ -231,9 +234,10 @@ constexpr CoordinateExecutionPlan BuildCoordinateExecutionPlan(
         const std::uint64_t returnStub =
             NormalizeCoordinateExecutionPointer(candidate.q3);
         if (alternateEntry != 0) {
-            if (!IsCoordinateExecutionPointer(returnStub) ||
+            if (!ContainsCoordinateExecutionCodeAddress(
+                    moduleBase, moduleSize, returnStub, 12) ||
                 returnStub > kCoordinateExecutionReturnStubMax ||
-                (returnStub & 3U) != 0) {
+                !IsCoordinateExecutionPointer(returnStub)) {
                 return CoordinateExecutionPlan{};
             }
             plan.entryPc = alternateEntry;
@@ -270,9 +274,9 @@ constexpr CoordinateExecutionPlan BuildCoordinateExecutionPlan(
         return plan;
     }
     if (!CoordinateExecutionAdd(
-            moduleBase, request.shared.hookOffset, plan.hookPc) ||
+            codeBase, request.shared.hookOffset, plan.hookPc) ||
         !ContainsCoordinateExecutionCodeAddress(
-            moduleBase, moduleSize, plan.hookPc)) {
+            codeBase, codeSize, plan.hookPc)) {
         return CoordinateExecutionPlan{};
     }
 
@@ -322,6 +326,8 @@ public:
         MemoryTransport& memory,
         std::uintptr_t moduleBase,
         std::size_t moduleSize,
+        std::uintptr_t codeBase,
+        std::size_t codeSize,
         std::uintptr_t subject,
         const ProcessExecutionContext& executionContext,
         const CoordinateExecutionRequest& request) noexcept;

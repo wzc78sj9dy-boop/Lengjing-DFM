@@ -38,6 +38,8 @@ CoordinateExecutionResult CoordinateExecutionRuntime::Execute(
     std::uintptr_t,
     std::size_t,
     std::uintptr_t,
+    std::size_t,
+    std::uintptr_t,
     const ProcessExecutionContext&,
     const CoordinateExecutionRequest&) noexcept {
     CoordinateExecutionResult result{};
@@ -51,6 +53,13 @@ CoordinateExecutionRuntimeProbe CoordinateExecutionRuntime::Probe()
 }
 
 void CoordinateExecutionRuntime::Reset() noexcept {}
+
+bool MemoryTransport::Read(
+    std::uintptr_t,
+    void*,
+    std::size_t) {
+    return false;
+}
 
 bool MemoryTransport::ReadCoordinateMemory(
     std::uintptr_t,
@@ -66,6 +75,8 @@ namespace {
 
 constexpr std::uint64_t kModuleBase = UINT64_C(0x7000000000);
 constexpr std::size_t kModuleSize = 0x0F000000;
+constexpr std::uint64_t kCodeBase = UINT64_C(0x7562560000);
+constexpr std::size_t kCodeSize = 0x0E2000;
 constexpr std::uint64_t kRelativeEntry = UINT64_C(0x4000);
 constexpr std::uint64_t kSubject = UINT64_C(0x7001000000);
 constexpr std::int32_t kProcessId = 3210;
@@ -138,7 +149,7 @@ void InstallCandidate(SparseMemory& memory,
     memory.Write(thunk + 4, EncodeLdrLiteral(5, 1));
     memory.Write(thunk + 8, EncodeBr(2));
     memory.Write(thunk + 16, q0);
-    memory.Write(thunk + 24, kModuleBase + kRelativeEntry);
+    memory.Write(thunk + 24, kCodeBase + kRelativeEntry);
 }
 
 std::uint64_t CandidateQ3(std::size_t index) {
@@ -153,7 +164,7 @@ SparseMemory BuildCandidateMemory() {
     const std::uint64_t anchor = kModuleBase + profile.rootOffset;
     constexpr std::uint64_t kRoot = UINT64_C(0x6000003000);
     memory.Write(anchor + profile.pointerOffset, kRoot);
-    memory.Write(kRoot + profile.entryOffset, kModuleBase + kRelativeEntry);
+    memory.Write(kRoot + profile.entryOffset, kCodeBase + kRelativeEntry);
     for (std::size_t index = 0; index < kCandidateCount; ++index) {
         InstallCandidate(
             memory,
@@ -208,7 +219,12 @@ struct Harness {
                             const game::CoordinateExecutionRequest& request) {
             requests.push_back(request);
             runtimeProbe.plan = game::BuildCoordinateExecutionPlan(
-                kModuleBase, kModuleSize, subject, request);
+                kModuleBase,
+                kModuleSize,
+                kCodeBase,
+                kCodeSize,
+                subject,
+                request);
             const game::CoordinateExecutionResult result = responder
                 ? responder(request)
                 : Failure();
@@ -229,12 +245,16 @@ bool Refresh(game::CoordinateExecutionDecoder& decoder,
              SparseMemory& memory,
              const game::ProcessExecutionContext& context,
              std::int32_t processId = kProcessId,
-             std::size_t moduleSize = kModuleSize) {
+             std::size_t moduleSize = kModuleSize,
+             std::uint64_t codeBase = kCodeBase,
+             std::size_t codeSize = kCodeSize) {
     return decoder.Refresh(
         memory.Callback(),
         processId,
         kModuleBase,
         moduleSize,
+        codeBase,
+        codeSize,
         context);
 }
 
@@ -262,8 +282,14 @@ void TestUnknownLimitAndPersistentCursor() {
         REQUIRE(!request.candidateKnown);
     }
     const auto unknownPlan = game::BuildCoordinateExecutionPlan(
-        kModuleBase, kModuleSize, kSubject, harness.requests.front());
+        kModuleBase,
+        kModuleSize,
+        kCodeBase,
+        kCodeSize,
+        kSubject,
+        harness.requests.front());
     REQUIRE(unknownPlan.valid);
+    REQUIRE(unknownPlan.hookPc == kCodeBase + kRelativeEntry);
     REQUIRE(unknownPlan.timeoutMicros == 45000);
     REQUIRE(unknownPlan.instructionBudget == 600000);
 
@@ -273,6 +299,8 @@ void TestUnknownLimitAndPersistentCursor() {
     REQUIRE(!decoder.Decode(kSubject, position));
     REQUIRE(harness.requests.size() == kCandidateCount - 64);
     REQUIRE(decoder.Probe().cursor == 0);
+    REQUIRE(decoder.Probe().status ==
+            game::CoordinateExecutionStatus::EvidenceFailure);
 }
 
 void TestTraversalTimeLimitBetweenCandidates() {
@@ -325,17 +353,26 @@ void TestKnownCandidateIsExclusive() {
     REQUIRE(harness.requests[0].candidateKnown);
     REQUIRE(harness.requests[0].candidate.q0 == CandidateQ0(2));
     REQUIRE(decoder.Probe().knownCandidate);
+    REQUIRE(decoder.Probe().status ==
+            game::CoordinateExecutionStatus::EvidenceFailure);
 
     const auto knownPlan = game::BuildCoordinateExecutionPlan(
-        kModuleBase, kModuleSize, kSubject, harness.requests[0]);
+        kModuleBase,
+        kModuleSize,
+        kCodeBase,
+        kCodeSize,
+        kSubject,
+        harness.requests[0]);
     REQUIRE(knownPlan.valid);
     REQUIRE(knownPlan.timeoutMicros == 120000);
     REQUIRE(knownPlan.instructionBudget == 3000000);
 
+    const std::size_t contextResetsBefore = harness.resetCount;
     REQUIRE(Refresh(decoder, memory, ExecutionContext(2)));
-    REQUIRE(!decoder.Probe().knownCandidate);
+    REQUIRE(decoder.Probe().knownCandidate);
     REQUIRE(decoder.Probe().cursor == 0);
     REQUIRE(decoder.Probe().candidateCount == kCandidateCount);
+    REQUIRE(harness.resetCount > contextResetsBefore);
 }
 
 void TestSharedEntryMappingAndInvalidation() {
@@ -368,11 +405,18 @@ void TestSharedEntryMappingAndInvalidation() {
         REQUIRE(request.shared.absoluteEntry == CandidateQ2(0));
         REQUIRE(request.shared.returnStub == CandidateQ3(0));
         const auto plan = game::BuildCoordinateExecutionPlan(
-            kModuleBase, kModuleSize, kSubject, request);
+            kModuleBase,
+            kModuleSize,
+            kCodeBase,
+            kCodeSize,
+            kSubject,
+            request);
         REQUIRE(plan.valid);
+        REQUIRE(plan.hookPc == kCodeBase + kRelativeEntry);
+        REQUIRE(!decoder.Probe().knownCandidate);
     }
 
-    REQUIRE(decoder.Probe().knownCandidate);
+    REQUIRE(!decoder.Probe().knownCandidate);
     const std::size_t resetsBefore = harness.resetCount;
     REQUIRE(Refresh(decoder, memory, context, kProcessId + 1));
     REQUIRE(!decoder.Probe().knownCandidate);
@@ -382,7 +426,7 @@ void TestSharedEntryMappingAndInvalidation() {
     harness.responder = [](const auto&) { return Success(); };
     game::CoordinateExecutionPosition position{};
     REQUIRE(decoder.Decode(kSubject, position));
-    REQUIRE(decoder.Probe().knownCandidate);
+    REQUIRE(!decoder.Probe().knownCandidate);
     REQUIRE(Refresh(
         decoder,
         memory,
@@ -391,6 +435,22 @@ void TestSharedEntryMappingAndInvalidation() {
         kModuleSize + 0x1000));
     REQUIRE(!decoder.Probe().knownCandidate);
     REQUIRE(decoder.Probe().candidateCount == kCandidateCount);
+
+    REQUIRE(decoder.Decode(kSubject, position));
+    REQUIRE(!decoder.Probe().knownCandidate);
+    const std::size_t codeRangeResetsBefore = harness.resetCount;
+    REQUIRE(Refresh(
+        decoder,
+        memory,
+        context,
+        kProcessId + 1,
+        kModuleSize + 0x1000,
+        kCodeBase,
+        kCodeSize + 0x1000));
+    REQUIRE(!decoder.Probe().knownCandidate);
+    REQUIRE(decoder.Probe().candidateCount == kCandidateCount);
+    REQUIRE(decoder.Probe().codeSize == kCodeSize + 0x1000);
+    REQUIRE(harness.resetCount > codeRangeResetsBefore);
 
     decoder.Reset();
     const auto resetProbe = decoder.Probe();
@@ -402,6 +462,82 @@ void TestSharedEntryMappingAndInvalidation() {
             game::CoordinateExecutionDecoderStage::Configured);
 }
 
+void TestSharedModeDoesNotTraverseCandidates() {
+    SparseMemory memory = BuildCandidateMemory();
+    Harness harness;
+    game::CoordinateExecutionDecoder decoder(harness.Hooks());
+    for (const auto mode : {
+             game::CoordinateExecutionMode::Interpret,
+             game::CoordinateExecutionMode::Predecode,
+             game::CoordinateExecutionMode::Jit,
+         }) {
+        harness.requests.clear();
+        harness.responder = [&harness](const auto&) {
+            return harness.requests.size() == 1
+                ? Failure(game::CoordinateExecutionStatus::
+                      ReadOrCoordinateFailure)
+                : Success();
+        };
+        REQUIRE(decoder.Configure(mode, 1));
+        REQUIRE(Refresh(decoder, memory, ExecutionContext(1)));
+
+        game::CoordinateExecutionPosition position{};
+        REQUIRE(!decoder.Decode(kSubject, position));
+        REQUIRE(harness.requests.size() == 1);
+        REQUIRE(harness.requests.front().candidate.q0 == CandidateQ0(0));
+        REQUIRE(!harness.requests.front().candidateKnown);
+        REQUIRE(decoder.Probe().cursor == 0);
+        REQUIRE(!decoder.Probe().knownCandidate);
+        REQUIRE(decoder.Probe().status ==
+                game::CoordinateExecutionStatus::ReadOrCoordinateFailure);
+    }
+}
+
+void TestMode1BackendFailureClassification() {
+    SparseMemory memory = BuildCandidateMemory();
+    Harness harness;
+    game::CoordinateExecutionDecoder decoder(harness.Hooks());
+    REQUIRE(decoder.Configure(game::CoordinateExecutionMode::Emulate, 1));
+    REQUIRE(Refresh(decoder, memory, ExecutionContext(1)));
+
+    game::CoordinateExecutionPosition position{};
+    REQUIRE(!decoder.Decode(kSubject, position));
+    REQUIRE(decoder.Probe().cursor == 64);
+
+    harness.requests.clear();
+    harness.runtimeProbe.error =
+        game::CoordinateExecutionRuntimeError::EngineSetupFailed;
+    harness.responder = [](const auto&) {
+        return Failure(game::CoordinateExecutionStatus::BackendUnavailable);
+    };
+    REQUIRE(!decoder.Decode(kSubject, position));
+    REQUIRE(harness.requests.size() == 1);
+    REQUIRE(decoder.Probe().cursor == 64);
+    REQUIRE(decoder.Probe().status ==
+            game::CoordinateExecutionStatus::BackendUnavailable);
+
+    decoder.Reset();
+    REQUIRE(decoder.Configure(game::CoordinateExecutionMode::Emulate, 1));
+    REQUIRE(Refresh(decoder, memory, ExecutionContext(1)));
+    harness.requests.clear();
+    harness.runtimeProbe.error = game::CoordinateExecutionRuntimeError::None;
+    harness.responder = [&harness](const auto&) {
+        if (harness.requests.size() == 1) {
+            harness.runtimeProbe.error =
+                game::CoordinateExecutionRuntimeError::RemotePageReadFailed;
+            return Failure(
+                game::CoordinateExecutionStatus::BackendUnavailable);
+        }
+        harness.runtimeProbe.error =
+            game::CoordinateExecutionRuntimeError::None;
+        return Success();
+    };
+    REQUIRE(decoder.Decode(kSubject, position));
+    REQUIRE(harness.requests.size() == 2);
+    REQUIRE(decoder.Probe().knownCandidate);
+    REQUIRE(decoder.Probe().cachedCandidate.q0 == CandidateQ0(1));
+}
+
 void TestInvalidLifecycle() {
     SparseMemory memory = BuildCandidateMemory();
     Harness harness;
@@ -409,10 +545,70 @@ void TestInvalidLifecycle() {
     REQUIRE(!Refresh(decoder, memory, ExecutionContext(1)));
     REQUIRE(decoder.Probe().error ==
             game::CoordinateExecutionDecoderError::InvalidRefresh);
+    REQUIRE(decoder.Probe().status ==
+            game::CoordinateExecutionStatus::EnvironmentFailure);
     REQUIRE(!decoder.Configure(
         static_cast<game::CoordinateExecutionMode>(0), 1));
     REQUIRE(decoder.Probe().error ==
             game::CoordinateExecutionDecoderError::InvalidMode);
+}
+
+void TestRefreshDiscoversWithoutExecutionContext() {
+    SparseMemory memory = BuildCandidateMemory();
+    Harness harness;
+    game::CoordinateExecutionDecoder decoder(harness.Hooks());
+    game::ProcessExecutionContext context{};
+    context.generation = 9;
+
+    REQUIRE(decoder.Configure(game::CoordinateExecutionMode::Emulate, 1));
+    REQUIRE(Refresh(decoder, memory, context));
+    const auto probe = decoder.Probe();
+    REQUIRE(probe.refreshed);
+    REQUIRE(probe.candidateCount == kCandidateCount);
+    REQUIRE(probe.moduleBase == kModuleBase);
+    REQUIRE(probe.moduleSize == kModuleSize);
+    REQUIRE(probe.codeBase == kCodeBase);
+    REQUIRE(probe.codeSize == kCodeSize);
+    REQUIRE(probe.contextGeneration == context.generation);
+}
+
+void TestRefreshRejectsMissingCodeRange() {
+    SparseMemory memory = BuildCandidateMemory();
+    Harness harness;
+    game::CoordinateExecutionDecoder decoder(harness.Hooks());
+
+    REQUIRE(decoder.Configure(game::CoordinateExecutionMode::Emulate, 1));
+    REQUIRE(!Refresh(
+        decoder,
+        memory,
+        ExecutionContext(1),
+        kProcessId,
+        kModuleSize,
+        kCodeBase,
+        0));
+    const auto probe = decoder.Probe();
+    REQUIRE(!probe.refreshed);
+    REQUIRE(probe.moduleBase == kModuleBase);
+    REQUIRE(probe.moduleSize == kModuleSize);
+    REQUIRE(probe.codeBase == kCodeBase);
+    REQUIRE(probe.codeSize == 0);
+    REQUIRE(probe.error ==
+            game::CoordinateExecutionDecoderError::InvalidRefresh);
+    REQUIRE(probe.status ==
+            game::CoordinateExecutionStatus::EnvironmentFailure);
+}
+
+void TestCandidateDiscoveryFailureIsInvalidAddress() {
+    SparseMemory memory;
+    Harness harness;
+    game::CoordinateExecutionDecoder decoder(harness.Hooks());
+    REQUIRE(decoder.Configure(game::CoordinateExecutionMode::Emulate, 1));
+    REQUIRE(!Refresh(decoder, memory, ExecutionContext(1)));
+    const auto probe = decoder.Probe();
+    REQUIRE(probe.error == game::CoordinateExecutionDecoderError::
+            CandidateDiscoveryFailed);
+    REQUIRE(probe.status ==
+            game::CoordinateExecutionStatus::InvalidAddress);
 }
 
 }  // namespace
@@ -422,6 +618,11 @@ int main() {
     TestTraversalTimeLimitBetweenCandidates();
     TestKnownCandidateIsExclusive();
     TestSharedEntryMappingAndInvalidation();
+    TestSharedModeDoesNotTraverseCandidates();
+    TestMode1BackendFailureClassification();
     TestInvalidLifecycle();
+    TestRefreshDiscoversWithoutExecutionContext();
+    TestRefreshRejectsMissingCodeRange();
+    TestCandidateDiscoveryFailureIsInvalidAddress();
     return 0;
 }

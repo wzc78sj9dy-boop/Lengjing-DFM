@@ -27,6 +27,8 @@ using lengjing::game::native::kCoordinateExecutionStopPc;
 
 constexpr std::uint64_t kModuleBase = UINT64_C(0x0000007000000000);
 constexpr std::size_t kModuleSize = 0x200000;
+constexpr std::uint64_t kCodeBase = UINT64_C(0x0000007100000000);
+constexpr std::size_t kCodeSize = 0x100000;
 constexpr std::uint64_t kSubject = UINT64_C(0xAB00007010000000);
 constexpr std::uint64_t kNormalizedSubject = UINT64_C(0x0000007010000000);
 
@@ -45,6 +47,7 @@ void TestAbiAndPointers() {
         kModuleBase, kModuleSize, kModuleBase + 4));
     REQUIRE(!ContainsCoordinateExecutionCodeAddress(
         kModuleBase, kModuleSize, kModuleBase + kModuleSize));
+    REQUIRE(kModuleBase + kModuleSize < kCodeBase);
 }
 
 void TestKnownRelativeCandidate() {
@@ -55,9 +58,9 @@ void TestKnownRelativeCandidate() {
     request.candidate.q1 = 0x1000;
 
     const auto plan = BuildCoordinateExecutionPlan(
-        kModuleBase, kModuleSize, kSubject, request);
+        kModuleBase, kModuleSize, kCodeBase, kCodeSize, kSubject, request);
     REQUIRE(plan.valid);
-    REQUIRE(plan.entryPc == kModuleBase + 0x1000);
+    REQUIRE(plan.entryPc == kCodeBase + 0x1000);
     REQUIRE(plan.hookPc == plan.entryPc);
     REQUIRE(plan.x0 == UINT64_C(0x0000007020000000));
     REQUIRE(plan.x1 == kCoordinateExecutionDefaultFrame);
@@ -76,7 +79,7 @@ void TestUnknownRelativeCandidate() {
     request.candidate.q1 = 0x2000;
 
     const auto plan = BuildCoordinateExecutionPlan(
-        kModuleBase, kModuleSize, kSubject, request);
+        kModuleBase, kModuleSize, kCodeBase, kCodeSize, kSubject, request);
     REQUIRE(plan.valid);
     REQUIRE(plan.x0 == kNormalizedSubject);
     REQUIRE(plan.x1 == kNormalizedSubject);
@@ -85,11 +88,21 @@ void TestUnknownRelativeCandidate() {
     REQUIRE(!plan.seedSlotBeforeRun);
     REQUIRE(plan.timeoutMicros == 45000);
     REQUIRE(plan.instructionBudget == 600000);
+}
 
+void TestKnownCandidateRequiresContext() {
+    CoordinateExecutionRequest request{};
+    request.mode = CoordinateExecutionMode::Emulate;
     request.candidateKnown = true;
-    REQUIRE(!BuildCoordinateExecutionPlan(
-                 kModuleBase, kModuleSize, kSubject, request)
-                 .valid);
+    request.candidate.q1 = 0x2000;
+    const auto knownPlan = BuildCoordinateExecutionPlan(
+        kModuleBase,
+        kModuleSize,
+        kCodeBase,
+        kCodeSize,
+        kSubject,
+        request);
+    REQUIRE(!knownPlan.valid);
 }
 
 void TestAbsoluteCandidate() {
@@ -97,13 +110,13 @@ void TestAbsoluteCandidate() {
     request.mode = CoordinateExecutionMode::Emulate;
     request.candidate.q1 = 0x3000;
     request.candidate.q2 = UINT64_C(0x0000007030000000);
-    request.candidate.q3 = UINT64_C(0x0000007040000000);
+    request.candidate.q3 = kModuleBase + 0x7000;
 
     const auto plan = BuildCoordinateExecutionPlan(
-        kModuleBase, kModuleSize, kSubject, request);
+        kModuleBase, kModuleSize, kCodeBase, kCodeSize, kSubject, request);
     REQUIRE(plan.valid);
     REQUIRE(plan.entryPc == request.candidate.q2);
-    REQUIRE(plan.hookPc == kModuleBase + request.candidate.q1);
+    REQUIRE(plan.hookPc == kCodeBase + request.candidate.q1);
     REQUIRE(plan.x0 == kNormalizedSubject);
     REQUIRE(plan.x1 == kNormalizedSubject);
     REQUIRE(plan.x2 == kNormalizedSubject);
@@ -113,6 +126,16 @@ void TestAbsoluteCandidate() {
     REQUIRE(plan.verifyReturnStubMagic);
     REQUIRE(!plan.seedSlotBeforeRun);
     REQUIRE(!plan.seedSlotAtHook);
+
+    request.candidate.q3 = kCodeBase + 0x7000;
+    REQUIRE(!BuildCoordinateExecutionPlan(
+                 kModuleBase,
+                 kModuleSize,
+                 kCodeBase,
+                 kCodeSize,
+                 kSubject,
+                 request)
+                 .valid);
 }
 
 void TestSharedRelativeModes() {
@@ -127,9 +150,14 @@ void TestSharedRelativeModes() {
         request.shared.x0Override = UINT64_C(0xEF00007050000000);
 
         const auto plan = BuildCoordinateExecutionPlan(
-            kModuleBase, kModuleSize, kSubject, request);
+            kModuleBase,
+            kModuleSize,
+            kCodeBase,
+            kCodeSize,
+            kSubject,
+            request);
         REQUIRE(plan.valid);
-        REQUIRE(plan.entryPc == kModuleBase + 0x4000);
+        REQUIRE(plan.entryPc == kCodeBase + 0x4000);
         REQUIRE(plan.hookPc == plan.entryPc);
         REQUIRE(plan.x0 == UINT64_C(0x0000007050000000));
         REQUIRE(plan.x1 == kCoordinateExecutionDefaultFrame);
@@ -150,10 +178,10 @@ void TestSharedAbsoluteEntry() {
     request.shared.returnStub = kModuleBase + 0x6000;
 
     const auto plan = BuildCoordinateExecutionPlan(
-        kModuleBase, kModuleSize, kSubject, request);
+        kModuleBase, kModuleSize, kCodeBase, kCodeSize, kSubject, request);
     REQUIRE(plan.valid);
     REQUIRE(plan.entryPc == request.shared.absoluteEntry);
-    REQUIRE(plan.hookPc == kModuleBase + 0x5000);
+    REQUIRE(plan.hookPc == kCodeBase + 0x5000);
     REQUIRE(plan.x1 == kNormalizedSubject);
     REQUIRE(plan.lr == request.shared.returnStub);
     REQUIRE(plan.returnStub == request.shared.returnStub);
@@ -162,7 +190,12 @@ void TestSharedAbsoluteEntry() {
 
     request.shared.returnStub = kModuleBase + kModuleSize;
     REQUIRE(!BuildCoordinateExecutionPlan(
-                 kModuleBase, kModuleSize, kSubject, request)
+                 kModuleBase,
+                 kModuleSize,
+                 kCodeBase,
+                 kCodeSize,
+                 kSubject,
+                 request)
                  .valid);
 }
 
@@ -170,18 +203,33 @@ void TestInvalidRequests() {
     CoordinateExecutionRequest request{};
     request.mode = static_cast<CoordinateExecutionMode>(0);
     REQUIRE(!BuildCoordinateExecutionPlan(
-                 kModuleBase, kModuleSize, kSubject, request)
+                 kModuleBase,
+                 kModuleSize,
+                 kCodeBase,
+                 kCodeSize,
+                 kSubject,
+                 request)
                  .valid);
 
     request.mode = CoordinateExecutionMode::Interpret;
-    request.shared.hookOffset = kModuleSize;
+    request.shared.hookOffset = kCodeSize;
     REQUIRE(!BuildCoordinateExecutionPlan(
-                 kModuleBase, kModuleSize, kSubject, request)
+                 kModuleBase,
+                 kModuleSize,
+                 kCodeBase,
+                 kCodeSize,
+                 kSubject,
+                 request)
                  .valid);
 
     request.shared.hookOffset = 4;
     REQUIRE(!BuildCoordinateExecutionPlan(
-                 kModuleBase, kModuleSize, UINT64_C(0x1000), request)
+                 kModuleBase,
+                 kModuleSize,
+                 kCodeBase,
+                 kCodeSize,
+                 UINT64_C(0x1000),
+                 request)
                  .valid);
 }
 
@@ -191,6 +239,7 @@ int main() {
     TestAbiAndPointers();
     TestKnownRelativeCandidate();
     TestUnknownRelativeCandidate();
+    TestKnownCandidateRequiresContext();
     TestAbsoluteCandidate();
     TestSharedRelativeModes();
     TestSharedAbsoluteEntry();

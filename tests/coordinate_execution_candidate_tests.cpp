@@ -179,14 +179,70 @@ void InstallNegativeImmediateThunk(SparseMemory& memory,
     memory.Write(thunk - 0xF00, absoluteEntry);
 }
 
-game::CoordinateExecutionModuleSnapshot Module(
+game::CoordinateExecutionModuleSnapshot Snapshot(
     std::uint64_t base,
     std::size_t size) {
     static const std::byte code{};
     return game::CoordinateExecutionModuleSnapshot{base, &code, size};
 }
 
+constexpr std::uint64_t kCodeBase = UINT64_C(0x6800000000);
+constexpr std::size_t kCodeSize = 0x200000;
+
+void TestCodeRangeSelection() {
+    constexpr std::uint64_t kFirstBase = UINT64_C(0x6800000000);
+    constexpr std::uint64_t kSecondBase = UINT64_C(0x6900000000);
+    constexpr std::uint64_t kThirdBase = UINT64_C(0x6A00000000);
+    const std::vector<game::CoordinateExecutionCodeRange> ranges{
+        {kFirstBase, kFirstBase + 0x40000},
+        {kFirstBase, kFirstBase + 0x90000},
+        {kSecondBase, kSecondBase + 0x100000},
+        {kThirdBase, kThirdBase + 0x200000},
+    };
+    game::CoordinateExecutionCodeRange selected{};
+
+    REQUIRE(game::SelectCoordinateExecutionCodeRange(
+        ranges,
+        kSecondBase + 0x100,
+        kThirdBase + 0x200,
+        &selected));
+    REQUIRE(selected.begin == kThirdBase);
+
+    REQUIRE(game::SelectCoordinateExecutionCodeRange(
+        ranges,
+        kSecondBase + 0x100,
+        UINT64_C(0x180000),
+        &selected));
+    REQUIRE(selected.begin == kSecondBase);
+
+    REQUIRE(game::SelectCoordinateExecutionCodeRange(
+        ranges, 0, UINT64_C(0x80000), &selected));
+    REQUIRE(selected.begin == kFirstBase);
+    REQUIRE(game::IsCoordinateExecutionCodeRangeCompatible(
+        selected, 0, UINT64_C(0x80000)));
+    std::uint64_t address = 0;
+    REQUIRE(game::ResolveCoordinateExecutionCodeAddress(
+        selected, UINT64_C(0x80000), &address));
+    REQUIRE(address == kFirstBase + UINT64_C(0x80000));
+    REQUIRE(game::ResolveCoordinateExecutionCodeAddress(
+        ranges.back(), kThirdBase + 0x200, &address));
+    REQUIRE(address == kThirdBase + 0x200);
+
+    REQUIRE(!game::SelectCoordinateExecutionCodeRange(
+        ranges, 0, UINT64_C(0x80002), &selected));
+    REQUIRE(!game::ResolveCoordinateExecutionCodeAddress(
+        selected, UINT64_C(0x80002), &address));
+    REQUIRE(!game::SelectCoordinateExecutionCodeRange(
+        ranges, 0, 0, &selected));
+}
+
 void TestProfileOffsetsAndDiscovery() {
+    REQUIRE(game::ResolveCoordinateExecutionScanProfile(0) == 0);
+    REQUIRE(game::ResolveCoordinateExecutionScanProfile(1) == 2);
+    REQUIRE(game::ResolveCoordinateExecutionScanProfile(2) == 1);
+    REQUIRE(game::ResolveCoordinateExecutionScanProfile(-1) == 0);
+    REQUIRE(game::ResolveCoordinateExecutionScanProfile(3) == 0);
+
     const game::CoordinateExecutionProfileOffsets profile1 =
         game::GetCoordinateExecutionProfileOffsets(1);
     const game::CoordinateExecutionProfileOffsets profile2 =
@@ -217,19 +273,32 @@ void TestProfileOffsetsAndDiscovery() {
     memory.Write(
         kRoot + profile1.entryOffset,
         UINT64_C(0xAB00000000000000) +
-            kModuleBase + kRelativeEntry);
+            kCodeBase + kRelativeEntry);
     const std::uint64_t ldrPc = anchor + 0x104;
     InstallVeneer(memory, ldrPc, kTaggedThunk);
     InstallLiteralThunk(
         memory,
         kThunk,
         kTaggedQ0,
-        kModuleBase + kRelativeEntry);
+        kCodeBase + kRelativeEntry);
+
+    const auto module = Snapshot(kModuleBase, kModuleSize);
+    const auto code = Snapshot(kCodeBase, kCodeSize);
+
+    game::CoordinateExecutionDiscoveryInput input{};
+    REQUIRE(game::ResolveCoordinateExecutionDiscoveryInput(
+        memory.Callback(), kModuleBase, 1, &input));
+    REQUIRE(input.scanAnchor == anchor);
+    REQUIRE(input.root == kRoot);
+    REQUIRE(
+        (input.rawEntry & game::kCoordinateExecutionPointerMask) ==
+        kCodeBase + kRelativeEntry);
 
     game::CoordinateExecutionCandidate candidate{};
     REQUIRE(game::DiscoverFirstCoordinateExecutionCandidate(
         memory.Callback(),
-        Module(kModuleBase, kModuleSize),
+        module,
+        code,
         kModuleBase,
         1,
         &candidate));
@@ -240,18 +309,44 @@ void TestProfileOffsetsAndDiscovery() {
 
     memory.Write(
         kRoot + profile1.entryOffset,
-        kModuleBase + kRelativeEntry + 4);
+        kCodeBase + kRelativeEntry + 4);
     REQUIRE(!game::DiscoverFirstCoordinateExecutionCandidate(
         memory.Callback(),
-        Module(kModuleBase, kModuleSize),
+        module,
+        code,
         kModuleBase,
         1,
         &candidate));
 
+    memory.Write(
+        kRoot + profile1.entryOffset,
+        kModuleBase + kRelativeEntry);
+    REQUIRE(!game::DiscoverFirstCoordinateExecutionCandidate(
+        memory.Callback(),
+        module,
+        code,
+        kModuleBase,
+        1,
+        &candidate));
+
+    memory.Write(
+        kRoot + profile1.entryOffset,
+        kCodeBase + kRelativeEntry);
+    memory.Write(kThunk + 24, kModuleBase + kRelativeEntry);
+    REQUIRE(!game::DiscoverFirstCoordinateExecutionCandidate(
+        memory.Callback(),
+        module,
+        code,
+        kModuleBase,
+        1,
+        &candidate));
+    memory.Write(kThunk + 24, kCodeBase + kRelativeEntry);
+
     memory.Write(kRoot + profile1.entryOffset, kRelativeEntry);
     REQUIRE(game::DiscoverFirstCoordinateExecutionCandidate(
         memory.Callback(),
-        Module(kModuleBase, kModuleSize),
+        module,
+        code,
         kModuleBase,
         1,
         &candidate));
@@ -260,7 +355,8 @@ void TestProfileOffsetsAndDiscovery() {
     memory.Write(kRoot + profile1.entryOffset, kRelativeEntry + 2);
     REQUIRE(!game::DiscoverFirstCoordinateExecutionCandidate(
         memory.Callback(),
-        Module(kModuleBase, kModuleSize),
+        module,
+        code,
         kModuleBase,
         1,
         &candidate));
@@ -279,12 +375,13 @@ void TestNegativeAarch64Immediates() {
 
     InstallVeneer(memory, kLdrPc, kTaggedThunk);
     InstallNegativeImmediateThunk(
-        memory, kThunk, kTaggedQ0, kModuleBase + kRelativeEntry);
+        memory, kThunk, kTaggedQ0, kCodeBase + kRelativeEntry);
 
     game::CoordinateExecutionCandidate candidate{};
     REQUIRE(game::ScanFirstCoordinateExecutionCandidate(
         memory.Callback(),
-        Module(kModuleBase, kModuleSize),
+        Snapshot(kModuleBase, kModuleSize),
+        Snapshot(kCodeBase, kCodeSize),
         kLdrPc,
         kRelativeEntry,
         &candidate));
@@ -300,7 +397,8 @@ void TestPriorityOrderDedupAndChunkOverlap() {
     constexpr std::uint64_t kModuleBase = UINT64_C(0x7000000000);
     constexpr std::size_t kModuleSize = 0x300000;
     constexpr std::uint64_t kRelativeEntry = UINT64_C(0x4000);
-    const auto module = Module(kModuleBase, kModuleSize);
+    const auto module = Snapshot(kModuleBase, kModuleSize);
+    const auto code = Snapshot(kCodeBase, kCodeSize);
 
     SparseMemory orderMemory;
     const std::uint64_t exactLdr = kModuleBase + 0x180104;
@@ -312,30 +410,31 @@ void TestPriorityOrderDedupAndChunkOverlap() {
         exactLdr,
         UINT64_C(0x6000200000),
         UINT64_C(0x6000300000),
-        kModuleBase + kRelativeEntry);
+        kCodeBase + kRelativeEntry);
     InstallCandidate(
         orderMemory,
         centerLdr,
         UINT64_C(0x6000210000),
         UINT64_C(0x6000310000),
-        kModuleBase + kRelativeEntry);
+        kCodeBase + kRelativeEntry);
     InstallCandidate(
         orderMemory,
         lowerLdr,
         UINT64_C(0x6000220000),
         UINT64_C(0x6000320000),
-        kModuleBase + kRelativeEntry);
+        kCodeBase + kRelativeEntry);
     InstallCandidate(
         orderMemory,
         upperLdr,
         UINT64_C(0x6000230000),
         UINT64_C(0x6000330000),
-        kModuleBase + kRelativeEntry);
+        kCodeBase + kRelativeEntry);
 
     game::CoordinateExecutionCandidate first{};
     REQUIRE(game::ScanFirstCoordinateExecutionCandidate(
         orderMemory.Callback(),
         module,
+        code,
         exactLdr,
         kRelativeEntry,
         &first));
@@ -343,7 +442,11 @@ void TestPriorityOrderDedupAndChunkOverlap() {
 
     const game::CoordinateExecutionCandidateScanResult all =
         game::ScanCoordinateExecutionCandidates(
-            orderMemory.Callback(), module, exactLdr, kRelativeEntry);
+            orderMemory.Callback(),
+            module,
+            code,
+            exactLdr,
+            kRelativeEntry);
     REQUIRE(!all.truncated);
     REQUIRE(all.candidates.size() == 4);
     REQUIRE(all.candidates[0].q0 == UINT64_C(0x6000300000));
@@ -359,10 +462,11 @@ void TestPriorityOrderDedupAndChunkOverlap() {
         boundaryLdr,
         UINT64_C(0x6000240000),
         UINT64_C(0x6000340000),
-        kModuleBase + kRelativeEntry);
+        kCodeBase + kRelativeEntry);
     REQUIRE(game::ScanFirstCoordinateExecutionCandidate(
         overlapMemory.Callback(),
         module,
+        code,
         0,
         kRelativeEntry,
         &first));
@@ -377,7 +481,8 @@ void TestBoundsAndStableMagic() {
     constexpr std::uint64_t kRelativeEntry = UINT64_C(0x100);
     constexpr std::uint64_t kThunk = UINT64_C(0x6000400000);
     constexpr std::uint64_t kQ0 = UINT64_C(0x6000410000);
-    const auto module = Module(kModuleBase, kModuleSize);
+    const auto module = Snapshot(kModuleBase, kModuleSize);
+    const auto code = Snapshot(kCodeBase, kCodeSize);
 
     SparseMemory lowerMemory;
     const std::uint64_t lowerLdr = kModuleBase + 4;
@@ -386,11 +491,12 @@ void TestBoundsAndStableMagic() {
         lowerLdr,
         kThunk,
         kQ0,
-        kModuleBase + kRelativeEntry);
+        kCodeBase + kRelativeEntry);
     game::CoordinateExecutionCandidate candidate{};
     REQUIRE(game::ScanFirstCoordinateExecutionCandidate(
         lowerMemory.Callback(),
         module,
+        code,
         lowerLdr,
         kRelativeEntry,
         &candidate));
@@ -403,10 +509,11 @@ void TestBoundsAndStableMagic() {
         upperLdr,
         kThunk,
         kQ0,
-        kModuleBase + kRelativeEntry);
+        kCodeBase + kRelativeEntry);
     REQUIRE(game::ScanFirstCoordinateExecutionCandidate(
         upperMemory.Callback(),
         module,
+        code,
         upperLdr,
         kRelativeEntry,
         &candidate));
@@ -419,10 +526,11 @@ void TestBoundsAndStableMagic() {
         invalidLdr,
         kThunk,
         kQ0,
-        kModuleBase + kRelativeEntry);
+        kCodeBase + kRelativeEntry);
     REQUIRE(!game::ScanFirstCoordinateExecutionCandidate(
         outsideMemory.Callback(),
         module,
+        code,
         invalidLdr,
         kRelativeEntry,
         &candidate));
@@ -435,27 +543,29 @@ void TestBoundsAndStableMagic() {
         moduleEndLdr,
         moduleEndThunk,
         UINT64_C(0x6000420000),
-        kModuleBase + kRelativeEntry);
+        kCodeBase + kRelativeEntry);
     REQUIRE(game::ScanFirstCoordinateExecutionCandidate(
         moduleEndMemory.Callback(),
         module,
+        code,
         moduleEndLdr,
         kRelativeEntry,
         &candidate));
     REQUIRE(candidate.q2 == moduleEndThunk);
 
     SparseMemory internalMemory;
-    const std::uint64_t internalThunk = kModuleBase + 0x1000;
+    const std::uint64_t internalThunk = kCodeBase + 0x1000;
     const std::uint64_t internalLdr = kModuleBase + 0xA00;
     InstallCandidate(
         internalMemory,
         internalLdr,
         internalThunk,
         kQ0,
-        kModuleBase + kRelativeEntry);
+        kCodeBase + kRelativeEntry);
     REQUIRE(!game::ScanFirstCoordinateExecutionCandidate(
         internalMemory.Callback(),
         module,
+        code,
         internalLdr,
         kRelativeEntry,
         &candidate));
@@ -467,10 +577,11 @@ void TestBoundsAndStableMagic() {
         racingLdr,
         kThunk,
         kQ0,
-        kModuleBase + kRelativeEntry);
+        kCodeBase + kRelativeEntry);
     REQUIRE(!game::ScanFirstCoordinateExecutionCandidate(
         racingMemory.Callback(),
         module,
+        code,
         racingLdr,
         kRelativeEntry,
         &candidate));
@@ -496,13 +607,14 @@ void TestCandidateLimit() {
             ldrPc,
             thunk,
             q0,
-            kModuleBase + kRelativeEntry);
+            kCodeBase + kRelativeEntry);
     }
 
     const game::CoordinateExecutionCandidateScanResult result =
         game::ScanCoordinateExecutionCandidates(
             memory.Callback(),
-            Module(kModuleBase, kModuleSize),
+            Snapshot(kModuleBase, kModuleSize),
+            Snapshot(kCodeBase, kCodeSize),
             kFirstStub + 4,
             kRelativeEntry);
     REQUIRE(result.truncated);
@@ -520,6 +632,7 @@ void TestCandidateLimit() {
 }  // namespace
 
 int main() {
+    TestCodeRangeSelection();
     TestProfileOffsetsAndDiscovery();
     TestNegativeAarch64Immediates();
     TestPriorityOrderDedupAndChunkOverlap();

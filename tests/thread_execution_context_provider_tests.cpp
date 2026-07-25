@@ -309,18 +309,24 @@ void TestProviderStateMachine() {
 
     reader.pacFailure = -EAGAIN;
     refresh = provider.Refresh();
-    CHECK(refresh.event == ThreadExecutionContextEvent::Lost);
-    CHECK(refresh.status == -EAGAIN);
+    CHECK(refresh.event == ThreadExecutionContextEvent::ValuesChanged);
+    CHECK(refresh.status == 0);
+    CHECK(refresh.pacgaStatus == -EAGAIN);
+    CHECK(refresh.HasThreadContext());
+    CHECK(!refresh.HasContext());
     reader.pacFailure = 0;
 
     refresh = provider.Refresh();
-    CHECK(refresh.event == ThreadExecutionContextEvent::Acquired);
-    CHECK(refresh.snapshot.generation == 6);
+    CHECK(refresh.event == ThreadExecutionContextEvent::ValuesChanged);
+    CHECK(refresh.HasContext());
 
     reader.values[702].apga = {};
     refresh = provider.Refresh();
-    CHECK(refresh.event == ThreadExecutionContextEvent::Lost);
-    CHECK(refresh.status == -ENODATA);
+    CHECK(refresh.event == ThreadExecutionContextEvent::ValuesChanged);
+    CHECK(refresh.status == 0);
+    CHECK(refresh.pacgaStatus == -ENODATA);
+    CHECK(refresh.HasThreadContext());
+    CHECK(!refresh.HasContext());
 
     provider.Reset();
     CHECK(!provider.Current(snapshot));
@@ -343,6 +349,21 @@ void TestCapabilityGate() {
     CHECK(refresh.status == -ENOTSUP);
     CHECK(reader.lastTpidrThreadId == 0);
     CHECK(reader.lastPacThreadId == 0);
+
+    FakeReader partialReader;
+    partialReader.capabilities.pacKeys = false;
+    partialReader.values[901] = {UINT64_C(0x7000777700), {}};
+    ThreadExecutionContextProvider partialProvider(
+        processId,
+        partialReader,
+        "GameThread",
+        proc.Root().string());
+    const auto partial = partialProvider.Refresh();
+    CHECK(partial.HasThreadContext());
+    CHECK(!partial.HasContext());
+    CHECK(partial.pacgaStatus == -ENOTSUP);
+    CHECK(partialReader.tpidrReadCount == 1);
+    CHECK(partialReader.pacReadCount == 0);
 }
 
 void TestMultipleExactCandidates() {
@@ -372,8 +393,7 @@ void TestMultipleExactCandidates() {
     CHECK(refresh.snapshot.threadId == 1103);
     CHECK(reader.tpidrAttempts ==
           std::vector<std::int32_t>({1101, 1102, 1103}));
-    CHECK(reader.pacAttempts ==
-          std::vector<std::int32_t>({1102, 1103}));
+    CHECK(reader.pacAttempts == std::vector<std::int32_t>({1103}));
 
     reader.tpidrAttempts.clear();
     reader.pacAttempts.clear();

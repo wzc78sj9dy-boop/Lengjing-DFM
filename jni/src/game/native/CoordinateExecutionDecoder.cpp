@@ -52,6 +52,8 @@ struct CoordinateExecutionDecoder::Impl {
         std::int32_t processId = 0;
         std::uintptr_t moduleBase = 0;
         std::size_t moduleSize = 0;
+        std::uintptr_t codeBase = 0;
+        std::size_t codeSize = 0;
         bool callbackOnly = false;
         bool valid = false;
     };
@@ -104,10 +106,12 @@ struct CoordinateExecutionDecoder::Impl {
     bool Refresh(MemoryTransport* memoryValue,
                  CoordinateExecutionReadCallback readValue,
                  bool callbackOnly,
-                 std::int32_t processIdValue,
-                 std::uintptr_t moduleBaseValue,
-                 std::size_t moduleSizeValue,
-                 const ProcessExecutionContext& executionContextValue)
+                  std::int32_t processIdValue,
+                  std::uintptr_t moduleBaseValue,
+                  std::size_t moduleSizeValue,
+                  std::uintptr_t codeBaseValue,
+                  std::size_t codeSizeValue,
+                  const ProcessExecutionContext& executionContextValue)
         noexcept {
         std::lock_guard<std::mutex> lock(mutex);
         try {
@@ -115,25 +119,59 @@ struct CoordinateExecutionDecoder::Impl {
                 (binding.processId != processIdValue ||
                  binding.moduleBase != moduleBaseValue ||
                  binding.moduleSize != moduleSizeValue ||
-                 binding.executionContext.generation !=
-                     executionContextValue.generation ||
+                 binding.codeBase != codeBaseValue ||
+                 binding.codeSize != codeSizeValue ||
                  binding.callbackOnly != callbackOnly ||
                  (!callbackOnly && binding.memory != memoryValue));
+            const bool contextChanged = binding.valid && !identityChanged &&
+                (binding.executionContext.generation !=
+                     executionContextValue.generation ||
+                 binding.executionContext.threadId !=
+                     executionContextValue.threadId ||
+                 binding.executionContext.threadStartTimeTicks !=
+                     executionContextValue.threadStartTimeTicks ||
+                 binding.executionContext.tpidrEl0 !=
+                     executionContextValue.tpidrEl0 ||
+                 binding.executionContext.pacgaLow !=
+                     executionContextValue.pacgaLow ||
+                 binding.executionContext.pacgaHigh !=
+                     executionContextValue.pacgaHigh ||
+                 binding.executionContext.pacgaOracle.available !=
+                     executionContextValue.pacgaOracle.available ||
+                 binding.executionContext.pacgaOracle.data !=
+                     executionContextValue.pacgaOracle.data ||
+                 binding.executionContext.pacgaOracle.modifier !=
+                     executionContextValue.pacgaOracle.modifier ||
+                 binding.executionContext.pacgaOracle.result !=
+                     executionContextValue.pacgaOracle.result);
             if (identityChanged) {
                 ClearCandidateState();
                 binding = {};
                 ResetRuntime();
+            } else if (contextChanged) {
+                ResetRuntime();
             }
 
-            if (!configured || !readValue || processIdValue <= 0 ||
+            SyncConfigurationProbe();
+            probe.processId = processIdValue;
+            probe.moduleBase = moduleBaseValue;
+            probe.moduleSize = moduleSizeValue;
+            probe.codeBase = codeBaseValue;
+            probe.codeSize = codeSizeValue;
+            probe.contextGeneration = executionContextValue.generation;
+
+            const bool backendAvailable = readValue &&
+                ((!callbackOnly && memoryValue != nullptr) ||
+                 (callbackOnly && static_cast<bool>(hooks.execute)));
+            if (!configured || !backendAvailable || processIdValue <= 0 ||
                 moduleBaseValue == 0 || moduleSizeValue == 0 ||
-                !executionContextValue.IsUsable() ||
-                (callbackOnly && !hooks.execute) ||
-                (!callbackOnly && memoryValue == nullptr)) {
+                codeBaseValue == 0 || codeSizeValue == 0) {
                 probe.stage = CoordinateExecutionDecoderStage::Failed;
                 probe.error =
                     CoordinateExecutionDecoderError::InvalidRefresh;
-                probe.status = CoordinateExecutionStatus::BackendUnavailable;
+                probe.status = backendAvailable
+                    ? CoordinateExecutionStatus::EnvironmentFailure
+                    : CoordinateExecutionStatus::BackendUnavailable;
                 probe.refreshed = false;
                 return false;
             }
@@ -144,6 +182,8 @@ struct CoordinateExecutionDecoder::Impl {
             binding.processId = processIdValue;
             binding.moduleBase = moduleBaseValue;
             binding.moduleSize = moduleSizeValue;
+            binding.codeBase = codeBaseValue;
+            binding.codeSize = codeSizeValue;
             binding.callbackOnly = callbackOnly;
             binding.valid = true;
             SyncBindingProbe();
@@ -167,6 +207,11 @@ struct CoordinateExecutionDecoder::Impl {
                         nullptr,
                         binding.moduleSize,
                     },
+                    CoordinateExecutionModuleSnapshot{
+                        binding.codeBase,
+                        nullptr,
+                        binding.codeSize,
+                    },
                     binding.moduleBase,
                     scanProfile);
             if (discovered.candidates.empty()) {
@@ -177,7 +222,7 @@ struct CoordinateExecutionDecoder::Impl {
                 probe.stage = CoordinateExecutionDecoderStage::Failed;
                 probe.error = CoordinateExecutionDecoderError::
                     CandidateDiscoveryFailed;
-                probe.status = CoordinateExecutionStatus::BackendUnavailable;
+                probe.status = CoordinateExecutionStatus::InvalidAddress;
                 return false;
             }
 
@@ -198,7 +243,7 @@ struct CoordinateExecutionDecoder::Impl {
             probe.stage = CoordinateExecutionDecoderStage::Failed;
             probe.error =
                 CoordinateExecutionDecoderError::CandidateDiscoveryFailed;
-            probe.status = CoordinateExecutionStatus::BackendUnavailable;
+            probe.status = CoordinateExecutionStatus::InvalidAddress;
             return false;
         }
     }
@@ -223,6 +268,17 @@ struct CoordinateExecutionDecoder::Impl {
             probe.error = CoordinateExecutionDecoderError::None;
             probe.status = CoordinateExecutionStatus::Loading;
 
+            if (mode != CoordinateExecutionMode::Emulate) {
+                cachedCandidate.reset();
+                cursor = 0;
+                const CoordinateExecutionResult result = ExecuteCandidate(
+                    subject, candidates.front(), 0, false);
+                SyncCandidateProbe();
+                return result.ok != 0
+                    ? CompleteSuccess(result, position)
+                    : CompleteFailure(result);
+            }
+
             if (cachedCandidate.has_value()) {
                 const CoordinateExecutionResult result = ExecuteCandidate(
                     subject,
@@ -232,7 +288,7 @@ struct CoordinateExecutionDecoder::Impl {
                 if (result.ok != 0) {
                     return CompleteSuccess(result, position);
                 }
-                return CompleteFailure(result);
+                return CompleteCandidateFailure(result);
             }
 
             if (cursor >= candidates.size()) cursor = 0;
@@ -251,22 +307,26 @@ struct CoordinateExecutionDecoder::Impl {
                     candidateIndex,
                     false);
                 if (lastResult.ok != 0) {
-                    cachedCandidate = CachedCandidate{
-                        candidates[candidateIndex],
-                        candidateIndex,
-                    };
+                    if (candidates[candidateIndex].q0 != 0 &&
+                        candidates[candidateIndex].q1 != 0) {
+                        cachedCandidate = CachedCandidate{
+                            candidates[candidateIndex],
+                            candidateIndex,
+                        };
+                    }
                     cursor = 0;
                     SyncCandidateProbe();
                     return CompleteSuccess(lastResult, position);
                 }
 
+                if (IsGlobalBackendFailure(lastResult)) {
+                    cursor = startIndex;
+                    probe.cursor = cursor;
+                    return CompleteCandidateFailure(lastResult);
+                }
                 const std::size_t next = candidateIndex + 1;
                 cursor = next < candidates.size() ? next : 0;
                 probe.cursor = cursor;
-                if (lastResult.status ==
-                    CoordinateExecutionStatus::BackendUnavailable) {
-                    return CompleteFailure(lastResult);
-                }
                 if (next < candidates.size() &&
                     TraversalTimeExpired(started, NowMilliseconds())) {
                     probe.traversalTimeLimitReached = true;
@@ -278,7 +338,7 @@ struct CoordinateExecutionDecoder::Impl {
                 count == kCoordinateExecutionAttemptsPerDecode &&
                 startIndex + count < candidates.size() &&
                 !probe.traversalTimeLimitReached;
-            return CompleteFailure(lastResult);
+            return CompleteCandidateFailure(lastResult);
         } catch (...) {
             probe.stage = CoordinateExecutionDecoderStage::Failed;
             probe.error = CoordinateExecutionDecoderError::ExecutionFailed;
@@ -330,6 +390,8 @@ private:
                 *binding.memory,
                 binding.moduleBase,
                 binding.moduleSize,
+                binding.codeBase,
+                binding.codeSize,
                 subject,
                 binding.executionContext,
                 request);
@@ -374,6 +436,26 @@ private:
             : CoordinateExecutionDecoderError::ExecutionFailed;
         SyncCandidateProbe();
         return false;
+    }
+
+    bool CompleteCandidateFailure(
+        CoordinateExecutionResult result) noexcept {
+        if (!IsGlobalBackendFailure(result)) {
+            result.status = CoordinateExecutionStatus::EvidenceFailure;
+        }
+        return CompleteFailure(result);
+    }
+
+    bool IsGlobalBackendFailure(
+        const CoordinateExecutionResult& result) const noexcept {
+        if (result.status != CoordinateExecutionStatus::BackendUnavailable) {
+            return false;
+        }
+        return probe.runtime.error == CoordinateExecutionRuntimeError::None ||
+            probe.runtime.error ==
+                CoordinateExecutionRuntimeError::EngineSetupFailed ||
+            probe.runtime.error ==
+                CoordinateExecutionRuntimeError::InvalidRequest;
     }
 
     std::uint64_t NowMilliseconds() const {
@@ -423,6 +505,8 @@ private:
         probe.processId = binding.processId;
         probe.moduleBase = binding.moduleBase;
         probe.moduleSize = binding.moduleSize;
+        probe.codeBase = binding.codeBase;
+        probe.codeSize = binding.codeSize;
         probe.contextGeneration = binding.executionContext.generation;
     }
 
@@ -471,15 +555,17 @@ bool CoordinateExecutionDecoder::Refresh(
     std::int32_t processId,
     std::uintptr_t moduleBase,
     std::size_t moduleSize,
+    std::uintptr_t codeBase,
+    std::size_t codeSize,
     const ProcessExecutionContext& executionContext) noexcept {
     CoordinateExecutionReadCallback read =
         [&memory](std::uint64_t address, void* output, std::size_t size) {
             game::CoordinateReadDiagnostic diagnostic{};
-            return memory.ReadCoordinateMemory(
-                static_cast<std::uintptr_t>(address),
-                output,
-                size,
-                diagnostic);
+            const auto remoteAddress =
+                static_cast<std::uintptr_t>(address);
+            return memory.Read(remoteAddress, output, size) ||
+                memory.ReadCoordinateMemory(
+                    remoteAddress, output, size, diagnostic);
         };
     return impl_ != nullptr && impl_->Refresh(
         &memory,
@@ -488,6 +574,8 @@ bool CoordinateExecutionDecoder::Refresh(
         processId,
         moduleBase,
         moduleSize,
+        codeBase,
+        codeSize,
         executionContext);
 }
 
@@ -496,6 +584,8 @@ bool CoordinateExecutionDecoder::Refresh(
     std::int32_t processId,
     std::uintptr_t moduleBase,
     std::size_t moduleSize,
+    std::uintptr_t codeBase,
+    std::size_t codeSize,
     const ProcessExecutionContext& executionContext) noexcept {
     return impl_ != nullptr && impl_->Refresh(
         nullptr,
@@ -504,6 +594,8 @@ bool CoordinateExecutionDecoder::Refresh(
         processId,
         moduleBase,
         moduleSize,
+        codeBase,
+        codeSize,
         executionContext);
 }
 

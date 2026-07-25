@@ -95,6 +95,10 @@ constexpr std::int32_t kMaximumActorCount = 10000;
 constexpr std::int32_t kMaximumWorldObjectCount = 65536;
 constexpr std::size_t kMaximumNameLength = 249;
 constexpr std::uint64_t kCoordinateTraceIntervalFrames = 30;
+constexpr std::array<std::string_view, 2> kGameModuleNames{
+    "libUE4.so",
+    "libUnreal.so",
+};
 
 std::uint8_t SelectedCoordinateExecutionMode(
     const ui::VisualSettings& visual) noexcept {
@@ -748,6 +752,50 @@ bool IsMappedNamedExecutableAddress(pid_t processId,
     return false;
 }
 
+bool FindCoordinateExecutionCodeRange(
+    pid_t processId,
+    std::uint64_t root,
+    std::uint64_t rawEntry,
+    native::CoordinateExecutionCodeRange& range) {
+    range = {};
+    if (processId <= 0) return false;
+
+    char path[64]{};
+    std::snprintf(path, sizeof(path), "/proc/%d/maps", processId);
+    std::ifstream input(path);
+    if (!input) return false;
+
+    std::vector<native::CoordinateExecutionCodeRange> ranges;
+    std::string line;
+    while (std::getline(input, line)) {
+        unsigned long long start = 0;
+        unsigned long long end = 0;
+        char permissions[5]{};
+        char name[512]{};
+        const int fields = std::sscanf(
+            line.c_str(),
+            "%llx-%llx %4s %*s %*s %*s %511[^\n]",
+            &start,
+            &end,
+            permissions,
+            name);
+        if (fields < 3) continue;
+
+        const bool anonymous = fields == 3 ||
+            std::string_view(name).substr(0, 5) == "[anon";
+        const std::uint64_t mappingSize = end > start ? end - start : 0;
+        if (!anonymous || permissions[2] != 'x' ||
+            permissions[3] != 'p' ||
+            mappingSize <
+                native::kCoordinateExecutionMinimumCodeRangeSize) {
+            continue;
+        }
+        ranges.push_back(native::CoordinateExecutionCodeRange{start, end});
+    }
+    return native::SelectCoordinateExecutionCodeRange(
+        ranges, root, rawEntry, &range);
+}
+
 bool IsValidPointer(std::uintptr_t address) {
     return address >= kMinimumRemoteAddress && address < kMaximumRemoteAddress &&
            (address & 0x3ULL) == 0;
@@ -1287,9 +1335,18 @@ public:
             return false;
         }
 
-        moduleBase_ = memory_->ModuleBase("libUE4.so");
-        if (!IsValidPointer(moduleBase_)) {
-            moduleBase_ = native::FindMappedModuleBase(processId_, "libUE4.so");
+        moduleBase_ = 0;
+        moduleName_.clear();
+        for (const std::string_view candidate : kGameModuleNames) {
+            moduleBase_ = memory_->ModuleBase(candidate);
+            if (!IsValidPointer(moduleBase_)) {
+                moduleBase_ = native::FindMappedModuleBase(
+                    processId_, candidate);
+            }
+            if (IsValidPointer(moduleBase_)) {
+                moduleName_.assign(candidate.data(), candidate.size());
+                break;
+            }
         }
         if (!IsValidPointer(moduleBase_)) {
             SetRuntimeFailure(
@@ -1313,7 +1370,7 @@ public:
         native::MappedModuleRange moduleRange{};
         coordinateExecutionModuleSize_ =
             native::FindMappedModuleRange(
-                processId_, "libUE4.so", moduleRange)
+                processId_, moduleName_, moduleRange)
             ? moduleRange.Size()
             : 0;
 
@@ -1339,7 +1396,7 @@ public:
         if (options.cloudLayout != nullptr) {
             const auto cloudLayout = native::BuildRuntimeLayoutOverride(
                 options.cloudLayout.get(), layout_.processName,
-                "libUE4.so", moduleBuildId_);
+                moduleName_, moduleBuildId_);
             if (!cloudLayout.has_value() ||
                 !memory_->ConfigureCoordinateReplay(
                     cloudLayout->coordinateTransport) ||
@@ -1376,7 +1433,7 @@ public:
             const auth::CoordinatePoolCloudLayoutDocument& decrypt2 =
                 *options.coordinateDecrypt2Layout;
             if (decrypt2.identity.packageName != layout_.processName ||
-                decrypt2.identity.moduleName != "libUE4.so" ||
+                decrypt2.identity.moduleName != moduleName_ ||
                 decrypt2.identity.buildId != moduleBuildId_ ||
                 !decrypt2.coordinatePool.IsValid() ||
                 !coordinateDecrypt2Runtime_.Configure(
@@ -1396,11 +1453,12 @@ public:
         const auto algorithmContextReadAt =
             std::chrono::steady_clock::now();
         algorithmExecutionContextReady_ =
-            memory_->ReadProcessExecutionContext(algorithmExecutionContext_);
+            memory_->ReadProcessExecutionContext(
+                moduleBase_, {}, algorithmExecutionContext_);
         algorithmExecutionContextReady_ =
             algorithmExecutionContextReady_ &&
             algorithmExecutionContext_.IsUsable();
-        if (algorithmExecutionContextReady_) {
+        if (algorithmExecutionContext_.HasThreadContext()) {
             algorithmExecutionContextRefreshPolicy_.MarkSucceeded(
                 CurrentAlgorithmExecutionContextRefreshKey(false),
                 algorithmContextReadAt);
@@ -1531,11 +1589,17 @@ public:
         coordinateExecutionMode_ = requestedCoordinateExecutionMode;
         if (coordinateExecutionModeChanged) {
             coordinateExecutionDecoder_.Reset();
+            coordinateExecutionDiscoveryInput_ = {};
+            coordinateExecutionCodeBase_ = 0;
+            coordinateExecutionCodeSize_ = 0;
+            coordinateExecutionScanProfile_ =
+                native::ResolveCoordinateExecutionScanProfile(
+                    options_.gameVersionIndex);
             if (coordinateExecutionMode_ != 0) {
                 static_cast<void>(coordinateExecutionDecoder_.Configure(
                     static_cast<native::CoordinateExecutionMode>(
                         coordinateExecutionMode_),
-                    static_cast<std::uint32_t>(options_.gameVersionIndex)));
+                    coordinateExecutionScanProfile_));
             }
         }
         if (coordinateRequestChanged ||
@@ -1628,10 +1692,9 @@ public:
             RefreshAlgorithmExecutionContext();
         }
         const bool infrastructureProbeFailed =
-            (coordinatePoolSelected || coordinateExecutionSelected) &&
             algorithmReplayAllowedThisFrame_ &&
-            (!algorithmExecutionContextReady_ ||
-             (coordinatePoolSelected && !coordinatePoolReady_) ||
+            ((coordinatePoolSelected &&
+              (!algorithmExecutionContextReady_ || !coordinatePoolReady_)) ||
              (coordinateExecutionSelected &&
               !coordinateExecutionDecoder_.Probe().refreshed));
         if (infrastructureProbeFailed) {
@@ -1642,7 +1705,7 @@ public:
         UpdateCoordinateProbe(probe);
         const native::PositionReadMode positionMode =
             native::ResolvePositionReadMode(
-                algorithmPositionRequested_);
+                algorithmPositionRequested_, coordinateExecutionSelected);
         if (positionMode != positionReadMode_) {
             characterPositions_.Clear();
             decodedPositionCache_.clear();
@@ -4692,7 +4755,7 @@ private:
         const std::uintptr_t firstVeneerAddress =
             moduleBase_ + profile->firstVeneerRva;
         if (!IsMappedNamedExecutableAddress(
-                processId_, firstVeneerAddress, "libUE4.so")) {
+                processId_, firstVeneerAddress, moduleName_)) {
             hardwareBreakpointFailure_.error =
                 CoordinateDecryptError::EntryMappingMissing;
             return false;
@@ -4872,8 +4935,7 @@ private:
         ++algorithmAttemptCount_;
         ++algorithmFrameAttemptCount_;
         native::CoordinateExecutionPosition decoded{};
-        const bool available = algorithmExecutionContextReady_ &&
-            memory_ != nullptr &&
+        const bool available = memory_ != nullptr &&
             coordinateExecutionDecoder_.Decode(subject, decoded);
         const native::CoordinateExecutionDecoderProbe executionProbe =
             coordinateExecutionDecoder_.Probe();
@@ -6212,13 +6274,15 @@ private:
         }
 #endif
         if (UsesCoordinateExecutionRuntime()) {
-            if (!record.resolverRecord ||
-                !IsValidPointer(record.root)) {
-                return false;
+            std::uintptr_t subject = record.ordinaryRoot;
+            if (!IsValidPointer(subject)) {
+                subject = ReadPointer(
+                    record.actor + native::kOrdinaryActorRootOffset);
             }
+            if (!IsValidPointer(subject)) return false;
             return ReadCharacterPosition(
                 record.actor,
-                record.root,
+                subject,
                 className,
                 native::PositionReadMode::Direct,
                 antiFlicker,
@@ -8826,14 +8890,94 @@ private:
         viewFovState_ = native::ProjectionFovStabilityState{};
     }
 
+    void RefreshCoordinateExecutionDiscovery() {
+        coordinateExecutionScanProfile_ =
+            native::ResolveCoordinateExecutionScanProfile(
+                options_.gameVersionIndex);
+        native::CoordinateExecutionDiscoveryInput input{};
+        const native::CoordinateExecutionReadCallback read =
+            [this](std::uint64_t address,
+                   void* output,
+                   std::size_t size) {
+                if (memory_ == nullptr ||
+                    address > std::numeric_limits<std::uintptr_t>::max()) {
+                    return false;
+                }
+                const auto remoteAddress =
+                    static_cast<std::uintptr_t>(address);
+                CoordinateReadDiagnostic diagnostic{};
+                return memory_->Read(remoteAddress, output, size) ||
+                    memory_->ReadCoordinateMemory(
+                        remoteAddress, output, size, diagnostic);
+            };
+        if (!native::ResolveCoordinateExecutionDiscoveryInput(
+                read,
+                moduleBase_,
+                coordinateExecutionScanProfile_,
+                &input)) {
+            coordinateExecutionDiscoveryInput_ = {};
+            coordinateExecutionCodeBase_ = 0;
+            coordinateExecutionCodeSize_ = 0;
+            return;
+        }
+
+        const bool discoveryChanged =
+            coordinateExecutionDiscoveryInput_.rawEntry != 0 &&
+            (coordinateExecutionDiscoveryInput_.scanAnchor !=
+                 input.scanAnchor ||
+             coordinateExecutionDiscoveryInput_.root != input.root ||
+             coordinateExecutionDiscoveryInput_.rawEntry != input.rawEntry);
+        const std::uint64_t cachedRangeEnd =
+            coordinateExecutionCodeSize_ <=
+                    std::numeric_limits<std::uint64_t>::max() -
+                        coordinateExecutionCodeBase_
+            ? coordinateExecutionCodeBase_ + coordinateExecutionCodeSize_
+            : 0;
+        const native::CoordinateExecutionCodeRange cachedRange{
+            coordinateExecutionCodeBase_, cachedRangeEnd};
+        const bool cachedRangeCompatible =
+            native::IsCoordinateExecutionCodeRangeCompatible(
+                cachedRange, input.root, input.rawEntry);
+
+        if (discoveryChanged || !cachedRangeCompatible) {
+            native::CoordinateExecutionCodeRange codeRange{};
+            if (!FindCoordinateExecutionCodeRange(
+                    processId_, input.root, input.rawEntry, codeRange)) {
+                coordinateExecutionDiscoveryInput_ = input;
+                coordinateExecutionCodeBase_ = 0;
+                coordinateExecutionCodeSize_ = 0;
+                return;
+            }
+            if (codeRange.begin >
+                    std::numeric_limits<std::uintptr_t>::max() ||
+                codeRange.Size() >
+                    std::numeric_limits<std::size_t>::max()) {
+                coordinateExecutionDiscoveryInput_ = input;
+                coordinateExecutionCodeBase_ = 0;
+                coordinateExecutionCodeSize_ = 0;
+                return;
+            }
+            coordinateExecutionCodeBase_ =
+                static_cast<std::uintptr_t>(codeRange.begin);
+            coordinateExecutionCodeSize_ =
+                static_cast<std::size_t>(codeRange.Size());
+        }
+        coordinateExecutionDiscoveryInput_ = input;
+        if (discoveryChanged) coordinateExecutionDecoder_.Reset();
+    }
+
     native::AlgorithmExecutionContextRefreshKey
     CurrentAlgorithmExecutionContextRefreshKey(
         bool coordinatePoolSelected) const noexcept {
         if (UsesCoordinateExecutionRuntime()) {
+            const native::ProcessExecutionCodeTarget codeTarget =
+                CurrentCoordinateExecutionCodeTarget();
             return native::AlgorithmExecutionContextRefreshKey{
                 static_cast<std::int32_t>(processId_),
                 moduleBase_,
-                moduleBase_,
+                codeTarget.IsValid()
+                    ? codeTarget.entry
+                    : coordinateExecutionCodeBase_,
                 static_cast<std::uint32_t>(coordinateExecutionMode_),
                 false,
             };
@@ -8848,6 +8992,36 @@ private:
             coordinatePoolSelected ? poolProbe.guestEntry : algorithmGuestPc_,
             coordinatePoolSelected ? 0U : algorithmEntryInstruction_,
             coordinatePoolSelected,
+        };
+    }
+
+    native::ProcessExecutionCodeTarget
+    CurrentCoordinateExecutionCodeTarget() const noexcept {
+        if (!UsesCoordinateExecutionRuntime()) return {};
+        if (coordinateExecutionCodeBase_ == 0 ||
+            coordinateExecutionCodeSize_ == 0 ||
+            coordinateExecutionCodeSize_ >
+                std::numeric_limits<std::uintptr_t>::max() -
+                    coordinateExecutionCodeBase_) {
+            return native::ProcessExecutionCodeTarget{0, 0, 0, true};
+        }
+        const native::CoordinateExecutionCodeRange range{
+            coordinateExecutionCodeBase_,
+            coordinateExecutionCodeBase_ + coordinateExecutionCodeSize_,
+        };
+        std::uint64_t entry = 0;
+        if (!native::ResolveCoordinateExecutionCodeAddress(
+                range,
+                coordinateExecutionDiscoveryInput_.rawEntry,
+                &entry) ||
+            entry > std::numeric_limits<std::uintptr_t>::max()) {
+            return native::ProcessExecutionCodeTarget{0, 0, 0, true};
+        }
+        return native::ProcessExecutionCodeTarget{
+            static_cast<std::uintptr_t>(entry),
+            coordinateExecutionCodeBase_,
+            coordinateExecutionCodeBase_ + coordinateExecutionCodeSize_,
+            true,
         };
     }
 
@@ -8868,17 +9042,24 @@ private:
             return;
         }
 
+        if (coordinateExecutionSelected) {
+            RefreshCoordinateExecutionDiscovery();
+        }
+
         const auto now = std::chrono::steady_clock::now();
         const native::AlgorithmExecutionContextRefreshKey refreshKey =
             CurrentAlgorithmExecutionContextRefreshKey(
                 coordinatePoolSelected);
         bool executionContextRefreshed = false;
-        if (!algorithmExecutionContextReady_ ||
+        if (!algorithmExecutionContext_.HasThreadContext() ||
             algorithmExecutionContextRefreshPolicy_.ShouldRefresh(
                 refreshKey, now)) {
             executionContextRefreshed = true;
             native::ProcessExecutionContext refreshed{};
-            if (!memory_->ReadProcessExecutionContext(refreshed)) {
+            if (!memory_->ReadProcessExecutionContext(
+                    moduleBase_,
+                    CurrentCoordinateExecutionCodeTarget(),
+                    refreshed)) {
                 if (algorithmExecutionContextReady_) {
                     algorithmPositionRuntime_.Invalidate();
                     algorithmReplayPagePolicy_.Invalidate();
@@ -8943,15 +9124,96 @@ private:
                 coordinatePoolContext_ = poolProbe.context;
                 coordinatePoolEntry_ = poolProbe.guestEntry;
             }
-        } else if (coordinateExecutionSelected &&
-                   algorithmExecutionContextReady_) {
+        } else if (coordinateExecutionSelected) {
             coordinatePoolReady_ = false;
-            static_cast<void>(coordinateExecutionDecoder_.Refresh(
+            const bool decoderRefreshed =
+                coordinateExecutionDecoder_.Refresh(
                 *memory_,
                 static_cast<std::int32_t>(processId_),
                 moduleBase_,
                 coordinateExecutionModuleSize_,
-                algorithmExecutionContext_));
+                coordinateExecutionCodeBase_,
+                coordinateExecutionCodeSize_,
+                algorithmExecutionContext_);
+            if (IsCoordinateTraceEnabled() &&
+                (executionContextRefreshed || !decoderRefreshed ||
+                 ShouldWriteCoordinateFrameTrace(coordinateTraceFrame_))) {
+                const native::CoordinateExecutionDecoderProbe executionProbe =
+                    coordinateExecutionDecoder_.Probe();
+                const native::ProcessExecutionContextDiagnostic diagnostic =
+                    memory_->ExecutionContextDiagnostic();
+                const native::CoordinateExecutionEvidence& evidence =
+                    executionProbe.runtime.evidence;
+                std::fprintf(
+                    stderr,
+                    "[coordinate-execution-trace] frame=%llu mode=%u "
+                    "profile=%u refreshed=%d scan_anchor=%llx root=%llx "
+                    "raw_entry=%llx module_base=%llx module_size=%llx "
+                    "code_base=%llx code_size=%llx context_ready=%d "
+                    "context_source=%u context_error=%u context_sys=%d "
+                    "tid=%d generation=%llu tpidr=%llx key=%d oracle=%d "
+                    "candidate_count=%llu cursor=%llu known=%d "
+                    "decoder_stage=%u decoder_error=%u decoder_status=%u "
+                    "runtime_stage=%u runtime_error=%u runtime_status=%u "
+                    "runtime_fault=%llx runtime_uc=%d evidence_stop=%d "
+                    "evidence_return=%d evidence_hook=%d evidence_magic=%d "
+                    "evidence_capture=%d capture_count=%llu "
+                    "captured_pc=%llx captured_slot=%llx "
+                    "captured_object=%llx final_pc=%llx write_size=%llu\n",
+                    static_cast<unsigned long long>(coordinateTraceFrame_),
+                    static_cast<unsigned int>(coordinateExecutionMode_),
+                    coordinateExecutionScanProfile_,
+                    decoderRefreshed ? 1 : 0,
+                    static_cast<unsigned long long>(
+                        coordinateExecutionDiscoveryInput_.scanAnchor),
+                    static_cast<unsigned long long>(
+                        coordinateExecutionDiscoveryInput_.root),
+                    static_cast<unsigned long long>(
+                        coordinateExecutionDiscoveryInput_.rawEntry),
+                    static_cast<unsigned long long>(moduleBase_),
+                    static_cast<unsigned long long>(
+                        coordinateExecutionModuleSize_),
+                    static_cast<unsigned long long>(
+                        coordinateExecutionCodeBase_),
+                    static_cast<unsigned long long>(
+                        coordinateExecutionCodeSize_),
+                    algorithmExecutionContextReady_ ? 1 : 0,
+                    static_cast<unsigned int>(diagnostic.source),
+                    static_cast<unsigned int>(diagnostic.error),
+                    diagnostic.systemError,
+                    algorithmExecutionContext_.threadId,
+                    static_cast<unsigned long long>(
+                        algorithmExecutionContext_.generation),
+                    static_cast<unsigned long long>(
+                        algorithmExecutionContext_.tpidrEl0),
+                    algorithmExecutionContext_.HasPacgaKey() ? 1 : 0,
+                    algorithmExecutionContext_.pacgaOracle.available ? 1 : 0,
+                    static_cast<unsigned long long>(
+                        executionProbe.candidateCount),
+                    static_cast<unsigned long long>(executionProbe.cursor),
+                    executionProbe.knownCandidate ? 1 : 0,
+                    static_cast<unsigned int>(executionProbe.stage),
+                    static_cast<unsigned int>(executionProbe.error),
+                    static_cast<unsigned int>(executionProbe.status),
+                    static_cast<unsigned int>(executionProbe.runtime.stage),
+                    static_cast<unsigned int>(executionProbe.runtime.error),
+                    static_cast<unsigned int>(executionProbe.runtime.status),
+                    static_cast<unsigned long long>(
+                        executionProbe.runtime.faultAddress),
+                    executionProbe.runtime.unicornError,
+                    evidence.hitStopPc ? 1 : 0,
+                    evidence.hitReturnStub ? 1 : 0,
+                    evidence.hitHookPc ? 1 : 0,
+                    evidence.returnStubMagicVerifiedBeforeRun ? 1 : 0,
+                    evidence.captureValid ? 1 : 0,
+                    static_cast<unsigned long long>(evidence.captureCount),
+                    static_cast<unsigned long long>(evidence.capturedPc),
+                    static_cast<unsigned long long>(evidence.capturedSlot),
+                    static_cast<unsigned long long>(evidence.capturedObject),
+                    static_cast<unsigned long long>(evidence.finalPc),
+                    static_cast<unsigned long long>(
+                        evidence.capturedWriteSize));
+            }
         } else {
             coordinatePoolReady_ = false;
         }
@@ -9551,15 +9813,16 @@ private:
                 ? CoordinatePoolPointerDiagnostic{}
                 : poolProbe.poolPointer;
             const std::uintptr_t executionMappingEnd =
-                coordinateExecutionModuleSize_ <=
+                coordinateExecutionCodeSize_ <=
                         std::numeric_limits<std::uintptr_t>::max() -
-                            moduleBase_
-                ? moduleBase_ + coordinateExecutionModuleSize_
+                            coordinateExecutionCodeBase_
+                ? coordinateExecutionCodeBase_ +
+                      coordinateExecutionCodeSize_
                 : 0;
             probe.coordinateEntry = coordinateExecutionSelected
                 ? CoordinateEntryDiagnostic{
                       executionProbe.runtime.plan.entryPc,
-                      moduleBase_,
+                      coordinateExecutionCodeBase_,
                       executionMappingEnd,
                       executionProbe.runtime.faultAddress,
                       0,
@@ -9692,6 +9955,10 @@ private:
         algorithmPositionRequested_ = false;
         coordinateDecrypt2Index_ = 0;
         coordinateExecutionMode_ = 0;
+        coordinateExecutionScanProfile_ = 0;
+        coordinateExecutionDiscoveryInput_ = {};
+        coordinateExecutionCodeBase_ = 0;
+        coordinateExecutionCodeSize_ = 0;
         hardwareBreakpointRequested_ = false;
 #if 0
         hardwareBreakpointRetryAfter_ = {};
@@ -9735,6 +10002,7 @@ private:
         processId_ = -1;
         moduleBase_ = 0;
         coordinateExecutionModuleSize_ = 0;
+        moduleName_.clear();
         moduleBuildId_.clear();
         layout_ = VersionLayout{};
         options_ = RuntimeOptions{};
@@ -9790,6 +10058,9 @@ private:
     bool algorithmPositionRequested_ = false;
     std::uint32_t coordinateDecrypt2Index_ = 0;
     std::uint8_t coordinateExecutionMode_ = 0;
+    std::uint32_t coordinateExecutionScanProfile_ = 0;
+    native::CoordinateExecutionDiscoveryInput
+        coordinateExecutionDiscoveryInput_{};
     bool hardwareBreakpointRequested_ = false;
 #if 0
     std::chrono::steady_clock::time_point
@@ -9849,6 +10120,9 @@ private:
     pid_t processId_ = -1;
     std::uintptr_t moduleBase_ = 0;
     std::size_t coordinateExecutionModuleSize_ = 0;
+    std::string moduleName_;
+    std::uintptr_t coordinateExecutionCodeBase_ = 0;
+    std::size_t coordinateExecutionCodeSize_ = 0;
     std::uintptr_t world_ = 0;
     CameraView lastView_{};
     std::uintptr_t lastViewWorld_ = 0;

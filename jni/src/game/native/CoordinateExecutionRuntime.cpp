@@ -126,6 +126,8 @@ struct CoordinateExecutionRuntime::Impl {
         MemoryTransport& memoryValue,
         std::uintptr_t moduleBaseValue,
         std::size_t moduleSizeValue,
+        std::uintptr_t codeBaseValue,
+        std::size_t codeSizeValue,
         std::uintptr_t subjectValue,
         const ProcessExecutionContext& executionContextValue,
         const CoordinateExecutionRequest& requestValue) noexcept {
@@ -151,7 +153,8 @@ struct CoordinateExecutionRuntime::Impl {
                     CoordinateExecutionStatus::ReadOrCoordinateFailure,
                     CoordinateExecutionRuntimeError::InvalidRequest);
             }
-            if (moduleBaseValue == 0 || moduleSizeValue == 0) {
+            if (moduleBaseValue == 0 || moduleSizeValue == 0 ||
+                codeBaseValue == 0 || codeSizeValue == 0) {
                 return Fail(
                     CoordinateExecutionStatus::BackendUnavailable,
                     CoordinateExecutionRuntimeError::InvalidRequest);
@@ -161,6 +164,8 @@ struct CoordinateExecutionRuntime::Impl {
                 BuildCoordinateExecutionPlan(
                     moduleBaseValue,
                     moduleSizeValue,
+                    codeBaseValue,
+                    codeSizeValue,
                     subjectValue,
                     requestValue);
             probe.plan = executionPlan;
@@ -173,8 +178,8 @@ struct CoordinateExecutionRuntime::Impl {
             }
 
             memory = &memoryValue;
-            moduleBase = moduleBaseValue;
-            moduleSize = moduleSizeValue;
+            codeBase = codeBaseValue;
+            codeSize = codeSizeValue;
             subject = NormalizeCoordinateExecutionPointer(subjectValue);
             executionContext = executionContextValue;
             request = requestValue;
@@ -389,8 +394,7 @@ private:
         std::uint64_t magic = 0;
         game::CoordinateReadDiagnostic diagnostic{};
         if (!CoordinateExecutionAdd(plan.returnStub, 4, magicAddress) ||
-            memory == nullptr ||
-            !memory->ReadCoordinateMemory(
+            !ReadRemoteMemory(
                 magicAddress, &magic, sizeof(magic), diagnostic)) {
             probe.read = diagnostic;
             return false;
@@ -572,7 +576,7 @@ private:
 
         std::array<std::uint8_t, kPageSize> bytes{};
         game::CoordinateReadDiagnostic diagnostic{};
-        if (!memory->ReadCoordinateMemory(
+        if (!ReadRemoteMemory(
                 remotePage, bytes.data(), bytes.size(), diagnostic)) {
             probe.read = diagnostic;
             probe.error = CoordinateExecutionRuntimeError::RemotePageReadFailed;
@@ -597,6 +601,32 @@ private:
         pages.emplace(guestPage, std::move(page));
         mappedPages.insert(guestPage);
         return true;
+    }
+
+    bool ReadRemoteMemory(
+        std::uint64_t address,
+        void* destination,
+        std::size_t size,
+        game::CoordinateReadDiagnostic& diagnostic) {
+        diagnostic = {};
+        diagnostic.address = address;
+        diagnostic.size = size;
+        if (memory == nullptr) {
+            diagnostic.failure =
+                game::CoordinateReadFailure::TransportUnavailable;
+            return false;
+        }
+        if (address > std::numeric_limits<std::uintptr_t>::max()) {
+            diagnostic.failure = game::CoordinateReadFailure::InvalidRange;
+            return false;
+        }
+        return memory->Read(
+                   static_cast<std::uintptr_t>(address), destination, size) ||
+            memory->ReadCoordinateMemory(
+                   static_cast<std::uintptr_t>(address),
+                   destination,
+                   size,
+                   diagnostic);
     }
 
     bool InstallInstructionHooks(
@@ -833,7 +863,7 @@ private:
             NormalizeCoordinateExecutionPointer(evidence.capturedSlot) !=
                 slot ||
             !ContainsCoordinateExecutionCodeAddress(
-                moduleBase, moduleSize, evidence.capturedPc)) {
+                codeBase, codeSize, evidence.capturedPc)) {
             probe.error = CoordinateExecutionRuntimeError::ResultInvalid;
             return Failure(CoordinateExecutionStatus::EvidenceFailure);
         }
@@ -905,8 +935,8 @@ private:
     uc_hook memoryWriteHook = 0;
     uc_hook mrsHook = 0;
     MemoryTransport* memory = nullptr;
-    std::uint64_t moduleBase = 0;
-    std::size_t moduleSize = 0;
+    std::uint64_t codeBase = 0;
+    std::size_t codeSize = 0;
     std::uint64_t subject = 0;
     ProcessExecutionContext executionContext{};
     CoordinateExecutionRequest request{};
@@ -932,6 +962,8 @@ CoordinateExecutionResult CoordinateExecutionRuntime::Execute(
     MemoryTransport& memory,
     std::uintptr_t moduleBase,
     std::size_t moduleSize,
+    std::uintptr_t codeBase,
+    std::size_t codeSize,
     std::uintptr_t subject,
     const ProcessExecutionContext& executionContext,
     const CoordinateExecutionRequest& request) noexcept {
@@ -939,6 +971,8 @@ CoordinateExecutionResult CoordinateExecutionRuntime::Execute(
         memory,
         moduleBase,
         moduleSize,
+        codeBase,
+        codeSize,
         subject,
         executionContext,
         request);

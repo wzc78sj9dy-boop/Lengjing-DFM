@@ -46,6 +46,8 @@ struct CoordinateExecutionDecoderProbe {
     std::int32_t processId = 0;
     std::uintptr_t moduleBase = 0;
     std::size_t moduleSize = 0;
+    std::uintptr_t codeBase = 0;
+    std::size_t codeSize = 0;
     std::uint64_t contextGeneration = 0;
     std::size_t candidateCount = 0;
     std::size_t cursor = 0;
@@ -99,12 +101,16 @@ public:
                  std::int32_t processId,
                  std::uintptr_t moduleBase,
                  std::size_t moduleSize,
+                 std::uintptr_t codeBase,
+                 std::size_t codeSize,
                  const ProcessExecutionContext& executionContext) noexcept;
 
     bool Refresh(const CoordinateExecutionReadCallback& read,
                  std::int32_t processId,
                  std::uintptr_t moduleBase,
                  std::size_t moduleSize,
+                 std::uintptr_t codeBase,
+                 std::size_t codeSize,
                  const ProcessExecutionContext& executionContext) noexcept;
 
     bool Decode(std::uintptr_t subject,

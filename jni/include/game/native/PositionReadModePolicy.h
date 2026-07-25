@@ -28,13 +28,20 @@ constexpr PositionReadMode ResolvePositionReadMode(
         : PositionReadMode::Standard;
 }
 
+constexpr PositionReadMode ResolvePositionReadMode(
+    bool coordinateDecrypt,
+    bool coordinateExecution) noexcept {
+    return ResolvePositionReadMode(
+        coordinateDecrypt || coordinateExecution);
+}
+
 constexpr bool ShouldRequireDecodedActorRecords(
     PositionReadMode positionMode,
     bool hardwareBreakpointDecrypt,
     bool trajectoryTracking,
     bool coordinateExecution = false) noexcept {
-    return positionMode == PositionReadMode::Direct ||
-        hardwareBreakpointDecrypt || trajectoryTracking || coordinateExecution;
+    return hardwareBreakpointDecrypt || trajectoryTracking ||
+        (positionMode == PositionReadMode::Direct && !coordinateExecution);
 }
 
 constexpr float ResolveDecodedCharacterZ(float decodedZ) noexcept {

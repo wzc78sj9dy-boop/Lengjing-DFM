@@ -600,6 +600,8 @@ struct MemoryTransport::Impl {
     }
 
     bool ResolvePtraceOracleInstructionUnlocked(
+        std::uintptr_t moduleBase,
+        const ProcessExecutionCodeTarget& codeTarget,
         PacgaOracleInstruction& instruction) {
         instruction = {};
         ptraceOracleFailure =
@@ -607,14 +609,25 @@ struct MemoryTransport::Impl {
         ptraceOracleSystemError = 0;
         ptraceOracleOperandsResolved = false;
 
-        const std::uintptr_t moduleBase =
-            FindMappedModuleBase(processId, "libUE4.so");
-        if (!IsRemoteRangeValid(moduleBase, 4) ||
-            coordinateReplayLayout.rootRva >
-                std::numeric_limits<std::uintptr_t>::max() - moduleBase ||
-            coordinateReplayLayout.bridgeOffset >
-                std::numeric_limits<std::uintptr_t>::max() - moduleBase -
-                    coordinateReplayLayout.rootRva) {
+        const bool directTarget = codeTarget.IsValid();
+        if (codeTarget.directOnly && !directTarget) {
+            ptraceOracleInstruction = {};
+            ptraceOracleCacheKey = {};
+            nextPtraceOracleResolve = {};
+            ptraceOracleFailure =
+                CoordinateDecryptError::EntryMappingMissing;
+            ptraceOracleSystemError = -ENOENT;
+            return false;
+        }
+        if ((!directTarget &&
+             (!IsRemoteRangeValid(moduleBase, 4) ||
+              coordinateReplayLayout.rootRva >
+                  std::numeric_limits<std::uintptr_t>::max() - moduleBase ||
+              coordinateReplayLayout.bridgeOffset >
+                  std::numeric_limits<std::uintptr_t>::max() - moduleBase -
+                      coordinateReplayLayout.rootRva)) ||
+            (directTarget &&
+             !IsRemoteRangeValid(codeTarget.entry, 4))) {
             ptraceOracleInstruction = {};
             ptraceOracleCacheKey = {};
             nextPtraceOracleResolve = {};
@@ -641,6 +654,11 @@ struct MemoryTransport::Impl {
 
         const auto readRootPointers = [&](std::uintptr_t& bridge,
                                           std::uintptr_t& entry) {
+            if (directTarget) {
+                bridge = codeTarget.mappingStart;
+                entry = codeTarget.entry;
+                return true;
+            }
             bridge = 0;
             entry = 0;
             std::uint64_t rawBridge = 0;
@@ -710,11 +728,14 @@ struct MemoryTransport::Impl {
 
                 std::uintptr_t mappingStart = 0;
                 std::uintptr_t mappingEnd = 0;
-                if (!FindExecutableMapping(
-                        processId,
-                        entryBefore,
-                        mappingStart,
-                        mappingEnd)) {
+                if (directTarget) {
+                    mappingStart = codeTarget.mappingStart;
+                    mappingEnd = codeTarget.mappingEnd;
+                } else if (!FindExecutableMapping(
+                               processId,
+                               entryBefore,
+                               mappingStart,
+                               mappingEnd)) {
                     ptraceOracleFailure =
                         CoordinateDecryptError::EntryMappingMissing;
                     ptraceOracleSystemError = -ENOENT;
@@ -844,10 +865,12 @@ struct MemoryTransport::Impl {
                 return false;
             }
 
-            PacgaOperands operands{
-                coordinateReplayLayout.pacgaData,
-                coordinateReplayLayout.pacgaModifier,
-            };
+            PacgaOperands operands = directTarget
+                ? PacgaOperands{}
+                : PacgaOperands{
+                      coordinateReplayLayout.pacgaData,
+                      coordinateReplayLayout.pacgaModifier,
+                  };
             const std::uintptr_t operandWindowStart = std::max(
                 root.mappingStart,
                 found >= kOracleImmediateWindowInstructions *
@@ -885,6 +908,13 @@ struct MemoryTransport::Impl {
                     operandInstructionCount - 1U,
                     resolvedOperands);
             if (operandsResolved) operands = resolvedOperands;
+            if (directTarget && !operandsResolved) {
+                invalidateCache();
+                ptraceOracleFailure =
+                    CoordinateDecryptError::PtraceOracleResolveFailed;
+                ptraceOracleSystemError = -ENODATA;
+                return false;
+            }
 
             PtraceOracleRootSnapshot verifiedRootBefore{};
             PtraceOracleRootSnapshot verifiedRootAfter{};
@@ -2070,7 +2100,10 @@ struct MemoryTransport::Impl {
         return false;
     }
 
-    bool ReadProcessExecutionContext(ProcessExecutionContext& context) {
+    bool ReadProcessExecutionContext(
+        std::uintptr_t moduleBase,
+        const ProcessExecutionCodeTarget& codeTarget,
+        ProcessExecutionContext& context) {
         std::lock_guard<std::mutex> lock(ioMutex);
         context = {};
         executionContextSource = ProcessExecutionContextSource::None;
@@ -2085,6 +2118,8 @@ struct MemoryTransport::Impl {
         CoordinateDecryptError deviceError =
             CoordinateDecryptError::ContextDeviceOpenFailed;
         int deviceStatus = lastThreadContextOpenStatus;
+        ProcessExecutionContext devicePartial{};
+        bool hasDevicePartial = false;
 
         if (OpenThreadContextUnlocked() &&
             threadContextProvider != nullptr) {
@@ -2100,7 +2135,7 @@ struct MemoryTransport::Impl {
                     refresh = threadContextProvider->Refresh();
                 }
             }
-            if (refresh.HasContext()) {
+            if (refresh.HasThreadContext()) {
                 const ThreadExecutionContextSnapshot& snapshot =
                     refresh.snapshot;
                 const ProcessExecutionContext candidate{
@@ -2119,7 +2154,11 @@ struct MemoryTransport::Impl {
                         ProcessExecutionContextSource::Device;
                     return true;
                 }
-                deviceStatus = -ENODATA;
+                devicePartial = candidate;
+                hasDevicePartial = true;
+                deviceStatus = refresh.pacgaStatus != 0
+                    ? refresh.pacgaStatus
+                    : -ENODATA;
             } else {
                 deviceStatus = refresh.status != 0
                     ? refresh.status
@@ -2151,14 +2190,26 @@ struct MemoryTransport::Impl {
             executionContextDiagnostic.error = error;
             executionContextDiagnostic.systemError = status;
         };
+        const auto useDevicePartial = [this,
+                                       &context,
+                                       &devicePartial,
+                                       hasDevicePartial]() {
+            if (!hasDevicePartial) return false;
+            context = devicePartial;
+            executionContextSource = ProcessExecutionContextSource::Device;
+            executionContextDiagnostic.source =
+                ProcessExecutionContextSource::Device;
+            return true;
+        };
 
         PacgaOracleInstruction instruction{};
-        if (!ResolvePtraceOracleInstructionUnlocked(instruction)) {
+        if (!ResolvePtraceOracleInstructionUnlocked(
+                moduleBase, codeTarget, instruction)) {
             executionContextDiagnostic.pacgaOperandsResolved =
                 ptraceOracleOperandsResolved;
             setPtraceFailure(
                 ptraceOracleFailure, ptraceOracleSystemError);
-            return false;
+            return useDevicePartial();
         }
         executionContextDiagnostic.pacgaOperandsResolved =
             ptraceOracleOperandsResolved;
@@ -2181,7 +2232,7 @@ struct MemoryTransport::Impl {
         if (!refresh.HasContext()) {
             const int status = refresh.status != 0 ? refresh.status : -EIO;
             setPtraceFailure(ContextStatusError(status, true), status);
-            return false;
+            return useDevicePartial();
         }
         const PtraceExecutionContextSnapshot& snapshot = refresh.snapshot;
         ProcessExecutionContext candidate{};
@@ -2198,7 +2249,7 @@ struct MemoryTransport::Impl {
         if (!candidate.IsUsable()) {
             setPtraceFailure(
                 CoordinateDecryptError::ContextDataInvalid, -ENODATA);
-            return false;
+            return useDevicePartial();
         }
         context = candidate;
         executionContextSource =
@@ -2460,9 +2511,13 @@ bool MemoryTransport::ResolveCoordinateReplayEntry(
 }
 
 bool MemoryTransport::ReadProcessExecutionContext(
+    std::uintptr_t moduleBase,
+    const ProcessExecutionCodeTarget& codeTarget,
     ProcessExecutionContext& context) {
     context = {};
-    return impl_ != nullptr && impl_->ReadProcessExecutionContext(context);
+    return impl_ != nullptr &&
+        impl_->ReadProcessExecutionContext(
+            moduleBase, codeTarget, context);
 }
 
 ProcessExecutionContextDiagnostic

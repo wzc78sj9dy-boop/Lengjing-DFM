@@ -31,8 +31,12 @@ struct ThreadContextReaderCapabilities {
     bool tpidrEl0 = false;
     bool pacKeys = false;
 
+    constexpr bool CanReadThreadContext() const noexcept {
+        return threadIdSubject && tpidrEl0;
+    }
+
     constexpr bool IsUsable() const noexcept {
-        return threadIdSubject && tpidrEl0 && pacKeys;
+        return CanReadThreadContext() && pacKeys;
     }
 };
 
@@ -72,9 +76,16 @@ struct ThreadExecutionContextSnapshot {
     ExecutionPacKey128 apga{};
     std::uint64_t generation = 0;
 
+    constexpr bool HasThreadContext() const noexcept {
+        return processId > 0 && threadId > 0 && tpidrEl0 != 0;
+    }
+
+    constexpr bool HasPacgaKey() const noexcept {
+        return apga.low != 0 || apga.high != 0;
+    }
+
     constexpr bool IsUsable() const noexcept {
-        return processId > 0 && threadId > 0 && tpidrEl0 != 0 &&
-            (apga.low != 0 || apga.high != 0);
+        return HasThreadContext() && HasPacgaKey();
     }
 };
 
@@ -92,6 +103,11 @@ struct ThreadExecutionContextRefresh {
         ThreadExecutionContextEvent::Missing;
     int status = 0;
     ThreadExecutionContextSnapshot snapshot{};
+    int pacgaStatus = 0;
+
+    constexpr bool HasThreadContext() const noexcept {
+        return status == 0 && snapshot.HasThreadContext();
+    }
 
     constexpr bool HasContext() const noexcept {
         return status == 0 && snapshot.IsUsable();

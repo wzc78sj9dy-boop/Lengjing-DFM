@@ -92,8 +92,12 @@ struct ProcessExecutionContext {
         return pacgaLow != 0 || pacgaHigh != 0;
     }
 
+    constexpr bool HasThreadContext() const noexcept {
+        return threadId > 0 && tpidrEl0 != 0;
+    }
+
     constexpr bool IsUsable() const noexcept {
-        return threadId > 0 && tpidrEl0 != 0 &&
+        return HasThreadContext() &&
             (HasPacgaKey() || pacgaOracle.available);
     }
 };
@@ -113,6 +117,18 @@ struct ProcessExecutionContextDiagnostic {
     int ptraceStatus = 0;
     std::size_t deviceRequestCount = 0;
     bool pacgaOperandsResolved = false;
+};
+
+struct ProcessExecutionCodeTarget {
+    std::uintptr_t entry = 0;
+    std::uintptr_t mappingStart = 0;
+    std::uintptr_t mappingEnd = 0;
+    bool directOnly = false;
+
+    constexpr bool IsValid() const noexcept {
+        return mappingStart != 0 && mappingEnd > mappingStart &&
+            entry >= mappingStart && entry < mappingEnd && (entry & 3U) == 0;
+    }
 };
 
 struct MemoryReadRequest {
@@ -212,7 +228,10 @@ public:
         std::uintptr_t moduleBase,
         CoordinateReplayEntrySnapshot& snapshot,
         CoordinateReplayEntryDiagnostic& diagnostic);
-    bool ReadProcessExecutionContext(ProcessExecutionContext& context);
+    bool ReadProcessExecutionContext(
+        std::uintptr_t moduleBase,
+        const ProcessExecutionCodeTarget& codeTarget,
+        ProcessExecutionContext& context);
     ProcessExecutionContextDiagnostic ExecutionContextDiagnostic()
         const noexcept;
     bool RejectProcessExecutionContext() noexcept;

@@ -180,11 +180,16 @@ ThreadExecutionContextRefresh ThreadExecutionContextProvider::Refresh() {
     if (processId_ <= 0 || threadName_.empty()) {
         return InvalidateLocked(-EINVAL);
     }
-    if (!reader_.Capabilities().IsUsable()) {
+    const ThreadContextReaderCapabilities capabilities =
+        reader_.Capabilities();
+    if (!capabilities.CanReadThreadContext()) {
         return InvalidateLocked(-ENOTSUP);
     }
 
     ThreadExecutionContextSnapshot candidate{};
+    ThreadExecutionContextSnapshot partialCandidate{};
+    int candidatePacgaStatus = 0;
+    int partialPacgaStatus = -ENODATA;
     int readStatus = -ENOENT;
     bool found = false;
     for (int scanAttempt = 0; scanAttempt < 2 && !found; ++scanAttempt) {
@@ -216,7 +221,7 @@ ThreadExecutionContextRefresh ThreadExecutionContextProvider::Refresh() {
             rejected_.clear();
         }
 
-        if (current_.IsUsable()) {
+        if (current_.HasThreadContext()) {
             const auto preferred = std::find_if(
                 identities.begin(),
                 identities.end(),
@@ -238,15 +243,9 @@ ThreadExecutionContextRefresh ThreadExecutionContextProvider::Refresh() {
         for (const TaskThreadIdentity& identity : identities) {
             if (isRejected(identity)) continue;
             std::uint64_t tpidrEl0 = 0;
-            ThreadPacKeys keys{};
             int candidateStatus = reader_.ReadTpidrEl0(
                 identity.threadId,
                 tpidrEl0);
-            if (candidateStatus == 0) {
-                candidateStatus = reader_.ReadPacKeys(
-                    identity.threadId,
-                    keys);
-            }
             if (candidateStatus != 0) {
                 readStatus = candidateStatus;
                 retryableFailure = retryableFailure ||
@@ -254,31 +253,58 @@ ThreadExecutionContextRefresh ThreadExecutionContextProvider::Refresh() {
                 continue;
             }
 
-            const ThreadExecutionContextSnapshot resolved{
+            ThreadExecutionContextSnapshot resolved{
                 processId_,
                 identity.threadId,
                 identity.startTimeTicks,
                 tpidrEl0,
-                keys.apga,
+                {},
                 0,
             };
-            if (!resolved.IsUsable()) {
+            if (!resolved.HasThreadContext()) {
                 readStatus = -ENODATA;
                 continue;
             }
+
+            ThreadPacKeys keys{};
+            int pacgaStatus = -ENOTSUP;
+            if (capabilities.pacKeys) {
+                pacgaStatus = reader_.ReadPacKeys(
+                    identity.threadId, keys);
+                if (pacgaStatus == 0) resolved.apga = keys.apga;
+            }
+            if (!resolved.IsUsable()) {
+                const int partialStatus = pacgaStatus != 0
+                    ? pacgaStatus
+                    : -ENODATA;
+                if (!partialCandidate.HasThreadContext()) {
+                    partialCandidate = resolved;
+                    partialPacgaStatus = partialStatus;
+                }
+                readStatus = partialStatus;
+                retryableFailure = retryableFailure ||
+                    IsRetryableContextError(partialStatus);
+                continue;
+            }
             candidate = resolved;
+            candidatePacgaStatus = 0;
             found = true;
             break;
         }
-        if (!found && !(scanAttempt == 0 && retryableFailure)) {
-            return InvalidateLocked(readStatus);
+        if (!found && scanAttempt == 0 && retryableFailure) continue;
+        if (!found && partialCandidate.HasThreadContext()) {
+            candidate = partialCandidate;
+            candidatePacgaStatus = partialPacgaStatus;
+            found = true;
+            break;
         }
+        if (!found) return InvalidateLocked(readStatus);
     }
     if (!found) return InvalidateLocked(readStatus);
 
     ThreadExecutionContextEvent event =
         ThreadExecutionContextEvent::Acquired;
-    if (current_.IsUsable()) {
+    if (current_.HasThreadContext()) {
         if (current_.threadId != candidate.threadId ||
             current_.threadStartTimeTicks !=
                 candidate.threadStartTimeTicks) {
@@ -299,19 +325,19 @@ ThreadExecutionContextRefresh ThreadExecutionContextProvider::Refresh() {
         candidate.generation = generation_;
     }
     current_ = candidate;
-    return {event, 0, current_};
+    return {event, 0, current_, candidatePacgaStatus};
 }
 
 bool ThreadExecutionContextProvider::Current(
     ThreadExecutionContextSnapshot& snapshot) const {
     std::lock_guard<std::mutex> lock(mutex_);
     snapshot = current_;
-    return snapshot.IsUsable();
+    return snapshot.HasThreadContext();
 }
 
 bool ThreadExecutionContextProvider::RejectCurrent() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!current_.IsUsable()) return false;
+    if (!current_.HasThreadContext()) return false;
     try {
         rejected_.push_back({
             current_.threadId,
@@ -333,7 +359,7 @@ void ThreadExecutionContextProvider::Reset() noexcept {
 
 ThreadExecutionContextRefresh
 ThreadExecutionContextProvider::InvalidateLocked(int status) {
-    const bool hadContext = current_.IsUsable();
+    const bool hadContext = current_.HasThreadContext();
     current_ = {};
     return {
         hadContext ? ThreadExecutionContextEvent::Lost

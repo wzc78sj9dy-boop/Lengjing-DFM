@@ -51,6 +51,12 @@ void RunPositionResolverTests() {
 
     REQUIRE(ResolvePositionReadMode(false) == PositionReadMode::Standard);
     REQUIRE(ResolvePositionReadMode(true) == PositionReadMode::Direct);
+    REQUIRE(ResolvePositionReadMode(false, false) ==
+            PositionReadMode::Standard);
+    REQUIRE(ResolvePositionReadMode(true, false) ==
+            PositionReadMode::Direct);
+    REQUIRE(ResolvePositionReadMode(false, true) ==
+            PositionReadMode::Direct);
     REQUIRE(!ShouldRequireDecodedActorRecords(
         PositionReadMode::Standard, false, false));
     REQUIRE(ShouldRequireDecodedActorRecords(
@@ -59,8 +65,12 @@ void RunPositionResolverTests() {
         PositionReadMode::Standard, true, false));
     REQUIRE(ShouldRequireDecodedActorRecords(
         PositionReadMode::Standard, false, true));
-    REQUIRE(ShouldRequireDecodedActorRecords(
+    REQUIRE(!ShouldRequireDecodedActorRecords(
+        PositionReadMode::Direct, false, false, true));
+    REQUIRE(!ShouldRequireDecodedActorRecords(
         PositionReadMode::Standard, false, false, true));
+    REQUIRE(ShouldRequireDecodedActorRecords(
+        PositionReadMode::Standard, false, true, true));
     REQUIRE(ResolveDecodedCharacterZ(1000.0f) == 910.0f);
     REQUIRE(ResolveDecodedCharacterZ(90.0f) == 0.0f);
     REQUIRE(ResolveDecodedCharacterZ(-10.0f) == -100.0f);
