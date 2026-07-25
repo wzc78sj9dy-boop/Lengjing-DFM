@@ -9350,7 +9350,7 @@ private:
     }
 
     bool UsesCoordinateDecrypt2Runtime() const noexcept {
-        return hardwareBreakpointRequested_;
+        return hardwareBreakpointRequested_ || algorithmPositionRequested_;
     }
 
     bool UsesAnyCoordinatePoolRuntime() const noexcept {
