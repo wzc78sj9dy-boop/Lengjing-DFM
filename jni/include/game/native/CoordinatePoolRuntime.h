@@ -183,7 +183,14 @@ enum class CoordinatePoolRemotePlanState : std::uint8_t {
     Stale,
 };
 
-constexpr bool ShouldRequestCoordinatePoolRemotePlan(
+constexpr bool ShouldRetryCoordinatePoolCompatibilityAnalysis(
+    CoordinatePoolRuntimeError error,
+    bool analysisInvalidated) noexcept {
+    return error == CoordinatePoolRuntimeError::AnalysisFailed &&
+        !analysisInvalidated;
+}
+
+constexpr bool ShouldRunCoordinatePoolFullMappingAnalysis(
     bool enabled,
     bool indexedPointers,
     CoordinatePoolRuntimeError error,
@@ -192,15 +199,6 @@ constexpr bool ShouldRequestCoordinatePoolRemotePlan(
     return enabled && indexedPointers &&
         error == CoordinatePoolRuntimeError::AnalysisFailed &&
         !analysisInvalidated && !read.HasFailure();
-}
-
-constexpr bool ShouldRetryCoordinatePoolCompatibilityAnalysis(
-    bool indexedPointers,
-    CoordinatePoolRuntimeError error,
-    bool analysisInvalidated) noexcept {
-    return !indexedPointers &&
-        error == CoordinatePoolRuntimeError::AnalysisFailed &&
-        !analysisInvalidated;
 }
 
 constexpr bool ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
@@ -304,7 +302,7 @@ class CoordinatePoolRuntime final {
 public:
     explicit CoordinatePoolRuntime(
         CoordinatePoolRuntimeLayout layout = {},
-        bool enableRemotePlan = false);
+        bool enableFullMappingFallback = false);
     ~CoordinatePoolRuntime();
 
     CoordinatePoolRuntime(const CoordinatePoolRuntime&) = delete;
