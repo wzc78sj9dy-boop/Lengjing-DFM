@@ -307,10 +307,10 @@ void TestProviderStateMachine() {
     CHECK(refresh.snapshot.threadId == 702);
     CHECK(refresh.snapshot.generation == 5);
 
-    reader.pacFailure = -EIO;
+    reader.pacFailure = -EAGAIN;
     refresh = provider.Refresh();
     CHECK(refresh.event == ThreadExecutionContextEvent::Lost);
-    CHECK(refresh.status == -EIO);
+    CHECK(refresh.status == -EAGAIN);
     reader.pacFailure = 0;
 
     refresh = provider.Refresh();

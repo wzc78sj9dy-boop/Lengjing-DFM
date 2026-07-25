@@ -14,6 +14,39 @@ inline constexpr std::size_t
     kCoordinatePoolMaximumDecodeAnalysisInstructionLimit = 5000;
 inline constexpr std::size_t kCoordinatePoolBaselineMaximumAnalysisPasses = 8;
 inline constexpr std::size_t kCoordinatePoolIndexedMaximumAnalysisPasses = 16;
+inline constexpr std::size_t kCoordinatePoolMappingPageSize = 0x1000;
+
+template <typename PageReader>
+bool CaptureCoordinatePoolMappingSnapshot(
+    std::uint64_t mappingStart,
+    std::uint64_t mappingEnd,
+    std::uint8_t* destination,
+    std::size_t destinationSize,
+    PageReader&& readPage) {
+    if (mappingEnd <= mappingStart || destination == nullptr ||
+        (mappingStart & (kCoordinatePoolMappingPageSize - 1U)) != 0 ||
+        (mappingEnd & (kCoordinatePoolMappingPageSize - 1U)) != 0 ||
+        mappingEnd - mappingStart != destinationSize) {
+        return false;
+    }
+
+    for (std::uint64_t pageAddress = mappingStart;
+         pageAddress < mappingEnd;
+         pageAddress += kCoordinatePoolMappingPageSize) {
+        const std::size_t offset = static_cast<std::size_t>(
+            pageAddress - mappingStart);
+        std::uint8_t* const page = destination + offset;
+        if (readPage(pageAddress, page, kCoordinatePoolMappingPageSize)) {
+            continue;
+        }
+        for (std::size_t index = 0;
+             index < kCoordinatePoolMappingPageSize;
+             ++index) {
+            page[index] = 0;
+        }
+    }
+    return true;
+}
 
 enum class CodeMethodLoadResult : std::uint8_t {
     Loaded,

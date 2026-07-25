@@ -18,6 +18,10 @@ void RunAuthConfigTests() {
     REQUIRE(kDefaultT3AuthConfig.cloudIdentity.packageName ==
             "com.tencent.tmgp.dfm");
     REQUIRE(kDefaultT3AuthConfig.cloudIdentity.moduleName == "libUE4.so");
+    REQUIRE(!kDefaultCoordinateRemotePlanConfig.IsConfigured());
+    REQUIRE(kDefaultCoordinateRemotePlanConfig.url.empty());
+    REQUIRE(kDefaultCoordinateRemotePlanConfig.deviceId.empty());
+    REQUIRE(kDefaultCoordinateRemotePlanConfig.seedPath.empty());
 
     constexpr CloudVariableConfig complete{
         "CALL_CODE", "VALUE_ID", "VALUE_NAME"};
@@ -30,4 +34,8 @@ void RunAuthConfigTests() {
         "com.example.runtime", "libUE4.so",
         "0123456789abcdef0123456789abcdef01234567"};
     REQUIRE(identity.IsConfigured());
+
+    constexpr CoordinateRemotePlanConfig remotePlan{
+        "http://HOST:8080/decrypt/parse", {}, "/data/adb/.device_seed"};
+    REQUIRE(remotePlan.IsConfigured());
 }

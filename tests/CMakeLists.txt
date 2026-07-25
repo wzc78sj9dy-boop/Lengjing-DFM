@@ -162,6 +162,7 @@ add_test(
 
 add_executable(coordinate_pool_runtime_plan_tests
     coordinate_pool_runtime_plan_tests.cpp
+    ../jni/src/game/native/CoordinatePoolRemotePlan.cpp
     ../jni/src/game/native/coordinate_pool_internal/Analyze.cpp
     ../jni/src/game/native/coordinate_pool_internal/FindDec.cpp
 )
@@ -182,6 +183,41 @@ endif()
 add_test(
     NAME coordinate_pool_runtime_plan_tests
     COMMAND coordinate_pool_runtime_plan_tests
+)
+
+add_executable(coordinate_pool_remote_client_tests
+    coordinate_pool_remote_client_tests.cpp
+    ../jni/lib/t3/t3sdk.cpp
+    ../jni/src/game/native/CoordinatePoolRemoteClient.cpp
+    ../jni/src/game/native/CoordinatePoolRemotePlan.cpp
+)
+
+target_include_directories(coordinate_pool_remote_client_tests PRIVATE
+    ../jni/include
+    ../jni/lib
+    ../jni/lib/capstone/include
+)
+
+if(WIN32)
+    target_link_libraries(coordinate_pool_remote_client_tests PRIVATE
+        ws2_32
+        iphlpapi
+    )
+endif()
+
+if(MSVC)
+    target_compile_options(coordinate_pool_remote_client_tests PRIVATE
+        /W4 /utf-8
+    )
+else()
+    target_compile_options(coordinate_pool_remote_client_tests PRIVATE
+        -Wall -Wextra -Wpedantic
+    )
+endif()
+
+add_test(
+    NAME coordinate_pool_remote_client_tests
+    COMMAND coordinate_pool_remote_client_tests
 )
 
 add_executable(coordinate_entry_branch_policy_tests
@@ -277,4 +313,35 @@ endif()
 add_test(
     NAME pacga_operand_resolver_tests
     COMMAND pacga_operand_resolver_tests
+)
+
+function(add_coordinate_execution_test target)
+    add_executable(${target} ${ARGN})
+    target_include_directories(${target} PRIVATE ../jni/include)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /utf-8)
+    else()
+        target_compile_options(${target} PRIVATE
+            -Wall -Wextra -Wpedantic
+        )
+    endif()
+    add_test(NAME ${target} COMMAND ${target})
+endfunction()
+
+add_coordinate_execution_test(
+    coordinate_execution_candidate_tests
+    coordinate_execution_candidate_tests.cpp
+    ../jni/src/game/native/CoordinateExecutionCandidate.cpp
+)
+
+add_coordinate_execution_test(
+    coordinate_execution_runtime_tests
+    coordinate_execution_runtime_tests.cpp
+)
+
+add_coordinate_execution_test(
+    coordinate_execution_decoder_tests
+    coordinate_execution_decoder_tests.cpp
+    ../jni/src/game/native/CoordinateExecutionDecoder.cpp
+    ../jni/src/game/native/CoordinateExecutionCandidate.cpp
 )

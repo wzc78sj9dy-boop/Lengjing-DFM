@@ -7,6 +7,7 @@
 
 void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::CodeMethodLoadResult;
+    using lengjing::game::native::CaptureCoordinatePoolMappingSnapshot;
     using lengjing::game::native::CoordinatePoolCodeFingerprint;
     using lengjing::game::native::CoordinatePoolCodeIdentityChanged;
     using lengjing::game::native::CoordinatePoolContextIdentityChanged;
@@ -79,6 +80,7 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::kCoordinatePoolRingReadFailureThreshold;
     using lengjing::game::native::kCoordinatePoolRingSearchesPerFrame;
     using lengjing::game::native::kCoordinatePoolMaximumRemoteAddress;
+    using lengjing::game::native::kCoordinatePoolMappingPageSize;
     using lengjing::game::native::kCoordinatePoolBlockProbeCount;
     using lengjing::game::native::kCoordinatePoolMaximumBlockCount;
     using lengjing::game::native::
@@ -108,6 +110,50 @@ void RunCoordinatePoolPolicyTests() {
         CodeMethodLoadResult::LimitExhausted));
     REQUIRE(!IsCoordinatePoolMethodScanLimitExhausted(
         CodeMethodLoadResult::MappingExhausted));
+
+    constexpr std::uint64_t snapshotStart = UINT64_C(0x10000000);
+    std::array<std::uint8_t, kCoordinatePoolMappingPageSize * 3>
+        mappingSnapshot{};
+    mappingSnapshot.fill(0xA5U);
+    std::size_t snapshotReadCount = 0;
+    REQUIRE(CaptureCoordinatePoolMappingSnapshot(
+        snapshotStart,
+        snapshotStart + mappingSnapshot.size(),
+        mappingSnapshot.data(),
+        mappingSnapshot.size(),
+        [&](std::uint64_t pageAddress,
+            std::uint8_t* destination,
+            std::size_t size) {
+            REQUIRE(size == kCoordinatePoolMappingPageSize);
+            REQUIRE(pageAddress ==
+                snapshotStart +
+                    snapshotReadCount * kCoordinatePoolMappingPageSize);
+            const bool readable = snapshotReadCount != 1;
+            const std::uint8_t value = static_cast<std::uint8_t>(
+                0x10U + snapshotReadCount);
+            for (std::size_t index = 0; index < size; ++index) {
+                destination[index] = value;
+            }
+            ++snapshotReadCount;
+            return readable;
+        }));
+    REQUIRE(snapshotReadCount == 3);
+    for (std::size_t index = 0;
+         index < kCoordinatePoolMappingPageSize;
+         ++index) {
+        REQUIRE(mappingSnapshot[index] == 0x10U);
+        REQUIRE(mappingSnapshot[kCoordinatePoolMappingPageSize + index] == 0);
+        REQUIRE(mappingSnapshot[kCoordinatePoolMappingPageSize * 2 + index] ==
+                0x12U);
+    }
+    REQUIRE(!CaptureCoordinatePoolMappingSnapshot(
+        snapshotStart,
+        snapshotStart + mappingSnapshot.size(),
+        mappingSnapshot.data(),
+        mappingSnapshot.size() - 1,
+        [](std::uint64_t, std::uint8_t*, std::size_t) {
+            return true;
+        }));
     REQUIRE(CoordinatePoolMaximumAnalysisPasses(false) == 8);
     REQUIRE(CoordinatePoolMaximumAnalysisPasses(true) == 16);
     REQUIRE(!ShouldExpandCoordinatePoolDecodeMethodScan(
@@ -1103,9 +1149,45 @@ void RunCoordinatePoolPolicyTests() {
         false,
         CoordinatePoolRuntimeError::AnalysisFailed,
         true));
+    REQUIRE(ShouldRequestCoordinatePoolRemotePlan(
+        true,
+        true,
+        CoordinatePoolRuntimeError::AnalysisFailed,
+        false,
+        CoordinateReadDiagnostic{}));
+    REQUIRE(!ShouldRequestCoordinatePoolRemotePlan(
+        false,
+        true,
+        CoordinatePoolRuntimeError::AnalysisFailed,
+        false,
+        CoordinateReadDiagnostic{}));
+    REQUIRE(!ShouldRequestCoordinatePoolRemotePlan(
+        true,
+        false,
+        CoordinatePoolRuntimeError::AnalysisFailed,
+        false,
+        CoordinateReadDiagnostic{}));
+    REQUIRE(!ShouldRequestCoordinatePoolRemotePlan(
+        true,
+        true,
+        CoordinatePoolRuntimeError::CodeReadFailed,
+        false,
+        CoordinateReadDiagnostic{}));
+    REQUIRE(!ShouldRequestCoordinatePoolRemotePlan(
+        true,
+        true,
+        CoordinatePoolRuntimeError::AnalysisFailed,
+        true,
+        CoordinateReadDiagnostic{}));
     CoordinateReadDiagnostic positionReadFailure{};
     positionReadFailure.stage = CoordinateReadStage::Position;
     positionReadFailure.failure = CoordinateReadFailure::AddressFault;
+    REQUIRE(!ShouldRequestCoordinatePoolRemotePlan(
+        true,
+        true,
+        CoordinatePoolRuntimeError::AnalysisFailed,
+        false,
+        positionReadFailure));
     REQUIRE(ShouldRetryCoordinatePoolCompatibilityAnalysis(
         false,
         CoordinatePoolRuntimeError::AnalysisFailed,

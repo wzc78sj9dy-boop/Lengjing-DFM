@@ -170,6 +170,30 @@ enum class CoordinatePoolRuntimeError : std::uint8_t {
     SlotLayoutEvidenceMissing,
 };
 
+enum class CoordinatePoolRemotePlanState : std::uint8_t {
+    Disabled,
+    Idle,
+    Preparing,
+    Pending,
+    Ready,
+    Applied,
+    Backoff,
+    TransportFailed,
+    PlanRejected,
+    Stale,
+};
+
+constexpr bool ShouldRequestCoordinatePoolRemotePlan(
+    bool enabled,
+    bool indexedPointers,
+    CoordinatePoolRuntimeError error,
+    bool analysisInvalidated,
+    const CoordinateReadDiagnostic& read) noexcept {
+    return enabled && indexedPointers &&
+        error == CoordinatePoolRuntimeError::AnalysisFailed &&
+        !analysisInvalidated && !read.HasFailure();
+}
+
 constexpr bool ShouldRetryCoordinatePoolCompatibilityAnalysis(
     bool indexedPointers,
     CoordinatePoolRuntimeError error,
@@ -265,12 +289,22 @@ struct CoordinatePoolRuntimeProbe {
     std::uint8_t analysisMethodLoadResult = UINT8_MAX;
     std::uint8_t entryBranchStatus = UINT8_MAX;
     std::uint8_t entryBranchHops = 0;
+    CoordinatePoolRemotePlanState remotePlanState =
+        CoordinatePoolRemotePlanState::Disabled;
+    std::uint64_t remotePlanAttempts = 0;
+    std::uint64_t remotePlanSuccesses = 0;
+    std::uint64_t remotePlanFailures = 0;
+    std::uintptr_t remotePlanMappingBase = 0;
+    std::uintptr_t remotePlanEntry = 0;
+    std::uint64_t remotePlanCodeFingerprint = 0;
+    bool remotePlanUsed = false;
 };
 
 class CoordinatePoolRuntime final {
 public:
     explicit CoordinatePoolRuntime(
-        CoordinatePoolRuntimeLayout layout = {});
+        CoordinatePoolRuntimeLayout layout = {},
+        bool enableRemotePlan = false);
     ~CoordinatePoolRuntime();
 
     CoordinatePoolRuntime(const CoordinatePoolRuntime&) = delete;

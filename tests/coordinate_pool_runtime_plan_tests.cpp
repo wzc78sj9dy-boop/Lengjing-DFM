@@ -1,20 +1,132 @@
 #include "game/native/coordinate_pool_internal/FindDec.h"
+#include "game/native/CoordinatePoolRemotePlan.h"
 #include "game/native/CoordinatePoolPolicy.h"
 #include "game/native/coordinate_pool_internal/RingIndexCandidatePolicy.h"
+#include "vendor/json.hpp"
 
 #include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace {
 
 std::size_t gFreedInstructions = 0;
 std::size_t gFreedDetails = 0;
+
+void AppendU32(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
+    for (unsigned int index = 0; index < 4U; ++index) {
+        bytes.push_back(static_cast<std::uint8_t>(value >> (index * 8U)));
+    }
+}
+
+void AppendU64(std::vector<std::uint8_t>& bytes, std::uint64_t value) {
+    for (unsigned int index = 0; index < 8U; ++index) {
+        bytes.push_back(static_cast<std::uint8_t>(value >> (index * 8U)));
+    }
+}
+
+void AppendVariable(std::vector<std::uint8_t>& bytes,
+                    const std::string& name,
+                    std::uint32_t type = 2U) {
+    AppendU32(bytes, type);
+    AppendU64(bytes, name.size());
+    bytes.insert(bytes.end(), name.begin(), name.end());
+}
+
+std::string EncodeBase64(const std::vector<std::uint8_t>& bytes) {
+    static constexpr char kAlphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string encoded;
+    encoded.reserve((bytes.size() + 2U) / 3U * 4U);
+    for (std::size_t offset = 0; offset < bytes.size(); offset += 3U) {
+        const std::uint32_t value =
+            static_cast<std::uint32_t>(bytes[offset]) << 16U |
+            (offset + 1U < bytes.size()
+                ? static_cast<std::uint32_t>(bytes[offset + 1U]) << 8U
+                : 0U) |
+            (offset + 2U < bytes.size()
+                ? static_cast<std::uint32_t>(bytes[offset + 2U])
+                : 0U);
+        encoded.push_back(kAlphabet[(value >> 18U) & 0x3FU]);
+        encoded.push_back(kAlphabet[(value >> 12U) & 0x3FU]);
+        encoded.push_back(offset + 1U < bytes.size()
+            ? kAlphabet[(value >> 6U) & 0x3FU]
+            : '=');
+        encoded.push_back(offset + 2U < bytes.size()
+            ? kAlphabet[value & 0x3FU]
+            : '=');
+    }
+    return encoded;
+}
+
+std::string BuildRemotePlanPayload(std::uint64_t base) {
+    using namespace lengjing::game::native::coordinate_pool_internal;
+    std::vector<std::uint8_t> expression;
+    AppendU32(expression, EXPR_BINARY);
+    AppendU32(expression, OP_ADD);
+    AppendVariable(expression, "ring", EXPR_MEMORY);
+    AppendU32(expression, EXPR_BINARY);
+    AppendU32(expression, OP_ADD);
+    AppendVariable(expression, "memory", EXPR_MEMORY);
+    AppendVariable(expression, "captured");
+
+    nlohmann::json data = {
+        {"A", 8},
+        {"B", 16},
+        {"C", 48},
+        {"D", base},
+        {"E", base + 4U},
+        {"F", ARM64_REG_X2},
+        {"G", base},
+        {"H", base + 8U},
+        {"I", ARM64_REG_X3},
+        {"J", nlohmann::json::array({
+            {{"A", "memory"}, {"B", 8},
+             {"C", nlohmann::json::array()}, {"D", 32}},
+        })},
+        {"K", nlohmann::json::array({
+            {{"A", "captured"}, {"B", base + 8U},
+             {"C", ARM64_REG_X4}, {"D", 0}},
+        })},
+        {"L", EncodeBase64(expression)},
+        {"M", "ring"},
+        {"N", base + 12U},
+        {"P", nlohmann::json::array({
+            nlohmann::json::array({base + 16U, UINT32_C(0xD503201F)}),
+        })},
+    };
+    return nlohmann::json{{"code", 0}, {"data", std::move(data)}}.dump();
+}
+
+std::string ReadFile(const char* path) {
+    if (path == nullptr || *path == '\0') return {};
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return {};
+    return std::string(
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>());
+}
+
+std::uint64_t ReadUnsignedEnvironment(const char* name,
+                                      std::uint64_t fallback) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') return fallback;
+    std::size_t consumed = 0;
+    const std::uint64_t parsed = std::stoull(value, &consumed, 10);
+    if (consumed != std::strlen(value)) {
+        throw std::invalid_argument("remote plan base is not decimal");
+    }
+    return parsed;
+}
 
 #define REQUIRE(condition)                                                    \
     do {                                                                      \
@@ -267,6 +379,87 @@ int main() {
         patchedPage.data(),
         sizeof(patchedInstruction));
     REQUIRE(patchedInstruction == kPatchedInstruction);
+
+    constexpr std::uint64_t kRemoteMappingBase = kBase - 0x1000U;
+    constexpr std::uint64_t kRemoteEntry = kBase;
+    constexpr std::size_t kRemotePlanCodeSize = 0x2000U;
+    const std::string remotePayload = BuildRemotePlanPayload(kRemoteEntry);
+    auto remotePlan = lengjing::game::native::ParseCoordinatePoolRemotePlan(
+        remotePayload,
+        kRemoteMappingBase,
+        kRemotePlanCodeSize,
+        kRemoteEntry);
+    if (!remotePlan.Ok()) {
+        throw std::runtime_error(remotePlan.detail);
+    }
+    REQUIRE(remotePlan.Ok());
+    REQUIRE(remotePlan.plan.memoryParameters.size() == 1);
+    REQUIRE(remotePlan.plan.variableParameters.size() == 1);
+    REQUIRE(remotePlan.plan.patches.size() == 1);
+
+    std::array<std::uint8_t, kRemotePlanCodeSize> remoteCode{};
+    coord_dec::FindDec remoteFinder;
+    REQUIRE(remoteFinder.set(
+        kRemoteMappingBase,
+        remoteCode.data(),
+        static_cast<std::uint32_t>(remoteCode.size())) == 0);
+    REQUIRE(remoteFinder.import_runtime_plan(std::move(remotePlan.plan)));
+    method* remoteEntry = remoteFinder.get_shellcode()->get_method("entry");
+    REQUIRE(remoteEntry != nullptr);
+    REQUIRE(remoteEntry->get_point("v87_end")->address == kRemoteEntry + 4U);
+    REQUIRE(remoteEntry->get_point("hash_end")->address == kRemoteEntry + 8U);
+    REQUIRE(remoteEntry->get_point("all_params_exec_end")->address ==
+        kRemoteEntry + 12U);
+    remoteFinder.mem_param_list[0].value = 10;
+    remoteFinder.analyze.varParams[0].value = 20;
+    remoteFinder.setup_param();
+    REQUIRE(remoteFinder.decode_ring_slot(5) == 35);
+    std::array<std::uint8_t, kRemotePlanCodeSize> remotePatched{};
+    REQUIRE(remoteFinder.get_shellcode()->apply_patches(
+        kRemoteMappingBase, remotePatched.data(), remotePatched.size()));
+    std::memcpy(
+        &patchedInstruction,
+        remotePatched.data() +
+            static_cast<std::size_t>(
+                kRemoteEntry - kRemoteMappingBase + 16U),
+        sizeof(patchedInstruction));
+    REQUIRE(patchedInstruction == kPatchedInstruction);
+
+    const char* fixturePath = std::getenv("LENGJING_REMOTE_PLAN_FIXTURE");
+    const char* dumpPath = std::getenv("LENGJING_REMOTE_PLAN_DUMP");
+    if (fixturePath != nullptr || dumpPath != nullptr) {
+        const std::string fixture = ReadFile(fixturePath);
+        const std::string dump = ReadFile(dumpPath);
+        REQUIRE(!fixture.empty());
+        REQUIRE(!dump.empty());
+        const nlohmann::json fixtureJson = nlohmann::json::parse(fixture);
+        const std::uint64_t fixtureEntry =
+            fixtureJson.at("data").at("D").get<std::uint64_t>();
+        const std::uint64_t fixtureBase = ReadUnsignedEnvironment(
+            "LENGJING_REMOTE_PLAN_BASE", fixtureEntry);
+        auto fixturePlan =
+            lengjing::game::native::ParseCoordinatePoolRemotePlan(
+                fixture,
+                fixtureBase,
+                dump.size(),
+                fixtureEntry);
+        if (!fixturePlan.Ok()) {
+            throw std::runtime_error(fixturePlan.detail);
+        }
+        REQUIRE(fixturePlan.Ok());
+        REQUIRE(fixturePlan.plan.memoryParameters.size() == 3);
+        REQUIRE(fixturePlan.plan.variableParameters.size() == 3);
+        REQUIRE(fixturePlan.plan.patches.size() == 18);
+        std::unordered_map<std::string, std::uint64_t> values;
+        for (const auto& parameter : fixturePlan.plan.memoryParameters) {
+            values[parameter.name] = parameter.value;
+        }
+        for (const auto& parameter : fixturePlan.plan.variableParameters) {
+            values[parameter.name] = parameter.value;
+        }
+        values[fixturePlan.plan.ringIndexParameter] = 0;
+        REQUIRE(fixturePlan.plan.indexExpression->eval(values) < 10U);
+    }
 
     return 0;
 }

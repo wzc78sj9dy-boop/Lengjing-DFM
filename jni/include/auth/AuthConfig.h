@@ -62,6 +62,18 @@
 #define LENGJING_T3_LAYOUT_BUILD_ID ""
 #endif
 
+#ifndef LENGJING_COORDINATE_REMOTE_PLAN_URL
+#define LENGJING_COORDINATE_REMOTE_PLAN_URL ""
+#endif
+
+#ifndef LENGJING_COORDINATE_REMOTE_PLAN_DEVICE_ID
+#define LENGJING_COORDINATE_REMOTE_PLAN_DEVICE_ID ""
+#endif
+
+#ifndef LENGJING_COORDINATE_REMOTE_PLAN_SEED_PATH
+#define LENGJING_COORDINATE_REMOTE_PLAN_SEED_PATH ""
+#endif
+
 namespace lengjing::auth {
 
 struct CloudVariableConfig {
@@ -106,6 +118,16 @@ struct T3AuthConfig {
     }
 };
 
+struct CoordinateRemotePlanConfig {
+    std::string_view url;
+    std::string_view deviceId;
+    std::string_view seedPath;
+
+    constexpr bool IsConfigured() const noexcept {
+        return !url.empty();
+    }
+};
+
 inline constexpr int kHeartbeatIntervalSeconds = 60;
 inline constexpr int kMaximumHeartbeatFailures = 5;
 
@@ -126,5 +148,12 @@ inline constexpr T3AuthConfig kDefaultT3AuthConfig{
      LENGJING_T3_LAYOUT_MODULE,
      LENGJING_T3_LAYOUT_BUILD_ID},
 };
+
+inline constexpr CoordinateRemotePlanConfig
+    kDefaultCoordinateRemotePlanConfig{
+        LENGJING_COORDINATE_REMOTE_PLAN_URL,
+        LENGJING_COORDINATE_REMOTE_PLAN_DEVICE_ID,
+        LENGJING_COORDINATE_REMOTE_PLAN_SEED_PATH,
+    };
 
 }  // namespace lengjing::auth

@@ -521,6 +521,81 @@ namespace coord_dec {
 		return resolution.resolvedEntry;
 	}
 
+	bool FindDec::import_runtime_plan(RuntimePlan plan) {
+		auto contains_instruction = [&](uint64_t address) {
+			return (address & 3U) == 0 &&
+				address >= binary_.start_addr() &&
+				address <= binary_.end_addr() &&
+				binary_.end_addr() - address >= sizeof(uint32_t);
+		};
+		auto valid_register = [](arm64_reg reg) {
+			if (reg >= ARM64_REG_W0 && reg <= ARM64_REG_W28) {
+				reg = static_cast<arm64_reg>(
+					reg - ARM64_REG_W0 + ARM64_REG_X0);
+			} else if (reg == ARM64_REG_W29) {
+				reg = ARM64_REG_X29;
+			} else if (reg == ARM64_REG_W30) {
+				reg = ARM64_REG_X30;
+			}
+			return (reg >= ARM64_REG_X0 && reg <= ARM64_REG_X28) ||
+				reg == ARM64_REG_X29 || reg == ARM64_REG_X30 ||
+				reg == ARM64_REG_SP || reg == ARM64_REG_XZR;
+		};
+		if (binary_.data() == nullptr || binary_.instruction_count() == 0 ||
+			plan.poolPointerOffset == 0 || plan.ringIndexParameter.empty() ||
+			plan.indexExpression == nullptr ||
+			!contains_instruction(plan.entryStart) ||
+			!contains_instruction(plan.v87End) ||
+			!contains_instruction(plan.searchEnd) ||
+			!contains_instruction(plan.parameterEnd) ||
+			plan.v87End <= plan.entryStart ||
+			plan.searchEnd <= plan.entryStart ||
+			plan.parameterEnd <= plan.entryStart ||
+			!valid_register(plan.v87Register) ||
+			!valid_register(plan.searchRegister)) {
+			return false;
+		}
+
+		const uint64_t method_end = std::max({
+			plan.v87End,
+			plan.searchEnd,
+			plan.parameterEnd,
+		});
+		method* imported_entry = binary_.create_method_range(
+			"entry", plan.entryStart, method_end);
+		if (imported_entry == nullptr) return false;
+		imported_entry->add_point(
+			"v87_end", plan.v87End, plan.v87Register);
+		imported_entry->add_point(
+			"hash_end", plan.searchEnd, plan.searchRegister);
+		imported_entry->add_point(
+			"all_params_exec_end", plan.parameterEnd);
+
+		for (const RuntimePatch& patch : plan.patches) {
+			if (!contains_instruction(patch.address) ||
+				!binary_.patch_address(
+					patch.address,
+					&patch.instruction,
+					sizeof(patch.instruction))) {
+				return false;
+			}
+		}
+
+		params.clear();
+		analyze.reset();
+		mem_param_list = std::move(plan.memoryParameters);
+		analyze.varParams = std::move(plan.variableParameters);
+		index_expr = std::move(plan.indexExpression);
+		ring_index_param = std::move(plan.ringIndexParameter);
+		index_offset = plan.indexOffset;
+		pool_ptr_offset = plan.poolPointerOffset;
+		ring_offset = plan.ringOffset;
+		entry = imported_entry;
+		failure_stage_ = FindDecFailureStage::None;
+		failure_detail_ = FindDecFailureDetail::None;
+		return true;
+	}
+
 	bool FindDec::analyze_base_index_calc() {
 		auto parse_instruction = [&](cs_insn* instruction) {
 			const int legacy_result = analyze.parse(instruction);

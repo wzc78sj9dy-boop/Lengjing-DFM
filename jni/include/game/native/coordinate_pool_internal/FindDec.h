@@ -42,6 +42,28 @@ namespace coord_dec {
         std::vector<int32_t> offset;
     };
 
+    struct RuntimePatch {
+        uint64_t address = 0;
+        uint32_t instruction = 0;
+    };
+
+    struct RuntimePlan {
+        int64_t indexOffset = 0;
+        int32_t poolPointerOffset = 0;
+        uint32_t ringOffset = 0;
+        uint64_t entryStart = 0;
+        uint64_t v87End = 0;
+        arm64_reg v87Register = ARM64_REG_INVALID;
+        uint64_t searchEnd = 0;
+        arm64_reg searchRegister = ARM64_REG_INVALID;
+        uint64_t parameterEnd = 0;
+        std::vector<param> memoryParameters;
+        std::vector<VarParam> variableParameters;
+        std::shared_ptr<Expr> indexExpression;
+        std::string ringIndexParameter;
+        std::vector<RuntimePatch> patches;
+    };
+
     class FindDec : public Find {
 
         uint32_t ring_offset = 0;
@@ -125,6 +147,8 @@ namespace coord_dec {
         }
 
         uint64_t resolve_decode_method_entry(uint64_t address);
+
+        bool import_runtime_plan(RuntimePlan plan);
 
         void compact_runtime_plan() noexcept {
             entry = nullptr;

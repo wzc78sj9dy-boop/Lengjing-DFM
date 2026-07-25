@@ -1,8 +1,10 @@
 #include "game/native/CoordinatePoolRuntime.h"
 
+#include "auth/AuthConfig.h"
 #include "game/native/AlgorithmPositionRuntime.h"
 #include "game/native/CoordinateEntryBranchPolicy.h"
 #include "game/native/CoordinatePoolPolicy.h"
+#include "game/native/CoordinatePoolRemoteClient.h"
 #include "game/native/MemoryTransport.h"
 #include "game/native/coordinate_pool_internal/FindDec.h"
 
@@ -23,6 +25,7 @@
 #include <mutex>
 #include <new>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -483,6 +486,7 @@ struct EntryCodeScan {
 inline constexpr std::uint8_t kAnalysisModeEntryBranch = 1U << 0U;
 inline constexpr std::uint8_t kAnalysisModeProgressiveDecode = 1U << 1U;
 inline constexpr std::uint8_t kAnalysisModeCompatibilityRetry = 1U << 2U;
+inline constexpr std::uint8_t kAnalysisModeRemotePlan = 1U << 3U;
 
 struct CodeAnalysisOptions {
     bool resolveEntryBranches = false;
@@ -589,6 +593,89 @@ std::uint64_t ReadHostVirtualCounter() noexcept {
 #endif
 }
 
+std::string RemotePlanSetting(const char* environmentName,
+                              std::string_view configured) {
+    const char* value = std::getenv(environmentName);
+    return value != nullptr && *value != '\0'
+        ? std::string(value)
+        : std::string(configured);
+}
+
+std::string TrimRemotePlanSeed(std::string value) {
+    const auto whitespace = [](unsigned char character) {
+        return character == ' ' || character == '\t' ||
+            character == '\r' || character == '\n';
+    };
+    while (!value.empty() &&
+           whitespace(static_cast<unsigned char>(value.back()))) {
+        value.pop_back();
+    }
+    const auto first = std::find_if_not(
+        value.begin(), value.end(), [&](unsigned char character) {
+            return whitespace(character);
+        });
+    value.erase(value.begin(), first);
+    return value;
+}
+
+std::string ReadRemotePlanSeed(std::string_view path) {
+    if (path.empty()) return {};
+    std::ifstream input(std::string(path), std::ios::binary);
+    if (!input) return {};
+    std::string seed;
+    std::getline(input, seed);
+    if (seed.size() > 4096U) return {};
+    return TrimRemotePlanSeed(std::move(seed));
+}
+
+bool IsDecimalRemotePlanId(std::string_view value) noexcept {
+    return !value.empty() && value.size() <= 20U &&
+        std::all_of(value.begin(), value.end(), [](unsigned char character) {
+            return character >= '0' && character <= '9';
+        });
+}
+
+std::string HashRemotePlanDeviceId(std::string_view seed) {
+    std::uint64_t hash = UINT64_C(0x1505);
+    for (const unsigned char byte : seed) hash = hash * 33U + byte;
+    return std::to_string(hash % UINT64_C(1000000));
+}
+
+struct ResolvedRemotePlanClientConfig {
+    CoordinatePoolRemoteClientOptions options{};
+    std::string deviceId;
+};
+
+ResolvedRemotePlanClientConfig ResolveRemotePlanClientConfig() {
+    const auth::CoordinateRemotePlanConfig& configured =
+        auth::kDefaultCoordinateRemotePlanConfig;
+    ResolvedRemotePlanClientConfig resolved;
+    resolved.options.endpoint = RemotePlanSetting(
+        "LENGJING_REMOTE_PLAN_URL", configured.url);
+    std::string deviceId = RemotePlanSetting(
+        "LENGJING_REMOTE_PLAN_DEVICE_ID", configured.deviceId);
+    if (!IsDecimalRemotePlanId(deviceId)) {
+        const std::string seedPath = RemotePlanSetting(
+            "LENGJING_REMOTE_PLAN_SEED_PATH", configured.seedPath);
+        std::string seed = ReadRemotePlanSeed(seedPath);
+        if (seed.empty()) seed = getMachineCode();
+        if (!seed.empty()) deviceId = HashRemotePlanDeviceId(seed);
+    }
+    if (IsDecimalRemotePlanId(deviceId)) {
+        resolved.deviceId = std::move(deviceId);
+    }
+    resolved.options.transport.connectTimeoutMilliseconds = 3000;
+    resolved.options.transport.sendTimeoutMilliseconds = 5000;
+    resolved.options.transport.receiveTimeoutMilliseconds = 10000;
+    resolved.options.transport.requestTimeoutMilliseconds = 15000;
+    resolved.options.transport.maximumResponseBytes =
+        kMaximumCoordinatePoolRemotePlanPayloadBytes;
+    resolved.options.initialRetryDelay = std::chrono::seconds(2);
+    resolved.options.maximumRetryDelay = std::chrono::minutes(1);
+    resolved.options.maximumMappingBytes = kMaximumCodeSize;
+    return resolved;
+}
+
 }  // namespace
 
 struct CoordinatePoolRuntime::Impl {
@@ -633,11 +720,32 @@ struct CoordinatePoolRuntime::Impl {
         bool hasIndexedPositions = false;
     };
 
-    explicit Impl(CoordinatePoolRuntimeLayout configuredLayout)
-        : layout(configuredLayout) {}
+    explicit Impl(CoordinatePoolRuntimeLayout configuredLayout,
+                  bool enableRemotePlan)
+        : layout(configuredLayout), remotePlanEnabled(enableRemotePlan) {
+        if (remotePlanEnabled) {
+            ResolvedRemotePlanClientConfig configured =
+                ResolveRemotePlanClientConfig();
+            remotePlanDeviceId = std::move(configured.deviceId);
+            if (!remotePlanDeviceId.empty() && configured.options.IsValid()) {
+                remotePlanClient =
+                    std::make_unique<CoordinatePoolRemoteClient>(
+                        std::move(configured.options));
+            }
+        }
+        probe.remotePlanState = RemotePlanAvailableUnlocked()
+            ? CoordinatePoolRemotePlanState::Idle
+            : CoordinatePoolRemotePlanState::Disabled;
+    }
 
     ~Impl() {
+        if (remotePlanClient != nullptr) remotePlanClient->Cancel();
         CloseEngineUnlocked();
+    }
+
+    bool RemotePlanAvailableUnlocked() const noexcept {
+        return remotePlanEnabled && remotePlanClient != nullptr &&
+            remotePlanClient->IsReady() && !remotePlanDeviceId.empty();
     }
 
     std::uint64_t NormalizePointer(std::uint64_t value) const noexcept {
@@ -2603,7 +2711,345 @@ private:
         return false;
     }
 
+    bool CommitFinderUnlocked(
+        std::unique_ptr<pool::coord_dec::FindDec> candidate,
+        ExecutableMappingIndex mappingIndex,
+        std::uint64_t analysisEntryAddress,
+        std::uint64_t mappingStart,
+        std::size_t mappingSize,
+        std::vector<CodeRangeFingerprint> rangeFingerprints,
+        bool remotePlan) {
+        if (candidate == nullptr || rangeFingerprints.empty()) return false;
+        pool::method* entry =
+            candidate->get_shellcode()->get_method("entry");
+        pool::point* v87 = entry != nullptr
+            ? entry->get_point("v87_end")
+            : nullptr;
+        pool::point* search = entry != nullptr
+            ? entry->get_point("hash_end")
+            : nullptr;
+        pool::point* parameters = entry != nullptr
+            ? entry->get_point("all_params_exec_end")
+            : nullptr;
+        if (entry == nullptr || v87 == nullptr || search == nullptr ||
+            parameters == nullptr || candidate->index_expr == nullptr ||
+            candidate->pool_ptr_offset == 0 ||
+            v87->reg == ARM64_REG_INVALID ||
+            search->reg == ARM64_REG_INVALID) {
+            return false;
+        }
+
+        finder = std::move(candidate);
+        analysisCodeFingerprints = std::move(rangeFingerprints);
+        executableMappingIndex = std::move(mappingIndex);
+        analysisEntry = analysisEntryAddress;
+        codeBase = mappingStart;
+        codeSize = mappingSize;
+        entryStart = entry->start_address();
+        v87End = v87->address;
+        v87Register = v87->reg;
+        searchEnd = search->address;
+        searchRegister = search->reg;
+        parameterEnd = parameters->address;
+        probe.codeBase = codeBase;
+        probe.codeSize = codeSize;
+        probe.poolPointerOffset = finder->pool_ptr_offset;
+        probe.indexOffset = finder->index_offset;
+        probe.ringOffset = finder->get_ring_offset();
+        probe.remotePlanUsed = remotePlan;
+        finder->compact_runtime_plan();
+        return true;
+    }
+
+    void SyncRemotePlanProbeUnlocked() {
+        if (remotePlanClient == nullptr) return;
+        const CoordinatePoolRemoteClientSnapshot snapshot =
+            remotePlanClient->GetSnapshot();
+        probe.remotePlanAttempts = snapshot.requestCount;
+        probe.remotePlanSuccesses = snapshot.successCount;
+        probe.remotePlanFailures = snapshot.failureCount;
+    }
+
+    bool ReadRemotePlanMappingUnlocked(
+        std::uint64_t rawEntry,
+        ExecutableMappingIndex& mappingIndex,
+        std::vector<std::uint8_t>& bytes) {
+        mappingIndex = {};
+        bytes.clear();
+        int mappingStatus = 0;
+        if (!BuildExecutableMappingIndex(
+                processId, rawEntry, mappingIndex, &mappingStatus)) {
+            return false;
+        }
+        const std::uint64_t mappingStart = mappingIndex.windowStart;
+        const std::uint64_t mappingEnd = mappingIndex.windowEnd;
+        if (mappingEnd <= mappingStart ||
+            mappingEnd - mappingStart > kMaximumCodeSize ||
+            (mappingEnd - mappingStart) % kPageSize != 0) {
+            return false;
+        }
+
+        bytes.resize(static_cast<std::size_t>(mappingEnd - mappingStart));
+        if (!CaptureCoordinatePoolMappingSnapshot(
+                mappingStart,
+                mappingEnd,
+                bytes.data(),
+                bytes.size(),
+                [&](std::uint64_t pageAddress,
+                    std::uint8_t* destination,
+                    std::size_t size) {
+                    CoordinateReadDiagnostic diagnostic{};
+                    return ReadRemoteUnlocked(
+                        pageAddress,
+                        destination,
+                        size,
+                        CoordinateReadStage::CodePage,
+                        &diagnostic);
+                })) {
+            return false;
+        }
+
+        ExecutableMappingIndex refreshedMapping{};
+        int refreshStatus = 0;
+        if (!BuildExecutableMappingIndex(
+                processId, rawEntry, refreshedMapping, &refreshStatus) ||
+            !SameExecutableMappingIndex(mappingIndex, refreshedMapping)) {
+            analysisInvalidated = true;
+            return false;
+        }
+        CoordinatePoolRootSnapshot observed{};
+        int rootStatus = 0;
+        if (!ResolveRootUnlocked(
+                CoordinatePoolRootSnapshot{bridge, decryptContext, rawEntry},
+                observed,
+                rootStatus) ||
+            observed.entry != rawEntry) {
+            analysisInvalidated = true;
+            return false;
+        }
+        return true;
+    }
+
+    void ClearRemotePlanTerminalUnlocked() noexcept {
+        remotePlanTerminal = false;
+        remotePlanTerminalKey = {};
+        remotePlanTerminalState = CoordinatePoolRemotePlanState::Idle;
+    }
+
+    void MarkRemotePlanTerminalUnlocked(
+        CoordinatePoolRemotePlanState state) noexcept {
+        remotePlanPending = false;
+        remotePlanTerminal = true;
+        remotePlanTerminalKey = remotePlanKey;
+        remotePlanTerminalState = state;
+        probe.remotePlanState = state;
+    }
+
+    bool InstallRemotePlanUnlocked(CoordinatePoolRemoteResult result) {
+        const CoordinatePoolRuntimeProbe preservedProbe = probe;
+        const CoordinateReadDiagnostic preservedTolerance =
+            toleratedReadFailure;
+        ExecutableMappingIndex mappingIndex{};
+        std::vector<std::uint8_t> currentBytes;
+        const bool snapshotReady = ReadRemotePlanMappingUnlocked(
+            guestEntry, mappingIndex, currentBytes);
+        const bool invalidated = analysisInvalidated;
+        probe = preservedProbe;
+        toleratedReadFailure = preservedTolerance;
+        analysisInvalidated = invalidated;
+
+        const bool identityMatches = snapshotReady && result.Ok() &&
+            result.mapping != nullptr && result.key == remotePlanKey &&
+            result.key.rawEntry == guestEntry &&
+            result.key.mappingBase == mappingIndex.windowStart &&
+            result.key.mappingSize == currentBytes.size() &&
+            result.key.codeFingerprint ==
+                CoordinatePoolRemoteCodeFingerprint(
+                    currentBytes.data(), currentBytes.size()) &&
+            currentBytes == *result.mapping;
+        if (!identityMatches) {
+            MarkRemotePlanTerminalUnlocked(
+                CoordinatePoolRemotePlanState::Stale);
+            return false;
+        }
+
+        auto candidate = std::unique_ptr<pool::coord_dec::FindDec>(
+            new (std::nothrow) pool::coord_dec::FindDec());
+        if (candidate == nullptr ||
+            candidate->set(
+                result.key.mappingBase,
+                currentBytes.data(),
+                static_cast<std::uint32_t>(currentBytes.size())) != 0 ||
+            !candidate->import_runtime_plan(std::move(result.plan))) {
+            MarkRemotePlanTerminalUnlocked(
+                CoordinatePoolRemotePlanState::PlanRejected);
+            return false;
+        }
+
+        std::vector<CodeRangeFingerprint> fingerprints;
+        fingerprints.push_back(CodeRangeFingerprint{
+            result.key.mappingBase,
+            currentBytes.size(),
+            result.key.codeFingerprint,
+        });
+        if (!CommitFinderUnlocked(
+                std::move(candidate),
+                std::move(mappingIndex),
+                result.key.rawEntry,
+                result.key.mappingBase,
+                currentBytes.size(),
+                std::move(fingerprints),
+                true)) {
+            MarkRemotePlanTerminalUnlocked(
+                CoordinatePoolRemotePlanState::PlanRejected);
+            return false;
+        }
+
+        remotePlanPending = false;
+        ClearRemotePlanTerminalUnlocked();
+        ClearReadDiagnosticUnlocked();
+        probe.resolvedEntry = entryStart;
+        probe.analysisFindStage = 0;
+        probe.analysisFindDetail = 0;
+        probe.analysisMaddCount = 0;
+        probe.analysisRingMaddCount = 0;
+        probe.analysisCandidateCount = 0;
+        probe.analysisFailureInstruction = 0;
+        probe.analysisDecodeInstructionLimit = 0;
+        probe.analysisPasses = 0;
+        probe.analysisMode = kAnalysisModeRemotePlan;
+        probe.analysisMethodLoadResult = UINT8_MAX;
+        probe.error = CoordinatePoolRuntimeError::None;
+        probe.stage = CoordinatePoolRuntimeStage::CodeAnalyzed;
+        probe.remotePlanState = CoordinatePoolRemotePlanState::Applied;
+        probe.remotePlanUsed = true;
+        return true;
+    }
+
+    bool PollRemotePlanUnlocked() {
+        if (!remotePlanPending || remotePlanClient == nullptr) return false;
+        CoordinatePoolRemoteResult result;
+        while (remotePlanClient->TryTakeResult(result)) {
+            SyncRemotePlanProbeUnlocked();
+            if (result.key != remotePlanKey) continue;
+            if (result.status ==
+                CoordinatePoolRemoteResultStatus::TransportFailed) {
+                probe.remotePlanState =
+                    CoordinatePoolRemotePlanState::TransportFailed;
+                if (!result.retryScheduled) {
+                    MarkRemotePlanTerminalUnlocked(
+                        CoordinatePoolRemotePlanState::TransportFailed);
+                }
+                continue;
+            }
+            if (result.status ==
+                CoordinatePoolRemoteResultStatus::PlanRejected) {
+                MarkRemotePlanTerminalUnlocked(
+                    CoordinatePoolRemotePlanState::PlanRejected);
+                continue;
+            }
+            probe.remotePlanState = CoordinatePoolRemotePlanState::Ready;
+            return InstallRemotePlanUnlocked(std::move(result));
+        }
+        SyncRemotePlanProbeUnlocked();
+        return false;
+    }
+
+    bool CaptureRemotePlanUnlocked() {
+        if (!ShouldRequestCoordinatePoolRemotePlan(
+                RemotePlanAvailableUnlocked(),
+                indexedPointers,
+                probe.error,
+                analysisInvalidated,
+                probe.read)) {
+            return false;
+        }
+        probe.primaryAnalysisError = static_cast<std::uint8_t>(probe.error);
+        probe.primaryAnalysisFindStage = probe.analysisFindStage;
+        probe.primaryAnalysisFindDetail = probe.analysisFindDetail;
+        probe.remotePlanState = CoordinatePoolRemotePlanState::Preparing;
+
+        const CoordinatePoolRuntimeProbe preservedProbe = probe;
+        const CoordinateReadDiagnostic preservedTolerance =
+            toleratedReadFailure;
+        ExecutableMappingIndex mappingIndex{};
+        std::vector<std::uint8_t> bytes;
+        const bool snapshotReady = ReadRemotePlanMappingUnlocked(
+            guestEntry, mappingIndex, bytes);
+        const bool invalidated = analysisInvalidated;
+        probe = preservedProbe;
+        toleratedReadFailure = preservedTolerance;
+        analysisInvalidated = invalidated;
+        if (!snapshotReady) {
+            probe.remotePlanState = CoordinatePoolRemotePlanState::Stale;
+            return false;
+        }
+
+        remotePlanKey = CoordinatePoolRemoteRequestKey{
+            mappingIndex.windowStart,
+            bytes.size(),
+            guestEntry,
+            CoordinatePoolRemoteCodeFingerprint(bytes.data(), bytes.size()),
+        };
+        probe.remotePlanMappingBase = remotePlanKey.mappingBase;
+        probe.remotePlanEntry = remotePlanKey.rawEntry;
+        probe.remotePlanCodeFingerprint = remotePlanKey.codeFingerprint;
+        if (remotePlanTerminal) {
+            if (remotePlanKey == remotePlanTerminalKey) {
+                remotePlanPending = false;
+                probe.remotePlanState = remotePlanTerminalState;
+                return false;
+            }
+            ClearRemotePlanTerminalUnlocked();
+        }
+
+        CoordinatePoolRemoteResult cached;
+        if (remotePlanClient->TryGetCached(remotePlanKey, cached)) {
+            probe.remotePlanState = CoordinatePoolRemotePlanState::Ready;
+            remotePlanPending = true;
+            return InstallRemotePlanUnlocked(std::move(cached));
+        }
+
+        CoordinatePoolRemoteRequest request;
+        request.key = remotePlanKey;
+        request.deviceId = remotePlanDeviceId;
+        request.mapping = std::move(bytes);
+        const CoordinatePoolRemoteSubmitStatus submit =
+            remotePlanClient->Submit(std::move(request));
+        SyncRemotePlanProbeUnlocked();
+        if (submit == CoordinatePoolRemoteSubmitStatus::Cached &&
+            remotePlanClient->TryGetCached(remotePlanKey, cached)) {
+            probe.remotePlanState = CoordinatePoolRemotePlanState::Ready;
+            remotePlanPending = true;
+            return InstallRemotePlanUnlocked(std::move(cached));
+        }
+        if (submit == CoordinatePoolRemoteSubmitStatus::Queued ||
+            submit == CoordinatePoolRemoteSubmitStatus::Duplicate) {
+            remotePlanPending = true;
+            probe.remotePlanState = CoordinatePoolRemotePlanState::Pending;
+            return false;
+        }
+        remotePlanPending = false;
+        probe.remotePlanState = submit ==
+                CoordinatePoolRemoteSubmitStatus::Stopped
+            ? CoordinatePoolRemotePlanState::Disabled
+            : CoordinatePoolRemotePlanState::PlanRejected;
+        if (submit != CoordinatePoolRemoteSubmitStatus::Stopped) {
+            MarkRemotePlanTerminalUnlocked(probe.remotePlanState);
+        }
+        return false;
+    }
+
     bool AnalyzeCodeUnlocked() {
+        if (remotePlanPending && remotePlanKey.rawEntry != guestEntry) {
+            remotePlanPending = false;
+            probe.remotePlanState = CoordinatePoolRemotePlanState::Stale;
+        }
+        if (remotePlanPending) {
+            if (PollRemotePlanUnlocked()) return true;
+            SetError(CoordinatePoolRuntimeError::AnalysisFailed);
+            return false;
+        }
         probe.primaryAnalysisError = 0;
         probe.primaryAnalysisFindStage = 0;
         probe.primaryAnalysisFindDetail = 0;
@@ -2615,9 +3061,12 @@ private:
                     kAnalysisModeEntryBranch |
                     kAnalysisModeProgressiveDecode),
             })) {
+            if (RemotePlanAvailableUnlocked()) {
+                probe.remotePlanState = CoordinatePoolRemotePlanState::Idle;
+            }
             return true;
         }
-        if (indexedPointers) return false;
+        if (indexedPointers) return CaptureRemotePlanUnlocked();
         if (!ShouldRetryCoordinatePoolCompatibilityAnalysis(
                 indexedPointers,
                 probe.error,
@@ -3360,44 +3809,17 @@ private:
             return false;
         }
 
-        pool::method* entry =
-            candidate->get_shellcode()->get_method("entry");
-        pool::point* v87 = entry != nullptr
-            ? entry->get_point("v87_end")
-            : nullptr;
-        pool::point* search = entry != nullptr
-            ? entry->get_point("hash_end")
-            : nullptr;
-        pool::point* parameters = entry != nullptr
-            ? entry->get_point("all_params_exec_end")
-            : nullptr;
-        if (entry == nullptr || v87 == nullptr || search == nullptr ||
-            parameters == nullptr || candidate->index_expr == nullptr ||
-            candidate->pool_ptr_offset == 0 ||
-            v87->reg == ARM64_REG_INVALID ||
-            search->reg == ARM64_REG_INVALID) {
+        if (!CommitFinderUnlocked(
+                std::move(candidate),
+                std::move(mappingIndex),
+                analysisEntryAddress,
+                mappingStart,
+                mappingSize,
+                std::move(rangeFingerprints),
+                false)) {
             SetError(CoordinatePoolRuntimeError::AnalysisFailed);
             return false;
         }
-
-        finder = std::move(candidate);
-        analysisCodeFingerprints = std::move(rangeFingerprints);
-        executableMappingIndex = std::move(mappingIndex);
-        analysisEntry = analysisEntryAddress;
-        codeBase = mappingStart;
-        codeSize = mappingSize;
-        entryStart = entry->start_address();
-        v87End = v87->address;
-        v87Register = v87->reg;
-        searchEnd = search->address;
-        searchRegister = search->reg;
-        parameterEnd = parameters->address;
-        probe.codeBase = codeBase;
-        probe.codeSize = codeSize;
-        probe.poolPointerOffset = finder->pool_ptr_offset;
-        probe.indexOffset = finder->index_offset;
-        probe.ringOffset = finder->get_ring_offset();
-        finder->compact_runtime_plan();
         ClearReadDiagnosticUnlocked();
         probe.analysisFindStage = 0;
         probe.analysisFindDetail = 0;
@@ -4379,6 +4801,10 @@ private:
 
     void ResetAnalysisUnlocked() {
         CloseEngineUnlocked();
+        if (remotePlanClient != nullptr) remotePlanClient->Reset();
+        remotePlanPending = false;
+        remotePlanKey = {};
+        ClearRemotePlanTerminalUnlocked();
         finder.reset();
         analysisCodeFingerprints.clear();
         executableMappingIndex = {};
@@ -4473,6 +4899,14 @@ private:
         probe.poolBlockCount = 0;
         probe.selectedPoolSlot = 0;
         probe.decryptIndexLocked = false;
+        probe.remotePlanMappingBase = 0;
+        probe.remotePlanEntry = 0;
+        probe.remotePlanCodeFingerprint = 0;
+        probe.remotePlanUsed = false;
+        probe.remotePlanState = RemotePlanAvailableUnlocked()
+            ? CoordinatePoolRemotePlanState::Idle
+            : CoordinatePoolRemotePlanState::Disabled;
+        SyncRemotePlanProbeUnlocked();
         UpdateSlotLayoutProbeUnlocked();
         analysisInvalidated = false;
         nextCodeValidationFrame = 0;
@@ -4502,6 +4936,10 @@ private:
     void ResetUnlocked() {
         const CoordinatePoolRuntimeLayout configuredLayout = layout;
         CloseEngineUnlocked();
+        if (remotePlanClient != nullptr) remotePlanClient->Reset();
+        remotePlanPending = false;
+        remotePlanKey = {};
+        ClearRemotePlanTerminalUnlocked();
         indexedPointers = false;
         finder.reset();
         analysisCodeFingerprints.clear();
@@ -4562,11 +5000,24 @@ private:
         ringSearchBudget.Reset();
         slotLayoutCalibration.Reset();
         probe = {};
+        probe.remotePlanState = RemotePlanAvailableUnlocked()
+            ? CoordinatePoolRemotePlanState::Idle
+            : CoordinatePoolRemotePlanState::Disabled;
+        SyncRemotePlanProbeUnlocked();
         toleratedReadFailure = {};
         layout = configuredLayout;
     }
 
     CoordinatePoolRuntimeLayout layout{};
+    bool remotePlanEnabled = false;
+    std::string remotePlanDeviceId;
+    std::unique_ptr<CoordinatePoolRemoteClient> remotePlanClient;
+    CoordinatePoolRemoteRequestKey remotePlanKey{};
+    CoordinatePoolRemoteRequestKey remotePlanTerminalKey{};
+    CoordinatePoolRemotePlanState remotePlanTerminalState =
+        CoordinatePoolRemotePlanState::Idle;
+    bool remotePlanPending = false;
+    bool remotePlanTerminal = false;
     mutable std::mutex mutex;
     MemoryTransport* memory = nullptr;
     pid_t processId = -1;
@@ -4648,8 +5099,9 @@ private:
 };
 
 CoordinatePoolRuntime::CoordinatePoolRuntime(
-    CoordinatePoolRuntimeLayout layout)
-    : impl_(new (std::nothrow) Impl(layout)) {}
+    CoordinatePoolRuntimeLayout layout,
+    bool enableRemotePlan)
+    : impl_(new (std::nothrow) Impl(layout, enableRemotePlan)) {}
 
 CoordinatePoolRuntime::~CoordinatePoolRuntime() = default;
 

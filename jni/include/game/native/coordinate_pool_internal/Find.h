@@ -927,14 +927,14 @@ namespace lengjing::game::native::coordinate_pool_internal {
             size_ = 0;
         }
 
-        void patch(uint32_t i, void* data, uint32_t len) {
-            if (insn == nullptr || i >= count) return;
+        bool patch(uint32_t i, const void* data, uint32_t len) {
+            if (insn == nullptr || i >= count) return false;
             uint64_t addr = address(i);
             if (addr == 0 || data == nullptr || len == 0 ||
                 addr < start_address ||
                 addr - start_address > size_ ||
                 static_cast<uint64_t>(len) > size_ - (addr - start_address)) {
-                return;
+                return false;
             }
 
             patch_record record;
@@ -943,6 +943,12 @@ namespace lengjing::game::native::coordinate_pool_internal {
             memcpy(record.bytes.data(), data, len);
             patches_.push_back(std::move(record));
             memcpy(data_.get() + addr - start_address, data, len);
+            return true;
+        }
+
+        bool patch_address(uint64_t address, const void* data, uint32_t len) {
+            const uint32_t instruction = index(address);
+            return instruction < count && patch(instruction, data, len);
         }
 
         bool apply_patches(uint64_t page_address, void* data, std::size_t size) const {
@@ -1069,6 +1075,25 @@ namespace lengjing::game::native::coordinate_pool_internal {
             uint32_t end_i = f.find_range(start_i, insn);
             if (!end_i) return nullptr;
             return &methods.insert({ name, method(start_i, end_i, insn) }).first->second;
+        }
+
+        method* create_method_range(const char* name,
+                                    uint64_t start_address,
+                                    uint64_t end_address) {
+            if (name == nullptr || *name == '\0' ||
+                start_address > end_address) {
+                return nullptr;
+            }
+            const uint32_t start_i = index(start_address);
+            const uint32_t end_i = index(end_address);
+            if (start_i >= count || end_i >= count || end_i < start_i) {
+                return nullptr;
+            }
+            methods.erase(name);
+            return &methods.insert({
+                name,
+                method(start_i, end_i, insn),
+            }).first->second;
         }
 
     };
