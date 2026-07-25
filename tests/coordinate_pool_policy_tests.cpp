@@ -1090,31 +1090,26 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(ShouldRetryCoordinatePoolCompatibilityAnalysis(
         false,
         CoordinatePoolRuntimeError::AnalysisFailed,
-        false,
-        CoordinateReadDiagnostic{}));
+        false));
     REQUIRE(!ShouldRetryCoordinatePoolCompatibilityAnalysis(
         true,
         CoordinatePoolRuntimeError::AnalysisFailed,
-        false,
-        CoordinateReadDiagnostic{}));
+        false));
     REQUIRE(!ShouldRetryCoordinatePoolCompatibilityAnalysis(
         false,
         CoordinatePoolRuntimeError::CodeReadFailed,
-        false,
-        CoordinateReadDiagnostic{}));
+        false));
     REQUIRE(!ShouldRetryCoordinatePoolCompatibilityAnalysis(
         false,
         CoordinatePoolRuntimeError::AnalysisFailed,
-        true,
-        CoordinateReadDiagnostic{}));
+        true));
     CoordinateReadDiagnostic positionReadFailure{};
     positionReadFailure.stage = CoordinateReadStage::Position;
     positionReadFailure.failure = CoordinateReadFailure::AddressFault;
-    REQUIRE(!ShouldRetryCoordinatePoolCompatibilityAnalysis(
+    REQUIRE(ShouldRetryCoordinatePoolCompatibilityAnalysis(
         false,
         CoordinatePoolRuntimeError::AnalysisFailed,
-        false,
-        positionReadFailure));
+        false));
     REQUIRE(!ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
         CoordinatePoolRuntimeError::PositionReadFailed,
         positionReadFailure));

@@ -2607,25 +2607,21 @@ private:
         probe.primaryAnalysisError = 0;
         probe.primaryAnalysisFindStage = 0;
         probe.primaryAnalysisFindDetail = 0;
-        if (indexedPointers) {
-            return AnalyzeCodeWithOptionsUnlocked(CodeAnalysisOptions{
+        if (AnalyzeCodeWithOptionsUnlocked(CodeAnalysisOptions{
                 true,
                 true,
                 false,
                 static_cast<std::uint8_t>(
                     kAnalysisModeEntryBranch |
                     kAnalysisModeProgressiveDecode),
-            });
-        }
-
-        if (AnalyzeCodeWithOptionsUnlocked(CodeAnalysisOptions{})) {
+            })) {
             return true;
         }
+        if (indexedPointers) return false;
         if (!ShouldRetryCoordinatePoolCompatibilityAnalysis(
                 indexedPointers,
                 probe.error,
-                analysisInvalidated,
-                probe.read)) {
+                analysisInvalidated)) {
             return false;
         }
 

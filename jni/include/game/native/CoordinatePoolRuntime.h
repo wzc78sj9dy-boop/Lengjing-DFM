@@ -173,11 +173,10 @@ enum class CoordinatePoolRuntimeError : std::uint8_t {
 constexpr bool ShouldRetryCoordinatePoolCompatibilityAnalysis(
     bool indexedPointers,
     CoordinatePoolRuntimeError error,
-    bool analysisInvalidated,
-    const CoordinateReadDiagnostic& read) noexcept {
+    bool analysisInvalidated) noexcept {
     return !indexedPointers &&
         error == CoordinatePoolRuntimeError::AnalysisFailed &&
-        !analysisInvalidated && !read.HasFailure();
+        !analysisInvalidated;
 }
 
 constexpr bool ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
