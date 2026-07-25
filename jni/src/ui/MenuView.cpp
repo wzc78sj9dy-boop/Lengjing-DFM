@@ -757,7 +757,7 @@ void RenderRuntime(UiModel& model, UiActions& actions) {
     VisualSettings& visual = model.visual;
     SystemSettings& system = model.system;
 
-    SectionTitle("运行状态", 310.0f);
+    SectionTitle("运行状态");
     const float metricsWidth = ImGui::GetContentRegionAvail().x;
     const int metricColumns =
         metricsWidth >= 420.0f
