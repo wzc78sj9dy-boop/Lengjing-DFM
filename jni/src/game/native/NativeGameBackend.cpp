@@ -8982,6 +8982,8 @@ private:
                     "bridge=%llx context=%llx raw_entry=%llx "
                     "resolved_entry=%llx branch_status=%u branch_hops=%u "
                     "branch_insn=%08x branch_terminal=%08x pool=%llx "
+                    "remote_state=%u remote_used=%d remote_req=%llu "
+                    "remote_ok=%llu remote_fail=%llu "
                     "attempts=%llu successes=%llu\n",
                     static_cast<unsigned long long>(coordinateTraceFrame_),
                     executionContextRefreshed ? 1 : 0,
@@ -9042,6 +9044,14 @@ private:
                         poolProbe.entryTerminalInstruction),
                     static_cast<unsigned long long>(
                         poolProbe.poolPointer.normalizedValue),
+                    static_cast<unsigned int>(poolProbe.remotePlanState),
+                    poolProbe.remotePlanUsed ? 1 : 0,
+                    static_cast<unsigned long long>(
+                        poolProbe.remotePlanAttempts),
+                    static_cast<unsigned long long>(
+                        poolProbe.remotePlanSuccesses),
+                    static_cast<unsigned long long>(
+                        poolProbe.remotePlanFailures),
                     static_cast<unsigned long long>(poolProbe.attempts),
                     static_cast<unsigned long long>(poolProbe.successes));
                 std::fflush(stderr);
@@ -9062,6 +9072,8 @@ private:
                 "bridge=%llx context=%llx raw_entry=%llx "
                 "resolved_entry=%llx branch_status=%u branch_hops=%u "
                 "branch_insn=%08x branch_terminal=%08x pool=%llx "
+                "remote_state=%u remote_used=%d remote_req=%llu "
+                "remote_ok=%llu remote_fail=%llu "
                 "attempts=%llu successes=%llu\n",
                 static_cast<unsigned long long>(coordinateTraceFrame_),
                 executionContextRefreshed ? 1 : 0,
@@ -9111,6 +9123,14 @@ private:
                     poolProbe.entryTerminalInstruction),
                 static_cast<unsigned long long>(
                     poolProbe.poolPointer.normalizedValue),
+                static_cast<unsigned int>(poolProbe.remotePlanState),
+                poolProbe.remotePlanUsed ? 1 : 0,
+                static_cast<unsigned long long>(
+                    poolProbe.remotePlanAttempts),
+                static_cast<unsigned long long>(
+                    poolProbe.remotePlanSuccesses),
+                static_cast<unsigned long long>(
+                    poolProbe.remotePlanFailures),
                 static_cast<unsigned long long>(poolProbe.attempts),
                 static_cast<unsigned long long>(poolProbe.successes));
             std::fflush(stderr);
