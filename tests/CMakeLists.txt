@@ -345,3 +345,9 @@ add_coordinate_execution_test(
     ../jni/src/game/native/CoordinateExecutionDecoder.cpp
     ../jni/src/game/native/CoordinateExecutionCandidate.cpp
 )
+
+add_coordinate_execution_test(
+    arm64_pacga_tests
+    arm64_pacga_tests.cpp
+    ../jni/src/game/native/Arm64Pacga.cpp
+)

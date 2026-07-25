@@ -1,6 +1,6 @@
 #include "game/native/CoordinateExecutionRuntime.h"
 
-#include "game/native/AlgorithmPositionRuntime.h"
+#include "game/native/Arm64Pacga.h"
 #include "game/native/MemoryTransport.h"
 
 #include <unicorn/unicorn.h>
@@ -700,10 +700,10 @@ private:
                 sourceValue, modifierValue)) {
             result = executionContext.pacgaOracle.result;
         } else if (executionContext.HasPacgaKey()) {
-            result = ComputeAlgorithmPositionPacga(
+            result = ComputeArm64Pacga(
                 sourceValue,
                 modifierValue,
-                AlgorithmPacgaKey{
+                Arm64PacgaKey{
                     executionContext.pacgaLow,
                     executionContext.pacgaHigh,
                 });
