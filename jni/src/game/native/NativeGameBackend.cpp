@@ -25,6 +25,7 @@
 #include "game/native/BoneFrameSource.h"
 #include "game/native/CharacterComponentTransform.h"
 #include "game/native/CharacterPositionResolver.h"
+#include "game/native/CoordinateDecryptBackendRoute.h"
 #include "game/native/CoordinateDecrypt2Runtime.h"
 #include "game/native/CoordinateExecutionDecoder.h"
 #include "game/native/CoordinateOutputPolicy.h"
@@ -99,29 +100,6 @@ constexpr std::array<std::string_view, 2> kGameModuleNames{
     "libUE4.so",
     "libUnreal.so",
 };
-
-std::uint8_t SelectedCoordinateExecutionMode(
-    const ui::VisualSettings& visual) noexcept {
-    switch (ui::ResolveCoordinateDecryptSelection(visual)) {
-        case ui::CoordinateDecryptSelection::Decrypt3:
-            return static_cast<std::uint8_t>(
-                native::CoordinateExecutionMode::Emulate);
-        case ui::CoordinateDecryptSelection::Decrypt4:
-            return static_cast<std::uint8_t>(
-                native::CoordinateExecutionMode::Interpret);
-        case ui::CoordinateDecryptSelection::Decrypt5:
-            return static_cast<std::uint8_t>(
-                native::CoordinateExecutionMode::Predecode);
-        case ui::CoordinateDecryptSelection::Decrypt6:
-            return static_cast<std::uint8_t>(
-                native::CoordinateExecutionMode::Jit);
-        case ui::CoordinateDecryptSelection::None:
-        case ui::CoordinateDecryptSelection::Decrypt1:
-        case ui::CoordinateDecryptSelection::Decrypt2:
-            return 0;
-    }
-    return 0;
-}
 
 constexpr bool ShouldWriteCoordinateFrameTrace(
     std::uint64_t frame) noexcept {
@@ -1529,12 +1507,15 @@ public:
 
         const ui::CoordinateDecryptSelection decryptSelection =
             ui::ResolveCoordinateDecryptSelection(settings.visual);
+        const native::CoordinateDecryptBackendRoute decryptRoute =
+            native::ResolveCoordinateDecryptBackendRoute(
+                decryptSelection, true);
         const bool requestedHardwareBreakpoint =
-            decryptSelection == ui::CoordinateDecryptSelection::Decrypt2;
+            decryptRoute.coordinateDecrypt2;
         const bool requestedCoordinateReplay =
-            decryptSelection == ui::CoordinateDecryptSelection::Decrypt1;
+            decryptRoute.coordinateReplay;
         const std::uint8_t requestedCoordinateExecutionMode =
-            SelectedCoordinateExecutionMode(settings.visual);
+            decryptRoute.ExecutionModeValue();
         const bool coordinateExecutionModeChanged =
             coordinateExecutionMode_ != requestedCoordinateExecutionMode;
         const bool hardwareBreakpointRequestChanged =

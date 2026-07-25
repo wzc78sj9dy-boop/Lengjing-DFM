@@ -26,6 +26,7 @@ int main() {
         RunCloudLayoutTests();
         RunCoordinatePoolCloudLayoutStandaloneTests();
         RunConfigTests();
+        RunCoordinateDecryptBackendRouteTests();
         RunCoordinatePoolPolicyTests();
         RunCoordinateOutputPolicyTests();
         RunCpuMailboxPolicyTests();
