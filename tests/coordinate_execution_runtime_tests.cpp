@@ -22,6 +22,7 @@ using lengjing::game::native::CoordinateExecutionStatus;
 using lengjing::game::native::ContainsCoordinateExecutionCodeAddress;
 using lengjing::game::native::IsCoordinateExecutionPointer;
 using lengjing::game::native::NormalizeCoordinateExecutionPointer;
+using lengjing::game::native::ShouldRedirectCoordinateExecutionReturn;
 using lengjing::game::native::kCoordinateExecutionDefaultFrame;
 using lengjing::game::native::kCoordinateExecutionStopPc;
 
@@ -174,6 +175,7 @@ void TestSharedAbsoluteEntry() {
     CoordinateExecutionRequest request{};
     request.mode = CoordinateExecutionMode::Interpret;
     request.shared.hookOffset = 0x5000;
+    request.shared.x0Override = UINT64_C(0x0000007050000000);
     request.shared.absoluteEntry = UINT64_C(0x0000007060000000);
     request.shared.returnStub = kModuleBase + 0x6000;
 
@@ -182,9 +184,16 @@ void TestSharedAbsoluteEntry() {
     REQUIRE(plan.valid);
     REQUIRE(plan.entryPc == request.shared.absoluteEntry);
     REQUIRE(plan.hookPc == kCodeBase + 0x5000);
+    REQUIRE(plan.x0 == kNormalizedSubject);
     REQUIRE(plan.x1 == kNormalizedSubject);
     REQUIRE(plan.lr == request.shared.returnStub);
     REQUIRE(plan.returnStub == request.shared.returnStub);
+    REQUIRE(ShouldRedirectCoordinateExecutionReturn(
+        plan, request.shared.returnStub));
+    REQUIRE(ShouldRedirectCoordinateExecutionReturn(
+        plan, UINT64_C(0xAB00007000006000)));
+    REQUIRE(!ShouldRedirectCoordinateExecutionReturn(
+        plan, request.shared.returnStub + 4));
     REQUIRE(!plan.seedSlotBeforeRun);
     REQUIRE(plan.seedSlotAtHook);
 

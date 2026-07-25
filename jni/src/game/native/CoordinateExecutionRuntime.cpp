@@ -694,8 +694,18 @@ private:
                 return;
             }
         }
-        if (plan.returnStub != 0 && address == plan.returnStub) {
+        if (ShouldRedirectCoordinateExecutionReturn(plan, address)) {
             evidence.hitReturnStub = true;
+            if (uc_reg_write(
+                    engine,
+                    UC_ARM64_REG_PC,
+                    &kCoordinateExecutionStopPc) != UC_ERR_OK ||
+                uc_emu_stop(engine) != UC_ERR_OK) {
+                FailHook(
+                    address,
+                    CoordinateExecutionRuntimeError::EmulationFailed);
+            }
+            return;
         }
 
         std::uint32_t instruction = 0;

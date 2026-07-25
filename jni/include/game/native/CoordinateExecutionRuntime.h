@@ -163,6 +163,14 @@ constexpr std::uint64_t NormalizeCoordinateExecutionPointer(
     return value & kCoordinateExecutionPointerMask;
 }
 
+constexpr bool ShouldRedirectCoordinateExecutionReturn(
+    const CoordinateExecutionPlan& plan,
+    std::uint64_t pc) noexcept {
+    return plan.returnStub != 0 &&
+        NormalizeCoordinateExecutionPointer(pc) ==
+            NormalizeCoordinateExecutionPointer(plan.returnStub);
+}
+
 constexpr bool IsCoordinateExecutionPointer(std::uint64_t value) noexcept {
     const std::uint64_t pointer =
         NormalizeCoordinateExecutionPointer(value);
@@ -280,9 +288,6 @@ constexpr CoordinateExecutionPlan BuildCoordinateExecutionPlan(
         return CoordinateExecutionPlan{};
     }
 
-    plan.x0 = request.shared.x0Override != 0
-        ? NormalizeCoordinateExecutionPointer(request.shared.x0Override)
-        : subject;
     plan.x2 = subject;
     plan.seedSlotAtHook = true;
     if (request.shared.absoluteEntry != 0) {
@@ -297,10 +302,15 @@ constexpr CoordinateExecutionPlan BuildCoordinateExecutionPlan(
         if ((plan.entryPc & 3U) != 0 || plan.entryPc == 0) {
             return CoordinateExecutionPlan{};
         }
+        plan.x0 = subject;
         plan.x1 = subject;
         plan.lr = returnStub;
         plan.returnStub = returnStub;
     } else {
+        plan.x0 = request.shared.x0Override != 0
+            ? NormalizeCoordinateExecutionPointer(
+                  request.shared.x0Override)
+            : subject;
         plan.entryPc = plan.hookPc;
         plan.x1 = kCoordinateExecutionDefaultFrame;
         plan.lr = kCoordinateExecutionStopPc;
