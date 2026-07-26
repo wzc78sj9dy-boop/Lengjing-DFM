@@ -5250,6 +5250,7 @@ private:
                 static_cast<double>(raw.z));
         }
         if (available && IsFinite(raw)) {
+            coordinateExecutionContextHadSuccess_ = true;
             const Vec3 adjusted = AdjustDecodedPosition(raw);
             coordinateExecutionPositionCache_[actor] =
                 DecodedPositionCacheEntry{
@@ -9379,6 +9380,7 @@ private:
             if (!coordinateContextSelected) {
                 algorithmExecutionContext_ = {};
                 algorithmExecutionContextReady_ = false;
+                coordinateExecutionContextHadSuccess_ = false;
                 algorithmExecutionContextRefreshPolicy_.Invalidate();
             }
             coordinatePoolReady_ = false;
@@ -9412,6 +9414,7 @@ private:
                 }
                 algorithmExecutionContext_ = {};
                 algorithmExecutionContextReady_ = false;
+                coordinateExecutionContextHadSuccess_ = false;
                 algorithmExecutionContextRefreshPolicy_.MarkFailed();
             } else {
                 const bool executionContextChanged =
@@ -9437,6 +9440,7 @@ private:
                     algorithmExecutionContext_.pacgaOracle.available !=
                         refreshed.pacgaOracle.available;
                 if (executionContextChanged) {
+                    coordinateExecutionContextHadSuccess_ = false;
                     if (coordinateExecutionSelected) {
                         coordinateExecutionPositionCache_.clear();
                     }
@@ -9874,6 +9878,7 @@ private:
                 algorithmExecutionContextRefreshPolicy_.Invalidate();
                 algorithmExecutionContext_ = {};
                 algorithmExecutionContextReady_ = false;
+                coordinateExecutionContextHadSuccess_ = false;
             }
         }
         algorithmGuestPc_ = candidatePc;
@@ -9968,10 +9973,15 @@ private:
             algorithmFailureSince_ = now;
             return;
         }
+        const bool acceleratedRecovery =
+            native::ShouldAccelerateCoordinateExecutionRecovery(
+                coordinateExecution,
+                coordinateExecutionContextHadSuccess_,
+                algorithmFrameAgedDecodedFailure_);
         if (!native::HasCoordinateFailureRecoveryElapsed(
                 algorithmFailureSince_,
                 now,
-                algorithmFrameAgedDecodedFailure_) ||
+                acceleratedRecovery) ||
             memory_ == nullptr) {
             return;
         }
@@ -9981,6 +9991,7 @@ private:
         algorithmFailureSince_ = {};
         algorithmExecutionContext_ = {};
         algorithmExecutionContextReady_ = false;
+        coordinateExecutionContextHadSuccess_ = false;
         algorithmExecutionContextRefreshPolicy_.Invalidate();
         coordinatePoolReady_ = false;
         coordinateExecutionPositionCache_.clear();
@@ -10322,6 +10333,7 @@ private:
         memory_.reset();
         algorithmExecutionContext_ = {};
         algorithmExecutionContextReady_ = false;
+        coordinateExecutionContextHadSuccess_ = false;
         coordinateReplayEntrySnapshot_ = {};
         coordinateReplayEntryDiagnostic_ = {};
         algorithmGuestPc_ = 0;
@@ -10442,6 +10454,7 @@ private:
     std::uintptr_t algorithmGuestPc_ = 0;
     std::uint32_t algorithmEntryInstruction_ = 0;
     bool algorithmExecutionContextReady_ = false;
+    bool coordinateExecutionContextHadSuccess_ = false;
     bool algorithmEntryReady_ = false;
     bool algorithmReplayAllowedThisFrame_ = true;
     bool algorithmPositionRequested_ = false;

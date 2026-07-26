@@ -10,6 +10,8 @@ void RunCoordinateExecutionCachePolicyTests() {
     using lengjing::game::native::
         CoordinateExecutionCacheVerificationInterval;
     using lengjing::game::native::ResolveCoordinateExecutionHealthSample;
+    using lengjing::game::native::
+        ShouldAccelerateCoordinateExecutionRecovery;
     using lengjing::game::native::ShouldVerifyCoordinateExecutionCache;
     using lengjing::game::native::
         kCoordinateExecutionCacheVerificationMaximum;
@@ -67,4 +69,15 @@ void RunCoordinateExecutionCachePolicyTests() {
     REQUIRE(ordinaryOutput.attempts == 10);
     REQUIRE(ordinaryOutput.successes == 1);
     REQUIRE(ordinaryOutput.IsHealthy());
+
+    REQUIRE(ShouldAccelerateCoordinateExecutionRecovery(
+        true, false, false));
+    REQUIRE(!ShouldAccelerateCoordinateExecutionRecovery(
+        true, true, false));
+    REQUIRE(!ShouldAccelerateCoordinateExecutionRecovery(
+        true, true, true));
+    REQUIRE(!ShouldAccelerateCoordinateExecutionRecovery(
+        false, false, false));
+    REQUIRE(ShouldAccelerateCoordinateExecutionRecovery(
+        false, true, true));
 }

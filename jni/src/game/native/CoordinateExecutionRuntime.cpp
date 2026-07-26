@@ -1732,7 +1732,7 @@ private:
         }
     }
 
-    void HandleSvc(std::uint64_t address) noexcept {
+    void HandleSvc(std::uint64_t address) {
         std::uint64_t number = 0;
         if (!ReadXRegister(8, number)) {
             FailHook(address, CoordinateExecutionRuntimeError::UnsupportedSvc);
@@ -1749,10 +1749,59 @@ private:
         evidence.lastSvcNumber = number;
         ++evidence.exclusiveClearCount;
         exclusiveMonitorInvalid = true;
+        if (TryHandleDescriptorEndSvc(address, number)) return;
         if (!WriteXRegister(0, CoordinateExecutionSvcResult(number)) ||
             !SkipInstruction(address)) {
             FailHook(address, CoordinateExecutionRuntimeError::EmulationFailed);
         }
+    }
+
+    bool ResolveDescriptorEnd(std::uint64_t descriptorValue,
+                              std::int32_t& descriptor,
+                              std::int64_t& result) {
+        descriptor = static_cast<std::int32_t>(descriptorValue);
+        result = -1;
+        const auto cached = descriptorEnds.find(descriptor);
+        if (cached != descriptorEnds.end()) {
+            result = cached->second;
+            return true;
+        }
+        if (!ReadDescriptorEnd(
+                executionContext.threadId, descriptor, result)) {
+            return false;
+        }
+        descriptorEnds.emplace(descriptor, result);
+        return true;
+    }
+
+    bool TryHandleDescriptorEndSvc(std::uint64_t address,
+                                   std::uint64_t number) {
+        std::uint64_t descriptorValue = 0;
+        std::uint64_t offset = 0;
+        std::uint64_t whence = 0;
+        if (!ReadXRegister(0, descriptorValue) ||
+            !ReadXRegister(1, offset) ||
+            !ReadXRegister(2, whence) ||
+            !IsCoordinateExecutionDescriptorEndSvc(
+                number, offset, whence)) {
+            return false;
+        }
+
+        std::int32_t descriptor = -1;
+        std::int64_t result = -1;
+        if (!ResolveDescriptorEnd(
+                descriptorValue, descriptor, result)) {
+            return false;
+        }
+
+        ++evidence.descriptorEndQueryCount;
+        evidence.descriptorEndQueryFd = descriptor;
+        evidence.descriptorEndQueryResult = result;
+        if (!WriteXRegister(0, static_cast<std::uint64_t>(result)) ||
+            !SkipInstruction(address)) {
+            FailHook(address, CoordinateExecutionRuntimeError::EmulationFailed);
+        }
+        return true;
     }
 
     bool TryHandleDescriptorEndQuery(std::uint64_t address) {
@@ -1769,16 +1818,10 @@ private:
             return false;
         }
 
-        const std::int32_t descriptor =
-            static_cast<std::int32_t>(descriptorValue);
+        std::int32_t descriptor = -1;
         std::int64_t result = -1;
-        const auto cached = descriptorEnds.find(descriptor);
-        if (cached != descriptorEnds.end()) {
-            result = cached->second;
-        } else if (ReadDescriptorEnd(
-                       executionContext.threadId, descriptor, result)) {
-            descriptorEnds.emplace(descriptor, result);
-        } else {
+        if (!ResolveDescriptorEnd(
+                descriptorValue, descriptor, result)) {
             return false;
         }
 
@@ -1865,7 +1908,9 @@ private:
     }
 
     CoordinateExecutionResult ValidateResult() {
-        if (!evidence.hitStopPc || !evidence.captureValid ||
+        if ((HasRecordedCoordinateExecutionSvc(evidence, 62) &&
+             evidence.descriptorEndQueryCount == 0) ||
+            !evidence.hitStopPc || !evidence.captureValid ||
             evidence.captureCount == 0 ||
             evidence.capturedWriteSize != sizeof(std::uint64_t) ||
             (plan.requireReturnStub && !evidence.hitReturnStub) ||

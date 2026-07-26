@@ -21,15 +21,18 @@ using lengjing::game::native::CoordinateExecutionMode;
 using lengjing::game::native::CoordinateExecutionMemoryBaseRegister;
 using lengjing::game::native::
     CoordinateExecutionExclusiveMonitorInvalidAfterInstruction;
+using lengjing::game::native::CoordinateExecutionEvidence;
 using lengjing::game::native::CoordinateExecutionStoreExclusiveStatusRegister;
 using lengjing::game::native::CoordinateExecutionRequest;
 using lengjing::game::native::CoordinateExecutionStatus;
 using lengjing::game::native::ContainsCoordinateExecutionCodeAddress;
 using lengjing::game::native::CoordinateExecutionSvcResult;
+using lengjing::game::native::HasRecordedCoordinateExecutionSvc;
 using lengjing::game::native::IsCoordinateExecutionPointer;
 using lengjing::game::native::IsCoordinateExecutionCanonicalFaultBase;
 using lengjing::game::native::IsCoordinateExecutionClearExclusiveInstruction;
 using lengjing::game::native::IsCoordinateExecutionDescriptorEndQuery;
+using lengjing::game::native::IsCoordinateExecutionDescriptorEndSvc;
 using lengjing::game::native::IsCoordinateExecutionLoadExclusiveInstruction;
 using lengjing::game::native::IsCoordinateExecutionStackBase;
 using lengjing::game::native::IsCoordinateExecutionStoreExclusiveInstruction;
@@ -140,6 +143,33 @@ void TestSvcContract() {
     REQUIRE(!IsCoordinateExecutionDescriptorEndQuery(62, 1, 2));
     REQUIRE(!IsCoordinateExecutionDescriptorEndQuery(62, 0, 1));
     REQUIRE(!IsCoordinateExecutionDescriptorEndQuery(178, 0, 2));
+    REQUIRE(IsCoordinateExecutionDescriptorEndSvc(62, 0, 2));
+    REQUIRE(!IsCoordinateExecutionDescriptorEndSvc(62, 1, 2));
+    REQUIRE(!IsCoordinateExecutionDescriptorEndSvc(62, 0, 1));
+    REQUIRE(!IsCoordinateExecutionDescriptorEndSvc(172, 0, 2));
+}
+
+void TestSvcEvidenceContract() {
+    CoordinateExecutionEvidence evidence{};
+    evidence.svcNumber0 = 62;
+    REQUIRE(!HasRecordedCoordinateExecutionSvc(evidence, 62));
+
+    evidence.svcCount = 1;
+    REQUIRE(HasRecordedCoordinateExecutionSvc(evidence, 62));
+    REQUIRE(!HasRecordedCoordinateExecutionSvc(evidence, 172));
+
+    evidence.svcNumber0 = 172;
+    evidence.svcNumber1 = 62;
+    REQUIRE(!HasRecordedCoordinateExecutionSvc(evidence, 62));
+    evidence.svcCount = 2;
+    REQUIRE(HasRecordedCoordinateExecutionSvc(evidence, 62));
+
+    evidence.svcNumber1 = 178;
+    evidence.svcNumber3 = 62;
+    evidence.svcCount = 3;
+    REQUIRE(!HasRecordedCoordinateExecutionSvc(evidence, 62));
+    evidence.svcCount = 4;
+    REQUIRE(HasRecordedCoordinateExecutionSvc(evidence, 62));
 }
 
 void TestTaggedMemoryInstructionContract() {
@@ -424,6 +454,7 @@ int main() {
     TestSyntheticStackContract();
     TestHookInitializationGate();
     TestSvcContract();
+    TestSvcEvidenceContract();
     TestTaggedMemoryInstructionContract();
     TestExclusiveMonitorContract();
     TestKnownRelativeCandidate();

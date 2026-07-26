@@ -295,6 +295,15 @@ struct CoordinateExecutionRuntimeProbe {
     CoordinateExecutionEvidence evidence{};
 };
 
+constexpr bool HasRecordedCoordinateExecutionSvc(
+    const CoordinateExecutionEvidence& evidence,
+    std::uint64_t number) noexcept {
+    return (evidence.svcCount >= 1 && evidence.svcNumber0 == number) ||
+        (evidence.svcCount >= 2 && evidence.svcNumber1 == number) ||
+        (evidence.svcCount >= 3 && evidence.svcNumber2 == number) ||
+        (evidence.svcCount >= 4 && evidence.svcNumber3 == number);
+}
+
 constexpr std::uint64_t NormalizeCoordinateExecutionPointer(
     std::uint64_t value) noexcept {
     return value & kCoordinateExecutionPointerMask;
@@ -418,6 +427,13 @@ constexpr bool IsCoordinateExecutionDescriptorEndQuery(
     std::uint64_t offset,
     std::uint64_t whence) noexcept {
     return number == 62 && offset == 0 && whence == 2;
+}
+
+constexpr bool IsCoordinateExecutionDescriptorEndSvc(
+    std::uint64_t number,
+    std::uint64_t offset,
+    std::uint64_t whence) noexcept {
+    return IsCoordinateExecutionDescriptorEndQuery(number, offset, whence);
 }
 
 constexpr bool IsCoordinateExecutionMode(CoordinateExecutionMode mode) noexcept {

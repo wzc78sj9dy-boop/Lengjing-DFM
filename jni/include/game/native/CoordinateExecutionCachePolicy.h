@@ -76,4 +76,13 @@ ResolveCoordinateExecutionHealthSample(
         : CoordinateExecutionHealthSample{outputAttempts, outputSuccesses};
 }
 
+constexpr bool ShouldAccelerateCoordinateExecutionRecovery(
+    bool coordinateExecution,
+    bool contextHadSuccess,
+    bool agedDecodedFailure) noexcept {
+    return coordinateExecution
+        ? !contextHadSuccess
+        : agedDecodedFailure;
+}
+
 }  // namespace lengjing::game::native
