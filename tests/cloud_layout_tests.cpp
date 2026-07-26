@@ -19,67 +19,30 @@ std::string LayoutJson(std::uint64_t revision,
                        std::string worldOffset = "0x22002000") {
     std::ostringstream stream;
     stream
-        << R"({"schema_version":3,"build_id":")" << buildId
-        << R"(","revision":)" << revision
-        << R"(,"layout":{"name_pool":"0x21001000","world":")"
+        << R"({"v":4,"b":")" << buildId
+        << R"(","r":)" << revision
+        << R"(,"d":[["0x21001000",")"
         << worldOffset
-        << R"(","geometry_instances":["0x23003000","0x24004000"],)"
-        << R"("actor_records":{"tagged_container":"0x25005000",)"
-        << R"("plain_array":"0x26006000","plain_root":"0x284",)"
-        << R"("plain_mesh":"0x414","encrypted_record_count":1536,)"
-        << R"("plain_record_stride":40,"maximum_plain_count":12288,)"
-        << R"("fallback_plain_count":3072},)"
-        << R"("actor_subject":{"root":"0x1a0","mesh":"0x410",)"
-        << R"("alternate_root":"0x420"},)"
-        << R"("tracking_matrix_root":"0x27007000",)"
-        << R"("component_position_flag":"0x28008003"},)"
-        << R"("decrypt":{"mode1":{"pool":{"root_rva":"0x29009000",)"
-        << R"("bridge_offset":"0x24","context_offset":-24,)"
-        << R"("entry_offset":"0xc0","component_key_offset":"0x260",)"
-        << R"("entry_stride":80,"pool_head_skip":32,)"
-        << R"("ring_refresh_frames":111},"pacga_data":"0x123456789",)"
-        << R"("pacga_modifier":"0x987654321"},)"
-        << R"("mode2":{"pool":{"root_rva":"0x2a00a000",)"
-        << R"("bridge_offset":"0x28","context_offset":-32,)"
-        << R"("entry_offset":"0xd0","component_key_offset":"0x270",)"
-        << R"("entry_stride":96,"pool_head_skip":36,)"
-        << R"("ring_refresh_frames":121}},)"
-        << R"("execution":{"discovery":{"root_offset":"0x2b00b000",)"
-        << R"("pointer_offset":"0x14","entry_offset":"0xd8",)"
-        << R"("return_stub_magic":"0x13572468abcdef01"},)"
-        << R"("result":{"slot_offset":"0x280",)"
-        << R"("position_offset":"0x184"},)"
-        << R"("hook_offsets":{"subject_load":"0x400",)"
-        << R"("callback_entry":"0x404","callback_return":"0x408",)"
-        << R"("callback_index":"0x40c","callback_copy_prepare":"0x410",)"
-        << R"("callback_copy_after":"0x414","table_pointer":"0x418",)"
-        << R"("table_value":"0x41c","lock":"0x420",)"
-        << R"("lock_return":"0x424","first_call":"0x428",)"
-        << R"("first_return":"0x42c","external_call":"0x430",)"
-        << R"("external_return":"0x434","primary_gate_write":"0x438",)"
-        << R"("alternate_gate_write":"0x43c","gate_probe":"0x440",)"
-        << R"("record_count":"0x444","target_key":"0x448",)"
-        << R"("ring_setup":"0x44c","ring_probe":"0x450",)"
-        << R"("ring_hit":"0x454","dispatch":"0x458",)"
-        << R"("dispatch_return":"0x45c","result_prepare":"0x460",)"
-        << R"("result":"0x464"},)"
-        << R"("field_offsets":{"context_expected":"0x300",)"
-        << R"("stack_prior_gate":"0x304",)"
-        << R"("stack_primary_gate_source":"0x308",)"
-        << R"("stack_gate_flag":"0x30c",)"
-        << R"("stack_gate_snapshot_a":"0x310",)"
-        << R"("stack_gate_snapshot_b":"0x314",)"
-        << R"("stack_ring_mid":"0x318",)"
-        << R"("object_position":"0x31c",)"
-        << R"("stack_capture_a":"0x320",)"
-        << R"("stack_capture_b":"0x324",)"
-        << R"("stack_capture_c":"0x328",)"
-        << R"("stack_capture_d":"0x32c",)"
-        << R"("capture_field":"0x330",)"
-        << R"("stack_pool_selector":"0x334",)"
-        << R"("context_pool_table":"0x338"},)"
-        << R"("context":{"thread_name":"WorkerAlpha",)"
-        << R"("oracle_opcode":"0x9ac33041"}}}})";
+        << R"(",["0x23003000","0x24004000"],)"
+        << R"(["0x25005000","0x26006000","0x284","0x414",)"
+        << R"(1536,40,12288,3072],)"
+        << R"(["0x1a0","0x410","0x420"],)"
+        << R"("0x27007000","0x28008003"],)"
+        << R"([[["0x29009000","0x24",-24,"0xc0","0x260",)"
+        << R"(80,32,111],"0x123456789","0x987654321"],)"
+        << R"([["0x2a00a000","0x28",-32,"0xd0","0x270",)"
+        << R"(96,36,121]],)"
+        << R"([["0x2b00b000","0x14","0xd8",)"
+        << R"("0x13572468abcdef01"],["0x280","0x184"],)"
+        << R"(["0x400","0x404","0x408","0x40c","0x410","0x414",)"
+        << R"("0x418","0x41c","0x420","0x424","0x428","0x42c",)"
+        << R"("0x430","0x434","0x438","0x43c","0x440","0x444",)"
+        << R"("0x448","0x44c","0x450","0x454","0x458","0x45c",)"
+        << R"("0x460","0x464"],)"
+        << R"(["0x300","0x304","0x308","0x30c","0x310","0x314",)"
+        << R"("0x318","0x31c","0x320","0x324","0x328","0x32c",)"
+        << R"("0x330","0x334","0x338"],)"
+        << R"(["WorkerAlpha","0x9ac33041"]]]]})";
     return stream.str();
 }
 
@@ -117,6 +80,17 @@ void RunCloudLayoutTests() {
     REQUIRE(empty.decrypt.execution.context.threadName.empty());
     REQUIRE(empty.decrypt.execution.context.oracleOpcode == 0);
 
+    std::string boundaryPayload = LayoutJson(1);
+    REQUIRE(boundaryPayload.size() < kMaximumCloudLayoutPayloadBytes);
+    boundaryPayload.append(
+        kMaximumCloudLayoutPayloadBytes - boundaryPayload.size(), ' ');
+    CloudLayoutStore boundaryStore(RuntimeTarget());
+    REQUIRE(boundaryStore.ValidateAndPublish(boundaryPayload).status ==
+            CloudLayoutStatus::Published);
+    boundaryPayload.push_back(' ');
+    REQUIRE(boundaryStore.ValidateAndPublish(boundaryPayload).status ==
+            CloudLayoutStatus::InvalidJson);
+
     CloudLayoutStore store(RuntimeTarget());
     REQUIRE(store.ExpectedTarget().packageName == "com.example.runtime");
     REQUIRE(store.ExpectedTarget().moduleName == "libSynthetic.so");
@@ -125,7 +99,7 @@ void RunCloudLayoutTests() {
         store.ValidateAndPublish(LayoutJson(17));
     REQUIRE(first.status == CloudLayoutStatus::Published);
     REQUIRE(first.snapshot != nullptr);
-    REQUIRE(first.snapshot->schemaVersion == 3);
+    REQUIRE(first.snapshot->schemaVersion == 4);
     REQUIRE(first.snapshot->revision == 17);
     REQUIRE(first.snapshot->identity.packageName == "com.example.runtime");
     REQUIRE(first.snapshot->identity.moduleName == "libSynthetic.so");
@@ -165,8 +139,12 @@ void RunCloudLayoutTests() {
     REQUIRE(mode1.pacgaModifier == 0x987654321ULL);
     const auto& mode2 = first.snapshot->decrypt.mode2;
     REQUIRE(mode2.pool.rootRva == 0x2a00a000ULL);
+    REQUIRE(mode2.pool.bridgeOffset == 0x28);
     REQUIRE(mode2.pool.contextOffset == -32);
     REQUIRE(mode2.pool.entryOffset == 0xd0);
+    REQUIRE(mode2.pool.componentKeyOffset == 0x270);
+    REQUIRE(mode2.pool.entryStride == 96);
+    REQUIRE(mode2.pool.poolHeadSkip == 36);
     REQUIRE(mode2.pool.ringRefreshFrames == 121);
 
     const auto& execution = first.snapshot->decrypt.execution;
@@ -177,13 +155,65 @@ void RunCloudLayoutTests() {
             0x13572468abcdef01ULL);
     REQUIRE(execution.result.slotOffset == 0x280);
     REQUIRE(execution.result.positionOffset == 0x184);
-    REQUIRE(execution.hookOffsets.subjectLoad == 0x400);
-    REQUIRE(execution.hookOffsets.callbackCopyAfter == 0x414);
-    REQUIRE(execution.hookOffsets.alternateGateWrite == 0x43c);
-    REQUIRE(execution.hookOffsets.result == 0x464);
-    REQUIRE(execution.fieldOffsets.contextExpected == 0x300);
-    REQUIRE(execution.fieldOffsets.objectPosition == 0x31c);
-    REQUIRE(execution.fieldOffsets.contextPoolTable == 0x338);
+    using HookMember =
+        std::uintptr_t CloudExecutionHookOffsetLayout::*;
+    static constexpr HookMember hookMembers[] = {
+        &CloudExecutionHookOffsetLayout::subjectLoad,
+        &CloudExecutionHookOffsetLayout::callbackEntry,
+        &CloudExecutionHookOffsetLayout::callbackReturn,
+        &CloudExecutionHookOffsetLayout::callbackIndex,
+        &CloudExecutionHookOffsetLayout::callbackCopyPrepare,
+        &CloudExecutionHookOffsetLayout::callbackCopyAfter,
+        &CloudExecutionHookOffsetLayout::tablePointer,
+        &CloudExecutionHookOffsetLayout::tableValue,
+        &CloudExecutionHookOffsetLayout::lock,
+        &CloudExecutionHookOffsetLayout::lockReturn,
+        &CloudExecutionHookOffsetLayout::firstCall,
+        &CloudExecutionHookOffsetLayout::firstReturn,
+        &CloudExecutionHookOffsetLayout::externalCall,
+        &CloudExecutionHookOffsetLayout::externalReturn,
+        &CloudExecutionHookOffsetLayout::primaryGateWrite,
+        &CloudExecutionHookOffsetLayout::alternateGateWrite,
+        &CloudExecutionHookOffsetLayout::gateProbe,
+        &CloudExecutionHookOffsetLayout::recordCount,
+        &CloudExecutionHookOffsetLayout::targetKey,
+        &CloudExecutionHookOffsetLayout::ringSetup,
+        &CloudExecutionHookOffsetLayout::ringProbe,
+        &CloudExecutionHookOffsetLayout::ringHit,
+        &CloudExecutionHookOffsetLayout::dispatch,
+        &CloudExecutionHookOffsetLayout::dispatchReturn,
+        &CloudExecutionHookOffsetLayout::resultPrepare,
+        &CloudExecutionHookOffsetLayout::result,
+    };
+    for (std::size_t index = 0;
+         index < sizeof(hookMembers) / sizeof(hookMembers[0]); ++index) {
+        REQUIRE(execution.hookOffsets.*hookMembers[index] ==
+                0x400U + index * 4U);
+    }
+    using FieldMember =
+        std::uintptr_t CloudExecutionFieldOffsetLayout::*;
+    static constexpr FieldMember fieldMembers[] = {
+        &CloudExecutionFieldOffsetLayout::contextExpected,
+        &CloudExecutionFieldOffsetLayout::stackPriorGate,
+        &CloudExecutionFieldOffsetLayout::stackPrimaryGateSource,
+        &CloudExecutionFieldOffsetLayout::stackGateFlag,
+        &CloudExecutionFieldOffsetLayout::stackGateSnapshotA,
+        &CloudExecutionFieldOffsetLayout::stackGateSnapshotB,
+        &CloudExecutionFieldOffsetLayout::stackRingMid,
+        &CloudExecutionFieldOffsetLayout::objectPosition,
+        &CloudExecutionFieldOffsetLayout::stackCaptureA,
+        &CloudExecutionFieldOffsetLayout::stackCaptureB,
+        &CloudExecutionFieldOffsetLayout::stackCaptureC,
+        &CloudExecutionFieldOffsetLayout::stackCaptureD,
+        &CloudExecutionFieldOffsetLayout::captureField,
+        &CloudExecutionFieldOffsetLayout::stackPoolSelector,
+        &CloudExecutionFieldOffsetLayout::contextPoolTable,
+    };
+    for (std::size_t index = 0;
+         index < sizeof(fieldMembers) / sizeof(fieldMembers[0]); ++index) {
+        REQUIRE(execution.fieldOffsets.*fieldMembers[index] ==
+                0x300U + index * 4U);
+    }
     REQUIRE(execution.context.threadName == "WorkerAlpha");
     REQUIRE(execution.context.oracleOpcode == 0x9ac33041U);
 
@@ -201,16 +231,17 @@ void RunCloudLayoutTests() {
         REQUIRE(result.snapshot == stable);
         REQUIRE(store.Snapshot() == stable);
     };
-    requireConflict("\"world\":\"0x22002000\"",
-                    "\"world\":\"0x22002008\"");
-    requireConflict("\"pacga_modifier\":\"0x987654321\"",
-                    "\"pacga_modifier\":\"0x987654322\"");
-    requireConflict("\"result\":\"0x464\"",
-                    "\"result\":\"0x468\"");
-    requireConflict("\"context_pool_table\":\"0x338\"",
-                    "\"context_pool_table\":\"0x33c\"");
-    requireConflict(std::string("\"build_id\":\"") + kSyntheticBuildId,
-                    "\"build_id\":\"0011223344556677");
+    requireConflict(
+        "\"0x22002000\",[\"0x23003000\"",
+        "\"0x22002008\",[\"0x23003000\"");
+    requireConflict("\"0x987654321\"]",
+                    "\"0x987654322\"]");
+    requireConflict("\"0x460\",\"0x464\"]",
+                    "\"0x460\",\"0x468\"]");
+    requireConflict("\"0x334\",\"0x338\"]",
+                    "\"0x334\",\"0x33c\"]");
+    requireConflict(std::string("\"b\":\"") + kSyntheticBuildId,
+                    "\"b\":\"0011223344556677");
 
     REQUIRE(store.ValidateAndPublish(LayoutJson(16)).status ==
             CloudLayoutStatus::RollbackRejected);
@@ -223,31 +254,32 @@ void RunCloudLayoutTests() {
                     .status == CloudLayoutStatus::SchemaMismatch);
         REQUIRE(store.Snapshot() == stable);
     };
-    requireSchemaMismatch("\"revision\":18,",
-                          "\"revision\":18,\"package\":\"x.y\",");
-    requireSchemaMismatch("\"actor_subject\":{",
-                          "\"actor_subject\":{\"unknown\":1,");
-    requireSchemaMismatch("\"ring_refresh_frames\":111}",
-                          "\"ring_refresh_frames\":111,\"unknown\":1}");
-    requireSchemaMismatch("\"result\":\"0x464\"}",
-                          "\"result\":\"0x464\",\"unknown\":1}");
-    requireSchemaMismatch("\"context_pool_table\":\"0x338\"}",
-                          "\"context_pool_table\":\"0x338\",\"unknown\":1}");
-    requireSchemaMismatch("\"thread_name\":\"WorkerAlpha\"",
-                          "\"thread_name\":7");
-    requireSchemaMismatch("\"name_pool\":\"0x21001000\"",
-                          "\"name_pool\":553652224");
-    requireSchemaMismatch("\"schema_version\":3",
-                          "\"schema_version\":2");
+    requireSchemaMismatch("\"r\":18,",
+                          "\"r\":18,\"x\":1,");
+    requireSchemaMismatch(
+        "[\"0x1a0\",\"0x410\",\"0x420\"]",
+        "[\"0x1a0\",\"0x410\",\"0x420\",\"0x424\"]");
+    requireSchemaMismatch("80,32,111]",
+                          "80,32,111,112]");
+    requireSchemaMismatch("\"0x460\",\"0x464\"]",
+                          "\"0x460\",\"0x464\",\"0x468\"]");
+    requireSchemaMismatch("\"0x334\",\"0x338\"]",
+                          "\"0x334\",\"0x338\",\"0x33c\"]");
+    requireSchemaMismatch("\"WorkerAlpha\"",
+                          "7");
+    requireSchemaMismatch("[\"0x21001000\"",
+                          "[553652224");
+    requireSchemaMismatch("\"v\":4",
+                          "\"v\":3");
 
     const std::string duplicateRoot = ReplaceFirst(
-        LayoutJson(18), "\"revision\":18,",
-        "\"revision\":18,\"revision\":19,");
+        LayoutJson(18), "\"r\":18,",
+        "\"r\":18,\"r\":19,");
     REQUIRE(store.ValidateAndPublish(duplicateRoot).status ==
             CloudLayoutStatus::InvalidJson);
     const std::string duplicateNested = ReplaceFirst(
-        LayoutJson(18), "\"subject_load\":\"0x400\",",
-        "\"subject_load\":\"0x400\",\"subject_load\":\"0x404\",");
+        LayoutJson(18), "\"d\":[",
+        "\"d\":[],\"d\":[");
     REQUIRE(store.ValidateAndPublish(duplicateNested).status ==
             CloudLayoutStatus::InvalidJson);
     REQUIRE(store.Snapshot() == stable);
@@ -259,22 +291,22 @@ void RunCloudLayoutTests() {
                     .status == CloudLayoutStatus::RangeError);
         REQUIRE(store.Snapshot() == stable);
     };
-    requireRangeError("\"callback_entry\":\"0x404\"",
-                      "\"callback_entry\":\"0x402\"");
-    requireRangeError("\"context_offset\":-24",
-                      "\"context_offset\":-12");
-    requireRangeError("\"alternate_root\":\"0x420\"",
-                      "\"alternate_root\":\"0x1a0\"");
-    requireRangeError("\"oracle_opcode\":\"0x9ac33041\"",
-                      "\"oracle_opcode\":\"0xd503201f\"");
-    requireRangeError("\"thread_name\":\"WorkerAlpha\"",
-                      "\"thread_name\":\"WorkerAlphaLongName\"");
+    requireRangeError("\"0x400\",\"0x404\",\"0x408\"",
+                      "\"0x400\",\"0x402\",\"0x408\"");
+    requireRangeError("\"0x24\",-24,\"0xc0\"",
+                      "\"0x24\",-12,\"0xc0\"");
+    requireRangeError("[\"0x1a0\",\"0x410\",\"0x420\"]",
+                      "[\"0x1a0\",\"0x410\",\"0x1a0\"]");
+    requireRangeError("\"0x9ac33041\"",
+                      "\"0xd503201f\"");
+    requireRangeError("\"WorkerAlpha\"",
+                      "\"WorkerAlphaLongName\"");
     const std::string bothPacgaZero = ReplaceFirst(
         ReplaceFirst(LayoutJson(18),
-                     "\"pacga_data\":\"0x123456789\"",
-                     "\"pacga_data\":\"0x0\""),
-        "\"pacga_modifier\":\"0x987654321\"",
-        "\"pacga_modifier\":\"0x0\"");
+                     "\"0x123456789\"",
+                     "\"0x0\""),
+        "\"0x987654321\"",
+        "\"0x0\"");
     REQUIRE(store.ValidateAndPublish(bothPacgaZero).status ==
             CloudLayoutStatus::RangeError);
     const std::string malformedBuild = LayoutJson(18, "ABCDEF12");

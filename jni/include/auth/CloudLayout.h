@@ -10,9 +10,8 @@
 
 namespace lengjing::auth {
 
-inline constexpr std::uint32_t kCloudLayoutSchemaVersion = 3;
-inline constexpr std::size_t kMaximumCloudLayoutPayloadBytes =
-    64U * 1024U;
+inline constexpr std::uint32_t kCloudLayoutSchemaVersion = 4;
+inline constexpr std::size_t kMaximumCloudLayoutPayloadBytes = 1000U;
 
 struct CloudRuntimeTarget {
     std::string packageName;

@@ -36,6 +36,10 @@ bool HasExactKeys(const Json& object,
     });
 }
 
+bool HasExactArraySize(const Json& array, std::size_t size) {
+    return array.is_array() && array.size() == size;
+}
+
 bool IsAsciiAlphaNumeric(char character) noexcept {
     return std::isalnum(static_cast<unsigned char>(character)) != 0;
 }
@@ -223,29 +227,21 @@ bool ParseOffset(const Json& value,
     return true;
 }
 
-bool ParseActorRecords(const Json& object,
+bool ParseActorRecords(const Json& values,
                        CloudActorRecordLayout& layout,
                        ParseFailure& failure) {
-    if (!HasExactKeys(
-            object,
-            {"tagged_container", "plain_array", "plain_root", "plain_mesh",
-             "encrypted_record_count", "plain_record_stride",
-             "maximum_plain_count", "fallback_plain_count"})) {
-        failure.detail = "actor_records keys do not match schema version 3";
+    if (!HasExactArraySize(values, 8)) {
+        failure.detail = "d[0][3] must contain exactly 8 values";
         return false;
     }
-    if (!ParseOffset(object.at("tagged_container"), 4, kMaximumModuleOffset,
-                     4, true, layout.taggedContainerOffset,
-                     "layout.actor_records.tagged_container", failure) ||
-        !ParseOffset(object.at("plain_array"), 4, kMaximumModuleOffset, 4,
-                     true, layout.plainArrayOffset,
-                     "layout.actor_records.plain_array", failure) ||
-        !ParseOffset(object.at("plain_root"), 4, kMaximumObjectOffset, 4,
-                     true, layout.plainRootOffset,
-                     "layout.actor_records.plain_root", failure) ||
-        !ParseOffset(object.at("plain_mesh"), 4, kMaximumObjectOffset, 4,
-                     true, layout.plainMeshOffset,
-                     "layout.actor_records.plain_mesh", failure)) {
+    if (!ParseOffset(values.at(0), 4, kMaximumModuleOffset, 4, true,
+                     layout.taggedContainerOffset, "d[0][3][0]", failure) ||
+        !ParseOffset(values.at(1), 4, kMaximumModuleOffset, 4, true,
+                     layout.plainArrayOffset, "d[0][3][1]", failure) ||
+        !ParseOffset(values.at(2), 4, kMaximumObjectOffset, 4, true,
+                     layout.plainRootOffset, "d[0][3][2]", failure) ||
+        !ParseOffset(values.at(3), 4, kMaximumObjectOffset, 4, true,
+                     layout.plainMeshOffset, "d[0][3][3]", failure)) {
         return false;
     }
 
@@ -253,18 +249,14 @@ bool ParseActorRecords(const Json& object,
     std::uint64_t stride = 0;
     std::uint64_t maximumCount = 0;
     std::uint64_t fallbackCount = 0;
-    if (!ParseUnsigned(object.at("encrypted_record_count"), 0, 65536,
-                       encryptedCount,
-                       "layout.actor_records.encrypted_record_count",
+    if (!ParseUnsigned(values.at(4), 0, 65536, encryptedCount,
+                       "d[0][3][4]", failure) ||
+        !ParseUnsigned(values.at(5), 0, 256, stride, "d[0][3][5]",
                        failure) ||
-        !ParseUnsigned(object.at("plain_record_stride"), 0, 256, stride,
-                       "layout.actor_records.plain_record_stride", failure) ||
-        !ParseUnsigned(object.at("maximum_plain_count"), 0, 65536,
-                       maximumCount,
-                       "layout.actor_records.maximum_plain_count", failure) ||
-        !ParseUnsigned(object.at("fallback_plain_count"), 0, 65536,
-                       fallbackCount,
-                       "layout.actor_records.fallback_plain_count", failure)) {
+        !ParseUnsigned(values.at(6), 0, 65536, maximumCount,
+                       "d[0][3][6]", failure) ||
+        !ParseUnsigned(values.at(7), 0, 65536, fallbackCount,
+                       "d[0][3][7]", failure)) {
         return false;
     }
 
@@ -281,7 +273,7 @@ bool ParseActorRecords(const Json& object,
         (!plainEnabled && !plainEmpty) || (plainEnabled && !plainComplete) ||
         (!taggedEnabled && !plainEnabled)) {
         failure.status = CloudLayoutStatus::RangeError;
-        failure.detail = "actor_records fields are incomplete or inconsistent";
+        failure.detail = "actor record values are incomplete or inconsistent";
         return false;
     }
 
@@ -292,87 +284,74 @@ bool ParseActorRecords(const Json& object,
     return true;
 }
 
-bool ParseActorSubject(const Json& object,
+bool ParseActorSubject(const Json& values,
                        CloudActorSubjectLayout& layout,
                        ParseFailure& failure) {
-    if (!HasExactKeys(object, {"root", "mesh", "alternate_root"})) {
-        failure.detail = "actor_subject keys do not match schema version 3";
+    if (!HasExactArraySize(values, 3)) {
+        failure.detail = "d[0][4] must contain exactly 3 values";
         return false;
     }
-    if (!ParseOffset(object.at("root"), 4, kMaximumObjectOffset, 4, false,
-                     layout.rootOffset, "layout.actor_subject.root", failure) ||
-        !ParseOffset(object.at("mesh"), 4, kMaximumObjectOffset, 4, false,
-                     layout.meshOffset, "layout.actor_subject.mesh", failure) ||
-        !ParseOffset(object.at("alternate_root"), 4,
-                     kMaximumObjectOffset, 4, false,
-                     layout.alternateRootOffset,
-                     "layout.actor_subject.alternate_root", failure)) {
+    if (!ParseOffset(values.at(0), 4, kMaximumObjectOffset, 4, false,
+                     layout.rootOffset, "d[0][4][0]", failure) ||
+        !ParseOffset(values.at(1), 4, kMaximumObjectOffset, 4, false,
+                     layout.meshOffset, "d[0][4][1]", failure) ||
+        !ParseOffset(values.at(2), 4, kMaximumObjectOffset, 4, false,
+                     layout.alternateRootOffset, "d[0][4][2]", failure)) {
         return false;
     }
     if (layout.rootOffset == layout.meshOffset ||
         layout.rootOffset == layout.alternateRootOffset ||
         layout.meshOffset == layout.alternateRootOffset) {
         failure.status = CloudLayoutStatus::RangeError;
-        failure.detail = "actor_subject offsets must be distinct";
+        failure.detail = "actor subject offsets must be distinct";
         return false;
     }
     return true;
 }
 
-bool ParsePool(const Json& object,
+bool ParsePool(const Json& values,
                CloudCoordinatePoolLayout& layout,
                std::string_view prefix,
                ParseFailure& failure) {
-    if (!HasExactKeys(
-            object,
-            {"root_rva", "bridge_offset", "context_offset", "entry_offset",
-             "component_key_offset", "entry_stride", "pool_head_skip",
-             "ring_refresh_frames"})) {
+    if (!HasExactArraySize(values, 8)) {
         failure.detail = std::string(prefix) +
-            " keys do not match schema version 3";
+            " must contain exactly 8 values";
         return false;
     }
-    const auto field = [&](std::string_view name) {
-        return std::string(prefix) + "." + std::string(name);
+    const auto field = [&](std::size_t index) {
+        return std::string(prefix) + "[" + std::to_string(index) + "]";
     };
     std::int64_t contextOffset = 0;
     std::uint64_t stride = 0;
     std::uint64_t headSkip = 0;
     std::uint64_t refreshFrames = 0;
-    if (!ParseOffset(object.at("root_rva"), 4, kMaximumModuleOffset, 4,
-                     false, layout.rootRva, field("root_rva"), failure) ||
-        !ParseOffset(object.at("bridge_offset"), 0,
-                     kMaximumExecutionFieldOffset, 4, true,
-                     layout.bridgeOffset, field("bridge_offset"), failure) ||
-        !ParseSigned(object.at("context_offset"), -0x10000, 0x10000,
-                     contextOffset, field("context_offset"), failure)) {
+    if (!ParseOffset(values.at(0), 4, kMaximumModuleOffset, 4, false,
+                     layout.rootRva, field(0), failure) ||
+        !ParseOffset(values.at(1), 0, kMaximumExecutionFieldOffset, 4, true,
+                     layout.bridgeOffset, field(1), failure) ||
+        !ParseSigned(values.at(2), -0x10000, 0x10000, contextOffset,
+                     field(2), failure)) {
         return false;
     }
     if (contextOffset == 0 || contextOffset % 8 != 0) {
         failure.status = CloudLayoutStatus::RangeError;
-        failure.detail = field("context_offset") +
-            " must be nonzero and 8-byte aligned";
+        failure.detail = field(2) + " must be nonzero and 8-byte aligned";
         return false;
     }
-    if (!ParseOffset(object.at("entry_offset"), 8,
-                     kMaximumExecutionFieldOffset, 8, false,
-                     layout.entryOffset, field("entry_offset"), failure) ||
-        !ParseOffset(object.at("component_key_offset"), 8,
-                     kMaximumObjectOffset, 8, false,
-                     layout.componentKeyOffset,
-                     field("component_key_offset"), failure) ||
-        !ParseUnsigned(object.at("entry_stride"), 12, 4096, stride,
-                       field("entry_stride"), failure) ||
-        !ParseUnsigned(object.at("pool_head_skip"), 0, 4084, headSkip,
-                       field("pool_head_skip"), failure) ||
-        !ParseUnsigned(object.at("ring_refresh_frames"), 1, 3600,
-                       refreshFrames, field("ring_refresh_frames"), failure)) {
+    if (!ParseOffset(values.at(3), 8, kMaximumExecutionFieldOffset, 8,
+                     false, layout.entryOffset, field(3), failure) ||
+        !ParseOffset(values.at(4), 8, kMaximumObjectOffset, 8, false,
+                     layout.componentKeyOffset, field(4), failure) ||
+        !ParseUnsigned(values.at(5), 12, 4096, stride, field(5), failure) ||
+        !ParseUnsigned(values.at(6), 0, 4084, headSkip, field(6), failure) ||
+        !ParseUnsigned(values.at(7), 1, 3600, refreshFrames, field(7),
+                       failure)) {
         return false;
     }
     if (stride % 4 != 0 || headSkip + 12 > stride ||
         layout.rootRva > kMaximumModuleOffset - layout.bridgeOffset) {
         failure.status = CloudLayoutStatus::RangeError;
-        failure.detail = std::string(prefix) + " fields are inconsistent";
+        failure.detail = std::string(prefix) + " values are inconsistent";
         return false;
     }
     layout.contextOffset = static_cast<std::int32_t>(contextOffset);
@@ -382,35 +361,29 @@ bool ParsePool(const Json& object,
     return true;
 }
 
-bool ParseLayout(const Json& object,
+bool ParseLayout(const Json& values,
                  CloudOffsetLayout& layout,
                  ParseFailure& failure) {
-    if (!HasExactKeys(
-            object,
-            {"name_pool", "world", "geometry_instances", "actor_records",
-             "actor_subject", "tracking_matrix_root",
-             "component_position_flag"})) {
-        failure.detail = "layout keys do not match schema version 3";
+    if (!HasExactArraySize(values, 7)) {
+        failure.detail = "d[0] must contain exactly 7 values";
         return false;
     }
-    if (!ParseOffset(object.at("name_pool"), 4, kMaximumModuleOffset, 4,
-                     false, layout.namePoolOffset, "layout.name_pool",
-                     failure) ||
-        !ParseOffset(object.at("world"), 4, kMaximumModuleOffset, 4, false,
-                     layout.worldOffset, "layout.world", failure)) {
+    if (!ParseOffset(values.at(0), 4, kMaximumModuleOffset, 4, false,
+                     layout.namePoolOffset, "d[0][0]", failure) ||
+        !ParseOffset(values.at(1), 4, kMaximumModuleOffset, 4, false,
+                     layout.worldOffset, "d[0][1]", failure)) {
         return false;
     }
     if (layout.namePoolOffset == layout.worldOffset) {
         failure.status = CloudLayoutStatus::RangeError;
-        failure.detail = "name_pool and world must be distinct";
+        failure.detail = "name pool and world offsets must be distinct";
         return false;
     }
 
-    const Json& geometry = object.at("geometry_instances");
-    if (!geometry.is_array() ||
-        geometry.size() != layout.geometryInstancePointerOffsets.size()) {
-        failure.detail =
-            "geometry_instances must contain exactly two offsets";
+    const Json& geometry = values.at(2);
+    if (!HasExactArraySize(
+            geometry, layout.geometryInstancePointerOffsets.size())) {
+        failure.detail = "d[0][2] must contain exactly 2 values";
         return false;
     }
     for (std::size_t index = 0;
@@ -418,310 +391,251 @@ bool ParseLayout(const Json& object,
         if (!ParseOffset(geometry.at(index), 8, kMaximumModuleOffset, 8,
                          false,
                          layout.geometryInstancePointerOffsets[index],
-                         "layout.geometry_instances", failure)) {
+                         "d[0][2]", failure)) {
             return false;
         }
     }
     if (layout.geometryInstancePointerOffsets[0] ==
         layout.geometryInstancePointerOffsets[1]) {
         failure.status = CloudLayoutStatus::RangeError;
-        failure.detail = "geometry_instances offsets must be distinct";
+        failure.detail = "geometry offsets must be distinct";
         return false;
     }
 
-    return ParseActorRecords(object.at("actor_records"),
-                             layout.actorRecords, failure) &&
-        ParseActorSubject(object.at("actor_subject"),
-                          layout.actorSubject, failure) &&
-        ParseOffset(object.at("tracking_matrix_root"), 4,
-                    kMaximumModuleOffset, 4, false,
-                    layout.trackingMatrixRootOffset,
-                    "layout.tracking_matrix_root", failure) &&
-        ParseOffset(object.at("component_position_flag"), 1,
-                    kMaximumModuleOffset, 1, false,
-                    layout.componentPositionFlagOffset,
-                    "layout.component_position_flag", failure);
+    return ParseActorRecords(values.at(3), layout.actorRecords, failure) &&
+        ParseActorSubject(values.at(4), layout.actorSubject, failure) &&
+        ParseOffset(values.at(5), 4, kMaximumModuleOffset, 4, false,
+                    layout.trackingMatrixRootOffset, "d[0][5]", failure) &&
+        ParseOffset(values.at(6), 1, kMaximumModuleOffset, 1, false,
+                    layout.componentPositionFlagOffset, "d[0][6]", failure);
 }
 
-bool ParseMode1(const Json& object,
+bool ParseMode1(const Json& values,
                 CloudDecryptMode1Layout& layout,
                 ParseFailure& failure) {
-    if (!HasExactKeys(object, {"pool", "pacga_data", "pacga_modifier"})) {
-        failure.detail = "decrypt.mode1 keys do not match schema version 3";
+    if (!HasExactArraySize(values, 3)) {
+        failure.detail = "d[1][0] must contain exactly 3 values";
         return false;
     }
-    if (!ParsePool(object.at("pool"), layout.pool, "decrypt.mode1.pool",
-                   failure) ||
-        !ParseHexUnsigned(object.at("pacga_data"), 0,
+    if (!ParsePool(values.at(0), layout.pool, "d[1][0][0]", failure) ||
+        !ParseHexUnsigned(values.at(1), 0,
                           std::numeric_limits<std::uint64_t>::max(),
-                          layout.pacgaData, "decrypt.mode1.pacga_data",
-                          failure) ||
-        !ParseHexUnsigned(object.at("pacga_modifier"), 0,
+                          layout.pacgaData, "d[1][0][1]", failure) ||
+        !ParseHexUnsigned(values.at(2), 0,
                           std::numeric_limits<std::uint64_t>::max(),
-                          layout.pacgaModifier,
-                          "decrypt.mode1.pacga_modifier", failure)) {
+                          layout.pacgaModifier, "d[1][0][2]", failure)) {
         return false;
     }
     if (layout.pacgaData == 0 && layout.pacgaModifier == 0) {
         failure.status = CloudLayoutStatus::RangeError;
-        failure.detail = "decrypt.mode1 PACGA inputs must not both be zero";
+        failure.detail = "mode 1 PACGA inputs must not both be zero";
         return false;
     }
     return true;
 }
 
-bool ParseMode2(const Json& object,
+bool ParseMode2(const Json& values,
                 CloudDecryptMode2Layout& layout,
                 ParseFailure& failure) {
-    if (!HasExactKeys(object, {"pool"})) {
-        failure.detail = "decrypt.mode2 keys do not match schema version 3";
+    if (!HasExactArraySize(values, 1)) {
+        failure.detail = "d[1][1] must contain exactly 1 value";
         return false;
     }
-    return ParsePool(object.at("pool"), layout.pool, "decrypt.mode2.pool",
-                     failure);
+    return ParsePool(values.at(0), layout.pool, "d[1][1][0]", failure);
 }
 
-bool ParseDiscovery(const Json& object,
+bool ParseDiscovery(const Json& values,
                     CloudExecutionDiscoveryLayout& layout,
                     ParseFailure& failure) {
-    if (!HasExactKeys(
-            object,
-            {"root_offset", "pointer_offset", "entry_offset",
-             "return_stub_magic"})) {
-        failure.detail =
-            "decrypt.execution.discovery keys do not match schema version 3";
+    if (!HasExactArraySize(values, 4)) {
+        failure.detail = "d[1][2][0] must contain exactly 4 values";
         return false;
     }
-    return ParseOffset(object.at("root_offset"), 4, kMaximumModuleOffset, 4,
-                       false, layout.rootOffset,
-                       "decrypt.execution.discovery.root_offset", failure) &&
-        ParseOffset(object.at("pointer_offset"), 4,
-                    kMaximumExecutionFieldOffset, 4, false,
-                    layout.pointerOffset,
-                    "decrypt.execution.discovery.pointer_offset", failure) &&
-        ParseOffset(object.at("entry_offset"), 8,
-                    kMaximumExecutionFieldOffset, 8, false,
-                    layout.entryOffset,
-                    "decrypt.execution.discovery.entry_offset", failure) &&
-        ParseHexUnsigned(object.at("return_stub_magic"), 1,
+    return ParseOffset(values.at(0), 4, kMaximumModuleOffset, 4, false,
+                       layout.rootOffset, "d[1][2][0][0]", failure) &&
+        ParseOffset(values.at(1), 4, kMaximumExecutionFieldOffset, 4,
+                    false, layout.pointerOffset, "d[1][2][0][1]",
+                    failure) &&
+        ParseOffset(values.at(2), 8, kMaximumExecutionFieldOffset, 8,
+                    false, layout.entryOffset, "d[1][2][0][2]", failure) &&
+        ParseHexUnsigned(values.at(3), 1,
                          std::numeric_limits<std::uint64_t>::max(),
-                         layout.returnStubMagic,
-                         "decrypt.execution.discovery.return_stub_magic",
+                         layout.returnStubMagic, "d[1][2][0][3]",
                          failure);
 }
 
-bool ParseResult(const Json& object,
+bool ParseResult(const Json& values,
                  CloudExecutionResultLayout& layout,
                  ParseFailure& failure) {
-    if (!HasExactKeys(object, {"slot_offset", "position_offset"})) {
-        failure.detail =
-            "decrypt.execution.result keys do not match schema version 3";
+    if (!HasExactArraySize(values, 2)) {
+        failure.detail = "d[1][2][1] must contain exactly 2 values";
         return false;
     }
-    return ParseOffset(object.at("slot_offset"), 8,
-                       kMaximumExecutionFieldOffset, 8, false,
-                       layout.slotOffset,
-                       "decrypt.execution.result.slot_offset", failure) &&
-        ParseOffset(object.at("position_offset"), 4,
-                    kMaximumExecutionFieldOffset, 4, false,
-                    layout.positionOffset,
-                    "decrypt.execution.result.position_offset", failure);
+    return ParseOffset(values.at(0), 8, kMaximumExecutionFieldOffset, 8,
+                       false, layout.slotOffset, "d[1][2][1][0]",
+                       failure) &&
+        ParseOffset(values.at(1), 4, kMaximumExecutionFieldOffset, 4,
+                    false, layout.positionOffset, "d[1][2][1][1]",
+                    failure);
 }
 
-bool ParseHookOffsets(const Json& object,
+bool ParseHookOffsets(const Json& values,
                       CloudExecutionHookOffsetLayout& layout,
                       ParseFailure& failure) {
-    if (!HasExactKeys(
-            object,
-            {"subject_load", "callback_entry", "callback_return",
-             "callback_index", "callback_copy_prepare",
-             "callback_copy_after", "table_pointer", "table_value", "lock",
-             "lock_return", "first_call", "first_return", "external_call",
-             "external_return", "primary_gate_write",
-             "alternate_gate_write", "gate_probe", "record_count",
-             "target_key", "ring_setup", "ring_probe", "ring_hit",
-             "dispatch", "dispatch_return", "result_prepare", "result"})) {
-        failure.detail =
-            "decrypt.execution.hook_offsets keys do not match schema version 3";
+    using Member = std::uintptr_t CloudExecutionHookOffsetLayout::*;
+    static constexpr Member members[] = {
+        &CloudExecutionHookOffsetLayout::subjectLoad,
+        &CloudExecutionHookOffsetLayout::callbackEntry,
+        &CloudExecutionHookOffsetLayout::callbackReturn,
+        &CloudExecutionHookOffsetLayout::callbackIndex,
+        &CloudExecutionHookOffsetLayout::callbackCopyPrepare,
+        &CloudExecutionHookOffsetLayout::callbackCopyAfter,
+        &CloudExecutionHookOffsetLayout::tablePointer,
+        &CloudExecutionHookOffsetLayout::tableValue,
+        &CloudExecutionHookOffsetLayout::lock,
+        &CloudExecutionHookOffsetLayout::lockReturn,
+        &CloudExecutionHookOffsetLayout::firstCall,
+        &CloudExecutionHookOffsetLayout::firstReturn,
+        &CloudExecutionHookOffsetLayout::externalCall,
+        &CloudExecutionHookOffsetLayout::externalReturn,
+        &CloudExecutionHookOffsetLayout::primaryGateWrite,
+        &CloudExecutionHookOffsetLayout::alternateGateWrite,
+        &CloudExecutionHookOffsetLayout::gateProbe,
+        &CloudExecutionHookOffsetLayout::recordCount,
+        &CloudExecutionHookOffsetLayout::targetKey,
+        &CloudExecutionHookOffsetLayout::ringSetup,
+        &CloudExecutionHookOffsetLayout::ringProbe,
+        &CloudExecutionHookOffsetLayout::ringHit,
+        &CloudExecutionHookOffsetLayout::dispatch,
+        &CloudExecutionHookOffsetLayout::dispatchReturn,
+        &CloudExecutionHookOffsetLayout::resultPrepare,
+        &CloudExecutionHookOffsetLayout::result,
+    };
+    constexpr std::size_t count = sizeof(members) / sizeof(members[0]);
+    if (!HasExactArraySize(values, count)) {
+        failure.detail = "d[1][2][2] must contain exactly 26 values";
         return false;
     }
-
-    struct Field {
-        const char* key;
-        std::uintptr_t CloudExecutionHookOffsetLayout::*member;
-    };
-    static constexpr Field fields[] = {
-        {"subject_load", &CloudExecutionHookOffsetLayout::subjectLoad},
-        {"callback_entry", &CloudExecutionHookOffsetLayout::callbackEntry},
-        {"callback_return", &CloudExecutionHookOffsetLayout::callbackReturn},
-        {"callback_index", &CloudExecutionHookOffsetLayout::callbackIndex},
-        {"callback_copy_prepare",
-         &CloudExecutionHookOffsetLayout::callbackCopyPrepare},
-        {"callback_copy_after",
-         &CloudExecutionHookOffsetLayout::callbackCopyAfter},
-        {"table_pointer", &CloudExecutionHookOffsetLayout::tablePointer},
-        {"table_value", &CloudExecutionHookOffsetLayout::tableValue},
-        {"lock", &CloudExecutionHookOffsetLayout::lock},
-        {"lock_return", &CloudExecutionHookOffsetLayout::lockReturn},
-        {"first_call", &CloudExecutionHookOffsetLayout::firstCall},
-        {"first_return", &CloudExecutionHookOffsetLayout::firstReturn},
-        {"external_call", &CloudExecutionHookOffsetLayout::externalCall},
-        {"external_return", &CloudExecutionHookOffsetLayout::externalReturn},
-        {"primary_gate_write",
-         &CloudExecutionHookOffsetLayout::primaryGateWrite},
-        {"alternate_gate_write",
-         &CloudExecutionHookOffsetLayout::alternateGateWrite},
-        {"gate_probe", &CloudExecutionHookOffsetLayout::gateProbe},
-        {"record_count", &CloudExecutionHookOffsetLayout::recordCount},
-        {"target_key", &CloudExecutionHookOffsetLayout::targetKey},
-        {"ring_setup", &CloudExecutionHookOffsetLayout::ringSetup},
-        {"ring_probe", &CloudExecutionHookOffsetLayout::ringProbe},
-        {"ring_hit", &CloudExecutionHookOffsetLayout::ringHit},
-        {"dispatch", &CloudExecutionHookOffsetLayout::dispatch},
-        {"dispatch_return", &CloudExecutionHookOffsetLayout::dispatchReturn},
-        {"result_prepare", &CloudExecutionHookOffsetLayout::resultPrepare},
-        {"result", &CloudExecutionHookOffsetLayout::result},
-    };
-    for (const Field& field : fields) {
-        if (!ParseOffset(
-                object.at(field.key), 4, kMaximumModuleOffset, 4, false,
-                layout.*(field.member),
-                std::string("decrypt.execution.hook_offsets.") + field.key,
-                failure)) {
+    for (std::size_t index = 0; index < count; ++index) {
+        const std::string field =
+            "d[1][2][2][" + std::to_string(index) + "]";
+        if (!ParseOffset(values.at(index), 4, kMaximumModuleOffset, 4,
+                         false, layout.*members[index], field, failure)) {
             return false;
         }
     }
     return true;
 }
 
-bool ParseFieldOffsets(const Json& object,
+bool ParseFieldOffsets(const Json& values,
                        CloudExecutionFieldOffsetLayout& layout,
                        ParseFailure& failure) {
-    if (!HasExactKeys(
-            object,
-            {"context_expected", "stack_prior_gate",
-             "stack_primary_gate_source", "stack_gate_flag",
-             "stack_gate_snapshot_a", "stack_gate_snapshot_b",
-             "stack_ring_mid", "object_position", "stack_capture_a",
-             "stack_capture_b", "stack_capture_c", "stack_capture_d",
-             "capture_field", "stack_pool_selector", "context_pool_table"})) {
-        failure.detail =
-            "decrypt.execution.field_offsets keys do not match schema version 3";
+    using Member = std::uintptr_t CloudExecutionFieldOffsetLayout::*;
+    static constexpr Member members[] = {
+        &CloudExecutionFieldOffsetLayout::contextExpected,
+        &CloudExecutionFieldOffsetLayout::stackPriorGate,
+        &CloudExecutionFieldOffsetLayout::stackPrimaryGateSource,
+        &CloudExecutionFieldOffsetLayout::stackGateFlag,
+        &CloudExecutionFieldOffsetLayout::stackGateSnapshotA,
+        &CloudExecutionFieldOffsetLayout::stackGateSnapshotB,
+        &CloudExecutionFieldOffsetLayout::stackRingMid,
+        &CloudExecutionFieldOffsetLayout::objectPosition,
+        &CloudExecutionFieldOffsetLayout::stackCaptureA,
+        &CloudExecutionFieldOffsetLayout::stackCaptureB,
+        &CloudExecutionFieldOffsetLayout::stackCaptureC,
+        &CloudExecutionFieldOffsetLayout::stackCaptureD,
+        &CloudExecutionFieldOffsetLayout::captureField,
+        &CloudExecutionFieldOffsetLayout::stackPoolSelector,
+        &CloudExecutionFieldOffsetLayout::contextPoolTable,
+    };
+    constexpr std::size_t count = sizeof(members) / sizeof(members[0]);
+    if (!HasExactArraySize(values, count)) {
+        failure.detail = "d[1][2][3] must contain exactly 15 values";
         return false;
     }
-
-    struct Field {
-        const char* key;
-        std::uintptr_t CloudExecutionFieldOffsetLayout::*member;
-    };
-    static constexpr Field fields[] = {
-        {"context_expected",
-         &CloudExecutionFieldOffsetLayout::contextExpected},
-        {"stack_prior_gate",
-         &CloudExecutionFieldOffsetLayout::stackPriorGate},
-        {"stack_primary_gate_source",
-         &CloudExecutionFieldOffsetLayout::stackPrimaryGateSource},
-        {"stack_gate_flag",
-         &CloudExecutionFieldOffsetLayout::stackGateFlag},
-        {"stack_gate_snapshot_a",
-         &CloudExecutionFieldOffsetLayout::stackGateSnapshotA},
-        {"stack_gate_snapshot_b",
-         &CloudExecutionFieldOffsetLayout::stackGateSnapshotB},
-        {"stack_ring_mid", &CloudExecutionFieldOffsetLayout::stackRingMid},
-        {"object_position", &CloudExecutionFieldOffsetLayout::objectPosition},
-        {"stack_capture_a", &CloudExecutionFieldOffsetLayout::stackCaptureA},
-        {"stack_capture_b", &CloudExecutionFieldOffsetLayout::stackCaptureB},
-        {"stack_capture_c", &CloudExecutionFieldOffsetLayout::stackCaptureC},
-        {"stack_capture_d", &CloudExecutionFieldOffsetLayout::stackCaptureD},
-        {"capture_field", &CloudExecutionFieldOffsetLayout::captureField},
-        {"stack_pool_selector",
-         &CloudExecutionFieldOffsetLayout::stackPoolSelector},
-        {"context_pool_table",
-         &CloudExecutionFieldOffsetLayout::contextPoolTable},
-    };
-    for (const Field& field : fields) {
-        if (!ParseOffset(
-                object.at(field.key), 4, kMaximumExecutionFieldOffset, 4,
-                false, layout.*(field.member),
-                std::string("decrypt.execution.field_offsets.") + field.key,
-                failure)) {
+    for (std::size_t index = 0; index < count; ++index) {
+        const std::string field =
+            "d[1][2][3][" + std::to_string(index) + "]";
+        if (!ParseOffset(values.at(index), 4,
+                         kMaximumExecutionFieldOffset, 4, false,
+                         layout.*members[index], field, failure)) {
             return false;
         }
     }
     return true;
 }
 
-bool ParseContext(const Json& object,
+bool ParseContext(const Json& values,
                   CloudExecutionContextLayout& layout,
                   ParseFailure& failure) {
-    if (!HasExactKeys(object, {"thread_name", "oracle_opcode"})) {
-        failure.detail =
-            "decrypt.execution.context keys do not match schema version 3";
+    if (!HasExactArraySize(values, 2)) {
+        failure.detail = "d[1][2][4] must contain exactly 2 values";
         return false;
     }
-    if (!object.at("thread_name").is_string()) {
-        failure.detail = "decrypt.execution.context.thread_name must be a string";
+    if (!values.at(0).is_string()) {
+        failure.detail = "d[1][2][4][0] must be a string";
         return false;
     }
-    layout.threadName = object.at("thread_name").get<std::string>();
+    layout.threadName = values.at(0).get<std::string>();
     if (!IsValidThreadName(layout.threadName)) {
         failure.status = CloudLayoutStatus::RangeError;
-        failure.detail =
-            "decrypt.execution.context.thread_name is outside the accepted range";
+        failure.detail = "d[1][2][4][0] is outside the accepted range";
         return false;
     }
     std::uint64_t opcode = 0;
-    if (!ParseHexUnsigned(object.at("oracle_opcode"), 1, UINT32_MAX, opcode,
-                          "decrypt.execution.context.oracle_opcode",
-                          failure)) {
+    if (!ParseHexUnsigned(values.at(1), 1, UINT32_MAX, opcode,
+                          "d[1][2][4][1]", failure)) {
         return false;
     }
     const auto encoded = static_cast<std::uint32_t>(opcode);
     const std::uint32_t destination = encoded & 0x1fU;
     const std::uint32_t data = (encoded >> 5U) & 0x1fU;
     const std::uint32_t modifier = (encoded >> 16U) & 0x1fU;
-    if ((encoded & UINT32_C(0xFFE0FC00)) !=
-            UINT32_C(0x9AC03000) ||
+    if ((encoded & UINT32_C(0xFFE0FC00)) != UINT32_C(0x9AC03000) ||
         destination == 31U || data == 31U || modifier == 31U) {
         failure.status = CloudLayoutStatus::RangeError;
-        failure.detail =
-            "decrypt.execution.context.oracle_opcode is invalid";
+        failure.detail = "d[1][2][4][1] is invalid";
         return false;
     }
     layout.oracleOpcode = encoded;
     return true;
 }
 
-bool ParseExecution(const Json& object,
+bool ParseExecution(const Json& values,
                     CloudExecutionLayout& layout,
                     ParseFailure& failure) {
-    if (!HasExactKeys(object,
-                      {"discovery", "result", "hook_offsets",
-                       "field_offsets", "context"})) {
-        failure.detail =
-            "decrypt.execution keys do not match schema version 3";
+    if (!HasExactArraySize(values, 5)) {
+        failure.detail = "d[1][2] must contain exactly 5 values";
         return false;
     }
-    return ParseDiscovery(object.at("discovery"), layout.discovery,
-                          failure) &&
-        ParseResult(object.at("result"), layout.result, failure) &&
-        ParseHookOffsets(object.at("hook_offsets"), layout.hookOffsets,
-                         failure) &&
-        ParseFieldOffsets(object.at("field_offsets"), layout.fieldOffsets,
-                          failure) &&
-        ParseContext(object.at("context"), layout.context, failure);
+    return ParseDiscovery(values.at(0), layout.discovery, failure) &&
+        ParseResult(values.at(1), layout.result, failure) &&
+        ParseHookOffsets(values.at(2), layout.hookOffsets, failure) &&
+        ParseFieldOffsets(values.at(3), layout.fieldOffsets, failure) &&
+        ParseContext(values.at(4), layout.context, failure);
 }
 
-bool ParseDecrypt(const Json& object,
+bool ParseDecrypt(const Json& values,
                   CloudDecryptLayout& layout,
                   ParseFailure& failure) {
-    if (!HasExactKeys(object, {"mode1", "mode2", "execution"})) {
-        failure.detail = "decrypt keys do not match schema version 3";
+    if (!HasExactArraySize(values, 3)) {
+        failure.detail = "d[1] must contain exactly 3 values";
         return false;
     }
-    return ParseMode1(object.at("mode1"), layout.mode1, failure) &&
-        ParseMode2(object.at("mode2"), layout.mode2, failure) &&
-        ParseExecution(object.at("execution"), layout.execution, failure);
+    return ParseMode1(values.at(0), layout.mode1, failure) &&
+        ParseMode2(values.at(1), layout.mode2, failure) &&
+        ParseExecution(values.at(2), layout.execution, failure);
+}
+
+bool ParseData(const Json& values,
+               CloudLayoutDocument& document,
+               ParseFailure& failure) {
+    if (!HasExactArraySize(values, 2)) {
+        failure.detail = "d must contain exactly 2 values";
+        return false;
+    }
+    return ParseLayout(values.at(0), document.layout, failure) &&
+        ParseDecrypt(values.at(1), document.decrypt, failure);
 }
 
 bool SameIdentity(const CloudRuntimeIdentity& left,
@@ -918,36 +832,34 @@ CloudLayoutUpdateResult CloudLayoutStore::ValidateAndPublish(
                        previous);
     }
 
-    if (!HasExactKeys(root,
-                      {"schema_version", "build_id", "revision", "layout",
-                       "decrypt"})) {
+    if (!HasExactKeys(root, {"v", "b", "r", "d"})) {
         return Failure(CloudLayoutStatus::SchemaMismatch,
-                       "root keys do not match schema version 3", previous);
+                       "root keys do not match schema version 4", previous);
     }
 
     ParseFailure failure;
     std::uint64_t schemaVersion = 0;
     std::uint64_t revision = 0;
-    if (!ParseUnsigned(root.at("schema_version"), 0, UINT32_MAX,
-                       schemaVersion, "schema_version", failure)) {
+    if (!ParseUnsigned(root.at("v"), 0, UINT32_MAX, schemaVersion, "v",
+                       failure)) {
         return Failure(failure.status, std::move(failure.detail), previous);
     }
     if (schemaVersion != kCloudLayoutSchemaVersion) {
         return Failure(CloudLayoutStatus::SchemaMismatch,
                        "unsupported cloud layout schema version", previous);
     }
-    if (!root.at("build_id").is_string()) {
+    if (!root.at("b").is_string()) {
         return Failure(CloudLayoutStatus::SchemaMismatch,
-                       "build_id must be a string", previous);
+                       "b must be a string", previous);
     }
-    const std::string buildId = root.at("build_id").get<std::string>();
+    const std::string buildId = root.at("b").get<std::string>();
     if (!IsValidBuildId(buildId)) {
         return Failure(CloudLayoutStatus::IdentityMismatch,
-                       "build_id is malformed", previous);
+                       "b is malformed", previous);
     }
-    if (!ParseUnsigned(root.at("revision"), 1,
+    if (!ParseUnsigned(root.at("r"), 1,
                        std::numeric_limits<std::uint64_t>::max(), revision,
-                       "revision", failure)) {
+                       "r", failure)) {
         return Failure(failure.status, std::move(failure.detail), previous);
     }
 
@@ -955,8 +867,7 @@ CloudLayoutUpdateResult CloudLayoutStore::ValidateAndPublish(
     candidate->schemaVersion = static_cast<std::uint32_t>(schemaVersion);
     candidate->revision = revision;
     candidate->identity = {target_.packageName, target_.moduleName, buildId};
-    if (!ParseLayout(root.at("layout"), candidate->layout, failure) ||
-        !ParseDecrypt(root.at("decrypt"), candidate->decrypt, failure)) {
+    if (!ParseData(root.at("d"), *candidate, failure)) {
         return Failure(failure.status, std::move(failure.detail), previous);
     }
 
