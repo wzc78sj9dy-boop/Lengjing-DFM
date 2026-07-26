@@ -69,16 +69,10 @@ void RunCoordinatePoolPolicyTests() {
         ShouldRepeatCoordinatePoolCompatibilityAnalysis;
     using lengjing::game::native::
         ShouldRetryCoordinatePoolCompatibilityAnalysis;
-    using lengjing::game::native::
-        ShouldRunCoordinatePoolFullMappingAnalysis;
-    using lengjing::game::native::
-        ShouldRetryCoordinatePoolFullMappingAnalysis;
     using lengjing::game::native::ShouldRetryCoordinatePoolRing;
     using lengjing::game::native::ShouldRetryCoordinatePoolCompactSnapshot;
     using lengjing::game::native::ShouldValidateCoordinatePoolCode;
     using lengjing::game::native::SelectCoordinatePoolIndexedSlot;
-    using lengjing::game::native::
-        SelectCoordinatePoolEntryAnalysisInstructionLimit;
     using lengjing::game::native::PredictCoordinatePoolBlockCount;
     using lengjing::game::native::kCoordinatePoolCodeValidationIdleFrame;
     using lengjing::game::native::kCoordinatePoolCodeValidationRetryFrames;
@@ -162,17 +156,6 @@ void RunCoordinatePoolPolicyTests() {
         }));
     REQUIRE(CoordinatePoolMaximumAnalysisPasses(false) == 8);
     REQUIRE(CoordinatePoolMaximumAnalysisPasses(true) == 16);
-    REQUIRE(SelectCoordinatePoolEntryAnalysisInstructionLimit(
-        false, true, true, 9000) == 5000);
-    REQUIRE(SelectCoordinatePoolEntryAnalysisInstructionLimit(
-        true, false, false, 9000) == 5000);
-    REQUIRE(SelectCoordinatePoolEntryAnalysisInstructionLimit(
-        true, true, false, 9000) == 6000);
-    REQUIRE(SelectCoordinatePoolEntryAnalysisInstructionLimit(
-        true, true, true, 9000) == 9000);
-    REQUIRE(!ShouldRetryCoordinatePoolFullMappingAnalysis(599, 0));
-    REQUIRE(ShouldRetryCoordinatePoolFullMappingAnalysis(600, 0));
-    REQUIRE(ShouldRetryCoordinatePoolFullMappingAnalysis(10, 20));
     REQUIRE(!ShouldExpandCoordinatePoolDecodeMethodScan(
         false, false, true));
     REQUIRE(ShouldExpandCoordinatePoolDecodeMethodScan(
@@ -217,8 +200,6 @@ void RunCoordinatePoolPolicyTests() {
         UINT64_C(0x2000), UINT64_C(0x1000), false, 2000) == 2000);
     REQUIRE(CoordinatePoolRequestedMethodInstructionLimit(
         UINT64_C(0x2000), UINT64_C(0x1000), true, 2000) == 5000);
-    REQUIRE(CoordinatePoolRequestedMethodInstructionLimit(
-        UINT64_C(0x2000), UINT64_C(0x1000), true, 2000, 6000) == 6000);
     REQUIRE(!CoordinatePoolEnvironmentFlagEnabled(nullptr));
     REQUIRE(!CoordinatePoolEnvironmentFlagEnabled(""));
     REQUIRE(!CoordinatePoolEnvironmentFlagEnabled("0"));
@@ -1150,39 +1131,46 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::CoordinatePoolRuntimeError;
     using lengjing::game::native::IsCoordinatePoolRingRemoteReadFailure;
     REQUIRE(ShouldRetryCoordinatePoolCompatibilityAnalysis(
+        false,
         CoordinatePoolRuntimeError::AnalysisFailed,
         false));
     REQUIRE(!ShouldRetryCoordinatePoolCompatibilityAnalysis(
+        true,
+        CoordinatePoolRuntimeError::AnalysisFailed,
+        false));
+    REQUIRE(!ShouldRetryCoordinatePoolCompatibilityAnalysis(
+        false,
         CoordinatePoolRuntimeError::CodeReadFailed,
         false));
     REQUIRE(!ShouldRetryCoordinatePoolCompatibilityAnalysis(
+        false,
         CoordinatePoolRuntimeError::AnalysisFailed,
         true));
-    REQUIRE(ShouldRunCoordinatePoolFullMappingAnalysis(
+    REQUIRE(ShouldRequestCoordinatePoolRemotePlan(
         true,
         true,
         CoordinatePoolRuntimeError::AnalysisFailed,
         false,
         CoordinateReadDiagnostic{}));
-    REQUIRE(!ShouldRunCoordinatePoolFullMappingAnalysis(
+    REQUIRE(!ShouldRequestCoordinatePoolRemotePlan(
         false,
         true,
         CoordinatePoolRuntimeError::AnalysisFailed,
         false,
         CoordinateReadDiagnostic{}));
-    REQUIRE(!ShouldRunCoordinatePoolFullMappingAnalysis(
+    REQUIRE(!ShouldRequestCoordinatePoolRemotePlan(
         true,
         false,
         CoordinatePoolRuntimeError::AnalysisFailed,
         false,
         CoordinateReadDiagnostic{}));
-    REQUIRE(!ShouldRunCoordinatePoolFullMappingAnalysis(
+    REQUIRE(!ShouldRequestCoordinatePoolRemotePlan(
         true,
         true,
         CoordinatePoolRuntimeError::CodeReadFailed,
         false,
         CoordinateReadDiagnostic{}));
-    REQUIRE(!ShouldRunCoordinatePoolFullMappingAnalysis(
+    REQUIRE(!ShouldRequestCoordinatePoolRemotePlan(
         true,
         true,
         CoordinatePoolRuntimeError::AnalysisFailed,
@@ -1191,15 +1179,16 @@ void RunCoordinatePoolPolicyTests() {
     CoordinateReadDiagnostic positionReadFailure{};
     positionReadFailure.stage = CoordinateReadStage::Position;
     positionReadFailure.failure = CoordinateReadFailure::AddressFault;
-    REQUIRE(ShouldRetryCoordinatePoolCompatibilityAnalysis(
-        CoordinatePoolRuntimeError::AnalysisFailed,
-        false));
-    REQUIRE(!ShouldRunCoordinatePoolFullMappingAnalysis(
+    REQUIRE(!ShouldRequestCoordinatePoolRemotePlan(
         true,
         true,
         CoordinatePoolRuntimeError::AnalysisFailed,
         false,
         positionReadFailure));
+    REQUIRE(ShouldRetryCoordinatePoolCompatibilityAnalysis(
+        false,
+        CoordinatePoolRuntimeError::AnalysisFailed,
+        false));
     REQUIRE(!ShouldRequestCoordinatePoolCodeValidationAfterReadFailure(
         CoordinatePoolRuntimeError::PositionReadFailed,
         positionReadFailure));

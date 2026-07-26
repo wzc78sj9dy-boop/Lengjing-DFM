@@ -18,15 +18,6 @@ struct RingIndexSuccessorRelation {
     std::uint32_t modulus = 0;
 };
 
-inline constexpr std::uint32_t kMaximumRingIndexSuccessorInstructionGap = 8;
-
-constexpr bool IsRingIndexSuccessorInstructionGap(
-    std::uint32_t first,
-    std::uint32_t second) noexcept {
-    return second > first &&
-        second - first <= kMaximumRingIndexSuccessorInstructionGap;
-}
-
 inline std::uint64_t MixRingIndexProbeValue(std::uint64_t value) noexcept {
     value ^= value >> 30;
     value *= UINT64_C(0xBF58476D1CE4E5B9);

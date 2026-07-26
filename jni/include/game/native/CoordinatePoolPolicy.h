@@ -8,8 +8,6 @@ namespace lengjing::game::native {
 
 inline constexpr std::size_t kCoordinatePoolEntryAnalysisInstructionLimit =
     5000;
-inline constexpr std::size_t
-    kCoordinatePoolExtendedEntryAnalysisInstructionLimit = 6000;
 inline constexpr std::size_t kCoordinatePoolDecodeAnalysisInstructionLimit =
     500;
 inline constexpr std::size_t
@@ -17,7 +15,6 @@ inline constexpr std::size_t
 inline constexpr std::size_t kCoordinatePoolBaselineMaximumAnalysisPasses = 8;
 inline constexpr std::size_t kCoordinatePoolIndexedMaximumAnalysisPasses = 16;
 inline constexpr std::size_t kCoordinatePoolMappingPageSize = 0x1000;
-inline constexpr std::uint64_t kCoordinatePoolFullMappingRetryFrames = 600;
 
 template <typename PageReader>
 bool CaptureCoordinatePoolMappingSnapshot(
@@ -78,29 +75,6 @@ constexpr std::size_t CoordinatePoolMaximumAnalysisPasses(
         : kCoordinatePoolBaselineMaximumAnalysisPasses;
 }
 
-constexpr std::size_t SelectCoordinatePoolEntryAnalysisInstructionLimit(
-    bool indexedPointers,
-    bool compatibilityAnalysis,
-    bool fullMappingAnalysis,
-    std::size_t mappingInstructionCount) noexcept {
-    if (!indexedPointers) {
-        return kCoordinatePoolEntryAnalysisInstructionLimit;
-    }
-    if (fullMappingAnalysis && mappingInstructionCount != 0) {
-        return mappingInstructionCount;
-    }
-    return compatibilityAnalysis
-        ? kCoordinatePoolExtendedEntryAnalysisInstructionLimit
-        : kCoordinatePoolEntryAnalysisInstructionLimit;
-}
-
-constexpr bool ShouldRetryCoordinatePoolFullMappingAnalysis(
-    std::uint64_t currentFrame,
-    std::uint64_t failedFrame) noexcept {
-    return currentFrame < failedFrame ||
-        currentFrame - failedFrame >= kCoordinatePoolFullMappingRetryFrames;
-}
-
 constexpr bool ShouldExpandCoordinatePoolDecodeMethodScan(
     bool extendedAnalysis,
     bool analysisComplete,
@@ -143,11 +117,9 @@ constexpr std::size_t CoordinatePoolRequestedMethodInstructionLimit(
     std::uint64_t guestEntry,
     bool entryMethodPending,
     std::size_t decodeInstructionLimit =
-        kCoordinatePoolDecodeAnalysisInstructionLimit,
-    std::size_t entryInstructionLimit =
-        kCoordinatePoolEntryAnalysisInstructionLimit) noexcept {
+        kCoordinatePoolDecodeAnalysisInstructionLimit) noexcept {
     return requestedAddress == guestEntry || entryMethodPending
-        ? entryInstructionLimit
+        ? kCoordinatePoolEntryAnalysisInstructionLimit
         : decodeInstructionLimit;
 }
 

@@ -1,5 +1,4 @@
 #pragma once
-#include "game/native/CoordinatePoolPolicy.h"
 #include "Find.h"
 #include "Analyze.h"
 
@@ -84,8 +83,6 @@ namespace coord_dec {
         uint16_t ring_madd_count_ = 0;
         uint16_t candidate_count_ = 0;
         uint16_t failure_instruction_ = 0;
-        uint32_t entry_method_instruction_limit_ = static_cast<uint32_t>(
-            kCoordinatePoolEntryAnalysisInstructionLimit);
         uint32_t decode_method_instruction_limit_ = 500;
         uint32_t expected_entry_stride_ = 0;
         bool resolve_decode_method_entry_branches_ = false;
@@ -136,17 +133,6 @@ namespace coord_dec {
 
         uint16_t failure_instruction() const noexcept {
             return failure_instruction_;
-        }
-
-        void set_entry_method_instruction_limit(uint32_t limit) noexcept {
-            entry_method_instruction_limit_ = limit != 0
-                ? limit
-                : static_cast<uint32_t>(
-                    kCoordinatePoolEntryAnalysisInstructionLimit);
-        }
-
-        uint32_t entry_method_instruction_limit() const noexcept {
-            return entry_method_instruction_limit_;
         }
 
         void set_decode_method_instruction_limit(uint32_t limit) noexcept {
