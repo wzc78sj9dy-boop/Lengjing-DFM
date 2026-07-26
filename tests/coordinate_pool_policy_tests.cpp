@@ -378,18 +378,22 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(multiComponentCalibration.Resolve(9) == 4);
     REQUIRE(multiComponentCalibration.Evidence() == 3);
     REQUIRE(multiComponentCalibration.ComponentCount() == 2);
-    multiComponentCalibration.Observe(0x1000, UINT32_C(1) << 6);
-    multiComponentCalibration.Observe(
-        0x4000,
-        static_cast<CoordinatePoolDecryptIndexMask>(
-            (UINT32_C(1) << 4) | (UINT32_C(1) << 6)));
-    REQUIRE(multiComponentCalibration.Contradictions() == 1);
-    multiComponentCalibration.Observe(0x2000, UINT32_C(1) << 6);
+    for (std::size_t observation = 0; observation < 64; ++observation) {
+        multiComponentCalibration.Observe(
+            0x3000 + observation, UINT32_C(1) << 6);
+        REQUIRE(multiComponentCalibration.IsLocked());
+        REQUIRE(multiComponentCalibration.Selected() == 4);
+    }
     REQUIRE(multiComponentCalibration.IsLocked());
-    REQUIRE(multiComponentCalibration.Contradictions() == 2);
-    multiComponentCalibration.Observe(0x3000, UINT32_C(1) << 6);
+    REQUIRE(multiComponentCalibration.Selected() == 4);
+    REQUIRE(multiComponentCalibration.Resolve(9) == 4);
+    multiComponentCalibration.Reset();
     REQUIRE(!multiComponentCalibration.IsLocked());
-    REQUIRE(multiComponentCalibration.Resolve(9) == 9);
+    multiComponentCalibration.Observe(0x3000, UINT32_C(1) << 6);
+    multiComponentCalibration.Observe(0x3000, UINT32_C(1) << 6);
+    multiComponentCalibration.Observe(0x4000, UINT32_C(1) << 6);
+    REQUIRE(multiComponentCalibration.IsLocked());
+    REQUIRE(multiComponentCalibration.Selected() == 6);
 
     CoordinatePoolDecryptIndexCalibration singleIndexCalibration;
     for (std::size_t observation = 0; observation < 5; ++observation) {
@@ -470,6 +474,51 @@ void RunCoordinatePoolPolicyTests() {
                  .requested);
     REQUIRE(flickerSwitch.ActiveOffset() == 1);
     REQUIRE(!flickerSwitch.SwitchRequested());
+    flickerSwitch.Lock(1, 10, flickerFrame + 4);
+    REQUIRE(flickerSwitch.IsLocked());
+    for (std::uint64_t frame = flickerFrame + 5;
+         frame < flickerFrame + 100;
+         ++frame) {
+        REQUIRE(!flickerSwitch
+                     .Observe(
+                         0x1000 + static_cast<std::uintptr_t>(frame % 8),
+                         frame % 2 == 0 ? 1 : 7,
+                         10,
+                         frame,
+                         true)
+                     .requested);
+    }
+    REQUIRE(flickerSwitch.ActiveOffset() == 1);
+    REQUIRE(flickerSwitch.Evidence() == 0);
+    REQUIRE(!flickerSwitch.SwitchRequested());
+    REQUIRE(!flickerSwitch
+                 .Observe(0x1000, 2, 11, flickerFrame + 100, false)
+                 .requested);
+    REQUIRE(!flickerSwitch.IsLocked());
+    REQUIRE(flickerSwitch.ActiveOffset() == 2);
+    flickerSwitch.Reset();
+    REQUIRE(!flickerSwitch.IsLocked());
+    REQUIRE(!flickerSwitch
+                 .Observe(0x1000, 1, 10, 200, false)
+                 .requested);
+    const std::uint64_t unlockedFlickerFrame =
+        200 + kCoordinatePoolDecryptIndexFlickerGraceFrames;
+    REQUIRE(!flickerSwitch
+                 .Observe(
+                     0x1000, 1, 10, unlockedFlickerFrame, true)
+                 .requested);
+    REQUIRE(!flickerSwitch
+                 .Observe(
+                     0x2000, 1, 10, unlockedFlickerFrame + 1, true)
+                 .requested);
+    REQUIRE(!flickerSwitch
+                 .Observe(
+                     0x3000, 1, 10, unlockedFlickerFrame + 2, true)
+                 .requested);
+    REQUIRE(flickerSwitch
+                .Observe(
+                    0x1000, 1, 10, unlockedFlickerFrame + 3, true)
+                .requested);
 
     CoordinatePoolDecryptIndexFlickerSwitch expandedRangeFlickerSwitch;
     REQUIRE(!expandedRangeFlickerSwitch

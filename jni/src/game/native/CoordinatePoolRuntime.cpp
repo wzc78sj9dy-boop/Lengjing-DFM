@@ -1017,7 +1017,11 @@ struct CoordinatePoolRuntime::Impl {
         std::uint8_t blockCount,
         bool flicker) {
         std::lock_guard<std::mutex> lock(mutex);
-        if (!indexedPointers) return false;
+        if (!indexedPointers ||
+            decryptIndexCalibration.IsLocked() ||
+            decryptIndexFlickerSwitch.IsLocked()) {
+            return false;
+        }
         const CoordinatePoolDecryptIndexSwitchDecision decision =
             decryptIndexFlickerSwitch.Observe(
                 component,
@@ -1034,7 +1038,6 @@ struct CoordinatePoolRuntime::Impl {
             return false;
         }
 
-        decryptIndexFlickerOverrideActive = true;
         decryptIndexCalibration.Reset();
         ResetDecryptIndexWitnessesUnlocked();
         pendingDecryptIndexOffset = decision.nextOffset;
@@ -1829,15 +1832,7 @@ struct CoordinatePoolRuntime::Impl {
 
     bool TryConsumeDecryptIndexCalibrationReadUnlocked(
         std::uint64_t component) noexcept {
-        if (decryptIndexCalibration.IsLocked() &&
-            decryptIndexCalibrationWitnessCount != 0) {
-            decryptIndexCalibrationWitnessCount =
-                ExpireCoordinatePoolDecryptIndexWitnesses(
-                    decryptIndexCalibrationWitnesses,
-                    decryptIndexCalibrationWitnessLastSeenFrames,
-                    decryptIndexCalibrationWitnessCount,
-                    frame);
-        }
+        if (decryptIndexCalibration.IsLocked()) return false;
         if (decryptIndexCalibrationFrame != frame) {
             const std::size_t previousVisitCount =
                 decryptIndexCalibrationVisitCount;
@@ -1874,9 +1869,7 @@ struct CoordinatePoolRuntime::Impl {
         const std::size_t ordinal =
             decryptIndexCalibrationVisitCount++;
         const std::size_t readLimit =
-            decryptIndexCalibration.IsLocked()
-            ? kCoordinatePoolDecryptIndexAuditReadsPerFrame
-            : kCoordinatePoolDecryptIndexCalibrationReadsPerFrame;
+            kCoordinatePoolDecryptIndexCalibrationReadsPerFrame;
 
         std::size_t witnessIndex =
             decryptIndexCalibrationWitnessCount;
@@ -1897,31 +1890,24 @@ struct CoordinatePoolRuntime::Impl {
         }
         if (witnessIndex == decryptIndexCalibrationWitnessCount) {
             const std::size_t witnessLimit =
-                decryptIndexCalibration.IsLocked()
-                ? std::min<std::size_t>(
-                      decryptIndexCalibrationWitnesses.size(),
-                      kCoordinatePoolDecryptIndexAuditReadsPerFrame)
-                : decryptIndexCalibrationWitnesses.size();
+                decryptIndexCalibrationWitnesses.size();
             if (decryptIndexCalibrationWitnessCount >= witnessLimit) {
                 return false;
             }
             const std::size_t population =
                 decryptIndexCalibrationPreviousVisitCount;
-            bool selected = decryptIndexCalibration.IsLocked();
-            if (!selected) {
-                selected = population == 0
-                    ? ordinal <
-                        kCoordinatePoolDecryptIndexCalibrationReadsPerFrame
-                    : kCoordinatePoolDecryptIndexCalibrationReadsPerFrame >=
-                        population;
-                if (!selected && population != 0 && ordinal < population) {
-                    const std::size_t distance =
-                        (ordinal + population -
-                         decryptIndexCalibrationWindowStart) %
-                        population;
-                    selected = distance <
-                        kCoordinatePoolDecryptIndexCalibrationReadsPerFrame;
-                }
+            bool selected = population == 0
+                ? ordinal <
+                    kCoordinatePoolDecryptIndexCalibrationReadsPerFrame
+                : kCoordinatePoolDecryptIndexCalibrationReadsPerFrame >=
+                    population;
+            if (!selected && population != 0 && ordinal < population) {
+                const std::size_t distance =
+                    (ordinal + population -
+                     decryptIndexCalibrationWindowStart) %
+                    population;
+                selected = distance <
+                    kCoordinatePoolDecryptIndexCalibrationReadsPerFrame;
             }
             if (!selected) return false;
             witnessIndex = decryptIndexCalibrationWitnessCount++;
@@ -1961,11 +1947,10 @@ struct CoordinatePoolRuntime::Impl {
     }
 
     void ScheduleDecryptIndexOffsetUnlocked() noexcept {
-        if (decryptIndexFlickerOverrideActive ||
-            !decryptIndexCalibration.IsLocked()) {
-            return;
-        }
+        if (!decryptIndexCalibration.IsLocked()) return;
         const std::uint8_t selected = decryptIndexCalibration.Selected();
+        decryptIndexFlickerSwitch.Lock(
+            selected, decryptIndexCalibrationBlockCount, frame);
         if (selected == effectiveDecryptIndexOffset ||
             selected == pendingDecryptIndexOffset) {
             return;
@@ -2112,7 +2097,6 @@ struct CoordinatePoolRuntime::Impl {
                     decryptIndexCalibrationBlockCount != predicted) {
                     decryptIndexCalibration.Reset();
                     decryptIndexFlickerSwitch.Reset();
-                    decryptIndexFlickerOverrideActive = false;
                     effectiveDecryptIndexOffset =
                         kCoordinatePoolUnknownDecryptIndexOffset;
                     pendingDecryptIndexOffset =
@@ -2268,8 +2252,7 @@ struct CoordinatePoolRuntime::Impl {
         candidates.resolvedPosition = current;
         candidates.resolvedPoolSlot = resolvedPoolSlot;
         candidates.decryptIndexLocked =
-            effectiveDecryptIndexOffset !=
-            kCoordinatePoolUnknownDecryptIndexOffset;
+            decryptIndexCalibration.IsLocked();
         candidates.resolvedValid = IsFinitePosition(current);
         probe.decryptIndexOffset = candidates.decryptIndexOffset;
         probe.decryptIndexEvidence = candidates.decryptIndexEvidence;
@@ -4848,7 +4831,6 @@ private:
             std::numeric_limits<std::uint64_t>::max();
         decryptIndexCalibrationLastEvidence = 0;
         decryptIndexFlickerSwitch.Reset();
-        decryptIndexFlickerOverrideActive = false;
         effectiveDecryptIndexOffset =
             kCoordinatePoolUnknownDecryptIndexOffset;
         pendingDecryptIndexOffset =
@@ -4992,7 +4974,6 @@ private:
             std::numeric_limits<std::uint64_t>::max();
         decryptIndexCalibrationLastEvidence = 0;
         decryptIndexFlickerSwitch.Reset();
-        decryptIndexFlickerOverrideActive = false;
         effectiveDecryptIndexOffset =
             kCoordinatePoolUnknownDecryptIndexOffset;
         pendingDecryptIndexOffset =
@@ -5072,7 +5053,6 @@ private:
         std::numeric_limits<std::uint64_t>::max();
     std::size_t decryptIndexCalibrationLastEvidence = 0;
     CoordinatePoolDecryptIndexFlickerSwitch decryptIndexFlickerSwitch{};
-    bool decryptIndexFlickerOverrideActive = false;
     std::uint8_t effectiveDecryptIndexOffset =
         kCoordinatePoolUnknownDecryptIndexOffset;
     std::uint8_t pendingDecryptIndexOffset =

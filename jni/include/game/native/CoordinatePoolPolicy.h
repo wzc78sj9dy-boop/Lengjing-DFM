@@ -158,14 +158,8 @@ inline constexpr std::size_t
 inline constexpr std::size_t kCoordinatePoolDecryptIndexMinimumLead = 2;
 inline constexpr std::size_t
     kCoordinatePoolDecryptIndexCalibrationReadsPerFrame = 4;
-inline constexpr std::size_t
-    kCoordinatePoolDecryptIndexAuditReadsPerFrame = 2;
 inline constexpr std::uint64_t
     kCoordinatePoolDecryptIndexWitnessRefreshFrames = 30;
-inline constexpr std::size_t
-    kCoordinatePoolDecryptIndexContradictionEvidence = 3;
-inline constexpr std::size_t
-    kCoordinatePoolDecryptIndexSingleComponentContradictionEvidence = 6;
 inline constexpr std::uint64_t
     kCoordinatePoolDecryptIndexFlickerGraceFrames = 12;
 inline constexpr std::uint64_t
@@ -328,30 +322,7 @@ public:
         std::uintptr_t component,
         CoordinatePoolDecryptIndexMask matchingOffsets) noexcept {
         if (component == 0 || matchingOffsets == 0) return;
-        if (locked_) {
-            const CoordinatePoolDecryptIndexMask selectedBit =
-                static_cast<CoordinatePoolDecryptIndexMask>(
-                    UINT32_C(1) << selected_);
-            if (matchingOffsets == selectedBit) {
-                contradictionCount_ = 0;
-                contradictionComponent_ = 0;
-                contradictionHasMultipleComponents_ = false;
-                return;
-            }
-            if ((matchingOffsets & selectedBit) != 0) return;
-            if (contradictionCount_ == 0) {
-                contradictionComponent_ = component;
-            } else if (component != contradictionComponent_) {
-                contradictionHasMultipleComponents_ = true;
-            }
-            ++contradictionCount_;
-            const std::size_t required =
-                contradictionHasMultipleComponents_
-                ? kCoordinatePoolDecryptIndexContradictionEvidence
-                : kCoordinatePoolDecryptIndexSingleComponentContradictionEvidence;
-            if (contradictionCount_ >= required) Reset();
-            return;
-        }
+        if (locked_) return;
         evidence_[writeIndex_] = {component, matchingOffsets};
         writeIndex_ = (writeIndex_ + 1) % evidence_.size();
         if (evidenceCount_ < evidence_.size()) ++evidenceCount_;
@@ -370,9 +341,6 @@ public:
     std::uint8_t Selected() const noexcept { return selected_; }
     std::size_t Evidence() const noexcept { return bestEvidence_; }
     std::size_t ComponentCount() const noexcept { return componentCount_; }
-    std::size_t Contradictions() const noexcept {
-        return contradictionCount_;
-    }
 
 private:
     struct Observation {
@@ -467,10 +435,7 @@ private:
     std::size_t writeIndex_ = 0;
     std::size_t bestEvidence_ = 0;
     std::size_t componentCount_ = 0;
-    std::size_t contradictionCount_ = 0;
-    std::uintptr_t contradictionComponent_ = 0;
     std::uint8_t selected_ = kCoordinatePoolUnknownDecryptIndexOffset;
-    bool contradictionHasMultipleComponents_ = false;
     bool locked_ = false;
 };
 
@@ -510,6 +475,7 @@ public:
         }
         const std::uint8_t normalizedOffset =
             static_cast<std::uint8_t>(observedOffset % candidateCount);
+        if (locked_ && blockCount_ == blockCount) return {};
         if (!initialized_ || blockCount_ != blockCount ||
             frame < lastObservedFrame_ ||
             normalizedOffset != activeOffset_) {
@@ -597,6 +563,25 @@ public:
         return decision;
     }
 
+    void Lock(std::uint32_t offset,
+              std::size_t blockCount,
+              std::uint64_t frame) noexcept {
+        if (!IsCoordinatePoolDecryptIndexCandidateOffsetValid(offset) ||
+            blockCount < 2 ||
+            blockCount > kCoordinatePoolMaximumBlockCount) {
+            Reset();
+            return;
+        }
+        const std::uint8_t candidateCount =
+            static_cast<std::uint8_t>(blockCount);
+        ResetForOffset(
+            static_cast<std::uint8_t>(offset % candidateCount),
+            candidateCount,
+            blockCount,
+            frame);
+        locked_ = true;
+    }
+
     void Reset() noexcept { *this = {}; }
 
     std::uint8_t ActiveOffset() const noexcept {
@@ -612,6 +597,8 @@ public:
     bool SwitchRequested() const noexcept {
         return switchRequested_;
     }
+
+    bool IsLocked() const noexcept { return locked_; }
 
 private:
     struct Observation {
@@ -632,6 +619,7 @@ private:
         activeOffset_ = offset;
         candidateCount_ = candidateCount;
         switchRequested_ = false;
+        locked_ = false;
         initialized_ = true;
     }
 
@@ -665,6 +653,7 @@ private:
         kCoordinatePoolUnknownDecryptIndexOffset;
     std::uint8_t candidateCount_ = 0;
     bool switchRequested_ = false;
+    bool locked_ = false;
     bool initialized_ = false;
 };
 
