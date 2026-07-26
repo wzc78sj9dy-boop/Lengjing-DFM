@@ -4,7 +4,7 @@ namespace lengjing::game::native {
 
 CoordinateDecrypt2Runtime::CoordinateDecrypt2Runtime(
     CoordinatePoolRuntimeLayout layout)
-    : runtime_(MakeCoordinateDecrypt2RuntimeLayout(layout), true) {}
+    : runtime_(MakeCoordinateDecrypt2RuntimeLayout(layout), false) {}
 
 bool CoordinateDecrypt2Runtime::Configure(
     const CoordinatePoolRuntimeLayout& layout) noexcept {

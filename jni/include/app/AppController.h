@@ -27,9 +27,6 @@ struct AppOptions {
     void* menuLogoTexture = nullptr;
     ui::AimInputMode inputMode = ui::AimInputMode::ReadOnly;
     std::shared_ptr<const auth::CloudLayoutDocument> cloudLayout;
-    std::shared_ptr<const auth::CoordinatePoolCloudLayoutDocument>
-        coordinateDecrypt2Layout;
-    game::native::AlgorithmPositionRuntimeConfig algorithmPosition;
 };
 
 class AppController final : public ui::UiActions {

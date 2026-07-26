@@ -196,36 +196,36 @@ std::int64_t FakeDeviceWrite(int fileDescriptor,
 void TestExactThreadLookup() {
     TempProcTree proc;
     constexpr std::int32_t processId = 400;
-    proc.WriteThread(processId, 402, "GameThreadExtra", 20);
-    proc.WriteThread(processId, 407, "GameThread", 70);
-    proc.WriteThread(processId, 405, "GameThread", 50);
+    proc.WriteThread(processId, 402, "WorkerBeta", 20);
+    proc.WriteThread(processId, 407, "WorkerAlpha", 70);
+    proc.WriteThread(processId, 405, "WorkerAlpha", 50);
     proc.WriteThread(processId, 401, "RenderThread", 10);
 
     ProcTaskThreadLocator locator(proc.Root().string());
     TaskThreadIdentity identity{};
-    CHECK(locator.FindExact(processId, "GameThread", identity) == 0);
+    CHECK(locator.FindExact(processId, "WorkerAlpha", identity) == 0);
     CHECK(identity.threadId == 405);
     CHECK(identity.startTimeTicks == 50);
 
     std::vector<TaskThreadIdentity> identities;
-    CHECK(locator.FindAllExact(processId, "GameThread", identities) == 0);
+    CHECK(locator.FindAllExact(processId, "WorkerAlpha", identities) == 0);
     CHECK(identities.size() == 2);
     CHECK(identities[0].threadId == 405);
     CHECK(identities[1].threadId == 407);
 
-    CHECK(locator.FindExact(processId, "GameThread", identity, 407) == 0);
+    CHECK(locator.FindExact(processId, "WorkerAlpha", identity, 407) == 0);
     CHECK(identity.threadId == 407);
     CHECK(identity.startTimeTicks == 70);
 
-    CHECK(locator.FindExact(processId, "gameThread", identity) == -ENOENT);
+    CHECK(locator.FindExact(processId, "workerAlpha", identity) == -ENOENT);
     CHECK(identity.threadId == 0);
-    CHECK(locator.FindExact(0, "GameThread", identity) == -EINVAL);
+    CHECK(locator.FindExact(0, "WorkerAlpha", identity) == -EINVAL);
 }
 
 void TestProviderStateMachine() {
     TempProcTree proc;
     constexpr std::int32_t processId = 700;
-    proc.WriteThread(processId, 701, "GameThread", 100);
+    proc.WriteThread(processId, 701, "WorkerAlpha", 100);
 
     FakeReader reader;
     reader.values[701] = {
@@ -235,7 +235,7 @@ void TestProviderStateMachine() {
     ThreadExecutionContextProvider provider(
         processId,
         reader,
-        "GameThread",
+        "WorkerAlpha",
         proc.Root().string());
 
     auto refresh = provider.Refresh();
@@ -267,14 +267,14 @@ void TestProviderStateMachine() {
     CHECK(refresh.event == ThreadExecutionContextEvent::ValuesChanged);
     CHECK(refresh.snapshot.generation == 2);
 
-    proc.WriteThread(processId, 701, "GameThread", 200);
+    proc.WriteThread(processId, 701, "WorkerAlpha", 200);
     refresh = provider.Refresh();
     CHECK(refresh.event == ThreadExecutionContextEvent::ThreadRecreated);
     CHECK(refresh.snapshot.threadId == 701);
     CHECK(refresh.snapshot.threadStartTimeTicks == 200);
     CHECK(refresh.snapshot.generation == 3);
 
-    proc.WriteThread(processId, 699, "GameThread", 300);
+    proc.WriteThread(processId, 699, "WorkerAlpha", 300);
     reader.values[699] = {
         UINT64_C(0x7000333300),
         {UINT64_C(0x3333), UINT64_C(0x4444)},
@@ -297,7 +297,7 @@ void TestProviderStateMachine() {
     ThreadExecutionContextSnapshot snapshot{};
     CHECK(!provider.Current(snapshot));
 
-    proc.WriteThread(processId, 702, "GameThread", 400);
+    proc.WriteThread(processId, 702, "WorkerAlpha", 400);
     reader.values[702] = {
         UINT64_C(0x7000444400),
         {UINT64_C(0x5555), UINT64_C(0x6666)},
@@ -335,14 +335,14 @@ void TestProviderStateMachine() {
 void TestCapabilityGate() {
     TempProcTree proc;
     constexpr std::int32_t processId = 900;
-    proc.WriteThread(processId, 901, "GameThread", 10);
+    proc.WriteThread(processId, 901, "WorkerAlpha", 10);
 
     FakeReader reader;
     reader.capabilities.threadIdSubject = false;
     ThreadExecutionContextProvider provider(
         processId,
         reader,
-        "GameThread",
+        "WorkerAlpha",
         proc.Root().string());
     const auto refresh = provider.Refresh();
     CHECK(refresh.event == ThreadExecutionContextEvent::Missing);
@@ -356,7 +356,7 @@ void TestCapabilityGate() {
     ThreadExecutionContextProvider partialProvider(
         processId,
         partialReader,
-        "GameThread",
+        "WorkerAlpha",
         proc.Root().string());
     const auto partial = partialProvider.Refresh();
     CHECK(partial.HasThreadContext());
@@ -369,9 +369,9 @@ void TestCapabilityGate() {
 void TestMultipleExactCandidates() {
     TempProcTree proc;
     constexpr std::int32_t processId = 1100;
-    proc.WriteThread(processId, 1101, "GameThread", 10);
-    proc.WriteThread(processId, 1102, "GameThread", 20);
-    proc.WriteThread(processId, 1103, "GameThread", 30);
+    proc.WriteThread(processId, 1101, "WorkerAlpha", 10);
+    proc.WriteThread(processId, 1102, "WorkerAlpha", 20);
+    proc.WriteThread(processId, 1103, "WorkerAlpha", 30);
 
     FakeReader reader;
     reader.values[1102] = {
@@ -385,7 +385,7 @@ void TestMultipleExactCandidates() {
     ThreadExecutionContextProvider provider(
         processId,
         reader,
-        "GameThread",
+        "WorkerAlpha",
         proc.Root().string());
 
     auto refresh = provider.Refresh();
@@ -402,7 +402,7 @@ void TestMultipleExactCandidates() {
     CHECK(reader.tpidrAttempts == std::vector<std::int32_t>({1103}));
     CHECK(reader.pacAttempts == std::vector<std::int32_t>({1103}));
 
-    proc.WriteThread(processId, 1103, "GameThread", 40);
+    proc.WriteThread(processId, 1103, "WorkerAlpha", 40);
     reader.tpidrAttempts.clear();
     reader.pacAttempts.clear();
     refresh = provider.Refresh();
@@ -428,7 +428,7 @@ void TestDeviceTransportUsesThreadId() {
     TempProcTree proc;
     constexpr std::int32_t processId = 1000;
     constexpr std::int32_t threadId = 1002;
-    proc.WriteThread(processId, threadId, "GameThread", 50);
+    proc.WriteThread(processId, threadId, "WorkerAlpha", 50);
 
     const device_abi::Profile profile{
         43,
@@ -442,7 +442,7 @@ void TestDeviceTransportUsesThreadId() {
     ThreadExecutionContextProvider provider(
         processId,
         transport,
-        "GameThread",
+        "WorkerAlpha",
         proc.Root().string());
     const auto refresh = provider.Refresh();
     CHECK(refresh.HasContext());
@@ -505,8 +505,8 @@ void TestDeviceWriteResultPolicies() {
 void TestCandidateRejectionRotation() {
     TempProcTree proc;
     constexpr std::int32_t processId = 1300;
-    proc.WriteThread(processId, 1301, "GameThread", 10);
-    proc.WriteThread(processId, 1302, "GameThread", 20);
+    proc.WriteThread(processId, 1301, "WorkerAlpha", 10);
+    proc.WriteThread(processId, 1302, "WorkerAlpha", 20);
 
     FakeReader reader;
     reader.values[1301] = {
@@ -520,7 +520,7 @@ void TestCandidateRejectionRotation() {
     ThreadExecutionContextProvider provider(
         processId,
         reader,
-        "GameThread",
+        "WorkerAlpha",
         proc.Root().string());
 
     auto refresh = provider.Refresh();

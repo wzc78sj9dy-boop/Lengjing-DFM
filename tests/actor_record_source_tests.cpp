@@ -5,6 +5,7 @@
 
 void RunActorRecordSourceTests() {
     using lengjing::game::native::ActorRecordSource;
+    using lengjing::game::native::ActorSubjectLayout;
     using lengjing::game::native::FillOrdinaryActorPointers;
     using lengjing::game::native::MakeOrdinaryActorRecord;
     using lengjing::game::native::MakeResolvedActorRecord;
@@ -12,6 +13,8 @@ void RunActorRecordSourceTests() {
     using lengjing::game::native::MergeCurrentLevelActorRecordSources;
     using lengjing::game::native::ReadActorRecordSourceWithFallback;
     using lengjing::game::native::ResolveActorCoordinateSubject;
+
+    constexpr ActorSubjectLayout subjectLayout{0x220, 0x428, 0x438};
 
     constexpr std::uintptr_t actor = 0x1000;
     const ActorRecordSource decoded =
@@ -67,10 +70,15 @@ void RunActorRecordSourceTests() {
     int pointerReads = 0;
     FillOrdinaryActorPointers(
         pendingOrdinary,
+        subjectLayout,
         [&](std::uintptr_t address) {
             ++pointerReads;
-            if (address == actor + 0x180) return std::uintptr_t{0x4000};
-            if (address == actor + 0x3D0) return std::uintptr_t{0x5000};
+            if (address == actor + subjectLayout.rootOffset) {
+                return std::uintptr_t{0x4000};
+            }
+            if (address == actor + subjectLayout.meshOffset) {
+                return std::uintptr_t{0x5000};
+            }
             return std::uintptr_t{0};
         });
     REQUIRE(pointerReads == 2);
@@ -82,6 +90,7 @@ void RunActorRecordSourceTests() {
 
     FillOrdinaryActorPointers(
         pendingOrdinary,
+        subjectLayout,
         [&](std::uintptr_t) {
             ++pointerReads;
             return std::uintptr_t{0};
@@ -94,6 +103,7 @@ void RunActorRecordSourceTests() {
     };
     REQUIRE(ResolveActorCoordinateSubject(
                 pendingOrdinary,
+                subjectLayout,
                 [&](std::uintptr_t) {
                     ++subjectReads;
                     return std::uintptr_t{0};
@@ -104,9 +114,10 @@ void RunActorRecordSourceTests() {
     ActorRecordSource uncachedOrdinary = MakeOrdinaryActorRecord(actor);
     REQUIRE(ResolveActorCoordinateSubject(
                 uncachedOrdinary,
+                subjectLayout,
                 [&](std::uintptr_t address) {
                     ++subjectReads;
-                    return address == actor + 0x180
+                    return address == actor + subjectLayout.rootOffset
                         ? std::uintptr_t{0x5000}
                         : std::uintptr_t{0};
                 },
@@ -116,9 +127,11 @@ void RunActorRecordSourceTests() {
     subjectReads = 0;
     REQUIRE(ResolveActorCoordinateSubject(
                 uncachedOrdinary,
+                subjectLayout,
                 [&](std::uintptr_t address) {
                     ++subjectReads;
-                    return address == actor + 0x3E0
+                    return address ==
+                            actor + subjectLayout.alternateRootOffset
                         ? std::uintptr_t{0x6000}
                         : std::uintptr_t{0};
                 },
@@ -128,6 +141,7 @@ void RunActorRecordSourceTests() {
     subjectReads = 0;
     REQUIRE(ResolveActorCoordinateSubject(
                 uncachedOrdinary,
+                subjectLayout,
                 [&](std::uintptr_t) {
                     ++subjectReads;
                     return std::uintptr_t{0};
@@ -139,6 +153,7 @@ void RunActorRecordSourceTests() {
     ActorRecordSource resolvedOnly = decoded;
     FillOrdinaryActorPointers(
         resolvedOnly,
+        subjectLayout,
         [&](std::uintptr_t) {
             ++ignoredReads;
             return std::uintptr_t{0};

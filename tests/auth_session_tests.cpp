@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -188,11 +189,68 @@ private:
 };
 
 std::string CloudPayload() {
-    return R"({"schema_version":2,"package":"com.example.runtime","module":"libUE4.so","build_id":"0123456789abcdef0123456789abcdef01234567","revision":1,"layout":{"name_pool":"0x12001000","world":"0x13002000","coordinate_replay_entry":"0x0","geometry_instances":["0x0","0x0"],"tracking_matrix_root":"0x0","component_position_flag":"0x0","actor_records":{"tagged_container":"0x0","plain_array":"0x0","plain_root":"0x0","plain_mesh":"0x0","encrypted_record_count":0,"plain_record_stride":0,"maximum_plain_count":0,"fallback_plain_count":0},"coordinate_pool":{"root_rva":"0x1a009000","bridge_offset":"0x14","context_offset":-16,"entry_offset":"0xb0","component_key_offset":"0x220","pacga_data":"0x13579bdf","pacga_modifier":"0x2468ace0","entry_stride":64,"pool_head_skip":24,"ring_refresh_frames":90}}})";
-}
-
-std::string CoordinatePoolPayload() {
-    return R"({"schema_version":1,"package":"com.example.runtime","module":"libUE4.so","build_id":"0123456789abcdef0123456789abcdef01234567","revision":1,"coordinate_pool":{"root_rva":"0x0e738950","bridge_offset":"0x0c","context_offset":-8,"entry_offset":"0x00a0","component_key_offset":"0x0210","entry_stride":48,"pool_head_skip":16,"ring_refresh_frames":60}})";
+    std::ostringstream stream;
+    stream
+        << R"({"schema_version":3,"build_id":"fedcba98765432100123456789abcdef","revision":1,)"
+        << R"("layout":{"name_pool":"0x21001000","world":"0x22002000",)"
+        << R"("geometry_instances":["0x23003000","0x24004000"],)"
+        << R"("actor_records":{"tagged_container":"0x25005000",)"
+        << R"("plain_array":"0x26006000","plain_root":"0x284",)"
+        << R"("plain_mesh":"0x414","encrypted_record_count":1536,)"
+        << R"("plain_record_stride":40,"maximum_plain_count":12288,)"
+        << R"("fallback_plain_count":3072},)"
+        << R"("actor_subject":{"root":"0x1a0","mesh":"0x410",)"
+        << R"("alternate_root":"0x420"},)"
+        << R"("tracking_matrix_root":"0x27007000",)"
+        << R"("component_position_flag":"0x28008003"},)"
+        << R"("decrypt":{"mode1":{"pool":{"root_rva":"0x29009000",)"
+        << R"("bridge_offset":"0x24","context_offset":-24,)"
+        << R"("entry_offset":"0xc0","component_key_offset":"0x260",)"
+        << R"("entry_stride":80,"pool_head_skip":32,)"
+        << R"("ring_refresh_frames":111},"pacga_data":"0x123456789",)"
+        << R"("pacga_modifier":"0x987654321"},)"
+        << R"("mode2":{"pool":{"root_rva":"0x2a00a000",)"
+        << R"("bridge_offset":"0x28","context_offset":-32,)"
+        << R"("entry_offset":"0xd0","component_key_offset":"0x270",)"
+        << R"("entry_stride":96,"pool_head_skip":36,)"
+        << R"("ring_refresh_frames":121}},)"
+        << R"("execution":{"discovery":{"root_offset":"0x2b00b000",)"
+        << R"("pointer_offset":"0x14","entry_offset":"0xd8",)"
+        << R"("return_stub_magic":"0x13572468abcdef01"},)"
+        << R"("result":{"slot_offset":"0x280",)"
+        << R"("position_offset":"0x184"},)"
+        << R"("hook_offsets":{"subject_load":"0x400",)"
+        << R"("callback_entry":"0x404","callback_return":"0x408",)"
+        << R"("callback_index":"0x40c","callback_copy_prepare":"0x410",)"
+        << R"("callback_copy_after":"0x414","table_pointer":"0x418",)"
+        << R"("table_value":"0x41c","lock":"0x420",)"
+        << R"("lock_return":"0x424","first_call":"0x428",)"
+        << R"("first_return":"0x42c","external_call":"0x430",)"
+        << R"("external_return":"0x434","primary_gate_write":"0x438",)"
+        << R"("alternate_gate_write":"0x43c","gate_probe":"0x440",)"
+        << R"("record_count":"0x444","target_key":"0x448",)"
+        << R"("ring_setup":"0x44c","ring_probe":"0x450",)"
+        << R"("ring_hit":"0x454","dispatch":"0x458",)"
+        << R"("dispatch_return":"0x45c","result_prepare":"0x460",)"
+        << R"("result":"0x464"},)"
+        << R"("field_offsets":{"context_expected":"0x300",)"
+        << R"("stack_prior_gate":"0x304",)"
+        << R"("stack_primary_gate_source":"0x308",)"
+        << R"("stack_gate_flag":"0x30c",)"
+        << R"("stack_gate_snapshot_a":"0x310",)"
+        << R"("stack_gate_snapshot_b":"0x314",)"
+        << R"("stack_ring_mid":"0x318",)"
+        << R"("object_position":"0x31c",)"
+        << R"("stack_capture_a":"0x320",)"
+        << R"("stack_capture_b":"0x324",)"
+        << R"("stack_capture_c":"0x328",)"
+        << R"("stack_capture_d":"0x32c",)"
+        << R"("capture_field":"0x330",)"
+        << R"("stack_pool_selector":"0x334",)"
+        << R"("context_pool_table":"0x338"},)"
+        << R"("context":{"thread_name":"WorkerAlpha",)"
+        << R"("oracle_opcode":"0x9ac33041"}}}})";
+    return stream.str();
 }
 
 std::string EncodeCloudPayloadQuotes(std::string_view quoteEntity) {
@@ -227,9 +285,8 @@ std::string EncodeCloudPayloadQuotesMixed() {
     return encoded;
 }
 
-lengjing::auth::CloudRuntimeIdentity RuntimeIdentity() {
-    return {"com.example.runtime", "libUE4.so",
-            "0123456789abcdef0123456789abcdef01234567"};
+lengjing::auth::CloudRuntimeTarget RuntimeTarget() {
+    return {"com.example.runtime", "libSynthetic.so"};
 }
 
 }  // namespace
@@ -337,7 +394,7 @@ void RunAuthSessionTests() {
         REQUIRE(!session.ExitRequested());
         REQUIRE(session.ExpiresAt() == "2099-12-31 23:59:59");
 
-        CloudLayoutStore store(RuntimeIdentity());
+        CloudLayoutStore store(RuntimeTarget());
         const CloudLayoutUpdateResult missing =
             session.RefreshCloudLayout(store);
         REQUIRE(missing.status == CloudLayoutStatus::NotConfigured);
@@ -373,39 +430,20 @@ void RunAuthSessionTests() {
         auto gateway = std::make_shared<FakeAuthGateway>();
         gateway->variableResult = {true, {}, CloudPayload()};
         AuthSessionOptions options;
-        options.cloudVariable = {"CALL_CODE", "VALUE_ID", "VALUE_NAME"};
+        options.coordinateSuiteVariable = {
+            "CALL_CODE", "VALUE_ID", "VALUE_NAME"};
 
         AuthSession session;
         REQUIRE(session.Login(
             gateway, "CARD_FOR_TEST", "DEVICE_FOR_TEST", options));
-        CloudLayoutStore store(RuntimeIdentity());
+        CloudLayoutStore store(RuntimeTarget());
         const CloudLayoutUpdateResult update =
             session.RefreshCloudLayout(store);
         REQUIRE(update.status == CloudLayoutStatus::Published);
         REQUIRE(gateway->variableCalls.load() == 1);
+        REQUIRE(gateway->lastValueId == "VALUE_ID");
+        REQUIRE(gateway->lastValueName == "VALUE_NAME");
         REQUIRE(store.Snapshot()->revision == 1);
-    }
-
-    {
-        auto gateway = std::make_shared<FakeAuthGateway>();
-        gateway->variableResult = {true, {}, CoordinatePoolPayload()};
-        AuthSessionOptions options;
-        options.coordinateDecrypt2Variable = {
-            "CALL_CODE", "DECRYPT2_ID", "DECRYPT2_NAME"};
-
-        AuthSession session;
-        REQUIRE(session.Login(
-            gateway, "CARD_FOR_TEST", "DEVICE_FOR_TEST", options));
-        CoordinatePoolCloudLayoutStore store(RuntimeIdentity());
-        const CoordinatePoolCloudLayoutUpdateResult update =
-            session.RefreshCoordinateDecrypt2Layout(store);
-        REQUIRE(update.status == CloudLayoutStatus::Published);
-        REQUIRE(gateway->variableCalls.load() == 1);
-        REQUIRE(gateway->lastValueId == "DECRYPT2_ID");
-        REQUIRE(gateway->lastValueName == "DECRYPT2_NAME");
-        REQUIRE(store.Snapshot() != nullptr);
-        REQUIRE(store.Snapshot()->coordinatePool.rootRva == 0x0E738950);
-        REQUIRE(store.Snapshot()->coordinatePool.entryStride == 48);
     }
 
     {
@@ -413,12 +451,13 @@ void RunAuthSessionTests() {
         gateway->variableResult = {
             true, {}, EncodeCloudPayloadQuotesMixed()};
         AuthSessionOptions options;
-        options.cloudVariable = {"CALL_CODE", "VALUE_ID", "VALUE_NAME"};
+        options.coordinateSuiteVariable = {
+            "CALL_CODE", "VALUE_ID", "VALUE_NAME"};
 
         AuthSession session;
         REQUIRE(session.Login(
             gateway, "CARD_FOR_TEST", "DEVICE_FOR_TEST", options));
-        CloudLayoutStore store(RuntimeIdentity());
+        CloudLayoutStore store(RuntimeTarget());
         const CloudLayoutUpdateResult update =
             session.RefreshCloudLayout(store);
         REQUIRE(update.status == CloudLayoutStatus::Published);
@@ -431,12 +470,13 @@ void RunAuthSessionTests() {
         gateway->variableResult = {
             true, {}, "&lt;" + EncodeCloudPayloadQuotesMixed()};
         AuthSessionOptions options;
-        options.cloudVariable = {"CALL_CODE", "VALUE_ID", "VALUE_NAME"};
+        options.coordinateSuiteVariable = {
+            "CALL_CODE", "VALUE_ID", "VALUE_NAME"};
 
         AuthSession session;
         REQUIRE(session.Login(
             gateway, "CARD_FOR_TEST", "DEVICE_FOR_TEST", options));
-        CloudLayoutStore store(RuntimeIdentity());
+        CloudLayoutStore store(RuntimeTarget());
         const CloudLayoutUpdateResult update =
             session.RefreshCloudLayout(store);
         REQUIRE(update.status == CloudLayoutStatus::InvalidJson);
@@ -450,12 +490,13 @@ void RunAuthSessionTests() {
         gateway->variableResult = {
             true, {}, EncodeCloudPayloadQuotes("&amp;quot;")};
         AuthSessionOptions options;
-        options.cloudVariable = {"CALL_CODE", "VALUE_ID", "VALUE_NAME"};
+        options.coordinateSuiteVariable = {
+            "CALL_CODE", "VALUE_ID", "VALUE_NAME"};
 
         AuthSession session;
         REQUIRE(session.Login(
             gateway, "CARD_FOR_TEST", "DEVICE_FOR_TEST", options));
-        CloudLayoutStore store(RuntimeIdentity());
+        CloudLayoutStore store(RuntimeTarget());
         const CloudLayoutUpdateResult update =
             session.RefreshCloudLayout(store);
         REQUIRE(update.status == CloudLayoutStatus::Published);
@@ -468,12 +509,13 @@ void RunAuthSessionTests() {
         gateway->variableResult = {
             true, {}, EncodeCloudPayloadQuotes("&amp;amp;quot;")};
         AuthSessionOptions options;
-        options.cloudVariable = {"CALL_CODE", "VALUE_ID", "VALUE_NAME"};
+        options.coordinateSuiteVariable = {
+            "CALL_CODE", "VALUE_ID", "VALUE_NAME"};
 
         AuthSession session;
         REQUIRE(session.Login(
             gateway, "CARD_FOR_TEST", "DEVICE_FOR_TEST", options));
-        CloudLayoutStore store(RuntimeIdentity());
+        CloudLayoutStore store(RuntimeTarget());
         const CloudLayoutUpdateResult update =
             session.RefreshCloudLayout(store);
         REQUIRE(update.status == CloudLayoutStatus::InvalidJson);
@@ -484,14 +526,15 @@ void RunAuthSessionTests() {
         auto gateway = std::make_shared<BlockingVariableGateway>(
             CloudPayload());
         AuthSessionOptions options;
-        options.cloudVariable = {"CALL_CODE", "VALUE_ID", "VALUE_NAME"};
+        options.coordinateSuiteVariable = {
+            "CALL_CODE", "VALUE_ID", "VALUE_NAME"};
         options.heartbeatInterval = std::chrono::hours(1);
         options.stopTimeout = 250ms;
 
         AuthSession session;
         REQUIRE(session.Login(
             gateway, "CARD_FOR_TEST", "DEVICE_FOR_TEST", options));
-        CloudLayoutStore store(RuntimeIdentity());
+        CloudLayoutStore store(RuntimeTarget());
         CloudLayoutUpdateResult update;
         std::thread refresh([&] {
             update = session.RefreshCloudLayout(store);
@@ -593,13 +636,11 @@ void RunAuthSessionTests() {
 
     {
         T3AuthConfig config = kDefaultT3AuthConfig;
-        config.cloudIdentity = {
-            "com.example.runtime", "libUE4.so",
-            "0123456789abcdef0123456789abcdef01234567"};
-        const CloudRuntimeIdentity identity =
-            ResolveCloudRuntimeIdentity(config);
-        REQUIRE(identity.IsValid());
-        REQUIRE(identity.packageName == "com.example.runtime");
-        REQUIRE(identity.moduleName == "libUE4.so");
+        config.targetPackage = "com.example.runtime";
+        config.targetModule = "libSynthetic.so";
+        const CloudRuntimeTarget target = ResolveCloudRuntimeTarget(config);
+        REQUIRE(target.IsValid());
+        REQUIRE(target.packageName == "com.example.runtime");
+        REQUIRE(target.moduleName == "libSynthetic.so");
     }
 }

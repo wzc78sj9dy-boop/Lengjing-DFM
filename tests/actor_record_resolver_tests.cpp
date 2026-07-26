@@ -26,6 +26,16 @@ constexpr std::uintptr_t kFirst = 0x21000000;
 constexpr std::uintptr_t kSecond = 0x22000000;
 constexpr std::uintptr_t kThird = 0x23000000;
 constexpr std::uintptr_t kContainer = 0x24000000;
+constexpr ActorRecordLayout kSyntheticLayout{
+    0x102000,
+    0x203000,
+    0x288,
+    0x418,
+    1536,
+    40,
+    12288,
+    3072,
+};
 
 class ActorMemory final {
 public:
@@ -84,7 +94,7 @@ auto ValidContainerEntry() {
 }
 
 void TestTaggedContainerResolution() {
-    const ActorRecordResolver resolver;
+    const ActorRecordResolver resolver(kSyntheticLayout);
     REQUIRE(
         ActorRecordResolver::UntagPointer(
             static_cast<std::uintptr_t>(0xAB00123456789ABCULL)) ==
@@ -115,7 +125,7 @@ void TestTaggedContainerResolution() {
 }
 
 void TestSentinelScanBoundaries() {
-    const ActorRecordResolver resolver;
+    const ActorRecordResolver resolver(kSyntheticLayout);
 
     ActorMemory lowerMemory;
     lowerMemory.Put(kContainer, kModule);
@@ -143,7 +153,7 @@ void TestSentinelScanBoundaries() {
 }
 
 void TestProbeComparisonContract() {
-    const ActorRecordResolver resolver;
+    const ActorRecordResolver resolver(kSyntheticLayout);
     ActorMemory memory;
     memory.Put(kContainer, kModule);
     std::array<std::uint8_t, 256> block{};
@@ -201,7 +211,7 @@ void TestProbeComparisonContract() {
 }
 
 void TestDynamicStrideDiscovery() {
-    const ActorRecordResolver resolver;
+    const ActorRecordResolver resolver(kSyntheticLayout);
 
     ActorMemory firstLayout;
     firstLayout.Put(kContainer + 8, std::uintptr_t{1});
@@ -239,7 +249,7 @@ void TestDynamicStrideDiscovery() {
 }
 
 void TestEncryptedAndPlainLocation() {
-    const ActorRecordResolver resolver;
+    const ActorRecordResolver resolver(kSyntheticLayout);
     const ActorRecordLayout& layout = resolver.Layout();
     ActorMemory memory;
     PlaceContainerChain(memory, layout);
@@ -340,7 +350,7 @@ void TestEncryptedAndPlainLocation() {
 }
 
 void TestRecordReading() {
-    const ActorRecordResolver resolver;
+    const ActorRecordResolver resolver(kSyntheticLayout);
     const ActorRecordLayout& layout = resolver.Layout();
 
     ActorMemory encryptedMemory;
@@ -367,7 +377,7 @@ void TestRecordReading() {
     REQUIRE(encryptedRecord->mesh == encryptedMesh);
 
     ActorMemory plainMemory;
-    const ActorArrayDescriptor plainArray{0x34000000, 3, 24, false};
+    const ActorArrayDescriptor plainArray{0x34000000, 3, 40, false};
     const std::uintptr_t plainEntry =
         plainArray.data + 2U * plainArray.stride;
     constexpr std::uintptr_t plainActor = 0x35000000;
@@ -408,7 +418,7 @@ void TestRecordReading() {
     const ActorArrayDescriptor overflow{
         std::numeric_limits<std::uintptr_t>::max() - 10,
         2,
-        24,
+        40,
         true,
     };
     REQUIRE(!resolver.ReadRecord(overflow, 1, plainRead).has_value());

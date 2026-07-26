@@ -10,9 +10,16 @@
 
 namespace lengjing::auth {
 
-inline constexpr std::uint32_t kCloudLayoutSchemaVersion = 2;
+inline constexpr std::uint32_t kCloudLayoutSchemaVersion = 3;
 inline constexpr std::size_t kMaximumCloudLayoutPayloadBytes =
     64U * 1024U;
+
+struct CloudRuntimeTarget {
+    std::string packageName;
+    std::string moduleName;
+
+    bool IsValid() const noexcept;
+};
 
 struct CloudRuntimeIdentity {
     std::string packageName;
@@ -33,14 +40,18 @@ struct CloudActorRecordLayout {
     std::int32_t fallbackPlainCount = 0;
 };
 
+struct CloudActorSubjectLayout {
+    std::uintptr_t rootOffset = 0;
+    std::uintptr_t meshOffset = 0;
+    std::uintptr_t alternateRootOffset = 0;
+};
+
 struct CloudCoordinatePoolLayout {
     std::uintptr_t rootRva = 0;
     std::uintptr_t bridgeOffset = 0;
     std::int32_t contextOffset = 0;
     std::uintptr_t entryOffset = 0;
     std::uintptr_t componentKeyOffset = 0;
-    std::uint64_t pacgaData = 0;
-    std::uint64_t pacgaModifier = 0;
     std::uint32_t entryStride = 0;
     std::uint32_t poolHeadSkip = 0;
     std::uint32_t ringRefreshFrames = 0;
@@ -49,19 +60,107 @@ struct CloudCoordinatePoolLayout {
 struct CloudOffsetLayout {
     std::uintptr_t namePoolOffset = 0;
     std::uintptr_t worldOffset = 0;
-    std::uintptr_t coordinateReplayEntryOffset = 0;
     std::array<std::uintptr_t, 2> geometryInstancePointerOffsets{};
     CloudActorRecordLayout actorRecords{};
+    CloudActorSubjectLayout actorSubject{};
     std::uintptr_t trackingMatrixRootOffset = 0;
     std::uintptr_t componentPositionFlagOffset = 0;
-    CloudCoordinatePoolLayout coordinatePool{};
+};
+
+struct CloudDecryptMode1Layout {
+    CloudCoordinatePoolLayout pool{};
+    std::uint64_t pacgaData = 0;
+    std::uint64_t pacgaModifier = 0;
+};
+
+struct CloudDecryptMode2Layout {
+    CloudCoordinatePoolLayout pool{};
+};
+
+struct CloudExecutionDiscoveryLayout {
+    std::uintptr_t rootOffset = 0;
+    std::uintptr_t pointerOffset = 0;
+    std::uintptr_t entryOffset = 0;
+    std::uint64_t returnStubMagic = 0;
+};
+
+struct CloudExecutionResultLayout {
+    std::uintptr_t slotOffset = 0;
+    std::uintptr_t positionOffset = 0;
+};
+
+struct CloudExecutionHookOffsetLayout {
+    std::uintptr_t subjectLoad = 0;
+    std::uintptr_t callbackEntry = 0;
+    std::uintptr_t callbackReturn = 0;
+    std::uintptr_t callbackIndex = 0;
+    std::uintptr_t callbackCopyPrepare = 0;
+    std::uintptr_t callbackCopyAfter = 0;
+    std::uintptr_t tablePointer = 0;
+    std::uintptr_t tableValue = 0;
+    std::uintptr_t lock = 0;
+    std::uintptr_t lockReturn = 0;
+    std::uintptr_t firstCall = 0;
+    std::uintptr_t firstReturn = 0;
+    std::uintptr_t externalCall = 0;
+    std::uintptr_t externalReturn = 0;
+    std::uintptr_t primaryGateWrite = 0;
+    std::uintptr_t alternateGateWrite = 0;
+    std::uintptr_t gateProbe = 0;
+    std::uintptr_t recordCount = 0;
+    std::uintptr_t targetKey = 0;
+    std::uintptr_t ringSetup = 0;
+    std::uintptr_t ringProbe = 0;
+    std::uintptr_t ringHit = 0;
+    std::uintptr_t dispatch = 0;
+    std::uintptr_t dispatchReturn = 0;
+    std::uintptr_t resultPrepare = 0;
+    std::uintptr_t result = 0;
+};
+
+struct CloudExecutionFieldOffsetLayout {
+    std::uintptr_t contextExpected = 0;
+    std::uintptr_t stackPriorGate = 0;
+    std::uintptr_t stackPrimaryGateSource = 0;
+    std::uintptr_t stackGateFlag = 0;
+    std::uintptr_t stackGateSnapshotA = 0;
+    std::uintptr_t stackGateSnapshotB = 0;
+    std::uintptr_t stackRingMid = 0;
+    std::uintptr_t objectPosition = 0;
+    std::uintptr_t stackCaptureA = 0;
+    std::uintptr_t stackCaptureB = 0;
+    std::uintptr_t stackCaptureC = 0;
+    std::uintptr_t stackCaptureD = 0;
+    std::uintptr_t captureField = 0;
+    std::uintptr_t stackPoolSelector = 0;
+    std::uintptr_t contextPoolTable = 0;
+};
+
+struct CloudExecutionContextLayout {
+    std::string threadName;
+    std::uint32_t oracleOpcode = 0;
+};
+
+struct CloudExecutionLayout {
+    CloudExecutionDiscoveryLayout discovery{};
+    CloudExecutionResultLayout result{};
+    CloudExecutionHookOffsetLayout hookOffsets{};
+    CloudExecutionFieldOffsetLayout fieldOffsets{};
+    CloudExecutionContextLayout context{};
+};
+
+struct CloudDecryptLayout {
+    CloudDecryptMode1Layout mode1{};
+    CloudDecryptMode2Layout mode2{};
+    CloudExecutionLayout execution{};
 };
 
 struct CloudLayoutDocument {
     std::uint32_t schemaVersion = 0;
     std::uint64_t revision = 0;
-    CloudRuntimeIdentity identity;
-    CloudOffsetLayout layout;
+    CloudRuntimeIdentity identity{};
+    CloudOffsetLayout layout{};
+    CloudDecryptLayout decrypt{};
 };
 
 enum class CloudLayoutStatus {
@@ -91,17 +190,17 @@ struct CloudLayoutUpdateResult {
 
 class CloudLayoutStore final {
 public:
-    explicit CloudLayoutStore(CloudRuntimeIdentity expectedIdentity);
+    explicit CloudLayoutStore(CloudRuntimeTarget target);
 
     CloudLayoutStore(const CloudLayoutStore&) = delete;
     CloudLayoutStore& operator=(const CloudLayoutStore&) = delete;
 
-    const CloudRuntimeIdentity& ExpectedIdentity() const noexcept;
+    const CloudRuntimeTarget& ExpectedTarget() const noexcept;
     std::shared_ptr<const CloudLayoutDocument> Snapshot() const noexcept;
     CloudLayoutUpdateResult ValidateAndPublish(std::string_view payload);
 
 private:
-    CloudRuntimeIdentity expectedIdentity_;
+    CloudRuntimeTarget target_;
     mutable std::mutex publishMutex_;
     std::shared_ptr<const CloudLayoutDocument> current_;
 };

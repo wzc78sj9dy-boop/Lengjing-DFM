@@ -68,22 +68,10 @@ public:
             error = "T3 SDK initialization failed";
             return false;
         }
-        const bool primaryConfigured =
-            config.cloudVariable.IsConfigured();
-        const bool decrypt2Configured =
-            config.coordinateDecrypt2Variable.IsConfigured();
-        if (primaryConfigured && decrypt2Configured &&
-            config.cloudVariable.callCode !=
-                config.coordinateDecrypt2Variable.callCode) {
-            verifier_.reset();
-            error = "T3 cloud variables use different call codes";
-            return false;
-        }
-        if (primaryConfigured || decrypt2Configured) {
-            const std::string_view callCode = primaryConfigured
-                ? config.cloudVariable.callCode
-                : config.coordinateDecrypt2Variable.callCode;
-            verifier_->setCode("get_variable", std::string(callCode));
+        if (config.coordinateSuiteVariable.IsConfigured()) {
+            verifier_->setCode(
+                "get_variable",
+                std::string(config.coordinateSuiteVariable.callCode));
         }
         return true;
     }
@@ -453,8 +441,7 @@ struct AuthSession::Runtime final {
     std::string cardKey;
     std::string deviceCode;
     std::string stateCode;
-    OwnedCloudVariableConfig cloudVariable;
-    OwnedCloudVariableConfig coordinateDecrypt2Variable;
+    OwnedCloudVariableConfig coordinateSuiteVariable;
     AuthSessionOptions options;
 
     mutable std::mutex metadataMutex;
@@ -491,8 +478,7 @@ struct AuthSession::Runtime final {
         SecureClear(cardKey);
         deviceCode.clear();
         stateCode.clear();
-        cloudVariable = {};
-        coordinateDecrypt2Variable = {};
+        coordinateSuiteVariable = {};
     }
 
     void HeartbeatLoop() noexcept {
@@ -641,12 +627,10 @@ bool AuthSession::Login(std::shared_ptr<AuthGateway> gateway,
     runtime_->gateway = std::move(gateway);
     runtime_->cardKey = std::move(cardKey);
     runtime_->deviceCode = std::move(deviceCode);
-    runtime_->cloudVariable = Own(options.cloudVariable);
-    runtime_->coordinateDecrypt2Variable =
-        Own(options.coordinateDecrypt2Variable);
+    runtime_->coordinateSuiteVariable =
+        Own(options.coordinateSuiteVariable);
     runtime_->options = options;
-    runtime_->options.cloudVariable = {};
-    runtime_->options.coordinateDecrypt2Variable = {};
+    runtime_->options.coordinateSuiteVariable = {};
 
     AuthLoginResult result;
     try {
@@ -735,17 +719,15 @@ struct AuthSession::VariableFetchResult {
     std::string payload;
 };
 
-AuthSession::VariableFetchResult AuthSession::FetchCloudVariable(
-    bool coordinateDecrypt2) {
+AuthSession::VariableFetchResult AuthSession::FetchCloudVariable() {
     try {
         std::lock_guard<std::mutex> requestLock(runtime_->requestMutex);
         if (!IsValid()) {
             return {false, CloudLayoutStatus::SessionInvalid,
                     "authentication session is not valid", {}};
         }
-        const OwnedCloudVariableConfig& variable = coordinateDecrypt2
-            ? runtime_->coordinateDecrypt2Variable
-            : runtime_->cloudVariable;
+        const OwnedCloudVariableConfig& variable =
+            runtime_->coordinateSuiteVariable;
         if (!variable.IsConfigured()) {
             return {false, CloudLayoutStatus::NotConfigured,
                     "get_variable call code, value id, or value name is missing",
@@ -796,7 +778,7 @@ AuthSession::VariableFetchResult AuthSession::FetchCloudVariable(
 
 CloudLayoutUpdateResult AuthSession::RefreshCloudLayout(
     CloudLayoutStore& store) {
-    const VariableFetchResult fetched = FetchCloudVariable(false);
+    const VariableFetchResult fetched = FetchCloudVariable();
     if (!fetched.success) {
         return {fetched.failureStatus, fetched.detail, store.Snapshot()};
     }
@@ -806,25 +788,6 @@ CloudLayoutUpdateResult AuthSession::RefreshCloudLayout(
         return {CloudLayoutStatus::SessionInvalid,
                 "authentication session ended during cloud layout validation",
                 store.Snapshot()};
-    }
-    return update;
-}
-
-CoordinatePoolCloudLayoutUpdateResult
-AuthSession::RefreshCoordinateDecrypt2Layout(
-    CoordinatePoolCloudLayoutStore& store) {
-    const VariableFetchResult fetched = FetchCloudVariable(true);
-    if (!fetched.success) {
-        return {fetched.failureStatus, fetched.detail, store.Snapshot()};
-    }
-    const CoordinatePoolCloudLayoutUpdateResult update =
-        store.ValidateAndPublish(fetched.payload);
-    if (!IsValid()) {
-        return {
-            CloudLayoutStatus::SessionInvalid,
-            "authentication session ended during decrypt2 layout validation",
-            store.Snapshot(),
-        };
     }
     return update;
 }
@@ -891,12 +854,11 @@ std::string ResolveDeviceCode() {
     return resolved;
 }
 
-CloudRuntimeIdentity ResolveCloudRuntimeIdentity(
+CloudRuntimeTarget ResolveCloudRuntimeTarget(
     const T3AuthConfig& config) {
     return {
-        std::string(config.cloudIdentity.packageName),
-        std::string(config.cloudIdentity.moduleName),
-        std::string(config.cloudIdentity.buildId),
+        std::string(config.targetPackage),
+        std::string(config.targetModule),
     };
 }
 
@@ -957,9 +919,7 @@ bool LoginInteractive(AuthSession& session,
     }
 
     AuthSessionOptions options;
-    options.cloudVariable = config.cloudVariable;
-    options.coordinateDecrypt2Variable =
-        config.coordinateDecrypt2Variable;
+    options.coordinateSuiteVariable = config.coordinateSuiteVariable;
     options.startHeartbeat = startHeartbeat;
     if (!session.Login(std::move(gateway), card.value,
                        std::move(resolvedDeviceCode), options)) {

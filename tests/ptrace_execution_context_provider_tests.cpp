@@ -99,9 +99,9 @@ public:
 void TestCandidateRotationAndCache() {
     TempProcTree proc;
     constexpr std::int32_t processId = 1400;
-    proc.WriteThread(processId, 1401, "GameThread", 10);
-    proc.WriteThread(processId, 1402, "GameThread", 20);
-    proc.WriteThread(processId, 1403, "GameThreadExtra", 30);
+    proc.WriteThread(processId, 1401, "WorkerAlpha", 10);
+    proc.WriteThread(processId, 1402, "WorkerAlpha", 20);
+    proc.WriteThread(processId, 1403, "WorkerBeta", 30);
 
     FakeReader reader;
     reader.values[1401] = {-EPERM, 0, 0};
@@ -113,13 +113,14 @@ void TestCandidateRotationAndCache() {
     PtraceExecutionContextProvider provider(
         processId,
         reader,
-        "GameThread",
+        "WorkerAlpha",
         proc.Root().string());
 
     const PacgaOracleInstruction first{
         UINT64_C(0x767F196CC4),
         UINT64_C(0x13579BDF),
         UINT64_C(0x2468ACE0),
+        UINT32_C(0x9AC33041),
         {
             UINT64_C(0x767F190000),
             UINT64_C(0xA17C9E210001),
@@ -154,6 +155,7 @@ void TestCandidateRotationAndCache() {
         UINT64_C(0x767F196CC8),
         first.data,
         first.modifier,
+        first.encoding,
         rewritten.codeIdentity,
     };
     reader.attempts.clear();
@@ -191,7 +193,7 @@ void TestInputValidation() {
     PtraceExecutionContextProvider provider(
         1500,
         reader,
-        "GameThread",
+        "WorkerAlpha",
         proc.Root().string());
     const auto refresh = provider.Refresh({});
     CHECK(!refresh.HasContext());
@@ -202,19 +204,20 @@ void TestInputValidation() {
 void TestFailureBackoff() {
     TempProcTree proc;
     constexpr std::int32_t processId = 1600;
-    proc.WriteThread(processId, 1601, "GameThread", 10);
+    proc.WriteThread(processId, 1601, "WorkerAlpha", 10);
 
     FakeReader reader;
     reader.values[1601] = {-EPERM, 0, 0};
     PtraceExecutionContextProvider provider(
         processId,
         reader,
-        "GameThread",
+        "WorkerAlpha",
         proc.Root().string());
     const PacgaOracleInstruction instruction{
         UINT64_C(0x767F196CC4),
         UINT64_C(0x13579BDF),
         UINT64_C(0x2468ACE0),
+        UINT32_C(0x9AC33041),
         {
             UINT64_C(0x767F190000),
             UINT64_C(0xA17C9E210001),

@@ -32,6 +32,7 @@ namespace coord_dec {
         PatchGuardMissing = 12,
         PatchBranchMissing = 13,
         PatchBranchOutOfRange = 14,
+        EntryStrideMissing = 15,
     };
 
     struct param {
@@ -83,6 +84,7 @@ namespace coord_dec {
         uint16_t candidate_count_ = 0;
         uint16_t failure_instruction_ = 0;
         uint32_t decode_method_instruction_limit_ = 500;
+        uint32_t expected_entry_stride_ = 0;
         bool resolve_decode_method_entry_branches_ = false;
 
         bool find_v87_str();
@@ -139,6 +141,17 @@ namespace coord_dec {
 
         uint32_t decode_method_instruction_limit() const noexcept {
             return decode_method_instruction_limit_;
+        }
+
+        bool set_expected_entry_stride(uint32_t stride) noexcept {
+            const bool valid =
+                stride >= 12 && stride <= 4096 && (stride & 3U) == 0;
+            expected_entry_stride_ = valid ? stride : 0;
+            return valid;
+        }
+
+        uint32_t expected_entry_stride() const noexcept {
+            return expected_entry_stride_;
         }
 
         void set_resolve_decode_method_entry_branches(

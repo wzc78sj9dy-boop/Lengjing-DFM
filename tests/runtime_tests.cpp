@@ -28,7 +28,7 @@ struct BackendState {
     std::atomic_int screenHeight{0};
     std::atomic_int orientation{0};
     std::atomic_int closeFailuresRemaining{0};
-    std::atomic_uintptr_t algorithmDecryptRva{0};
+    std::atomic_bool cloudLayoutPresent{false};
     std::atomic_bool aimEnabled{false};
     std::atomic_bool selfAimSetting{false};
     std::atomic_bool projectileTrackingSetting{false};
@@ -51,8 +51,7 @@ public:
               lengjing::game::RuntimeProbe& probe,
               std::string&) override {
         ++state_->opens;
-        state_->algorithmDecryptRva.store(
-            options.algorithmPosition.decryptRva);
+        state_->cloudLayoutPresent.store(options.cloudLayout != nullptr);
         probe.processId = 42;
         probe.baseReady = true;
         return true;
@@ -232,7 +231,8 @@ void RunRuntimeTests() {
     runtime.UpdateSettings(settings);
 
     lengjing::game::RuntimeOptions options;
-    options.algorithmPosition.decryptRva = 0x1234;
+    options.cloudLayout =
+        std::make_shared<lengjing::auth::CloudLayoutDocument>();
     REQUIRE(runtime.Start(options));
     REQUIRE(!runtime.Start(options));
     REQUIRE(WaitFor([&] {
@@ -245,7 +245,7 @@ void RunRuntimeTests() {
     }));
     REQUIRE(runtime.Status().processId == 42);
     REQUIRE(runtime.Status().baseReady);
-    REQUIRE(state->algorithmDecryptRva.load() == 0x1234);
+    REQUIRE(state->cloudLayoutPresent.load());
     REQUIRE(state->selfAimSetting.load());
     REQUIRE(!state->projectileTrackingSetting.load());
     REQUIRE(!state->coordinateDecryptSetting.load());

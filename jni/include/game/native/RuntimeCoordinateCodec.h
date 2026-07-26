@@ -62,6 +62,7 @@ enum class RuntimeCoordinateCodecError : std::uint16_t {
 
 struct RuntimeCoordinateCodecLayout {
     std::uintptr_t hookRva = 0x0E7FA4CCULL;
+    std::uintptr_t positionOffset = 0;
     std::uint64_t wrapperFingerprint = UINT64_C(0x5D79D891F15D0076);
     std::uint64_t mainFingerprint = UINT64_C(0x09632A7122906F3F);
     std::uint64_t stateFingerprint = UINT64_C(0x6E0E62461FA6483C);
@@ -165,6 +166,13 @@ public:
         if (moduleBase == 0 || layout_.hookRva == 0) {
             return Fail(RuntimeCoordinateCodecError::InvalidInput);
         }
+        if (layout_.positionOffset == 0 ||
+            layout_.positionOffset >
+                static_cast<std::uintptr_t>(0xFFFFU) ||
+            (layout_.positionOffset &
+                static_cast<std::uintptr_t>(3U)) != 0) {
+            return Fail(RuntimeCoordinateCodecError::ConfigInvalid);
+        }
         if (!CheckedAdd(moduleBase, layout_.hookRva, diagnostic_.hook)) {
             return Fail(RuntimeCoordinateCodecError::InvalidInput);
         }
@@ -182,8 +190,8 @@ public:
         if (hook[6] != UINT32_C(0xBD016800) ||
             hook[7] != UINT32_C(0xBD016C01) ||
             hook[8] != UINT32_C(0xBD017002) ||
-            hook[9] != UINT32_C(0x58000050) ||
-            hook[10] != UINT32_C(0xD61F0200)) {
+            hook[9] != UINT32_C(0x58000051) ||
+            hook[10] != UINT32_C(0xD61F0220)) {
             return Fail(RuntimeCoordinateCodecError::HookMismatch);
         }
         diagnostic_.stage = RuntimeCoordinateCodecStage::HookValidated;
@@ -218,8 +226,8 @@ public:
             Load32(trampoline.data() + 0x8C) != UINT32_C(0x58FFFB60) ||
             Load32(trampoline.data() + 0x90) != UINT32_C(0x910003E1) ||
             Load32(trampoline.data() + 0x94) != UINT32_C(0x100000BE) ||
-            Load32(trampoline.data() + 0x98) != UINT32_C(0x58000050) ||
-            Load32(trampoline.data() + 0x9C) != UINT32_C(0xD61F0200)) {
+            Load32(trampoline.data() + 0x98) != UINT32_C(0x58000051) ||
+            Load32(trampoline.data() + 0x9C) != UINT32_C(0xD61F0220)) {
             return Fail(RuntimeCoordinateCodecError::TrampolineMismatch);
         }
         const std::uint64_t callbackRaw =
@@ -319,7 +327,7 @@ public:
             CopyTableHeaderToDiagnostic(firstHeader, diagnostic);
 
             std::uint64_t firstOwner = 0;
-            if (!ReadAt(readBytes, object, 0xE8, firstOwner)) {
+            if (!ReadAt(readBytes, object, 0xF0, firstOwner)) {
                 lastError = RuntimeCoordinateCodecError::ObjectReadFailed;
                 continue;
             }
@@ -330,7 +338,8 @@ public:
             }
 
             std::uintptr_t fieldAddress = 0;
-            if (!CheckedAdd(object, 0x168, fieldAddress)) {
+            if (!CheckedAdd(
+                    object, layout_.positionOffset, fieldAddress)) {
                 return FailDecode(
                     diagnostic, RuntimeCoordinateCodecError::ObjectInvalid);
             }
@@ -463,7 +472,7 @@ public:
 
                 std::uint64_t secondOwner = 0;
                 TableHeader secondHeader{};
-                if (!ReadAt(readBytes, object, 0xE8, secondOwner) ||
+                if (!ReadAt(readBytes, object, 0xF0, secondOwner) ||
                     !ReadTableHeader(
                         context_.state, secondHeader, readBytes)) {
                     lastError = RuntimeCoordinateCodecError::StateUnstable;
@@ -517,7 +526,7 @@ public:
 
             std::uint64_t secondOwner = 0;
             TableHeader secondHeader{};
-            if (!ReadAt(readBytes, object, 0xE8, secondOwner) ||
+            if (!ReadAt(readBytes, object, 0xF0, secondOwner) ||
                 !ReadTableHeader(
                     context_.state, secondHeader, readBytes) ||
                 firstOwner != secondOwner ||
@@ -765,7 +774,7 @@ private:
         std::array<std::uint32_t, 4> parameters{};
         if (result.config == 0 ||
             !ReadAt(
-                readBytes, result.config, 0x210,
+                readBytes, result.config, 0x218,
                 parameters)) {
             return Fail(RuntimeCoordinateCodecError::ConfigInvalid);
         }

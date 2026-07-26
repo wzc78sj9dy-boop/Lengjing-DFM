@@ -40,7 +40,6 @@ using lengjing::game::native::ShouldRedirectCoordinateExecutionReturn;
 using lengjing::game::native::kCoordinateExecutionDefaultFrame;
 using lengjing::game::native::kCoordinateExecutionDefaultFp;
 using lengjing::game::native::kCoordinateExecutionDefaultSp;
-using lengjing::game::native::kCoordinateExecutionResultSlotOffset;
 using lengjing::game::native::kCoordinateExecutionStopPc;
 using lengjing::game::native::kCoordinateExecutionSyntheticStackBase;
 using lengjing::game::native::kCoordinateExecutionSyntheticStackTop;
@@ -51,6 +50,30 @@ constexpr std::uint64_t kCodeBase = UINT64_C(0x0000007100000000);
 constexpr std::size_t kCodeSize = 0x100000;
 constexpr std::uint64_t kSubject = UINT64_C(0xAB00007010000000);
 constexpr std::uint64_t kNormalizedSubject = UINT64_C(0x0000007010000000);
+
+constexpr lengjing::game::native::CoordinateExecutionLayout
+SyntheticLayout() {
+    lengjing::game::native::CoordinateExecutionLayout layout{};
+    layout.discovery = {
+        UINT64_C(0x234000),
+        UINT64_C(0x18),
+        UINT64_C(0xB8),
+        UINT64_C(0x123456789ABCDEF0),
+    };
+    layout.result = {UINT64_C(0x248), UINT64_C(0x178)};
+    layout.hooks = {
+        0x410, 0x434, 0x458, 0x47C, 0x4A0, 0x4C4, 0x4E8,
+        0x50C, 0x530, 0x554, 0x578, 0x59C, 0x5C0, 0x5E4,
+        0x608, 0x62C, 0x650, 0x674, 0x698, 0x6BC, 0x6E0,
+        0x704, 0x728, 0x74C, 0x770, 0x794,
+    };
+    layout.fields = {
+        0x818, 0x83C, 0x860, 0x884, 0x8A8,
+        0x8CC, 0x8F0, 0x914, 0x938, 0x95C,
+        0x980, 0x9A4, 0x9C8, 0x9EC, 0xA10,
+    };
+    return layout;
+}
 
 void TestAbiAndPointers() {
     static_assert(static_cast<std::uint8_t>(
@@ -86,7 +109,7 @@ void TestSyntheticStackContract() {
     REQUIRE(IsCoordinateExecutionStackBase(kCoordinateExecutionDefaultFp));
     REQUIRE(IsCoordinateExecutionStackBase(kCoordinateExecutionDefaultSp));
     REQUIRE(kCoordinateExecutionDefaultFrame +
-                kCoordinateExecutionResultSlotOffset <
+                SyntheticLayout().result.resultSlotOffset <
             kCoordinateExecutionSyntheticStackTop);
     REQUIRE(IsCoordinateExecutionStackBase(kNormalizedSubject));
     REQUIRE(IsCoordinateExecutionStackBase(kSubject));
@@ -186,6 +209,7 @@ void TestExclusiveMonitorContract() {
 void TestKnownRelativeCandidate() {
     CoordinateExecutionRequest request{};
     request.mode = CoordinateExecutionMode::Emulate;
+    request.layout = SyntheticLayout();
     request.candidateKnown = true;
     request.candidate.q0 = UINT64_C(0xCD00007020000000);
     request.candidate.q1 = 0x1000;
@@ -209,6 +233,7 @@ void TestKnownRelativeCandidate() {
 void TestUnknownRelativeCandidate() {
     CoordinateExecutionRequest request{};
     request.mode = CoordinateExecutionMode::Emulate;
+    request.layout = SyntheticLayout();
     request.candidate.q1 = 0x2000;
 
     const auto plan = BuildCoordinateExecutionPlan(
@@ -226,6 +251,7 @@ void TestUnknownRelativeCandidate() {
 void TestKnownCandidateRequiresContext() {
     CoordinateExecutionRequest request{};
     request.mode = CoordinateExecutionMode::Emulate;
+    request.layout = SyntheticLayout();
     request.candidateKnown = true;
     request.candidate.q1 = 0x2000;
     const auto knownPlan = BuildCoordinateExecutionPlan(
@@ -241,6 +267,7 @@ void TestKnownCandidateRequiresContext() {
 void TestAbsoluteCandidate() {
     CoordinateExecutionRequest request{};
     request.mode = CoordinateExecutionMode::Emulate;
+    request.layout = SyntheticLayout();
     request.candidate.q1 = 0x3000;
     request.candidate.q2 = UINT64_C(0x0000007030000000);
     request.candidate.q3 = kModuleBase + 0x7000;
@@ -279,6 +306,7 @@ void TestSharedRelativeModes() {
          }) {
         CoordinateExecutionRequest request{};
         request.mode = mode;
+        request.layout = SyntheticLayout();
         request.shared.hookOffset = 0x4000;
         request.shared.x0Override = UINT64_C(0xEF00007050000000);
 
@@ -306,6 +334,7 @@ void TestSharedRelativeModes() {
 void TestSharedAbsoluteEntry() {
     CoordinateExecutionRequest request{};
     request.mode = CoordinateExecutionMode::Interpret;
+    request.layout = SyntheticLayout();
     request.shared.hookOffset = 0x5000;
     request.shared.x0Override = UINT64_C(0x0000007050000000);
     request.shared.absoluteEntry = UINT64_C(0x0000007060000000);
@@ -343,6 +372,7 @@ void TestSharedAbsoluteEntry() {
 void TestInvalidRequests() {
     CoordinateExecutionRequest request{};
     request.mode = static_cast<CoordinateExecutionMode>(0);
+    request.layout = SyntheticLayout();
     REQUIRE(!BuildCoordinateExecutionPlan(
                  kModuleBase,
                  kModuleSize,
@@ -352,6 +382,19 @@ void TestInvalidRequests() {
                  request)
                  .valid);
 
+    request.mode = CoordinateExecutionMode::Interpret;
+    request.layout = {};
+    request.shared.hookOffset = 4;
+    REQUIRE(!BuildCoordinateExecutionPlan(
+                 kModuleBase,
+                 kModuleSize,
+                 kCodeBase,
+                 kCodeSize,
+                 kSubject,
+                 request)
+                 .valid);
+
+    request.layout = SyntheticLayout();
     request.mode = CoordinateExecutionMode::Interpret;
     request.shared.hookOffset = kCodeSize;
     REQUIRE(!BuildCoordinateExecutionPlan(

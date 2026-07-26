@@ -93,7 +93,6 @@ namespace {
 constexpr float kPi = 3.14159265358979323846f;
 constexpr std::uintptr_t kMinimumRemoteAddress = 0x10000000ULL;
 constexpr std::uintptr_t kMaximumRemoteAddress = 0x10000000000ULL;
-constexpr std::int32_t kMaximumActorCount = 10000;
 constexpr std::int32_t kMaximumWorldObjectCount = 65536;
 constexpr std::size_t kMaximumNameLength = 249;
 constexpr std::uint64_t kCoordinateTraceIntervalFrames = 30;
@@ -517,6 +516,7 @@ struct VersionLayout {
     std::uintptr_t worldOffset = 0;
     std::array<std::uintptr_t, 2> geometryInstancePointerOffsets{};
     native::ActorRecordLayout actorRecordLayout{};
+    native::ActorSubjectLayout actorSubjectLayout{};
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
     std::uintptr_t trackingMatrixRootOffset = 0;
 #endif
@@ -524,40 +524,9 @@ struct VersionLayout {
 };
 
 constexpr std::array<VersionLayout, 3> kVersionLayouts{{
-    {"com.tencent.tmgp.dfm",
-     0x1CDCB8C0ULL,
-     0x1D0E8668ULL,
-     {0x1C3C5368ULL, 0x1AF01C68ULL},
-     {0x0EEBDB14ULL,
-      0x1D0A6908ULL,
-      0x180,
-      0x3D0,
-      1000,
-       24,
-       10000,
-       3000},
-#if LENGJING_ENABLE_PROJECTILE_TRACKING
-       0x1D0AD4C0ULL,
-#endif
-       0x1DCFB4FULL},
-    {"com.proxima.dfm",
-     0x1D0F4800ULL,
-     0x1D4115A8ULL,
-     {0x1B1C0D68ULL, 0},
-     {0, 0, 0, 0, 0, 0, 0, 0},
-#if LENGJING_ENABLE_PROJECTILE_TRACKING
-      0,
-#endif
-      0},
-    {"com.garena.game.df",
-     0x1CF7A440ULL,
-     0x1D2971F8ULL,
-     {0x1B0669A8ULL, 0},
-     {0, 0, 0, 0, 0, 0, 0, 0},
-#if LENGJING_ENABLE_PROJECTILE_TRACKING
-      0,
-#endif
-      0},
+    {"com.tencent.tmgp.dfm"},
+    {"com.proxima.dfm"},
+    {"com.garena.game.df"},
 }};
 
 constexpr std::array<int, 15> kBoneIndices{
@@ -1282,7 +1251,6 @@ public:
             return false;
         }
         options_ = options;
-        algorithmPositionConfig_ = options.algorithmPosition;
         customItemPath_ = options.programDirectory.empty()
             ? std::string("自定义物资.txt")
             : options.programDirectory + "/自定义物资.txt";
@@ -1361,72 +1329,61 @@ public:
                 &ReadElfBytes,
                 memory_.get(),
                 moduleBuildId_);
-        if (options.cloudLayout != nullptr ||
-            options.coordinateDecrypt2Layout != nullptr) {
-            if (!moduleBuildIdReady) {
-                probe.failureKind =
-                    RuntimeFailureKind::CloudLayoutRejected;
-                SetRuntimeFailure(
-                    probe, RuntimeError::CloudBuildIdMismatch);
-                error = "cloud layout build id mismatch";
-                CloseLocked();
-                return false;
-            }
+        if (options.cloudLayout == nullptr || !moduleBuildIdReady) {
+            probe.failureKind = RuntimeFailureKind::CloudLayoutRejected;
+            SetRuntimeFailure(
+                probe,
+                moduleBuildIdReady
+                    ? RuntimeError::CloudLayoutInvalid
+                    : RuntimeError::CloudBuildIdMismatch);
+            error = "cloud layout unavailable";
+            CloseLocked();
+            return false;
         }
-        if (options.cloudLayout != nullptr) {
-            const auto cloudLayout = native::BuildRuntimeLayoutOverride(
-                options.cloudLayout.get(), layout_.processName,
-                moduleName_, moduleBuildId_);
-            if (!cloudLayout.has_value() ||
-                !memory_->ConfigureCoordinateReplay(
-                    cloudLayout->coordinateTransport) ||
-                !coordinatePoolRuntime_.Configure(
-                    cloudLayout->coordinatePool)) {
-                probe.failureKind =
-                    RuntimeFailureKind::CloudLayoutRejected;
-                SetRuntimeFailure(
-                    probe, RuntimeError::CloudLayoutInvalid, -EINVAL);
-                error = "cloud layout validation failed";
-                CloseLocked();
-                return false;
-            }
-            layout_.namePoolOffset = cloudLayout->namePoolOffset;
-            layout_.worldOffset = cloudLayout->worldOffset;
-            layout_.geometryInstancePointerOffsets =
-                cloudLayout->geometryInstancePointerOffsets;
-            layout_.actorRecordLayout = cloudLayout->actorRecords;
+
+        const auto cloudLayout = native::BuildRuntimeLayoutOverride(
+            options.cloudLayout.get(), layout_.processName,
+            moduleName_, moduleBuildId_);
+        if (!cloudLayout.has_value() ||
+            !memory_->ConfigureCoordinateReplay(
+                cloudLayout->coordinateTransport) ||
+            !memory_->ConfigureCoordinateExecutionContext(
+                cloudLayout->coordinateExecutionContext) ||
+            !coordinatePoolRuntime_.Configure(
+                cloudLayout->coordinatePool) ||
+            !coordinateDecrypt2Runtime_.Configure(
+                cloudLayout->coordinateDecrypt2Pool) ||
+            !characterPositions_.Configure({
+                cloudLayout->actorSubject.rootOffset,
+                cloudLayout->coordinateExecution.result.positionOffset,
+            })) {
+            probe.failureKind = RuntimeFailureKind::CloudLayoutRejected;
+            SetRuntimeFailure(
+                probe, RuntimeError::CloudLayoutInvalid, -EINVAL);
+            error = "cloud layout validation failed";
+            CloseLocked();
+            return false;
+        }
+        layout_.namePoolOffset = cloudLayout->namePoolOffset;
+        layout_.worldOffset = cloudLayout->worldOffset;
+        layout_.geometryInstancePointerOffsets =
+            cloudLayout->geometryInstancePointerOffsets;
+        layout_.actorRecordLayout = cloudLayout->actorRecords;
+        layout_.actorSubjectLayout = cloudLayout->actorSubject;
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
-            layout_.trackingMatrixRootOffset =
-                cloudLayout->trackingMatrixRootOffset;
+        layout_.trackingMatrixRootOffset =
+            cloudLayout->trackingMatrixRootOffset;
 #endif
-            layout_.componentPositionFlagOffset =
-                cloudLayout->componentPositionFlagOffset;
-            algorithmPositionConfig_ =
-                cloudLayout->coordinateReplayEntryOffset != 0
-                ? native::AlgorithmPositionRuntimeConfig{
-                      cloudLayout->coordinateReplayEntryOffset,
-                      0,
-                  }
-                : native::AlgorithmPositionRuntimeConfig{};
-        }
-        if (options.coordinateDecrypt2Layout != nullptr) {
-            const auth::CoordinatePoolCloudLayoutDocument& decrypt2 =
-                *options.coordinateDecrypt2Layout;
-            if (decrypt2.identity.packageName != layout_.processName ||
-                decrypt2.identity.moduleName != moduleName_ ||
-                decrypt2.identity.buildId != moduleBuildId_ ||
-                !decrypt2.coordinatePool.IsValid() ||
-                !coordinateDecrypt2Runtime_.Configure(
-                    decrypt2.coordinatePool)) {
-                probe.failureKind =
-                    RuntimeFailureKind::CloudLayoutRejected;
-                SetRuntimeFailure(
-                    probe, RuntimeError::CloudLayoutInvalid, -EINVAL);
-                error = "decrypt2 cloud layout validation failed";
-                CloseLocked();
-                return false;
-            }
-        }
+        layout_.componentPositionFlagOffset =
+            cloudLayout->componentPositionFlagOffset;
+        coordinateExecutionLayout_ = cloudLayout->coordinateExecution;
+#if LENGJING_ENABLE_ALGORITHM_COORDINATE
+        runtimeCoordinateCodec_ = native::RuntimeCoordinateCodec(
+            native::RuntimeCoordinateCodecLayout{
+                .positionOffset = static_cast<std::uintptr_t>(
+                    coordinateExecutionLayout_.result.positionOffset),
+            });
+#endif
 
         RefreshAlgorithmEntry(true);
 
@@ -1577,14 +1534,11 @@ public:
             coordinateExecutionDiscoveryInput_ = {};
             coordinateExecutionCodeBase_ = 0;
             coordinateExecutionCodeSize_ = 0;
-            coordinateExecutionScanProfile_ =
-                native::ResolveCoordinateExecutionScanProfile(
-                    options_.gameVersionIndex);
             if (coordinateExecutionMode_ != 0) {
                 static_cast<void>(coordinateExecutionDecoder_.Configure(
                     static_cast<native::CoordinateExecutionMode>(
                         coordinateExecutionMode_),
-                    coordinateExecutionScanProfile_));
+                    coordinateExecutionLayout_));
             }
         }
         if (coordinateRequestChanged ||
@@ -2122,6 +2076,7 @@ public:
 
             native::FillOrdinaryActorPointers(
                 actorRecord,
+                layout_.actorSubjectLayout,
                 [&](std::uintptr_t address) { return ReadPointer(address); });
             Vec3 position{};
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
@@ -3591,9 +3546,13 @@ private:
         sourceReady = true;
         encrypted = array->encrypted;
 
-        result.reserve(std::min<std::uint32_t>(array->count, 10000));
+        const std::size_t maximumRecords = static_cast<std::size_t>(
+            layout_.actorRecordLayout.maximumPlainCount);
+        if (maximumRecords == 0) return result;
+        result.reserve(std::min<std::size_t>(
+            array->count, maximumRecords));
         for (std::uint32_t index = 0;
-             index < array->count && result.size() < 10000;
+             index < array->count && result.size() < maximumRecords;
              ++index) {
             const std::optional<native::ActorAddressRecord> record =
                 resolver.ReadRecord(*array, index, readBytes);
@@ -3767,7 +3726,7 @@ private:
                 context.actorCount,
                 context.actorCount,
             },
-            kMaximumActorCount);
+            layout_.actorRecordLayout.maximumPlainCount);
         if (result.size() >= kMaximumCollectedActors) {
             return result;
         }
@@ -3817,7 +3776,7 @@ private:
                 context.actorCount,
                 context.actorCount,
             },
-            kMaximumActorCount);
+            layout_.actorRecordLayout.maximumPlainCount);
         ActorArrayHeader persistentObjects{};
         if (ReadValue(context.level + 0x98, persistentObjects)) {
             appendArray(persistentObjects, kMaximumWorldObjectCount);
@@ -4582,7 +4541,8 @@ private:
         const bool ordinaryActorsAvailable =
             ReadValue(context.level + 0x1F0, actors) &&
             IsValidPointer(actors.data) && actors.count > 0 &&
-            actors.count <= kMaximumActorCount &&
+            actors.count <=
+                layout_.actorRecordLayout.maximumPlainCount &&
             actors.capacity >= actors.count;
         if (!ordinaryActorsAvailable) {
             failure.error = RuntimeError::ActorSourceUnavailable;
@@ -4870,10 +4830,14 @@ private:
     bool ReadActorPosition(std::uintptr_t actor, Vec3& position, bool allowCache) {
         constexpr auto kCacheLifetime = std::chrono::milliseconds(300);
         const auto now = std::chrono::steady_clock::now();
-        const std::uintptr_t component = ReadPointer(actor + 0x180);
+        const std::uintptr_t component = ReadPointer(
+            actor + layout_.actorSubjectLayout.rootOffset);
         Vec3 candidate{};
         bool valid = IsValidPointer(component) &&
-            ((ReadValue(component + 0x168, candidate) && IsFinite(candidate) && IsNonzero(candidate)) ||
+            ((ReadValue(
+                  component + coordinateExecutionLayout_.result.positionOffset,
+                  candidate) &&
+              IsFinite(candidate) && IsNonzero(candidate)) ||
              (ReadValue(component + 0x220, candidate) && IsFinite(candidate) && IsNonzero(candidate)));
         if (valid) {
             if (allowCache) {
@@ -4938,7 +4902,7 @@ private:
             Vec3 raw{};
             if (ReadValue(
                     cached->second.component +
-                        native::kCoordinateExecutionPositionOffset,
+                        coordinateExecutionLayout_.result.positionOffset,
                     raw) &&
                 IsFinite(raw)) {
                 const Vec3 adjusted = AdjustDecodedPosition(raw);
@@ -5079,8 +5043,8 @@ private:
                 "captured_pc=%llx captured_slot=%llx "
                 "captured_object=%llx capture_sp=%llx capture_x8=%llx "
                 "capture_x9=%llx capture_x12=%llx capture_x21=%llx "
-                "local60=%llx local1c8=%llx local208=%llx local238=%llx "
-                "local238_field=%x available=%d runtime_error=%u "
+                "local0=%llx local1=%llx local2=%llx local3=%llx "
+                "local_field=%x available=%d runtime_error=%u "
                 "runtime_status=%u raw=(%.3f,%.3f,%.3f)\n",
                 static_cast<unsigned long long>(coordinateTraceFrame_),
                 static_cast<unsigned long long>(actor),
@@ -5273,11 +5237,11 @@ private:
                 static_cast<unsigned long long>(evidence.capturedX9),
                 static_cast<unsigned long long>(evidence.capturedX12),
                 static_cast<unsigned long long>(evidence.capturedX21),
-                static_cast<unsigned long long>(evidence.capturedLocal60),
-                static_cast<unsigned long long>(evidence.capturedLocal1C8),
-                static_cast<unsigned long long>(evidence.capturedLocal208),
-                static_cast<unsigned long long>(evidence.capturedLocal238),
-                static_cast<unsigned int>(evidence.capturedLocal238Field),
+                static_cast<unsigned long long>(evidence.capturedLocal0),
+                static_cast<unsigned long long>(evidence.capturedLocal1),
+                static_cast<unsigned long long>(evidence.capturedLocal2),
+                static_cast<unsigned long long>(evidence.capturedLocal3),
+                static_cast<unsigned int>(evidence.capturedLocalField),
                 available ? 1 : 0,
                 static_cast<unsigned int>(executionProbe.runtime.error),
                 static_cast<unsigned int>(executionProbe.runtime.status),
@@ -5402,7 +5366,7 @@ private:
         if (hardwareBreakpointRequested_) {
             position = Vec3{};
             const std::uintptr_t mesh =
-                ReadPointer(actor + native::kOrdinaryActorMeshOffset);
+                ReadPointer(actor + layout_.actorSubjectLayout.meshOffset);
             const bool available =
                 ReadHardwareBreakpointPosition(mesh, position);
             if (IsCoordinateTraceEnabled()) {
@@ -5462,7 +5426,8 @@ private:
                 auto& trace = coordinateTraceRecords_[actor];
                 trace = CoordinateTraceRecord{};
                 trace.root = decodedRoot;
-                trace.component = ReadPointer(actor + 0x180);
+                trace.component = ReadPointer(
+                    actor + layout_.actorSubjectLayout.rootOffset);
                 trace.raw = algorithmRaw;
                 trace.output = position;
                 trace.source = algorithmCoordinateAvailable
@@ -6341,7 +6306,8 @@ private:
             return false;
         }
 
-        const std::uintptr_t ordinaryRoot = ReadPointer(actor + 0x180);
+        const std::uintptr_t ordinaryRoot = ReadPointer(
+            actor + layout_.actorSubjectLayout.rootOffset);
         if (!IsValidPointer(ordinaryRoot) ||
             (IsValidPointer(component) && component != ordinaryRoot)) {
             native::RuntimeCoordinateCodecDiagnostic diagnostic =
@@ -6443,7 +6409,9 @@ private:
                 continue;
             }
             diagnostic.verticalAdjustmentSecond = secondAdjustment;
-            if (ReadPointer(actor + 0x180) != component) {
+            if (ReadPointer(
+                    actor + layout_.actorSubjectLayout.rootOffset) !=
+                component) {
                 diagnostic.stage =
                     native::RuntimeCoordinateCodecStage::Failed;
                 diagnostic.error =
@@ -6591,7 +6559,7 @@ private:
             std::uintptr_t mesh = record.ordinaryMesh;
             if (!IsValidPointer(mesh)) {
                 mesh = ReadPointer(
-                    record.actor + native::kOrdinaryActorMeshOffset);
+                    record.actor + layout_.actorSubjectLayout.meshOffset);
             }
             if (!IsValidPointer(mesh) && IsValidPointer(record.mesh)) {
                 mesh = record.mesh;
@@ -6626,6 +6594,7 @@ private:
             const std::uintptr_t subject =
                 native::ResolveActorCoordinateSubject(
                     record,
+                    layout_.actorSubjectLayout,
                     [this](std::uintptr_t address) {
                         return ReadPointer(address);
                     },
@@ -6664,7 +6633,8 @@ private:
                 algorithmDecryptRequested_)) {
             std::uintptr_t ordinaryRoot = record.ordinaryRoot;
             if (!IsValidPointer(ordinaryRoot)) {
-                ordinaryRoot = ReadPointer(record.actor + 0x180);
+                ordinaryRoot = ReadPointer(
+                    record.actor + layout_.actorSubjectLayout.rootOffset);
             }
             return ReadCharacterPosition(
                 record.actor,
@@ -7271,7 +7241,7 @@ private:
         std::uintptr_t ordinaryMesh = actorRecord.ordinaryMesh;
         if (!IsValidPointer(ordinaryMesh) && actorRecord.resolverRecord) {
             ordinaryMesh = ReadPointer(
-                actor + native::kOrdinaryActorMeshOffset);
+                actor + layout_.actorSubjectLayout.meshOffset);
         }
         const native::BoneFrameRecordSource boneRecord{
             actorRecord.root,
@@ -8423,6 +8393,7 @@ private:
         RuntimeActorRecord record = sourceRecord;
         native::FillOrdinaryActorPointers(
             record,
+            layout_.actorSubjectLayout,
             [&](std::uintptr_t address) { return ReadPointer(address); });
         if (!record.resolverRecord ||
             !IsValidPointer(record.actor) ||
@@ -8692,7 +8663,8 @@ private:
         if (!IsValidPointer(state)) return false;
         state = ReadPointer(state + 0x4D8);
         if (!IsValidPointer(state)) return false;
-        state = ReadPointer(state + 0x180);
+        state = ReadPointer(
+            state + layout_.actorSubjectLayout.rootOffset);
         return IsValidPointer(state) &&
             ReadValue(state + 0x220, origin) && IsFinite(origin);
     }
@@ -9251,9 +9223,6 @@ private:
         const std::uintptr_t previousCodeBase =
             coordinateExecutionCodeBase_;
         const std::size_t previousCodeSize = coordinateExecutionCodeSize_;
-        coordinateExecutionScanProfile_ =
-            native::ResolveCoordinateExecutionScanProfile(
-                options_.gameVersionIndex);
         native::CoordinateExecutionDiscoveryInput input{};
         const native::CoordinateExecutionReadCallback read =
             [this](std::uint64_t address,
@@ -9273,7 +9242,7 @@ private:
         if (!native::ResolveCoordinateExecutionDiscoveryInput(
                 read,
                 moduleBase_,
-                coordinateExecutionScanProfile_,
+                coordinateExecutionLayout_,
                 &input)) {
             if (hadDiscovery || !coordinateExecutionPositionCache_.empty()) {
                 coordinateExecutionPositionCache_.clear();
@@ -9543,7 +9512,7 @@ private:
                 std::fprintf(
                     stderr,
                     "[coordinate-execution-trace] frame=%llu mode=%u "
-                    "profile=%u refreshed=%d scan_anchor=%llx root=%llx "
+                    "refreshed=%d scan_anchor=%llx root=%llx "
                     "raw_entry=%llx module_base=%llx module_size=%llx "
                     "code_base=%llx code_size=%llx context_ready=%d "
                     "context_source=%u context_error=%u context_sys=%d "
@@ -9558,7 +9527,6 @@ private:
                     "captured_object=%llx final_pc=%llx write_size=%llu\n",
                     static_cast<unsigned long long>(coordinateTraceFrame_),
                     static_cast<unsigned int>(coordinateExecutionMode_),
-                    coordinateExecutionScanProfile_,
                     decoderRefreshed ? 1 : 0,
                     static_cast<unsigned long long>(
                         coordinateExecutionDiscoveryInput_.scanAnchor),
@@ -10378,7 +10346,7 @@ private:
         algorithmPositionRequested_ = false;
         coordinateDecrypt2Index_ = 0;
         coordinateExecutionMode_ = 0;
-        coordinateExecutionScanProfile_ = 0;
+        coordinateExecutionLayout_ = {};
         coordinateExecutionDiscoveryInput_ = {};
         coordinateExecutionCodeBase_ = 0;
         coordinateExecutionCodeSize_ = 0;
@@ -10415,7 +10383,6 @@ private:
         algorithmCoordinateFrameAttemptCount_ = 0;
         algorithmCoordinateFrameSuccessCount_ = 0;
 #endif
-        algorithmPositionConfig_ = {};
         coordinatePoolFallback_ = false;
         coordinatePoolReady_ = false;
         coordinatePoolFrame_ = 0;
@@ -10466,7 +10433,6 @@ private:
         algorithmExecutionContextRefreshPolicy_{};
     native::AlgorithmReplayBackoffPolicy algorithmReplayBackoffPolicy_{};
     native::AlgorithmReplayPagePolicy algorithmReplayPagePolicy_{};
-    native::AlgorithmPositionRuntimeConfig algorithmPositionConfig_{};
     native::ProcessExecutionContext algorithmExecutionContext_{};
     std::uintptr_t algorithmLastInstructionTracePc_ = 0;
     std::uintptr_t algorithmLastInstructionTraceFault_ = 0;
@@ -10481,7 +10447,7 @@ private:
     bool algorithmPositionRequested_ = false;
     std::uint32_t coordinateDecrypt2Index_ = 0;
     std::uint8_t coordinateExecutionMode_ = 0;
-    std::uint32_t coordinateExecutionScanProfile_ = 0;
+    native::CoordinateExecutionLayout coordinateExecutionLayout_{};
     native::CoordinateExecutionDiscoveryInput
         coordinateExecutionDiscoveryInput_{};
     bool hardwareBreakpointRequested_ = false;

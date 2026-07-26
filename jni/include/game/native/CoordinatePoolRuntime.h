@@ -16,14 +16,14 @@ class MemoryTransport;
 struct ProcessExecutionContext;
 
 struct CoordinatePoolRuntimeLayout {
-    std::uintptr_t rootRva = 0x0E738950;
-    std::uintptr_t bridgeOffset = 12;
-    std::int32_t contextOffset = -8;
-    std::uintptr_t entryOffset = 0xA0;
-    std::uintptr_t componentKeyOffset = 0x210;
-    std::uint32_t entryStride = 48;
-    std::uint32_t poolHeadSkip = 16;
-    std::uint32_t ringRefreshFrames = 60;
+    std::uintptr_t rootRva = 0;
+    std::uintptr_t bridgeOffset = 0;
+    std::int32_t contextOffset = 0;
+    std::uintptr_t entryOffset = 0;
+    std::uintptr_t componentKeyOffset = 0;
+    std::uint32_t entryStride = 0;
+    std::uint32_t poolHeadSkip = 0;
+    std::uint32_t ringRefreshFrames = 0;
 
     constexpr bool IsValid() const noexcept {
         return rootRva >= 4 && rootRva <= 0xffffffffULL &&

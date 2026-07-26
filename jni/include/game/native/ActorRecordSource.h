@@ -18,9 +18,31 @@ struct ActorRecordSource {
     bool ordinarySource = false;
 };
 
-inline constexpr std::uintptr_t kOrdinaryActorRootOffset = 0x180;
-inline constexpr std::uintptr_t kOrdinaryActorMeshOffset = 0x3D0;
-inline constexpr std::uintptr_t kOrdinaryActorAlternateRootOffset = 0x3E0;
+struct ActorSubjectLayout {
+    std::uintptr_t rootOffset = 0;
+    std::uintptr_t meshOffset = 0;
+    std::uintptr_t alternateRootOffset = 0;
+
+    constexpr bool IsValid() const noexcept {
+        return rootOffset >= 8 && rootOffset <= 0xffff &&
+            (rootOffset & 7U) == 0 && meshOffset >= 8 &&
+            meshOffset <= 0xffff && (meshOffset & 7U) == 0 &&
+            alternateRootOffset >= 8 &&
+            alternateRootOffset <= 0xffff &&
+            (alternateRootOffset & 7U) == 0 &&
+            rootOffset != meshOffset &&
+            rootOffset != alternateRootOffset &&
+            meshOffset != alternateRootOffset;
+    }
+
+    friend constexpr bool operator==(
+        const ActorSubjectLayout& left,
+        const ActorSubjectLayout& right) noexcept {
+        return left.rootOffset == right.rootOffset &&
+            left.meshOffset == right.meshOffset &&
+            left.alternateRootOffset == right.alternateRootOffset;
+    }
+};
 
 inline ActorRecordSource MakeResolvedActorRecord(
     std::uintptr_t actor,
@@ -107,30 +129,35 @@ inline std::vector<ActorRecordSource> MergeCurrentLevelActorRecordSources(
 template <typename ReadPointer>
 void FillOrdinaryActorPointers(
     ActorRecordSource& source,
+    const ActorSubjectLayout& layout,
     ReadPointer&& readPointer) {
-    if (!source.ordinarySource || source.actor == 0) return;
+    if (!source.ordinarySource || source.actor == 0 || !layout.IsValid()) {
+        return;
+    }
     if (source.ordinaryRoot == 0) {
         source.ordinaryRoot =
-            readPointer(source.actor + kOrdinaryActorRootOffset);
+            readPointer(source.actor + layout.rootOffset);
     }
     if (source.ordinaryMesh == 0) {
         source.ordinaryMesh =
-            readPointer(source.actor + kOrdinaryActorMeshOffset);
+            readPointer(source.actor + layout.meshOffset);
     }
 }
 
 template <typename ReadPointer, typename ValidatePointer>
 std::uintptr_t ResolveActorCoordinateSubject(
     const ActorRecordSource& source,
+    const ActorSubjectLayout& layout,
     ReadPointer&& readPointer,
     ValidatePointer&& validatePointer) {
+    if (!layout.IsValid()) return 0;
     std::uintptr_t subject = source.ordinaryRoot;
     if (!validatePointer(subject) && source.actor != 0) {
-        subject = readPointer(source.actor + kOrdinaryActorRootOffset);
+        subject = readPointer(source.actor + layout.rootOffset);
     }
     if (!validatePointer(subject) && source.actor != 0) {
         subject = readPointer(
-            source.actor + kOrdinaryActorAlternateRootOffset);
+            source.actor + layout.alternateRootOffset);
     }
     return validatePointer(subject) ? subject : 0;
 }

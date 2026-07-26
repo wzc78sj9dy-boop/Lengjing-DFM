@@ -27,10 +27,12 @@ bool TraversalTimeExpired(std::uint64_t started,
 
 CoordinateExecutionRequest MakeRequest(
     CoordinateExecutionMode mode,
+    const CoordinateExecutionLayout& layout,
     const CoordinateExecutionCandidate& candidate,
     bool known) noexcept {
     CoordinateExecutionRequest request{};
     request.mode = mode;
+    request.layout = layout;
     request.candidate = candidate;
     request.candidateKnown = known;
     if (mode != CoordinateExecutionMode::Emulate) {
@@ -71,19 +73,20 @@ struct CoordinateExecutionDecoder::Impl {
     }
 
     bool Configure(CoordinateExecutionMode modeValue,
-                   std::uint32_t scanProfileValue) noexcept {
+                   const CoordinateExecutionLayout& layoutValue) noexcept {
         std::lock_guard<std::mutex> lock(mutex);
         try {
-            if (!IsCoordinateExecutionMode(modeValue)) {
+            if (!IsCoordinateExecutionMode(modeValue) ||
+                !layoutValue.IsValid()) {
                 probe.stage = CoordinateExecutionDecoderStage::Failed;
                 probe.error = CoordinateExecutionDecoderError::InvalidMode;
                 return false;
             }
 
             const bool changed = !configured || mode != modeValue ||
-                scanProfile != scanProfileValue;
+                !(layout == layoutValue);
             mode = modeValue;
-            scanProfile = scanProfileValue;
+            layout = layoutValue;
             configured = true;
             if (changed) {
                 ClearCandidateState();
@@ -213,7 +216,7 @@ struct CoordinateExecutionDecoder::Impl {
                         binding.codeSize,
                     },
                     binding.moduleBase,
-                    scanProfile);
+                    layout);
             if (discovered.candidates.empty()) {
                 candidatesReady = false;
                 probe.candidateCount = 0;
@@ -360,11 +363,9 @@ struct CoordinateExecutionDecoder::Impl {
             ResetRuntime();
             const bool wasConfigured = configured;
             const CoordinateExecutionMode configuredMode = mode;
-            const std::uint32_t configuredProfile = scanProfile;
             probe = {};
             probe.configured = wasConfigured;
             probe.mode = configuredMode;
-            probe.scanProfile = configuredProfile;
             probe.stage = wasConfigured
                 ? CoordinateExecutionDecoderStage::Configured
                 : CoordinateExecutionDecoderStage::Idle;
@@ -381,7 +382,7 @@ private:
         std::size_t candidateIndex,
         bool known) {
         const CoordinateExecutionRequest request =
-            MakeRequest(mode, candidate, known);
+            MakeRequest(mode, layout, candidate, known);
         CoordinateExecutionResult result{};
         if (hooks.execute) {
             result = hooks.execute(subject, request);
@@ -497,7 +498,6 @@ private:
     void SyncConfigurationProbe() noexcept {
         probe.configured = configured;
         probe.mode = mode;
-        probe.scanProfile = scanProfile;
     }
 
     void SyncBindingProbe() noexcept {
@@ -528,7 +528,7 @@ private:
     std::optional<CachedCandidate> cachedCandidate;
     CoordinateExecutionDecoderProbe probe{};
     CoordinateExecutionMode mode = CoordinateExecutionMode::Emulate;
-    std::uint32_t scanProfile = 0;
+    CoordinateExecutionLayout layout{};
     std::size_t cursor = 0;
     bool configured = false;
     bool candidatesTruncated = false;
@@ -546,8 +546,8 @@ CoordinateExecutionDecoder::~CoordinateExecutionDecoder() = default;
 
 bool CoordinateExecutionDecoder::Configure(
     CoordinateExecutionMode mode,
-    std::uint32_t scanProfile) noexcept {
-    return impl_ != nullptr && impl_->Configure(mode, scanProfile);
+    const CoordinateExecutionLayout& layout) noexcept {
+    return impl_ != nullptr && impl_->Configure(mode, layout);
 }
 
 bool CoordinateExecutionDecoder::Refresh(

@@ -1,13 +1,11 @@
 #pragma once
 
 #include "auth/CloudLayout.h"
-#include "auth/CoordinatePoolCloudLayout.h"
 #include "game/CoordinateDecryptDiagnostics.h"
 #include "game/FeatureSettings.h"
 #include "game/GameFrame.h"
 #include "game/RuntimeDiagnostics.h"
 #include "game/native/AlgorithmCoordinateDiagnostics.h"
-#include "game/native/AlgorithmPositionRuntime.h"
 #include "game/native/RuntimeCoordinateCodec.h"
 
 #include <cstdint>
@@ -30,9 +28,6 @@ struct RuntimeOptions {
     int orientation = 0;
     std::string programDirectory;
     std::shared_ptr<const auth::CloudLayoutDocument> cloudLayout;
-    std::shared_ptr<const auth::CoordinatePoolCloudLayoutDocument>
-        coordinateDecrypt2Layout;
-    native::AlgorithmPositionRuntimeConfig algorithmPosition;
 };
 
 struct RuntimeProbe {

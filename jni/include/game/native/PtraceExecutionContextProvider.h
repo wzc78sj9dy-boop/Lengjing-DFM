@@ -29,17 +29,20 @@ struct PacgaOracleInstruction {
     std::uintptr_t address = 0;
     std::uint64_t data = 0;
     std::uint64_t modifier = 0;
+    std::uint32_t encoding = 0;
     PacgaOracleCodeIdentity codeIdentity{};
 
     constexpr bool IsValid() const noexcept {
         return address != 0 && (address & 3U) == 0 &&
+            (encoding & UINT32_C(0xFFE0FC00)) ==
+                UINT32_C(0x9AC03000) &&
             codeIdentity.IsValid();
     }
 
     constexpr bool operator==(
         const PacgaOracleInstruction& other) const noexcept {
         return address == other.address && data == other.data &&
-            modifier == other.modifier &&
+            modifier == other.modifier && encoding == other.encoding &&
             codeIdentity == other.codeIdentity;
     }
 };
@@ -102,7 +105,7 @@ public:
     PtraceExecutionContextProvider(
         std::int32_t processId,
         PacgaOracleReader& reader,
-        std::string threadName = "GameThread",
+        std::string threadName,
         std::string procRoot = "/proc");
 
     PtraceExecutionContextRefresh Refresh(

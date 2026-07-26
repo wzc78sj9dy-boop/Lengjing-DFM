@@ -49,10 +49,8 @@ static_assert(HWBP_MAX_RECORDS == kExecutionBreakpointRecordLimit,
 constexpr std::uintptr_t kMinimumRemoteAddress = 0x10000000ULL;
 constexpr std::uintptr_t kMaximumRemoteAddress = 0x10000000000ULL;
 constexpr char kDefaultThreadContextDevice[] = "/dev/fbe775";
-constexpr char kDefaultThreadContextName[] = "GameThread";
 constexpr std::uint64_t kPointerPayloadMask =
     UINT64_C(0x0000FFFFFFFFFFFF);
-constexpr std::uint32_t kPacgaX8X8X9 = UINT32_C(0x9AC93108);
 constexpr std::size_t kMaximumOracleMappingSize = 2U * 1024U * 1024U;
 constexpr std::size_t kOracleScanChunkSize = 4096;
 constexpr std::size_t kOracleImmediateWindowInstructions = 16;
@@ -498,6 +496,7 @@ struct MemoryTransport::Impl {
     std::chrono::steady_clock::time_point nextThreadContextOpen{};
     std::chrono::steady_clock::time_point nextPtraceOracleResolve{};
     CoordinateReplayTransportLayout coordinateReplayLayout{};
+    CoordinateExecutionContextLayout coordinateExecutionContextLayout{};
     bool coordinateBatchDisabled = false;
     bool open = false;
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
@@ -526,6 +525,7 @@ struct MemoryTransport::Impl {
         nextThreadContextOpen = {};
         nextPtraceOracleResolve = {};
         coordinateReplayLayout = {};
+        coordinateExecutionContextLayout = {};
         coordinateBatchDisabled = false;
 #if 0
         static_cast<void>(
@@ -559,6 +559,7 @@ struct MemoryTransport::Impl {
 
     bool OpenThreadContextUnlocked() {
         if (threadContextProvider != nullptr) return true;
+        if (!coordinateExecutionContextLayout.IsValid()) return false;
         const auto now = std::chrono::steady_clock::now();
         if (nextThreadContextOpen.time_since_epoch().count() != 0 &&
             now < nextThreadContextOpen) {
@@ -585,17 +586,11 @@ struct MemoryTransport::Impl {
         };
         threadContextTransport =
             std::make_unique<ThreadContextDeviceTransport>(profile);
-        const char* configuredName =
-            std::getenv("LENGJING_COORDINATE_THREAD_NAME");
-        const char* threadName = configuredName != nullptr &&
-                configuredName[0] != '\0'
-            ? configuredName
-            : kDefaultThreadContextName;
         threadContextProvider =
             std::make_unique<ThreadExecutionContextProvider>(
                 processId,
                 *threadContextTransport,
-                threadName);
+                coordinateExecutionContextLayout.threadName);
         return true;
     }
 
@@ -774,9 +769,10 @@ struct MemoryTransport::Impl {
             return false;
         };
 
-        const auto scan = [&readCoordinate](std::uintptr_t begin,
-                                            std::uintptr_t end,
-                                            std::uintptr_t& found) {
+        const auto scan = [this, &readCoordinate](
+                              std::uintptr_t begin,
+                              std::uintptr_t end,
+                              std::uintptr_t& found) {
             found = 0;
             begin = (begin + 3U) & ~std::uintptr_t{3U};
             if (end <= begin) return false;
@@ -792,7 +788,8 @@ struct MemoryTransport::Impl {
                     std::uint32_t encoded = 0;
                     std::memcpy(
                         &encoded, bytes.data() + offset, sizeof(encoded));
-                    if (encoded == kPacgaX8X8X9) {
+                    if (encoded ==
+                        coordinateExecutionContextLayout.oracleOpcode) {
                         found = cursor + offset;
                         return true;
                     }
@@ -949,6 +946,7 @@ struct MemoryTransport::Impl {
                 found,
                 operands.data,
                 operands.modifier,
+                coordinateExecutionContextLayout.oracleOpcode,
                 {
                     verifiedRootAfter.entry,
                     ptraceOracleCacheKey.CodeFingerprint(),
@@ -1933,6 +1931,27 @@ struct MemoryTransport::Impl {
         return true;
     }
 
+    bool ConfigureCoordinateExecutionContext(
+        const CoordinateExecutionContextLayout& layout) {
+        if (!layout.IsValid()) return false;
+        std::lock_guard<std::mutex> lock(ioMutex);
+        if (coordinateExecutionContextLayout == layout) return true;
+        CloseThreadContextUnlocked();
+        ptraceContextProvider.reset();
+        ptraceOracleInstruction = {};
+        ptraceOracleCacheKey = {};
+        ptraceOracleOperandsResolved = false;
+        ptraceOracleFailure =
+            CoordinateDecryptError::PtraceOracleResolveFailed;
+        ptraceOracleSystemError = 0;
+        executionContextSource = ProcessExecutionContextSource::None;
+        executionContextDiagnostic = {};
+        nextThreadContextOpen = {};
+        nextPtraceOracleResolve = {};
+        coordinateExecutionContextLayout = layout;
+        return true;
+    }
+
     bool ResolveCoordinateReplayEntry(
         std::uintptr_t moduleBase,
         CoordinateReplayEntrySnapshot& snapshot,
@@ -2214,17 +2233,17 @@ struct MemoryTransport::Impl {
         executionContextDiagnostic.pacgaOperandsResolved =
             ptraceOracleOperandsResolved;
         if (ptraceContextProvider == nullptr) {
-            const char* configuredName =
-                std::getenv("LENGJING_COORDINATE_THREAD_NAME");
-            const char* threadName = configuredName != nullptr &&
-                    configuredName[0] != '\0'
-                ? configuredName
-                : kDefaultThreadContextName;
+            if (!coordinateExecutionContextLayout.IsValid()) {
+                setPtraceFailure(
+                    CoordinateDecryptError::PtraceOracleResolveFailed,
+                    -EINVAL);
+                return useDevicePartial();
+            }
             ptraceContextProvider =
                 std::make_unique<PtraceExecutionContextProvider>(
                     processId,
                     ptraceContextReader,
-                    threadName);
+                    coordinateExecutionContextLayout.threadName);
         }
         const PtraceExecutionContextRefresh refresh =
             ptraceContextProvider->Refresh(instruction);
@@ -2489,6 +2508,16 @@ bool MemoryTransport::ConfigureCoordinateReplay(
     const CoordinateReplayTransportLayout& layout) noexcept {
     try {
         return impl_ != nullptr && impl_->ConfigureCoordinateReplay(layout);
+    } catch (...) {
+        return false;
+    }
+}
+
+bool MemoryTransport::ConfigureCoordinateExecutionContext(
+    const CoordinateExecutionContextLayout& layout) noexcept {
+    try {
+        return impl_ != nullptr &&
+            impl_->ConfigureCoordinateExecutionContext(layout);
     } catch (...) {
         return false;
     }

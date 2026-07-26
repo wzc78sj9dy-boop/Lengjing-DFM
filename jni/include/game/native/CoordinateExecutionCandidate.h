@@ -1,5 +1,7 @@
 #pragma once
 
+#include "game/native/CoordinateExecutionLayout.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -16,12 +18,6 @@ struct CoordinateExecutionModuleSnapshot {
     std::uint64_t guestBase = 0;
     const std::byte* hostBytes = nullptr;
     std::size_t size = 0;
-};
-
-struct CoordinateExecutionProfileOffsets {
-    std::uint64_t rootOffset = 0;
-    std::uint64_t pointerOffset = 0;
-    std::uint64_t entryOffset = 0;
 };
 
 struct CoordinateExecutionCandidate {
@@ -49,9 +45,6 @@ inline constexpr std::uint64_t kCoordinateExecutionPointerMin =
     UINT64_C(0x0000006000000000);
 inline constexpr std::uint64_t kCoordinateExecutionPointerMax =
     UINT64_C(0x0000008000000000);
-inline constexpr std::uint64_t kCoordinateExecutionReturnStubMagic =
-    UINT64_C(0xD61F020058000050);
-
 struct CoordinateExecutionCodeRange {
     std::uint64_t begin = 0;
     std::uint64_t end = 0;
@@ -71,24 +64,16 @@ struct CoordinateExecutionCandidateScanResult {
     bool truncated = false;
 };
 
-constexpr std::uint32_t ResolveCoordinateExecutionScanProfile(
-    int gameVersionIndex) noexcept {
-    return gameVersionIndex == 1 ? 2U : (gameVersionIndex == 2 ? 1U : 0U);
-}
-
 struct CoordinateExecutionDiscoveryInput {
     std::uint64_t scanAnchor = 0;
     std::uint64_t root = 0;
     std::uint64_t rawEntry = 0;
 };
 
-CoordinateExecutionProfileOffsets GetCoordinateExecutionProfileOffsets(
-    std::uint32_t scanProfile) noexcept;
-
 bool ResolveCoordinateExecutionDiscoveryInput(
     const CoordinateExecutionReadCallback& read,
     std::uint64_t configuredModuleBase,
-    std::uint32_t scanProfile,
+    const CoordinateExecutionLayout& layout,
     CoordinateExecutionDiscoveryInput* input);
 
 bool IsCoordinateExecutionCodeRangeCompatible(
@@ -112,7 +97,8 @@ CoordinateExecutionCandidateScanResult ScanCoordinateExecutionCandidates(
     const CoordinateExecutionModuleSnapshot& module,
     const CoordinateExecutionModuleSnapshot& code,
     std::uint64_t scanAnchor,
-    std::uint64_t relativeEntry);
+    std::uint64_t relativeEntry,
+    const CoordinateExecutionLayout& layout);
 
 CoordinateExecutionCandidateScanResult
 DiscoverCoordinateExecutionCandidates(
@@ -120,7 +106,7 @@ DiscoverCoordinateExecutionCandidates(
     const CoordinateExecutionModuleSnapshot& module,
     const CoordinateExecutionModuleSnapshot& code,
     std::uint64_t configuredModuleBase,
-    std::uint32_t scanProfile);
+    const CoordinateExecutionLayout& layout);
 
 bool ScanFirstCoordinateExecutionCandidate(
     const CoordinateExecutionReadCallback& read,
@@ -128,6 +114,7 @@ bool ScanFirstCoordinateExecutionCandidate(
     const CoordinateExecutionModuleSnapshot& code,
     std::uint64_t scanAnchor,
     std::uint64_t relativeEntry,
+    const CoordinateExecutionLayout& layout,
     CoordinateExecutionCandidate* candidate);
 
 bool DiscoverFirstCoordinateExecutionCandidate(
@@ -135,7 +122,7 @@ bool DiscoverFirstCoordinateExecutionCandidate(
     const CoordinateExecutionModuleSnapshot& module,
     const CoordinateExecutionModuleSnapshot& code,
     std::uint64_t configuredModuleBase,
-    std::uint32_t scanProfile,
+    const CoordinateExecutionLayout& layout,
     CoordinateExecutionCandidate* candidate);
 
 }  // namespace lengjing::game::native

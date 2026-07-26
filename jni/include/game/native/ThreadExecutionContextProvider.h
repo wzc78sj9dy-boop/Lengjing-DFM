@@ -119,7 +119,7 @@ public:
     ThreadExecutionContextProvider(
         std::int32_t processId,
         ThreadExecutionContextReader& reader,
-        std::string threadName = "GameThread",
+        std::string threadName,
         std::string procRoot = "/proc");
 
     ThreadExecutionContextRefresh Refresh();

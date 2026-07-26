@@ -11,35 +11,75 @@
 
 namespace {
 
-constexpr const char* kBuildId =
-    "0123456789abcdef0123456789abcdef01234567";
+constexpr const char* kSyntheticBuildId =
+    "fedcba98765432100123456789abcdef";
 
 std::string LayoutJson(std::uint64_t revision,
-                       std::string buildId = kBuildId,
-                       std::string worldOffset = "0x13002000",
-                       std::string replayEntry = "0x0") {
+                       std::string buildId = kSyntheticBuildId,
+                       std::string worldOffset = "0x22002000") {
     std::ostringstream stream;
     stream
-        << R"({"schema_version":2,"package":"com.example.runtime",)"
-        << R"("module":"libUE4.so","build_id":")" << buildId
+        << R"({"schema_version":3,"build_id":")" << buildId
         << R"(","revision":)" << revision
-        << R"(,"layout":{"name_pool":"0x12001000","world":")"
+        << R"(,"layout":{"name_pool":"0x21001000","world":")"
         << worldOffset
-        << R"(","coordinate_replay_entry":")" << replayEntry
-        << R"(","geometry_instances":["0x14003000","0x15004000"],)"
-        << R"("tracking_matrix_root":"0x18005000",)"
-        << R"("component_position_flag":"0x19006001",)"
-        << R"("actor_records":{"tagged_container":"0x16007000",)"
-        << R"("plain_array":"0x17008000","plain_root":"0x188",)"
-        << R"("plain_mesh":"0x3e0","encrypted_record_count":1024,)"
-        << R"("plain_record_stride":32,"maximum_plain_count":8192,)"
-        << R"("fallback_plain_count":2048},)"
-        << R"("coordinate_pool":{"root_rva":"0x1a009000",)"
-        << R"("bridge_offset":"0x14","context_offset":-16,)"
-        << R"("entry_offset":"0xb0","component_key_offset":"0x220",)"
-        << R"("pacga_data":"0x13579bdf",)"
-        << R"("pacga_modifier":"0x2468ace0","entry_stride":64,)"
-        << R"("pool_head_skip":24,"ring_refresh_frames":90}}})";
+        << R"(","geometry_instances":["0x23003000","0x24004000"],)"
+        << R"("actor_records":{"tagged_container":"0x25005000",)"
+        << R"("plain_array":"0x26006000","plain_root":"0x284",)"
+        << R"("plain_mesh":"0x414","encrypted_record_count":1536,)"
+        << R"("plain_record_stride":40,"maximum_plain_count":12288,)"
+        << R"("fallback_plain_count":3072},)"
+        << R"("actor_subject":{"root":"0x1a0","mesh":"0x410",)"
+        << R"("alternate_root":"0x420"},)"
+        << R"("tracking_matrix_root":"0x27007000",)"
+        << R"("component_position_flag":"0x28008003"},)"
+        << R"("decrypt":{"mode1":{"pool":{"root_rva":"0x29009000",)"
+        << R"("bridge_offset":"0x24","context_offset":-24,)"
+        << R"("entry_offset":"0xc0","component_key_offset":"0x260",)"
+        << R"("entry_stride":80,"pool_head_skip":32,)"
+        << R"("ring_refresh_frames":111},"pacga_data":"0x123456789",)"
+        << R"("pacga_modifier":"0x987654321"},)"
+        << R"("mode2":{"pool":{"root_rva":"0x2a00a000",)"
+        << R"("bridge_offset":"0x28","context_offset":-32,)"
+        << R"("entry_offset":"0xd0","component_key_offset":"0x270",)"
+        << R"("entry_stride":96,"pool_head_skip":36,)"
+        << R"("ring_refresh_frames":121}},)"
+        << R"("execution":{"discovery":{"root_offset":"0x2b00b000",)"
+        << R"("pointer_offset":"0x14","entry_offset":"0xd8",)"
+        << R"("return_stub_magic":"0x13572468abcdef01"},)"
+        << R"("result":{"slot_offset":"0x280",)"
+        << R"("position_offset":"0x184"},)"
+        << R"("hook_offsets":{"subject_load":"0x400",)"
+        << R"("callback_entry":"0x404","callback_return":"0x408",)"
+        << R"("callback_index":"0x40c","callback_copy_prepare":"0x410",)"
+        << R"("callback_copy_after":"0x414","table_pointer":"0x418",)"
+        << R"("table_value":"0x41c","lock":"0x420",)"
+        << R"("lock_return":"0x424","first_call":"0x428",)"
+        << R"("first_return":"0x42c","external_call":"0x430",)"
+        << R"("external_return":"0x434","primary_gate_write":"0x438",)"
+        << R"("alternate_gate_write":"0x43c","gate_probe":"0x440",)"
+        << R"("record_count":"0x444","target_key":"0x448",)"
+        << R"("ring_setup":"0x44c","ring_probe":"0x450",)"
+        << R"("ring_hit":"0x454","dispatch":"0x458",)"
+        << R"("dispatch_return":"0x45c","result_prepare":"0x460",)"
+        << R"("result":"0x464"},)"
+        << R"("field_offsets":{"context_expected":"0x300",)"
+        << R"("stack_prior_gate":"0x304",)"
+        << R"("stack_primary_gate_source":"0x308",)"
+        << R"("stack_gate_flag":"0x30c",)"
+        << R"("stack_gate_snapshot_a":"0x310",)"
+        << R"("stack_gate_snapshot_b":"0x314",)"
+        << R"("stack_ring_mid":"0x318",)"
+        << R"("object_position":"0x31c",)"
+        << R"("stack_capture_a":"0x320",)"
+        << R"("stack_capture_b":"0x324",)"
+        << R"("stack_capture_c":"0x328",)"
+        << R"("stack_capture_d":"0x32c",)"
+        << R"("capture_field":"0x330",)"
+        << R"("stack_pool_selector":"0x334",)"
+        << R"("context_pool_table":"0x338"},)"
+        << R"("context":{"thread_name":"WorkerAlpha",)"
+        << R"("oracle_opcode":"0x9ac33041"}}}})";
     return stream.str();
 }
 
@@ -52,8 +92,8 @@ std::string ReplaceFirst(std::string value,
     return value;
 }
 
-lengjing::auth::CloudRuntimeIdentity RuntimeIdentity() {
-    return {"com.example.runtime", "libUE4.so", kBuildId};
+lengjing::auth::CloudRuntimeTarget RuntimeTarget() {
+    return {"com.example.runtime", "libSynthetic.so"};
 }
 
 }  // namespace
@@ -61,273 +101,199 @@ lengjing::auth::CloudRuntimeIdentity RuntimeIdentity() {
 void RunCloudLayoutTests() {
     using namespace lengjing::auth;
 
-    CloudLayoutStore store(RuntimeIdentity());
+    const CloudLayoutDocument empty{};
+    REQUIRE(empty.schemaVersion == 0);
+    REQUIRE(empty.revision == 0);
+    REQUIRE(empty.identity.packageName.empty());
+    REQUIRE(empty.layout.namePoolOffset == 0);
+    REQUIRE(empty.layout.actorSubject.rootOffset == 0);
+    REQUIRE(empty.decrypt.mode1.pool.rootRva == 0);
+    REQUIRE(empty.decrypt.mode1.pacgaData == 0);
+    REQUIRE(empty.decrypt.mode2.pool.rootRva == 0);
+    REQUIRE(empty.decrypt.execution.discovery.rootOffset == 0);
+    REQUIRE(empty.decrypt.execution.result.slotOffset == 0);
+    REQUIRE(empty.decrypt.execution.hookOffsets.subjectLoad == 0);
+    REQUIRE(empty.decrypt.execution.fieldOffsets.contextExpected == 0);
+    REQUIRE(empty.decrypt.execution.context.threadName.empty());
+    REQUIRE(empty.decrypt.execution.context.oracleOpcode == 0);
+
+    CloudLayoutStore store(RuntimeTarget());
+    REQUIRE(store.ExpectedTarget().packageName == "com.example.runtime");
+    REQUIRE(store.ExpectedTarget().moduleName == "libSynthetic.so");
+
     const CloudLayoutUpdateResult first =
-        store.ValidateAndPublish(LayoutJson(7));
+        store.ValidateAndPublish(LayoutJson(17));
     REQUIRE(first.status == CloudLayoutStatus::Published);
     REQUIRE(first.snapshot != nullptr);
-    REQUIRE(first.snapshot->revision == 7);
-    REQUIRE(first.snapshot->layout.namePoolOffset == 0x12001000ULL);
-    REQUIRE(first.snapshot->layout.coordinateReplayEntryOffset == 0);
-    REQUIRE(first.snapshot->layout.trackingMatrixRootOffset ==
-            0x18005000ULL);
-    REQUIRE(first.snapshot->layout.componentPositionFlagOffset ==
-            0x19006001ULL);
-    REQUIRE(first.snapshot->layout.geometryInstancePointerOffsets[0] ==
-            0x14003000ULL);
+    REQUIRE(first.snapshot->schemaVersion == 3);
+    REQUIRE(first.snapshot->revision == 17);
+    REQUIRE(first.snapshot->identity.packageName == "com.example.runtime");
+    REQUIRE(first.snapshot->identity.moduleName == "libSynthetic.so");
+    REQUIRE(first.snapshot->identity.buildId == kSyntheticBuildId);
+    REQUIRE(first.snapshot->layout.namePoolOffset == 0x21001000ULL);
+    REQUIRE(first.snapshot->layout.worldOffset == 0x22002000ULL);
     REQUIRE(first.snapshot->layout.geometryInstancePointerOffsets[1] ==
-            0x15004000ULL);
+            0x24004000ULL);
     REQUIRE(first.snapshot->layout.actorRecords.taggedContainerOffset ==
-            0x16007000ULL);
+            0x25005000ULL);
     REQUIRE(first.snapshot->layout.actorRecords.plainArrayOffset ==
-            0x17008000ULL);
-    REQUIRE(first.snapshot->layout.actorRecords.plainRootOffset == 0x188);
-    REQUIRE(first.snapshot->layout.actorRecords.plainMeshOffset == 0x3e0);
-    REQUIRE(first.snapshot->layout.actorRecords.encryptedRecordCount == 1024);
-    REQUIRE(first.snapshot->layout.actorRecords.plainRecordStride == 32);
-    REQUIRE(first.snapshot->layout.actorRecords.maximumPlainCount == 8192);
-    REQUIRE(first.snapshot->layout.actorRecords.fallbackPlainCount == 2048);
-    REQUIRE(first.snapshot->layout.coordinatePool.rootRva == 0x1a009000ULL);
-    REQUIRE(first.snapshot->layout.coordinatePool.bridgeOffset == 0x14);
-    REQUIRE(first.snapshot->layout.coordinatePool.contextOffset == -16);
-    REQUIRE(first.snapshot->layout.coordinatePool.entryOffset == 0xb0);
-    REQUIRE(first.snapshot->layout.coordinatePool.componentKeyOffset == 0x220);
-    REQUIRE(first.snapshot->layout.coordinatePool.pacgaData == 0x13579bdfULL);
-    REQUIRE(first.snapshot->layout.coordinatePool.pacgaModifier ==
-            0x2468ace0ULL);
-    REQUIRE(first.snapshot->layout.coordinatePool.entryStride == 64);
-    REQUIRE(first.snapshot->layout.coordinatePool.poolHeadSkip == 24);
-    REQUIRE(first.snapshot->layout.coordinatePool.ringRefreshFrames == 90);
+            0x26006000ULL);
+    REQUIRE(first.snapshot->layout.actorRecords.plainRootOffset == 0x284);
+    REQUIRE(first.snapshot->layout.actorRecords.plainMeshOffset == 0x414);
+    REQUIRE(first.snapshot->layout.actorRecords.encryptedRecordCount == 1536);
+    REQUIRE(first.snapshot->layout.actorRecords.plainRecordStride == 40);
+    REQUIRE(first.snapshot->layout.actorRecords.maximumPlainCount == 12288);
+    REQUIRE(first.snapshot->layout.actorRecords.fallbackPlainCount == 3072);
+    REQUIRE(first.snapshot->layout.actorSubject.rootOffset == 0x1a0);
+    REQUIRE(first.snapshot->layout.actorSubject.meshOffset == 0x410);
+    REQUIRE(first.snapshot->layout.actorSubject.alternateRootOffset == 0x420);
+    REQUIRE(first.snapshot->layout.trackingMatrixRootOffset ==
+            0x27007000ULL);
+    REQUIRE(first.snapshot->layout.componentPositionFlagOffset ==
+            0x28008003ULL);
+
+    const auto& mode1 = first.snapshot->decrypt.mode1;
+    REQUIRE(mode1.pool.rootRva == 0x29009000ULL);
+    REQUIRE(mode1.pool.bridgeOffset == 0x24);
+    REQUIRE(mode1.pool.contextOffset == -24);
+    REQUIRE(mode1.pool.entryOffset == 0xc0);
+    REQUIRE(mode1.pool.componentKeyOffset == 0x260);
+    REQUIRE(mode1.pool.entryStride == 80);
+    REQUIRE(mode1.pool.poolHeadSkip == 32);
+    REQUIRE(mode1.pool.ringRefreshFrames == 111);
+    REQUIRE(mode1.pacgaData == 0x123456789ULL);
+    REQUIRE(mode1.pacgaModifier == 0x987654321ULL);
+    const auto& mode2 = first.snapshot->decrypt.mode2;
+    REQUIRE(mode2.pool.rootRva == 0x2a00a000ULL);
+    REQUIRE(mode2.pool.contextOffset == -32);
+    REQUIRE(mode2.pool.entryOffset == 0xd0);
+    REQUIRE(mode2.pool.ringRefreshFrames == 121);
+
+    const auto& execution = first.snapshot->decrypt.execution;
+    REQUIRE(execution.discovery.rootOffset == 0x2b00b000ULL);
+    REQUIRE(execution.discovery.pointerOffset == 0x14);
+    REQUIRE(execution.discovery.entryOffset == 0xd8);
+    REQUIRE(execution.discovery.returnStubMagic ==
+            0x13572468abcdef01ULL);
+    REQUIRE(execution.result.slotOffset == 0x280);
+    REQUIRE(execution.result.positionOffset == 0x184);
+    REQUIRE(execution.hookOffsets.subjectLoad == 0x400);
+    REQUIRE(execution.hookOffsets.callbackCopyAfter == 0x414);
+    REQUIRE(execution.hookOffsets.alternateGateWrite == 0x43c);
+    REQUIRE(execution.hookOffsets.result == 0x464);
+    REQUIRE(execution.fieldOffsets.contextExpected == 0x300);
+    REQUIRE(execution.fieldOffsets.objectPosition == 0x31c);
+    REQUIRE(execution.fieldOffsets.contextPoolTable == 0x338);
+    REQUIRE(execution.context.threadName == "WorkerAlpha");
+    REQUIRE(execution.context.oracleOpcode == 0x9ac33041U);
 
     const auto stable = store.Snapshot();
     const CloudLayoutUpdateResult unchanged =
-        store.ValidateAndPublish(LayoutJson(7));
+        store.ValidateAndPublish(LayoutJson(17));
     REQUIRE(unchanged.status == CloudLayoutStatus::Unchanged);
     REQUIRE(unchanged.snapshot == stable);
 
-    const CloudLayoutUpdateResult conflict = store.ValidateAndPublish(
-        LayoutJson(7, kBuildId, "0x13002008"));
-    REQUIRE(conflict.status == CloudLayoutStatus::RevisionConflict);
-    REQUIRE(store.Snapshot() == stable);
-
-    const std::string coordinateConflict = ReplaceFirst(
-        LayoutJson(7), "\"pacga_modifier\":\"0x2468ace0\"",
-        "\"pacga_modifier\":\"0x2468ace1\"");
-    const CloudLayoutUpdateResult rejectedCoordinateConflict =
-        store.ValidateAndPublish(coordinateConflict);
-    REQUIRE(rejectedCoordinateConflict.status ==
-            CloudLayoutStatus::RevisionConflict);
-    REQUIRE(store.Snapshot() == stable);
-
-    const auto requireRevisionConflict = [&](const std::string& needle,
-                                             const std::string& replacement) {
-        const CloudLayoutUpdateResult changed = store.ValidateAndPublish(
-            ReplaceFirst(LayoutJson(7), needle, replacement));
-        REQUIRE(changed.status == CloudLayoutStatus::RevisionConflict);
-        REQUIRE(changed.snapshot == stable);
+    const auto requireConflict = [&](const std::string& needle,
+                                     const std::string& replacement) {
+        const auto result = store.ValidateAndPublish(
+            ReplaceFirst(LayoutJson(17), needle, replacement));
+        REQUIRE(result.status == CloudLayoutStatus::RevisionConflict);
+        REQUIRE(result.snapshot == stable);
         REQUIRE(store.Snapshot() == stable);
     };
-    requireRevisionConflict(
-        "\"name_pool\":\"0x12001000\"",
-        "\"name_pool\":\"0x12001008\"");
-    requireRevisionConflict(
-        "\"coordinate_replay_entry\":\"0x0\"",
-        "\"coordinate_replay_entry\":\"0x1234\"");
-    requireRevisionConflict(
-        "\"0x14003000\"", "\"0x14003008\"");
-    requireRevisionConflict(
-        "\"tagged_container\":\"0x16007000\"",
-        "\"tagged_container\":\"0x16007004\"");
-    requireRevisionConflict(
-        "\"plain_array\":\"0x17008000\"",
-        "\"plain_array\":\"0x17008008\"");
-    requireRevisionConflict(
-        "\"plain_root\":\"0x188\"",
-        "\"plain_root\":\"0x18c\"");
-    requireRevisionConflict(
-        "\"plain_mesh\":\"0x3e0\"",
-        "\"plain_mesh\":\"0x3e4\"");
-    requireRevisionConflict(
-        "\"encrypted_record_count\":1024",
-        "\"encrypted_record_count\":1025");
-    requireRevisionConflict(
-        "\"plain_record_stride\":32",
-        "\"plain_record_stride\":40");
-    requireRevisionConflict(
-        "\"maximum_plain_count\":8192",
-        "\"maximum_plain_count\":8193");
-    requireRevisionConflict(
-        "\"fallback_plain_count\":2048",
-        "\"fallback_plain_count\":2047");
-    requireRevisionConflict(
-        "\"tracking_matrix_root\":\"0x18005000\"",
-        "\"tracking_matrix_root\":\"0x18005008\"");
-    requireRevisionConflict(
-        "\"component_position_flag\":\"0x19006001\"",
-        "\"component_position_flag\":\"0x19006002\"");
-    requireRevisionConflict(
-        "\"root_rva\":\"0x1a009000\"",
-        "\"root_rva\":\"0x1a009004\"");
-    requireRevisionConflict(
-        "\"bridge_offset\":\"0x14\"",
-        "\"bridge_offset\":\"0x18\"");
-    requireRevisionConflict(
-        "\"context_offset\":-16",
-        "\"context_offset\":-24");
-    requireRevisionConflict(
-        "\"entry_offset\":\"0xb0\"",
-        "\"entry_offset\":\"0xb8\"");
-    requireRevisionConflict(
-        "\"component_key_offset\":\"0x220\"",
-        "\"component_key_offset\":\"0x228\"");
-    requireRevisionConflict(
-        "\"pacga_data\":\"0x13579bdf\"",
-        "\"pacga_data\":\"0x13579be0\"");
-    requireRevisionConflict(
-        "\"entry_stride\":64", "\"entry_stride\":68");
-    requireRevisionConflict(
-        "\"pool_head_skip\":24", "\"pool_head_skip\":28");
-    requireRevisionConflict(
-        "\"ring_refresh_frames\":90",
-        "\"ring_refresh_frames\":91");
+    requireConflict("\"world\":\"0x22002000\"",
+                    "\"world\":\"0x22002008\"");
+    requireConflict("\"pacga_modifier\":\"0x987654321\"",
+                    "\"pacga_modifier\":\"0x987654322\"");
+    requireConflict("\"result\":\"0x464\"",
+                    "\"result\":\"0x468\"");
+    requireConflict("\"context_pool_table\":\"0x338\"",
+                    "\"context_pool_table\":\"0x33c\"");
+    requireConflict(std::string("\"build_id\":\"") + kSyntheticBuildId,
+                    "\"build_id\":\"0011223344556677");
 
-    const CloudLayoutUpdateResult rollback =
-        store.ValidateAndPublish(LayoutJson(6));
-    REQUIRE(rollback.status == CloudLayoutStatus::RollbackRejected);
+    REQUIRE(store.ValidateAndPublish(LayoutJson(16)).status ==
+            CloudLayoutStatus::RollbackRejected);
     REQUIRE(store.Snapshot() == stable);
 
-    const CloudLayoutUpdateResult wrongBuild = store.ValidateAndPublish(
-        LayoutJson(8, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
-    REQUIRE(wrongBuild.status == CloudLayoutStatus::IdentityMismatch);
-    REQUIRE(store.Snapshot() == stable);
+    const auto requireSchemaMismatch = [&](const std::string& needle,
+                                           const std::string& replacement) {
+        REQUIRE(store.ValidateAndPublish(
+                    ReplaceFirst(LayoutJson(18), needle, replacement))
+                    .status == CloudLayoutStatus::SchemaMismatch);
+        REQUIRE(store.Snapshot() == stable);
+    };
+    requireSchemaMismatch("\"revision\":18,",
+                          "\"revision\":18,\"package\":\"x.y\",");
+    requireSchemaMismatch("\"actor_subject\":{",
+                          "\"actor_subject\":{\"unknown\":1,");
+    requireSchemaMismatch("\"ring_refresh_frames\":111}",
+                          "\"ring_refresh_frames\":111,\"unknown\":1}");
+    requireSchemaMismatch("\"result\":\"0x464\"}",
+                          "\"result\":\"0x464\",\"unknown\":1}");
+    requireSchemaMismatch("\"context_pool_table\":\"0x338\"}",
+                          "\"context_pool_table\":\"0x338\",\"unknown\":1}");
+    requireSchemaMismatch("\"thread_name\":\"WorkerAlpha\"",
+                          "\"thread_name\":7");
+    requireSchemaMismatch("\"name_pool\":\"0x21001000\"",
+                          "\"name_pool\":553652224");
+    requireSchemaMismatch("\"schema_version\":3",
+                          "\"schema_version\":2");
 
-    const std::string missingField = ReplaceFirst(
-        LayoutJson(8), "\"plain_mesh\":\"0x3e0\",", "");
-    const CloudLayoutUpdateResult missing =
-        store.ValidateAndPublish(missingField);
-    REQUIRE(missing.status == CloudLayoutStatus::SchemaMismatch);
-    REQUIRE(store.Snapshot() == stable);
-
-    const std::string wrongType = ReplaceFirst(
-        LayoutJson(8), "\"name_pool\":\"0x12001000\"",
-        "\"name_pool\":483178688");
-    const CloudLayoutUpdateResult typed =
-        store.ValidateAndPublish(wrongType);
-    REQUIRE(typed.status == CloudLayoutStatus::SchemaMismatch);
-    REQUIRE(store.Snapshot() == stable);
-
-    const std::string partialPlain = ReplaceFirst(
-        LayoutJson(8), "\"plain_array\":\"0x17008000\"",
-        "\"plain_array\":\"0x0\"");
-    const CloudLayoutUpdateResult partial =
-        store.ValidateAndPublish(partialPlain);
-    REQUIRE(partial.status == CloudLayoutStatus::RangeError);
-    REQUIRE(store.Snapshot() == stable);
-
-    const std::string unknownKey = ReplaceFirst(
-        LayoutJson(8), "\"revision\":8,",
-        "\"revision\":8,\"unknown\":1,");
-    const CloudLayoutUpdateResult unknown =
-        store.ValidateAndPublish(unknownKey);
-    REQUIRE(unknown.status == CloudLayoutStatus::SchemaMismatch);
-    REQUIRE(store.Snapshot() == stable);
-
-    const std::string unknownActorKey = ReplaceFirst(
-        LayoutJson(8), "\"fallback_plain_count\":2048",
-        "\"fallback_plain_count\":2048,\"unknown\":1");
-    REQUIRE(store.ValidateAndPublish(unknownActorKey).status ==
-            CloudLayoutStatus::SchemaMismatch);
-    REQUIRE(store.Snapshot() == stable);
-
-    const std::string unknownCoordinateKey = ReplaceFirst(
-        LayoutJson(8), "\"ring_refresh_frames\":90",
-        "\"ring_refresh_frames\":90,\"unknown\":1");
-    REQUIRE(store.ValidateAndPublish(unknownCoordinateKey).status ==
-            CloudLayoutStatus::SchemaMismatch);
-    REQUIRE(store.Snapshot() == stable);
-
-    const std::string wrongGeometryCount = ReplaceFirst(
-        LayoutJson(8),
-        "[\"0x14003000\",\"0x15004000\"]",
-        "[\"0x14003000\"]");
-    REQUIRE(store.ValidateAndPublish(wrongGeometryCount).status ==
-            CloudLayoutStatus::SchemaMismatch);
-    REQUIRE(store.Snapshot() == stable);
-
-    const std::string duplicateKey = ReplaceFirst(
-        LayoutJson(8), "\"revision\":8,",
-        "\"revision\":8,\"revision\":9,");
-    const CloudLayoutUpdateResult duplicate =
-        store.ValidateAndPublish(duplicateKey);
-    REQUIRE(duplicate.status == CloudLayoutStatus::InvalidJson);
-    REQUIRE(store.Snapshot() == stable);
-
-    const std::string nestedDuplicateKey = ReplaceFirst(
-        LayoutJson(8), "\"root_rva\":\"0x1a009000\",",
-        "\"root_rva\":\"0x1a009000\",\"root_rva\":\"0x1a009004\",");
-    const CloudLayoutUpdateResult nestedDuplicate =
-        store.ValidateAndPublish(nestedDuplicateKey);
-    REQUIRE(nestedDuplicate.status == CloudLayoutStatus::InvalidJson);
-    REQUIRE(store.Snapshot() == stable);
-
-    const std::string actorDuplicateKey = ReplaceFirst(
-        LayoutJson(8), "\"plain_root\":\"0x188\",",
-        "\"plain_root\":\"0x188\",\"plain_root\":\"0x18c\",");
-    REQUIRE(store.ValidateAndPublish(actorDuplicateKey).status ==
+    const std::string duplicateRoot = ReplaceFirst(
+        LayoutJson(18), "\"revision\":18,",
+        "\"revision\":18,\"revision\":19,");
+    REQUIRE(store.ValidateAndPublish(duplicateRoot).status ==
+            CloudLayoutStatus::InvalidJson);
+    const std::string duplicateNested = ReplaceFirst(
+        LayoutJson(18), "\"subject_load\":\"0x400\",",
+        "\"subject_load\":\"0x400\",\"subject_load\":\"0x404\",");
+    REQUIRE(store.ValidateAndPublish(duplicateNested).status ==
             CloudLayoutStatus::InvalidJson);
     REQUIRE(store.Snapshot() == stable);
 
-    const std::string oldSchema = ReplaceFirst(
-        LayoutJson(8), "\"schema_version\":2",
-        "\"schema_version\":1");
-    REQUIRE(store.ValidateAndPublish(oldSchema).status ==
-            CloudLayoutStatus::SchemaMismatch);
-    REQUIRE(store.Snapshot() == stable);
-
-    const std::string missingCoordinate = ReplaceFirst(
-        LayoutJson(8),
-        R"(,"coordinate_pool":{"root_rva":"0x1a009000","bridge_offset":"0x14","context_offset":-16,"entry_offset":"0xb0","component_key_offset":"0x220","pacga_data":"0x13579bdf","pacga_modifier":"0x2468ace0","entry_stride":64,"pool_head_skip":24,"ring_refresh_frames":90})",
-        "");
-    REQUIRE(store.ValidateAndPublish(missingCoordinate).status ==
-            CloudLayoutStatus::SchemaMismatch);
-    REQUIRE(store.Snapshot() == stable);
-
-    const std::string badContext = ReplaceFirst(
-        LayoutJson(8), "\"context_offset\":-16",
-        "\"context_offset\":-4");
-    REQUIRE(store.ValidateAndPublish(badContext).status ==
+    const auto requireRangeError = [&](const std::string& needle,
+                                       const std::string& replacement) {
+        REQUIRE(store.ValidateAndPublish(
+                    ReplaceFirst(LayoutJson(18), needle, replacement))
+                    .status == CloudLayoutStatus::RangeError);
+        REQUIRE(store.Snapshot() == stable);
+    };
+    requireRangeError("\"callback_entry\":\"0x404\"",
+                      "\"callback_entry\":\"0x402\"");
+    requireRangeError("\"context_offset\":-24",
+                      "\"context_offset\":-12");
+    requireRangeError("\"alternate_root\":\"0x420\"",
+                      "\"alternate_root\":\"0x1a0\"");
+    requireRangeError("\"oracle_opcode\":\"0x9ac33041\"",
+                      "\"oracle_opcode\":\"0xd503201f\"");
+    requireRangeError("\"thread_name\":\"WorkerAlpha\"",
+                      "\"thread_name\":\"WorkerAlphaLongName\"");
+    const std::string bothPacgaZero = ReplaceFirst(
+        ReplaceFirst(LayoutJson(18),
+                     "\"pacga_data\":\"0x123456789\"",
+                     "\"pacga_data\":\"0x0\""),
+        "\"pacga_modifier\":\"0x987654321\"",
+        "\"pacga_modifier\":\"0x0\"");
+    REQUIRE(store.ValidateAndPublish(bothPacgaZero).status ==
             CloudLayoutStatus::RangeError);
+    const std::string malformedBuild = LayoutJson(18, "ABCDEF12");
+    REQUIRE(store.ValidateAndPublish(malformedBuild).status ==
+            CloudLayoutStatus::IdentityMismatch);
     REQUIRE(store.Snapshot() == stable);
 
-    const std::string badEntryAlignment = ReplaceFirst(
-        LayoutJson(8), "\"entry_offset\":\"0xb0\"",
-        "\"entry_offset\":\"0xb4\"");
-    REQUIRE(store.ValidateAndPublish(badEntryAlignment).status ==
-            CloudLayoutStatus::RangeError);
-    REQUIRE(store.Snapshot() == stable);
-
-    const std::string overflowingBridge = ReplaceFirst(
-        LayoutJson(8), "\"root_rva\":\"0x1a009000\"",
-        "\"root_rva\":\"0xfffffffc\"");
-    REQUIRE(store.ValidateAndPublish(overflowingBridge).status ==
-            CloudLayoutStatus::RangeError);
-    REQUIRE(store.Snapshot() == stable);
-
-    const std::string badPacga = ReplaceFirst(
-        LayoutJson(8), "\"pacga_data\":\"0x13579bdf\"",
-        "\"pacga_data\":\"0x13579BDF\"");
-    REQUIRE(store.ValidateAndPublish(badPacga).status ==
-            CloudLayoutStatus::SchemaMismatch);
-    REQUIRE(store.Snapshot() == stable);
-
-    const CloudLayoutUpdateResult newer =
-        store.ValidateAndPublish(LayoutJson(8, kBuildId, "0x13002000",
-                                            "0x1234"));
+    const CloudLayoutUpdateResult newer = store.ValidateAndPublish(
+        LayoutJson(18, "00112233445566778899aabbccddeeff"));
     REQUIRE(newer.status == CloudLayoutStatus::Published);
-    REQUIRE(newer.snapshot->revision == 8);
-    REQUIRE(newer.snapshot->layout.coordinateReplayEntryOffset == 0x1234);
+    REQUIRE(newer.snapshot->revision == 18);
+    REQUIRE(newer.snapshot->identity.buildId ==
+            "00112233445566778899aabbccddeeff");
 
-    CloudLayoutStore concurrentStore(RuntimeIdentity());
+    CloudLayoutStore invalidTarget({"invalid", "bad/path.so"});
+    REQUIRE(invalidTarget.ValidateAndPublish(LayoutJson(1)).status ==
+            CloudLayoutStatus::IdentityMismatch);
+
+    CloudLayoutStore concurrentStore(RuntimeTarget());
     std::atomic_bool start{false};
     std::atomic_bool done{false};
     std::atomic_bool invalidSnapshot{false};
@@ -342,12 +308,13 @@ void RunCloudLayoutTests() {
                 if (snapshot != nullptr &&
                     (snapshot->schemaVersion != kCloudLayoutSchemaVersion ||
                      snapshot->revision == 0 ||
-                      snapshot->identity.buildId != kBuildId ||
-                      snapshot->layout.namePoolOffset != 0x12001000ULL ||
-                      snapshot->layout.worldOffset != 0x13002000ULL ||
-                      snapshot->layout.coordinatePool.rootRva !=
-                          0x1a009000ULL ||
-                     snapshot->layout.coordinatePool.entryOffset != 0xb0)) {
+                     snapshot->identity.packageName != "com.example.runtime" ||
+                     snapshot->identity.buildId != kSyntheticBuildId ||
+                     snapshot->layout.worldOffset != 0x22002000ULL ||
+                     snapshot->decrypt.mode1.pool.rootRva !=
+                         0x29009000ULL ||
+                     snapshot->decrypt.execution.hookOffsets.result !=
+                         0x464)) {
                     invalidSnapshot.store(true, std::memory_order_release);
                     break;
                 }
@@ -356,7 +323,7 @@ void RunCloudLayoutTests() {
     }
     start.store(true, std::memory_order_release);
     bool publishFailed = false;
-    for (std::uint64_t revision = 1; revision <= 64; ++revision) {
+    for (std::uint64_t revision = 1; revision <= 48; ++revision) {
         if (concurrentStore.ValidateAndPublish(LayoutJson(revision)).status !=
             CloudLayoutStatus::Published) {
             publishFailed = true;
@@ -367,5 +334,5 @@ void RunCloudLayoutTests() {
     for (std::thread& reader : readers) reader.join();
     REQUIRE(!publishFailed);
     REQUIRE(!invalidSnapshot.load(std::memory_order_acquire));
-    REQUIRE(concurrentStore.Snapshot()->revision == 64);
+    REQUIRE(concurrentStore.Snapshot()->revision == 48);
 }

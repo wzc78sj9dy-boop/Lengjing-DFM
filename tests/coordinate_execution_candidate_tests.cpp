@@ -130,14 +130,37 @@ constexpr std::uint32_t EncodeBr(unsigned targetRegister) {
     return UINT32_C(0xD61F0000) | ((targetRegister & 0x1FU) << 5U);
 }
 
+constexpr game::CoordinateExecutionLayout SyntheticLayout() {
+    game::CoordinateExecutionLayout layout{};
+    layout.discovery.rootOffset = UINT64_C(0x234000);
+    layout.discovery.pointerOffset = UINT64_C(0x18);
+    layout.discovery.entryOffset = UINT64_C(0xB8);
+    layout.discovery.returnStubMagic =
+        (static_cast<std::uint64_t>(EncodeBr(17)) << 32U) |
+        EncodeLdrLiteral(3, 17);
+    layout.result = {UINT64_C(0x248), UINT64_C(0x178)};
+    layout.hooks = {
+        0x410, 0x434, 0x458, 0x47C, 0x4A0, 0x4C4, 0x4E8,
+        0x50C, 0x530, 0x554, 0x578, 0x59C, 0x5C0, 0x5E4,
+        0x608, 0x62C, 0x650, 0x674, 0x698, 0x6BC, 0x6E0,
+        0x704, 0x728, 0x74C, 0x770, 0x794,
+    };
+    layout.fields = {
+        0x818, 0x83C, 0x860, 0x884, 0x8A8,
+        0x8CC, 0x8F0, 0x914, 0x938, 0x95C,
+        0x980, 0x9A4, 0x9C8, 0x9EC, 0xA10,
+    };
+    return layout;
+}
+
 template <typename Memory>
 void InstallVeneer(Memory& memory,
                    std::uint64_t ldrPc,
                    std::uint64_t rawThunk) {
+    constexpr auto kLayout = SyntheticLayout();
     memory.Write(ldrPc - 4, UINT32_C(0xD503201F));
-    memory.Write(ldrPc, EncodeLdrLiteral(2, 16));
-    memory.Write(ldrPc + 4, EncodeBr(16));
-    memory.Write(ldrPc + 8, rawThunk);
+    memory.Write(ldrPc, kLayout.discovery.returnStubMagic);
+    memory.Write(ldrPc + 12, rawThunk);
 }
 
 template <typename Memory>
@@ -236,27 +259,11 @@ void TestCodeRangeSelection() {
         ranges, 0, 0, &selected));
 }
 
-void TestProfileOffsetsAndDiscovery() {
-    REQUIRE(game::ResolveCoordinateExecutionScanProfile(0) == 0);
-    REQUIRE(game::ResolveCoordinateExecutionScanProfile(1) == 2);
-    REQUIRE(game::ResolveCoordinateExecutionScanProfile(2) == 1);
-    REQUIRE(game::ResolveCoordinateExecutionScanProfile(-1) == 0);
-    REQUIRE(game::ResolveCoordinateExecutionScanProfile(3) == 0);
-
-    const game::CoordinateExecutionProfileOffsets profile1 =
-        game::GetCoordinateExecutionProfileOffsets(1);
-    const game::CoordinateExecutionProfileOffsets profile2 =
-        game::GetCoordinateExecutionProfileOffsets(2);
-    const game::CoordinateExecutionProfileOffsets fallback =
-        game::GetCoordinateExecutionProfileOffsets(0);
-    REQUIRE(profile1.rootOffset == UINT64_C(0x0E9CC2EC));
-    REQUIRE(profile1.pointerOffset == 8);
-    REQUIRE(profile1.entryOffset == UINT64_C(0xA0));
-    REQUIRE(profile2.rootOffset == profile1.rootOffset);
-    REQUIRE(profile2.pointerOffset == profile1.pointerOffset);
-    REQUIRE(fallback.rootOffset == UINT64_C(0x0E7F7664));
-    REQUIRE(fallback.pointerOffset == UINT64_C(0xC));
-    REQUIRE(fallback.entryOffset == UINT64_C(0xA0));
+void TestLayoutAndDiscovery() {
+    constexpr game::CoordinateExecutionLayout kLayout = SyntheticLayout();
+    static_assert(kLayout.IsValid());
+    static_assert(!game::CoordinateExecutionLayout{}.IsValid());
+    REQUIRE(kLayout == SyntheticLayout());
 
     SparseMemory memory;
     constexpr std::uint64_t kModuleBase = UINT64_C(0x7000000000);
@@ -268,10 +275,11 @@ void TestProfileOffsetsAndDiscovery() {
     constexpr std::uint64_t kTaggedThunk =
         UINT64_C(0xCD00006000008000);
     constexpr std::uint64_t kTaggedQ0 = UINT64_C(0xAB00006000009000);
-    const std::uint64_t anchor = kModuleBase + profile1.rootOffset;
-    memory.Write(anchor + profile1.pointerOffset, kTaggedRoot);
+    const std::uint64_t anchor =
+        kModuleBase + kLayout.discovery.rootOffset;
+    memory.Write(anchor + kLayout.discovery.pointerOffset, kTaggedRoot);
     memory.Write(
-        kRoot + profile1.entryOffset,
+        kRoot + kLayout.discovery.entryOffset,
         UINT64_C(0xAB00000000000000) +
             kCodeBase + kRelativeEntry);
     const std::uint64_t ldrPc = anchor + 0x104;
@@ -287,7 +295,7 @@ void TestProfileOffsetsAndDiscovery() {
 
     game::CoordinateExecutionDiscoveryInput input{};
     REQUIRE(game::ResolveCoordinateExecutionDiscoveryInput(
-        memory.Callback(), kModuleBase, 1, &input));
+        memory.Callback(), kModuleBase, kLayout, &input));
     REQUIRE(input.scanAnchor == anchor);
     REQUIRE(input.root == kRoot);
     REQUIRE(
@@ -300,7 +308,7 @@ void TestProfileOffsetsAndDiscovery() {
         module,
         code,
         kModuleBase,
-        1,
+        kLayout,
         &candidate));
     REQUIRE(candidate.q0 == kTaggedQ0);
     REQUIRE(candidate.q1 == kRelativeEntry);
@@ -308,29 +316,29 @@ void TestProfileOffsetsAndDiscovery() {
     REQUIRE(candidate.q3 == ldrPc - 4);
 
     memory.Write(
-        kRoot + profile1.entryOffset,
+        kRoot + kLayout.discovery.entryOffset,
         kCodeBase + kRelativeEntry + 4);
     REQUIRE(!game::DiscoverFirstCoordinateExecutionCandidate(
         memory.Callback(),
         module,
         code,
         kModuleBase,
-        1,
+        kLayout,
         &candidate));
 
     memory.Write(
-        kRoot + profile1.entryOffset,
+        kRoot + kLayout.discovery.entryOffset,
         kModuleBase + kRelativeEntry);
     REQUIRE(!game::DiscoverFirstCoordinateExecutionCandidate(
         memory.Callback(),
         module,
         code,
         kModuleBase,
-        1,
+        kLayout,
         &candidate));
 
     memory.Write(
-        kRoot + profile1.entryOffset,
+        kRoot + kLayout.discovery.entryOffset,
         kCodeBase + kRelativeEntry);
     memory.Write(kThunk + 24, kModuleBase + kRelativeEntry);
     REQUIRE(!game::DiscoverFirstCoordinateExecutionCandidate(
@@ -338,27 +346,29 @@ void TestProfileOffsetsAndDiscovery() {
         module,
         code,
         kModuleBase,
-        1,
+        kLayout,
         &candidate));
     memory.Write(kThunk + 24, kCodeBase + kRelativeEntry);
 
-    memory.Write(kRoot + profile1.entryOffset, kRelativeEntry);
+    memory.Write(kRoot + kLayout.discovery.entryOffset, kRelativeEntry);
     REQUIRE(game::DiscoverFirstCoordinateExecutionCandidate(
         memory.Callback(),
         module,
         code,
         kModuleBase,
-        1,
+        kLayout,
         &candidate));
     REQUIRE(candidate.q1 == kRelativeEntry);
 
-    memory.Write(kRoot + profile1.entryOffset, kRelativeEntry + 2);
+    memory.Write(
+        kRoot + kLayout.discovery.entryOffset,
+        kRelativeEntry + 2);
     REQUIRE(!game::DiscoverFirstCoordinateExecutionCandidate(
         memory.Callback(),
         module,
         code,
         kModuleBase,
-        1,
+        kLayout,
         &candidate));
 }
 
@@ -384,6 +394,7 @@ void TestNegativeAarch64Immediates() {
         Snapshot(kCodeBase, kCodeSize),
         kLdrPc,
         kRelativeEntry,
+        SyntheticLayout(),
         &candidate));
     REQUIRE((candidate == game::CoordinateExecutionCandidate{
         kTaggedQ0,
@@ -437,6 +448,7 @@ void TestPriorityOrderDedupAndChunkOverlap() {
         code,
         exactLdr,
         kRelativeEntry,
+        SyntheticLayout(),
         &first));
     REQUIRE(first.q0 == UINT64_C(0x6000300000));
 
@@ -446,7 +458,8 @@ void TestPriorityOrderDedupAndChunkOverlap() {
             module,
             code,
             exactLdr,
-            kRelativeEntry);
+            kRelativeEntry,
+            SyntheticLayout());
     REQUIRE(!all.truncated);
     REQUIRE(all.candidates.size() == 4);
     REQUIRE(all.candidates[0].q0 == UINT64_C(0x6000300000));
@@ -469,6 +482,7 @@ void TestPriorityOrderDedupAndChunkOverlap() {
         code,
         0,
         kRelativeEntry,
+        SyntheticLayout(),
         &first));
     REQUIRE(first.q3 == boundaryLdr - 4);
     REQUIRE(overlapMemory.HasReadSize(4096));
@@ -499,6 +513,7 @@ void TestBoundsAndStableMagic() {
         code,
         lowerLdr,
         kRelativeEntry,
+        SyntheticLayout(),
         &candidate));
     REQUIRE(candidate.q3 == kModuleBase);
 
@@ -516,6 +531,7 @@ void TestBoundsAndStableMagic() {
         code,
         upperLdr,
         kRelativeEntry,
+        SyntheticLayout(),
         &candidate));
     REQUIRE(candidate.q3 == kModuleBase + kModuleSize - 12);
 
@@ -533,6 +549,7 @@ void TestBoundsAndStableMagic() {
         code,
         invalidLdr,
         kRelativeEntry,
+        SyntheticLayout(),
         &candidate));
 
     SparseMemory moduleEndMemory;
@@ -550,6 +567,7 @@ void TestBoundsAndStableMagic() {
         code,
         moduleEndLdr,
         kRelativeEntry,
+        SyntheticLayout(),
         &candidate));
     REQUIRE(candidate.q2 == moduleEndThunk);
 
@@ -568,6 +586,7 @@ void TestBoundsAndStableMagic() {
         code,
         internalLdr,
         kRelativeEntry,
+        SyntheticLayout(),
         &candidate));
 
     const std::uint64_t racingLdr = kModuleBase + 0x400;
@@ -584,6 +603,7 @@ void TestBoundsAndStableMagic() {
         code,
         racingLdr,
         kRelativeEntry,
+        SyntheticLayout(),
         &candidate));
 }
 
@@ -616,7 +636,8 @@ void TestCandidateLimit() {
             Snapshot(kModuleBase, kModuleSize),
             Snapshot(kCodeBase, kCodeSize),
             kFirstStub + 4,
-            kRelativeEntry);
+            kRelativeEntry,
+            SyntheticLayout());
     REQUIRE(result.truncated);
     REQUIRE(
         result.candidates.size() ==
@@ -633,7 +654,7 @@ void TestCandidateLimit() {
 
 int main() {
     TestCodeRangeSelection();
-    TestProfileOffsetsAndDiscovery();
+    TestLayoutAndDiscovery();
     TestNegativeAarch64Immediates();
     TestPriorityOrderDedupAndChunkOverlap();
     TestBoundsAndStableMagic();

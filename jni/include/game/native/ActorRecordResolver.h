@@ -10,14 +10,14 @@
 namespace lengjing::game::native {
 
 struct ActorRecordLayout {
-    std::uintptr_t taggedContainerOffset = 0x0EEBDB14ULL;
-    std::uintptr_t plainArrayOffset = 0x1D0A6908ULL;
-    std::uintptr_t plainRootOffset = 0x180;
-    std::uintptr_t plainMeshOffset = 0x3D0;
-    std::uint32_t encryptedRecordCount = 1000;
-    std::uint32_t plainRecordStride = 24;
-    std::int32_t maximumPlainCount = 10000;
-    std::int32_t fallbackPlainCount = 3000;
+    std::uintptr_t taggedContainerOffset = 0;
+    std::uintptr_t plainArrayOffset = 0;
+    std::uintptr_t plainRootOffset = 0;
+    std::uintptr_t plainMeshOffset = 0;
+    std::uint32_t encryptedRecordCount = 0;
+    std::uint32_t plainRecordStride = 0;
+    std::int32_t maximumPlainCount = 0;
+    std::int32_t fallbackPlainCount = 0;
 };
 
 constexpr bool HasConfiguredActorRecordSource(

@@ -33,11 +33,11 @@ constexpr bool IsKernelMemoryTransportMode(
 }
 
 struct CoordinateReplayTransportLayout {
-    std::uintptr_t rootRva = 0x0E738950;
-    std::uintptr_t bridgeOffset = 12;
-    std::uintptr_t entryOffset = 0xA0;
-    std::uint64_t pacgaData = UINT64_C(0x412625C7);
-    std::uint64_t pacgaModifier = UINT64_C(0xBB7AC00B);
+    std::uintptr_t rootRva = 0;
+    std::uintptr_t bridgeOffset = 0;
+    std::uintptr_t entryOffset = 0;
+    std::uint64_t pacgaData = 0;
+    std::uint64_t pacgaModifier = 0;
 
     constexpr bool IsValid() const noexcept {
         return rootRva >= 4 && rootRva <= 0xffffffffULL &&
@@ -47,6 +47,33 @@ struct CoordinateReplayTransportLayout {
             entryOffset >= 8 && entryOffset <= 0x10000 &&
             (entryOffset & 7U) == 0 &&
             (pacgaData != 0 || pacgaModifier != 0);
+    }
+};
+
+struct CoordinateExecutionContextLayout {
+    std::string threadName;
+    std::uint32_t oracleOpcode = 0;
+
+    bool IsValid() const noexcept {
+        if (threadName.empty() || threadName.size() > 15 ||
+            (oracleOpcode & UINT32_C(0xFFE0FC00)) !=
+                UINT32_C(0x9AC03000)) {
+            return false;
+        }
+        for (const char character : threadName) {
+            if (character < 0x21 || character > 0x7e) return false;
+        }
+        const std::uint32_t destination = oracleOpcode & 0x1fU;
+        const std::uint32_t data = (oracleOpcode >> 5U) & 0x1fU;
+        const std::uint32_t modifier = (oracleOpcode >> 16U) & 0x1fU;
+        return destination != 31U && data != 31U && modifier != 31U;
+    }
+
+    friend bool operator==(
+        const CoordinateExecutionContextLayout& left,
+        const CoordinateExecutionContextLayout& right) noexcept {
+        return left.threadName == right.threadName &&
+            left.oracleOpcode == right.oracleOpcode;
     }
 };
 
@@ -224,6 +251,8 @@ public:
 #endif
     bool ConfigureCoordinateReplay(
         const CoordinateReplayTransportLayout& layout) noexcept;
+    bool ConfigureCoordinateExecutionContext(
+        const CoordinateExecutionContextLayout& layout) noexcept;
     bool ResolveCoordinateReplayEntry(
         std::uintptr_t moduleBase,
         CoordinateReplayEntrySnapshot& snapshot,

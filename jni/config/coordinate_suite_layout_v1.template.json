@@ -1,0 +1,119 @@
+{
+  "schema_version": 3,
+  "build_id": "fedcba98765432100123456789abcdef",
+  "revision": 1,
+  "layout": {
+    "name_pool": "0x21001000",
+    "world": "0x22002000",
+    "geometry_instances": [
+      "0x23003000",
+      "0x24004000"
+    ],
+    "actor_records": {
+      "tagged_container": "0x25005000",
+      "plain_array": "0x26006000",
+      "plain_root": "0x284",
+      "plain_mesh": "0x414",
+      "encrypted_record_count": 1536,
+      "plain_record_stride": 40,
+      "maximum_plain_count": 12288,
+      "fallback_plain_count": 3072
+    },
+    "actor_subject": {
+      "root": "0x1a0",
+      "mesh": "0x410",
+      "alternate_root": "0x420"
+    },
+    "tracking_matrix_root": "0x27007000",
+    "component_position_flag": "0x28008003"
+  },
+  "decrypt": {
+    "mode1": {
+      "pool": {
+        "root_rva": "0x29009000",
+        "bridge_offset": "0x24",
+        "context_offset": -24,
+        "entry_offset": "0xc0",
+        "component_key_offset": "0x260",
+        "entry_stride": 80,
+        "pool_head_skip": 32,
+        "ring_refresh_frames": 111
+      },
+      "pacga_data": "0x123456789",
+      "pacga_modifier": "0x987654321"
+    },
+    "mode2": {
+      "pool": {
+        "root_rva": "0x2a00a000",
+        "bridge_offset": "0x28",
+        "context_offset": -32,
+        "entry_offset": "0xd0",
+        "component_key_offset": "0x270",
+        "entry_stride": 96,
+        "pool_head_skip": 36,
+        "ring_refresh_frames": 121
+      }
+    },
+    "execution": {
+      "discovery": {
+        "root_offset": "0x2b00b000",
+        "pointer_offset": "0x14",
+        "entry_offset": "0xd8",
+        "return_stub_magic": "0x13572468abcdef01"
+      },
+      "result": {
+        "slot_offset": "0x280",
+        "position_offset": "0x184"
+      },
+      "hook_offsets": {
+        "subject_load": "0x400",
+        "callback_entry": "0x404",
+        "callback_return": "0x408",
+        "callback_index": "0x40c",
+        "callback_copy_prepare": "0x410",
+        "callback_copy_after": "0x414",
+        "table_pointer": "0x418",
+        "table_value": "0x41c",
+        "lock": "0x420",
+        "lock_return": "0x424",
+        "first_call": "0x428",
+        "first_return": "0x42c",
+        "external_call": "0x430",
+        "external_return": "0x434",
+        "primary_gate_write": "0x438",
+        "alternate_gate_write": "0x43c",
+        "gate_probe": "0x440",
+        "record_count": "0x444",
+        "target_key": "0x448",
+        "ring_setup": "0x44c",
+        "ring_probe": "0x450",
+        "ring_hit": "0x454",
+        "dispatch": "0x458",
+        "dispatch_return": "0x45c",
+        "result_prepare": "0x460",
+        "result": "0x464"
+      },
+      "field_offsets": {
+        "context_expected": "0x300",
+        "stack_prior_gate": "0x304",
+        "stack_primary_gate_source": "0x308",
+        "stack_gate_flag": "0x30c",
+        "stack_gate_snapshot_a": "0x310",
+        "stack_gate_snapshot_b": "0x314",
+        "stack_ring_mid": "0x318",
+        "object_position": "0x31c",
+        "stack_capture_a": "0x320",
+        "stack_capture_b": "0x324",
+        "stack_capture_c": "0x328",
+        "stack_capture_d": "0x32c",
+        "capture_field": "0x330",
+        "stack_pool_selector": "0x334",
+        "context_pool_table": "0x338"
+      },
+      "context": {
+        "thread_name": "WorkerAlpha",
+        "oracle_opcode": "0x9ac33041"
+      }
+    }
+  }
+}

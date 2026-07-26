@@ -16,8 +16,6 @@
 namespace lengjing::game::native {
 namespace {
 
-constexpr std::uint32_t kPacgaX8X8X9 = UINT32_C(0x9AC93108);
-
 std::uint64_t NextGeneration(std::uint64_t generation) noexcept {
     return generation == std::numeric_limits<std::uint64_t>::max()
         ? UINT64_C(1)
@@ -228,14 +226,23 @@ int PtracePacgaOracleReader::Read(
         reinterpret_cast<void*>(instruction.address),
         nullptr);
     if ((encoded == -1 && errno != 0) ||
-        static_cast<std::uint32_t>(encoded) != kPacgaX8X8X9) {
+        static_cast<std::uint32_t>(encoded) != instruction.encoding) {
         const int error = errno != 0 ? errno : ENOEXEC;
         return fail(error);
     }
 
+    const std::uint32_t destinationRegister = instruction.encoding & 0x1fU;
+    const std::uint32_t dataRegister =
+        (instruction.encoding >> 5U) & 0x1fU;
+    const std::uint32_t modifierRegister =
+        (instruction.encoding >> 16U) & 0x1fU;
+    if (destinationRegister >= 31U || dataRegister >= 31U ||
+        modifierRegister >= 31U) {
+        return fail(EINVAL);
+    }
     Arm64GeneralRegisters staged = original;
-    staged.registers[8] = instruction.data;
-    staged.registers[9] = instruction.modifier;
+    staged.registers[dataRegister] = instruction.data;
+    staged.registers[modifierRegister] = instruction.modifier;
     staged.programCounter = instruction.address;
     if (!WriteRegisterSet(
             threadId, NT_PRSTATUS, &staged, sizeof(staged))) {
@@ -269,7 +276,7 @@ int PtracePacgaOracleReader::Read(
         const int error = errno != 0 ? errno : EIO;
         return fail(error);
     }
-    result = completed.registers[8];
+    result = completed.registers[destinationRegister];
 
     if (!WriteRegisterSet(
             threadId, NT_PRSTATUS, &original, sizeof(original))) {

@@ -450,7 +450,7 @@ namespace coord_dec {
 			uint32_t index = 0;
 			if (!nearest_mov_immediate(entry, i, entry->reg(i, 2),
 				entry->start_i(), kRingStrideSearchBack, immediate, index) ||
-				immediate != 48) {
+				immediate != static_cast<int64_t>(expected_entry_stride_)) {
 				continue;
 			}
 
@@ -522,6 +522,11 @@ namespace coord_dec {
 	}
 
 	bool FindDec::import_runtime_plan(RuntimePlan plan) {
+		if (expected_entry_stride_ == 0) {
+			failure_stage_ = FindDecFailureStage::RingOffset;
+			failure_detail_ = FindDecFailureDetail::EntryStrideMissing;
+			return false;
+		}
 		auto contains_instruction = [&](uint64_t address) {
 			return (address & 3U) == 0 &&
 				address >= binary_.start_addr() &&
@@ -631,7 +636,8 @@ namespace coord_dec {
 				continue;
 			}
 
-			if (immediate == 48) {
+			if (immediate ==
+				static_cast<int64_t>(expected_entry_stride_)) {
 				ring_madds.push_back(madd);
 				continue;
 			}
@@ -1022,6 +1028,11 @@ namespace coord_dec {
 		candidate_count_ = 0;
 		failure_instruction_ = 0;
 
+		if (expected_entry_stride_ == 0) {
+			failure_stage_ = FindDecFailureStage::RingOffset;
+			failure_detail_ = FindDecFailureDetail::EntryStrideMissing;
+			return -1;
+		}
 
 		finder f;
 		f.is_ret(0);

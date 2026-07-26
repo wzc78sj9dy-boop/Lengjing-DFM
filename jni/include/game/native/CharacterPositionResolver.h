@@ -16,9 +16,35 @@ enum class PositionReadMode : std::uint8_t {
     Direct,
 };
 
+struct CharacterPositionLayout {
+    std::uintptr_t actorComponentOffset = 0;
+    std::uintptr_t preferredPositionOffset = 0;
+
+    constexpr bool IsValid() const noexcept {
+        return actorComponentOffset >= 8 && actorComponentOffset <= 0xffff &&
+            (actorComponentOffset & 7U) == 0 &&
+            preferredPositionOffset >= 4 &&
+            preferredPositionOffset <= 0xffff &&
+            (preferredPositionOffset & 3U) == 0;
+    }
+
+    friend constexpr bool operator==(
+        const CharacterPositionLayout& left,
+        const CharacterPositionLayout& right) noexcept {
+        return left.actorComponentOffset == right.actorComponentOffset &&
+            left.preferredPositionOffset == right.preferredPositionOffset;
+    }
+};
+
 class CharacterPositionResolver final {
 public:
     using Coordinate = std::array<float, 3>;
+
+    bool Configure(const CharacterPositionLayout& layout) noexcept {
+        Clear();
+        layout_ = layout.IsValid() ? layout : CharacterPositionLayout{};
+        return layout_.IsValid();
+    }
 
     template <typename ReadBytes>
     bool Read(std::uintptr_t actor,
@@ -100,7 +126,7 @@ public:
             className.find("DFMCharacter") != std::string_view::npos;
     }
 
-    void Clear() {
+    void Clear() noexcept {
         positionHistory_.clear();
         lastPruneAt_ = {};
     }
@@ -116,6 +142,7 @@ private:
                         Coordinate& coordinate,
                         ReadBytes&& readBytes) {
         coordinate = Coordinate{};
+        if (!layout_.IsValid()) return false;
         const auto now = std::chrono::steady_clock::now();
         PruneIfDue(now);
         const bool rangeTarget = IsRangeTargetCharacter(className);
@@ -173,21 +200,26 @@ private:
     }
 
     template <typename ReadBytes>
-    static bool ReadComponent(std::uintptr_t actor,
-                              std::uintptr_t& component,
-                              ReadBytes& readBytes) {
+    bool ReadComponent(std::uintptr_t actor,
+                       std::uintptr_t& component,
+                       ReadBytes& readBytes) const {
         return actor <=
-                std::numeric_limits<std::uintptr_t>::max() - 0x180 &&
-            ReadValue(readBytes, actor + 0x180, component) && component != 0;
+                std::numeric_limits<std::uintptr_t>::max() -
+                    layout_.actorComponentOffset &&
+            ReadValue(
+                readBytes,
+                actor + layout_.actorComponentOffset,
+                component) &&
+            component != 0;
     }
 
     template <typename ReadBytes>
-    static bool ReadDecodedRoot(std::uintptr_t root,
-                                Coordinate& coordinate,
-                                ReadBytes& readBytes) {
-        constexpr std::array<std::uintptr_t, 3> fallbackOffsets{
-            0x168, 0x148, 0x220};
-        for (const std::uintptr_t offset : fallbackOffsets) {
+    bool ReadDecodedRoot(std::uintptr_t root,
+                         Coordinate& coordinate,
+                         ReadBytes& readBytes) const {
+        const std::array<std::uintptr_t, 3> offsets{
+            layout_.preferredPositionOffset, 0x148, 0x220};
+        for (const std::uintptr_t offset : offsets) {
             coordinate = Coordinate{};
             bool read = false;
             if (root <=
@@ -208,13 +240,17 @@ private:
     }
 
     template <typename ReadBytes>
-    static bool ReadDecodedLocalRoot(std::uintptr_t root,
-                                     Coordinate& coordinate,
-                                     ReadBytes& readBytes) {
+    bool ReadDecodedLocalRoot(std::uintptr_t root,
+                              Coordinate& coordinate,
+                              ReadBytes& readBytes) const {
         coordinate = Coordinate{};
         const bool read = root <=
-                std::numeric_limits<std::uintptr_t>::max() - 0x168 &&
-            ReadValue(readBytes, root + 0x168, coordinate);
+                std::numeric_limits<std::uintptr_t>::max() -
+                    layout_.preferredPositionOffset &&
+            ReadValue(
+                readBytes,
+                root + layout_.preferredPositionOffset,
+                coordinate);
         if (read && IsValid(coordinate)) return true;
         coordinate = Coordinate{};
         return false;
@@ -230,12 +266,13 @@ private:
     }
 
     template <typename ReadBytes>
-    static bool ReadStandard(std::uintptr_t actor,
-                             Coordinate& coordinate,
-                             ReadBytes& readBytes) {
+    bool ReadStandard(std::uintptr_t actor,
+                      Coordinate& coordinate,
+                      ReadBytes& readBytes) const {
         std::uintptr_t component = 0;
         if (!ReadComponent(actor, component, readBytes)) return false;
-        constexpr std::array<std::uintptr_t, 2> offsets{0x168, 0x220};
+        const std::array<std::uintptr_t, 2> offsets{
+            layout_.preferredPositionOffset, 0x220};
         for (const std::uintptr_t offset : offsets) {
             if (component <=
                     std::numeric_limits<std::uintptr_t>::max() - offset &&
@@ -288,6 +325,7 @@ private:
         lastPruneAt_ = now;
     }
 
+    CharacterPositionLayout layout_{};
     std::unordered_map<std::uintptr_t, HistoryEntry> positionHistory_;
     std::chrono::steady_clock::time_point lastPruneAt_{};
 };

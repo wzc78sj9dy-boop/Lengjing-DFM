@@ -1,6 +1,5 @@
 #include "game/native/CoordinatePoolRuntime.h"
 
-#include "auth/AuthConfig.h"
 #include "game/native/AlgorithmPositionRuntime.h"
 #include "game/native/CoordinateEntryBranchPolicy.h"
 #include "game/native/CoordinatePoolPolicy.h"
@@ -593,87 +592,13 @@ std::uint64_t ReadHostVirtualCounter() noexcept {
 #endif
 }
 
-std::string RemotePlanSetting(const char* environmentName,
-                              std::string_view configured) {
-    const char* value = std::getenv(environmentName);
-    return value != nullptr && *value != '\0'
-        ? std::string(value)
-        : std::string(configured);
-}
-
-std::string TrimRemotePlanSeed(std::string value) {
-    const auto whitespace = [](unsigned char character) {
-        return character == ' ' || character == '\t' ||
-            character == '\r' || character == '\n';
-    };
-    while (!value.empty() &&
-           whitespace(static_cast<unsigned char>(value.back()))) {
-        value.pop_back();
-    }
-    const auto first = std::find_if_not(
-        value.begin(), value.end(), [&](unsigned char character) {
-            return whitespace(character);
-        });
-    value.erase(value.begin(), first);
-    return value;
-}
-
-std::string ReadRemotePlanSeed(std::string_view path) {
-    if (path.empty()) return {};
-    std::ifstream input(std::string(path), std::ios::binary);
-    if (!input) return {};
-    std::string seed;
-    std::getline(input, seed);
-    if (seed.size() > 4096U) return {};
-    return TrimRemotePlanSeed(std::move(seed));
-}
-
-bool IsDecimalRemotePlanId(std::string_view value) noexcept {
-    return !value.empty() && value.size() <= 20U &&
-        std::all_of(value.begin(), value.end(), [](unsigned char character) {
-            return character >= '0' && character <= '9';
-        });
-}
-
-std::string HashRemotePlanDeviceId(std::string_view seed) {
-    std::uint64_t hash = UINT64_C(0x1505);
-    for (const unsigned char byte : seed) hash = hash * 33U + byte;
-    return std::to_string(hash % UINT64_C(1000000));
-}
-
 struct ResolvedRemotePlanClientConfig {
     CoordinatePoolRemoteClientOptions options{};
     std::string deviceId;
 };
 
 ResolvedRemotePlanClientConfig ResolveRemotePlanClientConfig() {
-    const auth::CoordinateRemotePlanConfig& configured =
-        auth::kDefaultCoordinateRemotePlanConfig;
-    ResolvedRemotePlanClientConfig resolved;
-    resolved.options.endpoint = RemotePlanSetting(
-        "LENGJING_REMOTE_PLAN_URL", configured.url);
-    std::string deviceId = RemotePlanSetting(
-        "LENGJING_REMOTE_PLAN_DEVICE_ID", configured.deviceId);
-    if (!IsDecimalRemotePlanId(deviceId)) {
-        const std::string seedPath = RemotePlanSetting(
-            "LENGJING_REMOTE_PLAN_SEED_PATH", configured.seedPath);
-        std::string seed = ReadRemotePlanSeed(seedPath);
-        if (seed.empty()) seed = getMachineCode();
-        if (!seed.empty()) deviceId = HashRemotePlanDeviceId(seed);
-    }
-    if (IsDecimalRemotePlanId(deviceId)) {
-        resolved.deviceId = std::move(deviceId);
-    }
-    resolved.options.transport.connectTimeoutMilliseconds = 3000;
-    resolved.options.transport.sendTimeoutMilliseconds = 5000;
-    resolved.options.transport.receiveTimeoutMilliseconds = 10000;
-    resolved.options.transport.requestTimeoutMilliseconds = 15000;
-    resolved.options.transport.maximumResponseBytes =
-        kMaximumCoordinatePoolRemotePlanPayloadBytes;
-    resolved.options.initialRetryDelay = std::chrono::seconds(2);
-    resolved.options.maximumRetryDelay = std::chrono::minutes(1);
-    resolved.options.maximumMappingBytes = kMaximumCodeSize;
-    return resolved;
+    return {};
 }
 
 }  // namespace
@@ -2876,6 +2801,7 @@ private:
         auto candidate = std::unique_ptr<pool::coord_dec::FindDec>(
             new (std::nothrow) pool::coord_dec::FindDec());
         if (candidate == nullptr ||
+            !candidate->set_expected_entry_stride(layout.entryStride) ||
             candidate->set(
                 result.key.mappingBase,
                 currentBytes.data(),
@@ -3573,6 +3499,11 @@ private:
             candidate = std::unique_ptr<pool::coord_dec::FindDec>(
                 new (std::nothrow) pool::coord_dec::FindDec());
             if (candidate == nullptr) {
+                SetError(CoordinatePoolRuntimeError::AnalysisFailed);
+                return false;
+            }
+            if (!candidate->set_expected_entry_stride(
+                    layout.entryStride)) {
                 SetError(CoordinatePoolRuntimeError::AnalysisFailed);
                 return false;
             }

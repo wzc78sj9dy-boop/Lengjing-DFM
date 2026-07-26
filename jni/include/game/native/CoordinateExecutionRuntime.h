@@ -25,8 +25,6 @@ inline constexpr std::uint64_t kCoordinateExecutionDefaultSp =
     UINT64_C(0x00000001FFFF8000);
 inline constexpr std::uint64_t kCoordinateExecutionDefaultFp =
     UINT64_C(0x00000001FFFF7F00);
-inline constexpr std::uint64_t kCoordinateExecutionResultSlotOffset = 0x200;
-inline constexpr std::uint64_t kCoordinateExecutionPositionOffset = 0x168;
 inline constexpr std::uint64_t kCoordinateExecutionReturnStubMax =
     UINT64_C(0x0000007FFFFFFFE0);
 
@@ -107,6 +105,7 @@ struct CoordinateExecutionSharedEntry {
 
 struct CoordinateExecutionRequest {
     CoordinateExecutionMode mode = CoordinateExecutionMode::Interpret;
+    CoordinateExecutionLayout layout{};
     CoordinateExecutionCandidate candidate{};
     CoordinateExecutionSharedEntry shared{};
     bool candidateKnown = false;
@@ -269,11 +268,11 @@ struct CoordinateExecutionEvidence {
     std::uint64_t capturedX9 = 0;
     std::uint64_t capturedX12 = 0;
     std::uint64_t capturedX21 = 0;
-    std::uint64_t capturedLocal60 = 0;
-    std::uint64_t capturedLocal1C8 = 0;
-    std::uint64_t capturedLocal208 = 0;
-    std::uint64_t capturedLocal238 = 0;
-    std::uint32_t capturedLocal238Field = 0;
+    std::uint64_t capturedLocal0 = 0;
+    std::uint64_t capturedLocal1 = 0;
+    std::uint64_t capturedLocal2 = 0;
+    std::uint64_t capturedLocal3 = 0;
+    std::uint32_t capturedLocalField = 0;
     std::uint64_t stackBase = 0;
     std::uint64_t finalPc = 0;
     std::size_t capturedWriteSize = 0;
@@ -461,7 +460,8 @@ constexpr CoordinateExecutionPlan BuildCoordinateExecutionPlan(
     std::uint64_t subject,
     const CoordinateExecutionRequest& request) noexcept {
     CoordinateExecutionPlan plan{};
-    if (!IsCoordinateExecutionMode(request.mode) || moduleBase == 0 ||
+    if (!IsCoordinateExecutionMode(request.mode) || !request.layout.IsValid() ||
+        moduleBase == 0 ||
         moduleSize == 0 || codeBase == 0 || codeSize == 0 ||
         !IsCoordinateExecutionPointer(subject)) {
         return plan;

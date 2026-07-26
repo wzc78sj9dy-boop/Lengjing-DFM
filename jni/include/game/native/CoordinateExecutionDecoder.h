@@ -42,7 +42,6 @@ struct CoordinateExecutionDecoderProbe {
         CoordinateExecutionDecoderError::None;
     CoordinateExecutionStatus status = CoordinateExecutionStatus::Idle;
     CoordinateExecutionMode mode = CoordinateExecutionMode::Emulate;
-    std::uint32_t scanProfile = 0;
     std::int32_t processId = 0;
     std::uintptr_t moduleBase = 0;
     std::size_t moduleSize = 0;
@@ -95,7 +94,7 @@ public:
         const CoordinateExecutionDecoder&) = delete;
 
     bool Configure(CoordinateExecutionMode mode,
-                   std::uint32_t scanProfile) noexcept;
+                   const CoordinateExecutionLayout& layout) noexcept;
 
     bool Refresh(MemoryTransport& memory,
                  std::int32_t processId,

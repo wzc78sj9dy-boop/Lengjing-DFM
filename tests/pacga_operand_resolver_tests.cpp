@@ -22,18 +22,18 @@ using lengjing::game::native::ResolvePacgaOperandsFromImmediateBlock;
 
 void TestFirstRuntimeShape() {
     constexpr std::array<std::uint32_t, 6> instructions{
-        UINT32_C(0x5284B8E8),
-        UINT32_C(0x52980169),
-        UINT32_C(0x528D7BAA),
-        UINT32_C(0x72A824C8),
-        UINT32_C(0x72B76F49),
-        UINT32_C(0x9AC93108),
+        UINT32_C(0x52897068),
+        UINT32_C(0x529BBDE9),
+        UINT32_C(0x5282468A),
+        UINT32_C(0x72B00AC8),
+        UINT32_C(0x72A28969),
+        UINT32_C(0x9AC93105),
     };
     PacgaOperands operands{};
     CHECK(ResolvePacgaOperandsFromImmediateBlock(
         instructions.data(), instructions.size(), 5, operands));
-    CHECK(operands.data == UINT64_C(0x412625C7));
-    CHECK(operands.modifier == UINT64_C(0xBB7AC00B));
+    CHECK(operands.data == UINT64_C(0x80564B83));
+    CHECK(operands.modifier == UINT64_C(0x144BDDEF));
 }
 
 void TestRegeneratedRuntimeShape() {
@@ -42,7 +42,7 @@ void TestRegeneratedRuntimeShape() {
         UINT32_C(0x529BBDE9),
         UINT32_C(0x72B00AC8),
         UINT32_C(0x72A28969),
-        UINT32_C(0x9AC93108),
+        UINT32_C(0x9AC93105),
     };
     PacgaOperands operands{};
     CHECK(ResolvePacgaOperandsFromImmediateBlock(
@@ -58,7 +58,7 @@ void TestInterleavedUnrelatedRegisterMove() {
         UINT32_C(0x72B00AC8),
         UINT32_C(0xAA1903FD),
         UINT32_C(0x72A28969),
-        UINT32_C(0x9AC93108),
+        UINT32_C(0x9AC93105),
     };
     PacgaOperands operands{};
     CHECK(ResolvePacgaOperandsFromImmediateBlock(
@@ -72,7 +72,7 @@ void TestRejectsUnknownSourceOverwrite() {
         UINT32_C(0x52800028),
         UINT32_C(0x52800049),
         UINT32_C(0xAA0003E8),
-        UINT32_C(0x9AC93108),
+        UINT32_C(0x9AC93105),
     };
     PacgaOperands operands{};
     CHECK(!ResolvePacgaOperandsFromImmediateBlock(
@@ -83,7 +83,7 @@ void TestRejectsNonImmediateInputs() {
     constexpr std::array<std::uint32_t, 3> instructions{
         UINT32_C(0xAA0003E8),
         UINT32_C(0xAA0103E9),
-        UINT32_C(0x9AC93108),
+        UINT32_C(0x9AC93105),
     };
     PacgaOperands operands{1, 2};
     CHECK(!ResolvePacgaOperandsFromImmediateBlock(

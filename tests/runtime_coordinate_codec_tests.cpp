@@ -39,6 +39,7 @@ constexpr std::uint32_t kCapacity = 8;
 constexpr std::uint32_t kTargetPhysicalIndex = 5;
 constexpr std::uint32_t kDecoyPhysicalIndex = 2;
 constexpr std::size_t kRecordSize = 0x568;
+constexpr std::uintptr_t kPositionOffset = 0x1A4;
 constexpr std::uintptr_t kCapturedObject = UINT64_C(0x7CB9B3E020);
 constexpr std::uintptr_t kCapturedOwner = UINT64_C(0x7B5DA58020);
 constexpr std::uintptr_t kCapturedRecords = UINT64_C(0x7C62B04000);
@@ -46,8 +47,6 @@ constexpr std::uint32_t kCapturedCodecSeed = UINT32_C(0x1894ECA5);
 constexpr std::uint32_t kCapturedTableSeed = UINT32_C(0x7FF5C76C);
 constexpr std::uint64_t kCapturedTableSalt =
     UINT64_C(0x11C313E3EA1737EF);
-constexpr std::uint64_t kCapturedFieldKey =
-    UINT64_C(0x27B8A9561347C707);
 constexpr std::uint64_t kCapturedObjectKey =
     UINT64_C(0xE42BC6A9177E1B6F);
 constexpr std::uint64_t kCapturedRingSalt =
@@ -107,9 +106,13 @@ public:
         }
         const std::uintptr_t end = address + size;
         const bool syntheticField =
-            address < kObject + 0x174 && end > kObject + 0x168;
-        const bool capturedField = address < kCapturedObject + 0x174 &&
-            end > kCapturedObject + 0x168;
+            address < kObject + kPositionOffset +
+                    sizeof(RuntimeCoordinateCodec::Coordinate) &&
+            end > kObject + kPositionOffset;
+        const bool capturedField =
+            address < kCapturedObject + kPositionOffset +
+                    sizeof(RuntimeCoordinateCodec::Coordinate) &&
+            end > kCapturedObject + kPositionOffset;
         if (syntheticField || capturedField) {
             ordinaryFieldRead_ = true;
         }
@@ -171,6 +174,7 @@ RuntimeCoordinateCodecLayout BuildLayout() {
         CoordinatePoolCodeFingerprint(zeros.data(), 0x58);
     layout.codecFingerprint =
         CoordinatePoolCodeFingerprint(zeros.data(), 0x78);
+    layout.positionOffset = kPositionOffset;
     return layout;
 }
 
@@ -197,8 +201,8 @@ void PutFixture(Memory& memory,
         UINT32_C(0xD503201F), UINT32_C(0xD503201F),
         UINT32_C(0xD503201F), UINT32_C(0xD503201F),
         UINT32_C(0xBD016800), UINT32_C(0xBD016C01),
-        UINT32_C(0xBD017002), UINT32_C(0x58000050),
-        UINT32_C(0xD61F0200),
+        UINT32_C(0xBD017002), UINT32_C(0x58000051),
+        UINT32_C(0xD61F0220),
     };
     memory.PutBytes(hook, hookCode.data(), sizeof(hookCode));
     memory.Put(hook + 0x2C, kTrampoline);
@@ -216,8 +220,8 @@ void PutFixture(Memory& memory,
     putInstruction(0x8C, UINT32_C(0x58FFFB60));
     putInstruction(0x90, UINT32_C(0x910003E1));
     putInstruction(0x94, UINT32_C(0x100000BE));
-    putInstruction(0x98, UINT32_C(0x58000050));
-    putInstruction(0x9C, UINT32_C(0xD61F0200));
+    putInstruction(0x98, UINT32_C(0x58000051));
+    putInstruction(0x9C, UINT32_C(0xD61F0220));
     std::memcpy(
         trampoline.data() + 0xA0,
         &kCallback,
@@ -248,7 +252,7 @@ void PutFixture(Memory& memory,
         0,
         layout.zBias,
     };
-    memory.Put(kConfig + 0x210, parameters);
+    memory.Put(kConfig + 0x218, parameters);
 
     memory.Put(kState + 0x10, kIndexArray);
     memory.Put(kState + 0xAC0, kAuxiliary);
@@ -263,17 +267,17 @@ void PutFixture(Memory& memory,
         RuntimeCoordinateCodec::EncodeRecordValue(kRecords, recordsSeed);
     memory.Put(kState + 0x2598, tableSalt);
 
-    memory.Put(kObject + 0xE8, kOwner);
+    memory.Put(kObject + 0xF0, kOwner);
     const RuntimeCoordinateCodec::Coordinate publicValue{
         10.0f,
         20.0f,
         30.0f,
     };
-    memory.Put(kObject + 0x168, publicValue);
+    memory.Put(kObject + kPositionOffset, publicValue);
 
     std::array<std::uint8_t, kRecordSize> target{};
     const std::uintptr_t targetField =
-        kObject + (options.wrongFieldKey ? 0x210 : 0x168);
+        kObject + (options.wrongFieldKey ? 0x218 : kPositionOffset);
     const std::uint64_t targetFieldKey =
         RuntimeCoordinateCodec::EncodeRecordValue(
             targetField, kCodecSeed);
@@ -315,7 +319,7 @@ void PutFixture(Memory& memory,
     std::array<std::uint8_t, kRecordSize> decoy{};
     const std::uint64_t decoyFieldKey =
         RuntimeCoordinateCodec::EncodeRecordValue(
-            kObject + 0x210, kCodecSeed);
+            kObject + 0x218, kCodecSeed);
     Store(decoy, 0x10, decoyFieldKey);
     memory.PutBytes(
         RecordAddress(kDecoyPhysicalIndex),
@@ -347,10 +351,14 @@ void PutRecordedKind2Fixture(
     memory.Put(kState + 0x186C, kCapturedTableSeed);
     memory.Put(kState + 0x2118, one);
     memory.Put(kState + 0x2598, kCapturedTableSalt);
-    memory.Put(kCapturedObject + 0xE8, kCapturedOwner);
+    memory.Put(kCapturedObject + 0xF0, kCapturedOwner);
 
     std::array<std::uint8_t, kRecordSize> record{};
-    Store(record, 0x10, kCapturedFieldKey);
+    const std::uint64_t capturedFieldKey =
+        RuntimeCoordinateCodec::EncodeRecordValue(
+            kCapturedObject + layout.positionOffset,
+            kCapturedCodecSeed);
+    Store(record, 0x10, capturedFieldKey);
     Store(record, 0x530, kCapturedObjectKey);
     record[0x53D] = 0;
     Store(record, 0x540, kCapturedRingSalt);
@@ -389,10 +397,21 @@ void TestAddressAndCodecPrimitives() {
 
     std::uintptr_t literal = 0;
     REQUIRE(RuntimeCoordinateCodec::DecodeLdrLiteralAddress(
-        UINT32_C(0x58000050), UINT64_C(0x1000), literal));
+        UINT32_C(0x58000051), UINT64_C(0x1000), literal));
     REQUIRE(literal == UINT64_C(0x1008));
     REQUIRE(!RuntimeCoordinateCodec::DecodeLdrLiteralAddress(
         UINT32_C(0xD503201F), UINT64_C(0x1000), literal));
+}
+
+void TestMissingPositionOffsetIsRejected() {
+    RuntimeCoordinateCodec codec;
+    const auto read = [](std::uintptr_t, void*, std::size_t) {
+        return false;
+    };
+
+    REQUIRE(!Refresh(codec, read));
+    REQUIRE(codec.Diagnostic().error ==
+        RuntimeCoordinateCodecError::ConfigInvalid);
 }
 
 void TestRefreshAndExactRingDecode() {
@@ -727,6 +746,7 @@ void TestFingerprintFailure() {
 int main() {
     try {
         TestAddressAndCodecPrimitives();
+        TestMissingPositionOffsetIsRejected();
         TestRefreshAndExactRingDecode();
         TestRecordedKind2RingDecode();
         TestStrictIdentityFailures();

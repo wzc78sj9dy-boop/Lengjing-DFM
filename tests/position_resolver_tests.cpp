@@ -40,6 +40,7 @@ private:
 void RunPositionResolverTests() {
     using lengjing::game::native::AlgorithmCoordinateFinalizeError;
     using lengjing::game::native::CharacterPositionResolver;
+    using lengjing::game::native::CharacterPositionLayout;
     using lengjing::game::native::CharacterPositionSource;
     using lengjing::game::native::PositionReadMode;
     using lengjing::game::native::FinalizeAlgorithmCharacterCoordinate;
@@ -143,9 +144,15 @@ void RunPositionResolverTests() {
 
     constexpr std::uintptr_t actor = 0x100000;
     constexpr std::uintptr_t component = 0x200000;
+    constexpr std::uintptr_t actorComponentOffset = 0x38;
+    constexpr std::uintptr_t preferredPositionOffset = 0x58;
+    constexpr CharacterPositionLayout layout{
+        actorComponentOffset, preferredPositionOffset};
     PositionMemory memory;
-    memory.Put(actor + 0x180, component);
-    memory.Put(component + 0x168, Coordinate{10.0f, 20.0f, 30.0f});
+    memory.Put(actor + actorComponentOffset, component);
+    memory.Put(
+        component + preferredPositionOffset,
+        Coordinate{10.0f, 20.0f, 30.0f});
     memory.Put(component + 0x220, Coordinate{40.0f, 50.0f, 60.0f});
     auto read = [&memory](std::uintptr_t address, void* output, std::size_t size) {
         return memory.Read(address, output, size);
@@ -153,6 +160,21 @@ void RunPositionResolverTests() {
 
     CharacterPositionResolver resolver;
     Coordinate coordinate{};
+    bool unconfiguredReadAttempted = false;
+    auto unconfiguredRead = [&unconfiguredReadAttempted](
+                                std::uintptr_t,
+                                void*,
+                                std::size_t) {
+        unconfiguredReadAttempted = true;
+        return false;
+    };
+    REQUIRE(!resolver.Read(
+        actor, "NC_BP_DFMCharacter_C", PositionReadMode::Standard,
+        true, coordinate, unconfiguredRead));
+    REQUIRE(coordinate == Coordinate{});
+    REQUIRE(!unconfiguredReadAttempted);
+    REQUIRE(!resolver.Configure({}));
+    REQUIRE(resolver.Configure(layout));
     REQUIRE(resolver.Read(
         actor, "NC_BP_DFMCharacter_C", PositionReadMode::Standard,
         true, coordinate, read));
@@ -216,7 +238,7 @@ void RunPositionResolverTests() {
         false, coordinate, read));
     REQUIRE(coordinate == Coordinate({10.0f, 20.0f, 30.0f}));
 
-    memory.Put(component + 0x168, Coordinate{});
+    memory.Put(component + preferredPositionOffset, Coordinate{});
     REQUIRE(resolver.ReadLocalWithRoot(
         actor, 0, "NC_BP_DFMCharacter_C", PositionReadMode::Standard,
         false, coordinate, read));
@@ -225,7 +247,9 @@ void RunPositionResolverTests() {
         actor, "", PositionReadMode::Standard,
         false, coordinate, read));
     REQUIRE(coordinate == Coordinate({40.0f, 50.0f, 60.0f}));
-    memory.Put(component + 0x168, Coordinate{10.0f, 20.0f, 30.0f});
+    memory.Put(
+        component + preferredPositionOffset,
+        Coordinate{10.0f, 20.0f, 30.0f});
 
     memory.Put(component + 0x220, Coordinate{
         std::numeric_limits<float>::quiet_NaN(), 50.0f, 60.0f});
@@ -251,7 +275,7 @@ void RunPositionResolverTests() {
     REQUIRE(coordinate == Coordinate({10.0f, 20.0f, 30.0f}));
 
     constexpr std::uintptr_t decodedRoot = 0x300000;
-    memory.Put(decodedRoot + 0x168, Coordinate{});
+    memory.Put(decodedRoot + preferredPositionOffset, Coordinate{});
     memory.Put(decodedRoot + 0x148, Coordinate{});
     memory.Put(decodedRoot + 0x220, Coordinate{0.0f, 0.0f, -90.0f});
     memory.Put(decodedRoot + 0x240, Coordinate{70.0f, 80.0f, 90.0f});
@@ -299,7 +323,9 @@ void RunPositionResolverTests() {
         read));
     REQUIRE(coordinate == Coordinate{});
 
-    memory.Put(decodedRoot + 0x168, Coordinate{1.0f, 2.0f, 3.0f});
+    memory.Put(
+        decodedRoot + preferredPositionOffset,
+        Coordinate{1.0f, 2.0f, 3.0f});
     memory.Put(decodedRoot + 0x148, Coordinate{4.0f, 5.0f, 6.0f});
     memory.Put(decodedRoot + 0x220, Coordinate{7.0f, 8.0f, 9.0f});
     memory.Put(decodedRoot + 0x240, Coordinate{10.0f, 11.0f, 12.0f});
@@ -323,7 +349,7 @@ void RunPositionResolverTests() {
         read));
     REQUIRE(coordinate == Coordinate({1.0f, 2.0f, 3.0f}));
 
-    memory.Put(decodedRoot + 0x168, Coordinate{});
+    memory.Put(decodedRoot + preferredPositionOffset, Coordinate{});
     REQUIRE(resolver.ReadWithRoot(
         actor,
         decodedRoot,
@@ -375,7 +401,7 @@ void RunPositionResolverTests() {
         true, coordinate, read));
     REQUIRE(coordinate == Coordinate{});
 
-    memory.Erase(component + 0x168);
+    memory.Erase(component + preferredPositionOffset);
     memory.Erase(component + 0x220);
     REQUIRE(resolver.Read(
         actor, "Pickup_C", PositionReadMode::Standard,

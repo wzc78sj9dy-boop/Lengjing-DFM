@@ -1043,25 +1043,25 @@ void RunCoordinatePoolPolicyTests() {
     std::uint64_t indexedEntryAddress = 0;
     REQUIRE(ResolveCoordinatePoolIndexedPointerAddress(
         UINT64_C(0xAB00007123456000),
-        0xA0,
+        0xB0,
         indexedEntryAddress));
-    REQUIRE(indexedEntryAddress == UINT64_C(0x00000071234560A0));
+    REQUIRE(indexedEntryAddress == UINT64_C(0x00000071234560B0));
     std::uint64_t indexedContextAddress = 0;
     REQUIRE(ResolveCoordinatePoolIndexedPointerAddress(
         UINT64_C(0xCD00007123457000),
-        -8,
+        -16,
         indexedContextAddress));
-    REQUIRE(indexedContextAddress == UINT64_C(0x0000007123456FF8));
+    REQUIRE(indexedContextAddress == UINT64_C(0x0000007123456FF0));
     REQUIRE(!ResolveCoordinatePoolIndexedPointerAddress(
-        4, -8, indexedContextAddress));
+        4, -16, indexedContextAddress));
     REQUIRE(ResolveCoordinatePoolIndexedRootAddresses(
         UINT64_C(0xAB00007123456000),
-        -8,
-        0xA0,
+        -16,
+        0xB0,
         indexedContextAddress,
         indexedEntryAddress));
-    REQUIRE(indexedContextAddress == UINT64_C(0x0000007123455FF8));
-    REQUIRE(indexedEntryAddress == UINT64_C(0x00000071234560A0));
+    REQUIRE(indexedContextAddress == UINT64_C(0x0000007123455FF0));
+    REQUIRE(indexedEntryAddress == UINT64_C(0x00000071234560B0));
 
     const lengjing::game::native::CoordinatePoolRuntimeLayout cloudLayout{
         0x1A009000,
@@ -1088,14 +1088,11 @@ void RunCoordinatePoolPolicyTests() {
             cloudLayout.ringRefreshFrames);
     const auto builtInDecrypt2Layout =
         MakeCoordinateDecrypt2RuntimeLayout({});
-    REQUIRE(builtInDecrypt2Layout.rootRva == 0x0E738950);
-    REQUIRE(builtInDecrypt2Layout.bridgeOffset == 0x0C);
-    REQUIRE(builtInDecrypt2Layout.contextOffset == -8);
-    REQUIRE(builtInDecrypt2Layout.entryOffset == 0xA0);
-    REQUIRE(builtInDecrypt2Layout.componentKeyOffset == 0x210);
-    REQUIRE(builtInDecrypt2Layout.entryStride == 0x30);
-    REQUIRE(builtInDecrypt2Layout.poolHeadSkip == 0x10);
-    REQUIRE(builtInDecrypt2Layout.ringRefreshFrames == 60);
+    REQUIRE(!builtInDecrypt2Layout.IsValid());
+    REQUIRE(builtInDecrypt2Layout.rootRva == 0);
+    REQUIRE(builtInDecrypt2Layout.bridgeOffset == 0);
+    REQUIRE(builtInDecrypt2Layout.contextOffset == 0);
+    REQUIRE(builtInDecrypt2Layout.entryOffset == 0);
     REQUIRE(!ShouldClearCoordinatePoolRingsAfterPointerRefresh(
         true,
         NormalizeCoordinatePoolPointer(UINT64_C(0xABCD007123456780)),

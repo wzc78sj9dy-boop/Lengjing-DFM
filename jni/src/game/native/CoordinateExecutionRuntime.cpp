@@ -41,32 +41,6 @@ constexpr std::uint32_t kPacgaMask = 0xFFE0FC00U;
 constexpr std::uint32_t kPacgaOpcode = 0x9AC03000U;
 constexpr std::uint32_t kSvcMask = 0xFFE0001FU;
 constexpr std::uint32_t kSvcOpcode = 0xD4000001U;
-constexpr std::uint64_t kSubjectLoadInstructionOffset = UINT64_C(0xF4C);
-constexpr std::uint64_t kCallbackInstructionOffset = UINT64_C(0x1000);
-constexpr std::uint64_t kCallbackReturnOffset = UINT64_C(0x1004);
-constexpr std::uint64_t kCallbackIndexOffset = UINT64_C(0x28A4);
-constexpr std::uint64_t kCallbackCopyPrepareOffset = UINT64_C(0x3130);
-constexpr std::uint64_t kCallbackCopyAfterOffset = UINT64_C(0x3148);
-constexpr std::uint64_t kCallbackTablePointerCodeOffset = UINT64_C(0xCD844);
-constexpr std::uint64_t kCallbackTableValueCodeOffset = UINT64_C(0xCD848);
-constexpr std::uint64_t kCallbackLockCodeOffset = UINT64_C(0xCC67C);
-constexpr std::uint64_t kCallbackLockReturnCodeOffset = UINT64_C(0xCC680);
-constexpr std::uint64_t kCallbackFirstCallCodeOffset = UINT64_C(0xCD750);
-constexpr std::uint64_t kCallbackFirstReturnCodeOffset = UINT64_C(0xCD754);
-constexpr std::uint64_t kCallbackExternalCallCodeOffset = UINT64_C(0xCD77C);
-constexpr std::uint64_t kCallbackExternalReturnCodeOffset = UINT64_C(0xCD780);
-constexpr std::uint64_t kCallbackPrimaryGateWriteCodeOffset = UINT64_C(0xCD79C);
-constexpr std::uint64_t kCallbackAlternateGateWriteCodeOffset = UINT64_C(0xCDF34);
-constexpr std::uint64_t kCallbackGateCodeOffset = UINT64_C(0xCD024);
-constexpr std::uint64_t kCallbackRecordCountCodeOffset = UINT64_C(0xCC964);
-constexpr std::uint64_t kCallbackTargetKeyCodeOffset = UINT64_C(0xCC98C);
-constexpr std::uint64_t kCallbackRingSetupCodeOffset = UINT64_C(0xCCA38);
-constexpr std::uint64_t kCallbackRingProbeCodeOffset = UINT64_C(0xCC240);
-constexpr std::uint64_t kCallbackRingHitCodeOffset = UINT64_C(0xCDA38);
-constexpr std::uint64_t kCallbackDispatchCodeOffset = UINT64_C(0xCBF50);
-constexpr std::uint64_t kCallbackDispatchReturnCodeOffset = UINT64_C(0xCBF54);
-constexpr std::uint64_t kCallbackResultPrepareCodeOffset = UINT64_C(0xCC004);
-constexpr std::uint64_t kCallbackResultCodeOffset = UINT64_C(0xCC018);
 
 int XRegisterId(std::uint32_t index) noexcept {
     if (index <= 28) {
@@ -229,7 +203,8 @@ struct CoordinateExecutionRuntime::Impl {
                 codeBaseValue,
                 codeSizeValue,
                 requestValue.mode,
-                executionPlan);
+                executionPlan,
+                requestValue.layout);
             if (!reuseEngine) CloseEngine();
 
             memory = &memoryValue;
@@ -264,7 +239,8 @@ struct CoordinateExecutionRuntime::Impl {
                      codeBaseValue,
                      codeSizeValue,
                      requestValue.mode,
-                     executionPlan))) {
+                     executionPlan,
+                     requestValue.layout))) {
                 return Fail(
                     CoordinateExecutionStatus::BackendUnavailable,
                     probe.error == CoordinateExecutionRuntimeError::None
@@ -484,7 +460,8 @@ private:
         std::uintptr_t codeBaseValue,
         std::size_t codeSizeValue,
         CoordinateExecutionMode modeValue,
-        const CoordinateExecutionPlan& executionPlan) const noexcept {
+        const CoordinateExecutionPlan& executionPlan,
+        const CoordinateExecutionLayout& layoutValue) const noexcept {
         return engine != nullptr && !enginePoisoned && engineIdentityValid &&
             engineExecutionCount < kMaximumEngineExecutions &&
             engineMemory == &memoryValue &&
@@ -492,7 +469,7 @@ private:
             engineModuleSize == moduleSizeValue &&
             engineCodeBase == codeBaseValue &&
             engineCodeSize == codeSizeValue &&
-            engineMode == modeValue &&
+            engineMode == modeValue && engineLayout == layoutValue &&
             SameEnginePlan(enginePlan, executionPlan);
     }
 
@@ -517,7 +494,8 @@ private:
         std::uintptr_t codeBaseValue,
         std::size_t codeSizeValue,
         CoordinateExecutionMode modeValue,
-        const CoordinateExecutionPlan& executionPlan) noexcept {
+        const CoordinateExecutionPlan& executionPlan,
+        const CoordinateExecutionLayout& layoutValue) noexcept {
         if (engine == nullptr) return false;
         engineMemory = &memoryValue;
         engineModuleBase = moduleBaseValue;
@@ -525,6 +503,7 @@ private:
         engineCodeBase = codeBaseValue;
         engineCodeSize = codeSizeValue;
         engineMode = modeValue;
+        engineLayout = layoutValue;
         enginePlan = executionPlan;
         engineIdentityValid = true;
         codeSnapshotVerifiedAt = std::chrono::steady_clock::now();
@@ -677,7 +656,7 @@ private:
             return false;
         }
         evidence.returnStubMagicVerifiedBeforeRun =
-            magic == kCoordinateExecutionReturnStubMagic;
+            magic == request.layout.discovery.returnStubMagic;
         return evidence.returnStubMagicVerifiedBeforeRun;
     }
 
@@ -690,7 +669,7 @@ private:
                 UC_ERR_OK) {
             return false;
         }
-        return magic == kCoordinateExecutionReturnStubMagic;
+        return magic == request.layout.discovery.returnStubMagic;
     }
 
     bool OpenEngine() {
@@ -773,6 +752,7 @@ private:
         engineCodeBase = 0;
         engineCodeSize = 0;
         engineMode = static_cast<CoordinateExecutionMode>(0);
+        engineLayout = {};
         enginePlan = {};
         engineIdentityValid = false;
         codeSnapshotVerifiedAt = {};
@@ -826,7 +806,7 @@ private:
         std::uint64_t slot = 0;
         if (stackBase == 0 ||
             !CoordinateExecutionAdd(
-                stackBase, kCoordinateExecutionResultSlotOffset, slot) ||
+                stackBase, request.layout.result.resultSlotOffset, slot) ||
             !EnsureGuestRange(slot, sizeof(subject))) {
             return false;
         }
@@ -1061,9 +1041,9 @@ private:
                 appendIfInPage(address);
             }
         };
-        appendHookOffset(kSubjectLoadInstructionOffset);
-        appendHookOffset(kCallbackInstructionOffset);
-        appendHookOffset(kCallbackReturnOffset);
+        appendHookOffset(request.layout.hooks.subjectLoadInstruction);
+        appendHookOffset(request.layout.hooks.callbackInstruction);
+        appendHookOffset(request.layout.hooks.callbackReturn);
         const auto appendCallbackOffset = [&](std::uint64_t offset) {
             std::uint64_t address = 0;
             if (evidence.callbackTarget != 0 &&
@@ -1075,35 +1055,35 @@ private:
                 appendIfInPage(address);
             }
         };
-        appendCallbackOffset(kCallbackIndexOffset);
-        appendCallbackOffset(kCallbackCopyPrepareOffset);
-        appendCallbackOffset(kCallbackCopyAfterOffset);
+        appendCallbackOffset(request.layout.hooks.callbackIndex);
+        appendCallbackOffset(request.layout.hooks.callbackCopyPrepare);
+        appendCallbackOffset(request.layout.hooks.callbackCopyAfter);
         const auto appendCodeOffset = [&](std::uint64_t offset) {
             std::uint64_t address = 0;
             if (CoordinateExecutionAdd(codeBase, offset, address)) {
                 appendIfInPage(address);
             }
         };
-        appendCodeOffset(kCallbackTablePointerCodeOffset);
-        appendCodeOffset(kCallbackTableValueCodeOffset);
-        appendCodeOffset(kCallbackLockCodeOffset);
-        appendCodeOffset(kCallbackLockReturnCodeOffset);
-        appendCodeOffset(kCallbackFirstCallCodeOffset);
-        appendCodeOffset(kCallbackFirstReturnCodeOffset);
-        appendCodeOffset(kCallbackExternalCallCodeOffset);
-        appendCodeOffset(kCallbackExternalReturnCodeOffset);
-        appendCodeOffset(kCallbackPrimaryGateWriteCodeOffset);
-        appendCodeOffset(kCallbackAlternateGateWriteCodeOffset);
-        appendCodeOffset(kCallbackGateCodeOffset);
-        appendCodeOffset(kCallbackRecordCountCodeOffset);
-        appendCodeOffset(kCallbackTargetKeyCodeOffset);
-        appendCodeOffset(kCallbackRingSetupCodeOffset);
-        appendCodeOffset(kCallbackRingProbeCodeOffset);
-        appendCodeOffset(kCallbackRingHitCodeOffset);
-        appendCodeOffset(kCallbackDispatchCodeOffset);
-        appendCodeOffset(kCallbackDispatchReturnCodeOffset);
-        appendCodeOffset(kCallbackResultPrepareCodeOffset);
-        appendCodeOffset(kCallbackResultCodeOffset);
+        appendCodeOffset(request.layout.hooks.callbackTablePointerCode);
+        appendCodeOffset(request.layout.hooks.callbackTableValueCode);
+        appendCodeOffset(request.layout.hooks.callbackLockCode);
+        appendCodeOffset(request.layout.hooks.callbackLockReturnCode);
+        appendCodeOffset(request.layout.hooks.callbackFirstCallCode);
+        appendCodeOffset(request.layout.hooks.callbackFirstReturnCode);
+        appendCodeOffset(request.layout.hooks.callbackExternalCallCode);
+        appendCodeOffset(request.layout.hooks.callbackExternalReturnCode);
+        appendCodeOffset(request.layout.hooks.callbackPrimaryGateWriteCode);
+        appendCodeOffset(request.layout.hooks.callbackAlternateGateWriteCode);
+        appendCodeOffset(request.layout.hooks.callbackGateCode);
+        appendCodeOffset(request.layout.hooks.callbackRecordCountCode);
+        appendCodeOffset(request.layout.hooks.callbackTargetKeyCode);
+        appendCodeOffset(request.layout.hooks.callbackRingSetupCode);
+        appendCodeOffset(request.layout.hooks.callbackRingProbeCode);
+        appendCodeOffset(request.layout.hooks.callbackRingHitCode);
+        appendCodeOffset(request.layout.hooks.callbackDispatchCode);
+        appendCodeOffset(request.layout.hooks.callbackDispatchReturnCode);
+        appendCodeOffset(request.layout.hooks.callbackResultPrepareCode);
+        appendCodeOffset(request.layout.hooks.callbackResultCode);
         for (std::size_t offset = 0; offset <= bytes.size() - 4; offset += 4) {
             std::uint32_t instruction = 0;
             std::memcpy(&instruction, bytes.data() + offset, sizeof(instruction));
@@ -1172,7 +1152,7 @@ private:
                 std::uint64_t snapshotAddress = 0;
                 if (CoordinateExecutionAdd(
                         stackBase,
-                        kCoordinateExecutionResultSlotOffset,
+                        request.layout.result.resultSlotOffset,
                         snapshotAddress)) {
                     static_cast<void>(uc_mem_read(
                         engine,
@@ -1182,7 +1162,7 @@ private:
                 }
                 if (CoordinateExecutionAdd(
                         stackBase,
-                        kCoordinateExecutionResultSlotOffset + 8,
+                        request.layout.result.resultSlotOffset + 8,
                         snapshotAddress)) {
                     static_cast<void>(uc_mem_read(
                         engine,
@@ -1192,7 +1172,7 @@ private:
                 }
                 if (CoordinateExecutionAdd(
                         stackBase,
-                        kCoordinateExecutionResultSlotOffset + 0x10,
+                        request.layout.result.resultSlotOffset + 0x10,
                         snapshotAddress)) {
                     static_cast<void>(uc_mem_read(
                         engine,
@@ -1214,7 +1194,7 @@ private:
         std::uint64_t probeAddress = 0;
         if (CoordinateExecutionAdd(
                 plan.hookPc,
-                kSubjectLoadInstructionOffset,
+                request.layout.hooks.subjectLoadInstruction,
                 probeAddress) &&
             address == probeAddress) {
             ++evidence.subjectLoadCount;
@@ -1229,7 +1209,7 @@ private:
         }
         if (CoordinateExecutionAdd(
                 plan.hookPc,
-                kCallbackInstructionOffset,
+                request.layout.hooks.callbackInstruction,
                 probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackCount;
@@ -1263,7 +1243,7 @@ private:
         }
         if (CoordinateExecutionAdd(
                 plan.hookPc,
-                kCallbackReturnOffset,
+                request.layout.hooks.callbackReturn,
                 probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackReturnCount;
@@ -1273,13 +1253,17 @@ private:
             NormalizeCoordinateExecutionPointer(evidence.callbackTarget);
         if (callbackTarget != 0 &&
             CoordinateExecutionAdd(
-                callbackTarget, kCallbackIndexOffset, probeAddress) &&
+                callbackTarget,
+                request.layout.hooks.callbackIndex,
+                probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackIndexCount;
             static_cast<void>(ReadXRegister(0, evidence.callbackIndex));
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackTablePointerCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackTablePointerCode,
+                probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackTableProbeCount;
             static_cast<void>(
@@ -1287,12 +1271,16 @@ private:
             static_cast<void>(ReadXRegister(0, evidence.callbackTableIndex));
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackTableValueCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackTableValueCode,
+                probeAddress) &&
             address == probeAddress) {
             static_cast<void>(ReadXRegister(8, evidence.callbackTableValue));
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackLockCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackLockCode,
+                probeAddress) &&
             address == probeAddress) {
             static_cast<void>(
                 ReadXRegister(0, evidence.callbackMutexRecord));
@@ -1308,7 +1296,9 @@ private:
             }
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackLockReturnCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackLockReturnCode,
+                probeAddress) &&
             address == probeAddress) {
             static_cast<void>(ReadXRegister(0, evidence.callbackLockReturn));
             const std::uint64_t record = NormalizeCoordinateExecutionPointer(
@@ -1322,7 +1312,9 @@ private:
             }
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackFirstCallCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackFirstCallCode,
+                probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackFirstCallCount;
             static_cast<void>(
@@ -1331,14 +1323,18 @@ private:
                 ReadXRegister(0, evidence.callbackFirstArgument));
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackFirstReturnCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackFirstReturnCode,
+                probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackFirstReturnCount;
             static_cast<void>(
                 ReadXRegister(0, evidence.callbackFirstReturn));
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackExternalCallCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackExternalCallCode,
+                probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackExternalCallCount;
             static_cast<void>(
@@ -1351,7 +1347,9 @@ private:
             if (hookFailed) return;
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackExternalReturnCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackExternalReturnCode,
+                probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackExternalReturnCount;
             static_cast<void>(
@@ -1362,7 +1360,7 @@ private:
                 if (IsCoordinateExecutionPointer(context)) {
                     static_cast<void>(uc_mem_read(
                         engine,
-                        context + 0x3098,
+                        context + request.layout.fields.externalExpected,
                         &evidence.callbackExternalExpected,
                         sizeof(evidence.callbackExternalExpected)));
                 }
@@ -1371,13 +1369,15 @@ private:
             if (uc_reg_read(engine, UC_ARM64_REG_SP, &sp) == UC_ERR_OK) {
                 static_cast<void>(uc_mem_read(
                     engine,
-                    sp + 0xE8,
+                    sp + request.layout.fields.externalPriorGate,
                     &evidence.callbackExternalPriorGate,
                     sizeof(evidence.callbackExternalPriorGate)));
             }
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackPrimaryGateWriteCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackPrimaryGateWriteCode,
+                probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackPrimaryGateWriteCount;
             std::uint64_t value = 0;
@@ -1389,13 +1389,15 @@ private:
             if (uc_reg_read(engine, UC_ARM64_REG_SP, &sp) == UC_ERR_OK) {
                 static_cast<void>(uc_mem_read(
                     engine,
-                    sp + 0x1EC,
+                    sp + request.layout.fields.primaryGateSource,
                     &evidence.callbackPrimaryGateSource,
                     sizeof(evidence.callbackPrimaryGateSource)));
             }
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackAlternateGateWriteCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackAlternateGateWriteCode,
+                probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackAlternateGateWriteCount;
             std::uint64_t value = 0;
@@ -1405,7 +1407,9 @@ private:
             }
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackGateCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackGateCode,
+                probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackGateProbeCount;
             std::uint64_t state = 0;
@@ -1417,23 +1421,25 @@ private:
             if (uc_reg_read(engine, UC_ARM64_REG_SP, &sp) == UC_ERR_OK) {
                 static_cast<void>(uc_mem_read(
                     engine,
-                    sp + 0xDC,
+                    sp + request.layout.fields.gateFlag,
                     &evidence.callbackGateFlag,
                     sizeof(evidence.callbackGateFlag)));
                 static_cast<void>(uc_mem_read(
                     engine,
-                    sp + 0xE0,
+                    sp + request.layout.fields.gateSnapshotA,
                     &evidence.callbackGateSnapshotA,
                     sizeof(evidence.callbackGateSnapshotA)));
                 static_cast<void>(uc_mem_read(
                     engine,
-                    sp + 0xE4,
+                    sp + request.layout.fields.gateSnapshotB,
                     &evidence.callbackGateSnapshotB,
                     sizeof(evidence.callbackGateSnapshotB)));
             }
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackRecordCountCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackRecordCountCode,
+                probeAddress) &&
             address == probeAddress) {
             std::uint64_t count = 0;
             if (ReadXRegister(10, count)) {
@@ -1442,19 +1448,25 @@ private:
             }
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackTargetKeyCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackTargetKeyCode,
+                probeAddress) &&
             address == probeAddress) {
             static_cast<void>(ReadXRegister(8, evidence.callbackTargetKey));
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackRingSetupCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackRingSetupCode,
+                probeAddress) &&
             address == probeAddress) {
             static_cast<void>(ReadXRegister(10, evidence.callbackRingBase));
             static_cast<void>(
                 ReadXRegister(8, evidence.callbackRingIndexArray));
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackRingProbeCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackRingProbeCode,
+                probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackRingProbeCount;
             static_cast<void>(ReadXRegister(9, evidence.callbackRingRowKey));
@@ -1467,19 +1479,23 @@ private:
             if (uc_reg_read(engine, UC_ARM64_REG_SP, &sp) == UC_ERR_OK) {
                 static_cast<void>(uc_mem_read(
                     engine,
-                    sp + 0x1BC,
+                    sp + request.layout.fields.ringMid,
                     &evidence.callbackRingMid,
                     sizeof(evidence.callbackRingMid)));
             }
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackRingHitCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackRingHitCode,
+                probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackRingHitCount;
             static_cast<void>(ReadXRegister(22, evidence.callbackRingHitRow));
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackDispatchCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackDispatchCode,
+                probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackDispatchCount;
             static_cast<void>(
@@ -1500,7 +1516,7 @@ private:
         }
         if (CoordinateExecutionAdd(
                 codeBase,
-                kCallbackDispatchReturnCodeOffset,
+                request.layout.hooks.callbackDispatchReturnCode,
                 probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackDispatchReturnCount;
@@ -1520,7 +1536,7 @@ private:
         }
         if (CoordinateExecutionAdd(
                 codeBase,
-                kCallbackResultPrepareCodeOffset,
+                request.layout.hooks.callbackResultPrepareCode,
                 probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackResultCount;
@@ -1530,20 +1546,24 @@ private:
                 ReadXRegister(9, evidence.callbackResultBase));
         }
         if (CoordinateExecutionAdd(
-                codeBase, kCallbackResultCodeOffset, probeAddress) &&
+                codeBase,
+                request.layout.hooks.callbackResultCode,
+                probeAddress) &&
             address == probeAddress) {
             static_cast<void>(
                 ReadXRegister(8, evidence.callbackResultPointer));
             evidence.callbackResultPositionValid = CapturePositionBits(
                 evidence.callbackResultPointer,
-                0x10,
+                request.layout.fields.resultPosition,
                 evidence.callbackResultPositionX,
                 evidence.callbackResultPositionY,
                 evidence.callbackResultPositionZ);
         }
         if (callbackTarget != 0 &&
             CoordinateExecutionAdd(
-                callbackTarget, kCallbackCopyPrepareOffset, probeAddress) &&
+                callbackTarget,
+                request.layout.hooks.callbackCopyPrepare,
+                probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackCopyPrepareCount;
             static_cast<void>(
@@ -1578,7 +1598,9 @@ private:
         }
         if (callbackTarget != 0 &&
             CoordinateExecutionAdd(
-                callbackTarget, kCallbackCopyAfterOffset, probeAddress) &&
+                callbackTarget,
+                request.layout.hooks.callbackCopyAfter,
+                probeAddress) &&
             address == probeAddress) {
             ++evidence.callbackCopyAfterCount;
             const std::uint64_t destination =
@@ -1781,7 +1803,7 @@ private:
         if (size != static_cast<int>(sizeof(std::uint64_t)) ||
             stackBase == 0 ||
             !CoordinateExecutionAdd(
-                stackBase, kCoordinateExecutionResultSlotOffset, slot)) {
+                stackBase, request.layout.result.resultSlotOffset, slot)) {
             return;
         }
         slot = NormalizeCoordinateExecutionPointer(slot);
@@ -1810,21 +1832,29 @@ private:
                 uc_mem_read(engine, localAddress, &value, sizeof(value)) ==
                 UC_ERR_OK;
         };
-        static_cast<void>(readLocal(0x60, evidence.capturedLocal60));
-        static_cast<void>(readLocal(0x1C8, evidence.capturedLocal1C8));
-        static_cast<void>(readLocal(0x208, evidence.capturedLocal208));
-        static_cast<void>(readLocal(0x238, evidence.capturedLocal238));
+        static_cast<void>(readLocal(
+            request.layout.fields.capturedLocal0,
+            evidence.capturedLocal0));
+        static_cast<void>(readLocal(
+            request.layout.fields.capturedLocal1,
+            evidence.capturedLocal1));
+        static_cast<void>(readLocal(
+            request.layout.fields.capturedLocal2,
+            evidence.capturedLocal2));
+        static_cast<void>(readLocal(
+            request.layout.fields.capturedLocal3,
+            evidence.capturedLocal3));
         std::uint64_t fieldAddress = 0;
         if (CoordinateExecutionAdd(
                 NormalizeCoordinateExecutionPointer(
-                    evidence.capturedLocal238),
-                0x2298,
+                    evidence.capturedLocal3),
+                request.layout.fields.capturedLocalField,
                 fieldAddress)) {
             static_cast<void>(uc_mem_read(
                 engine,
                 fieldAddress,
-                &evidence.capturedLocal238Field,
-                sizeof(evidence.capturedLocal238Field)));
+                &evidence.capturedLocalField,
+                sizeof(evidence.capturedLocalField)));
         }
         evidence.captureValid = true;
         ++evidence.captureCount;
@@ -1851,7 +1881,7 @@ private:
         std::uint64_t slot = 0;
         if (stackBase == 0 ||
             !CoordinateExecutionAdd(
-                stackBase, kCoordinateExecutionResultSlotOffset, slot)) {
+                stackBase, request.layout.result.resultSlotOffset, slot)) {
             probe.error = CoordinateExecutionRuntimeError::EvidenceInvalid;
             return Failure(CoordinateExecutionStatus::EvidenceFailure);
         }
@@ -1879,7 +1909,7 @@ private:
         std::uint64_t positionAddress = 0;
         if (!CoordinateExecutionAdd(
                 object,
-                kCoordinateExecutionPositionOffset,
+                request.layout.result.positionOffset,
                 positionAddress) ||
             (request.mode == CoordinateExecutionMode::Emulate &&
              !IsCoordinateExecutionPointer(positionAddress)) ||
@@ -1938,7 +1968,7 @@ private:
             !ReadXRegister(21, context) ||
             uc_mem_read(
                 engine,
-                sp + 0x230,
+                sp + request.layout.fields.poolSelector,
                 &selector,
                 sizeof(selector)) != UC_ERR_OK ||
             selector >
@@ -1947,7 +1977,8 @@ private:
         }
         std::uint64_t slot = context + selector * 8;
         std::uint64_t pointer = 0;
-        if (!CoordinateExecutionAdd(slot, 0x2D40, slot) ||
+        if (!CoordinateExecutionAdd(
+                slot, request.layout.fields.poolTable, slot) ||
             uc_mem_read(engine, slot, &pointer, sizeof(pointer)) != UC_ERR_OK) {
             return false;
         }
@@ -2016,6 +2047,7 @@ private:
     std::size_t engineCodeSize = 0;
     CoordinateExecutionMode engineMode =
         static_cast<CoordinateExecutionMode>(0);
+    CoordinateExecutionLayout engineLayout{};
     CoordinateExecutionPlan enginePlan{};
     bool engineIdentityValid = false;
     std::chrono::steady_clock::time_point codeSnapshotVerifiedAt{};

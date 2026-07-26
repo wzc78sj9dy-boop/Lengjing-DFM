@@ -21,6 +21,7 @@ namespace {
 
 std::size_t gFreedInstructions = 0;
 std::size_t gFreedDetails = 0;
+constexpr std::uint32_t kSyntheticEntryStride = 80;
 
 void AppendU32(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
     for (unsigned int index = 0; index < 4U; ++index) {
@@ -82,7 +83,7 @@ std::string BuildRemotePlanPayload(std::uint64_t base) {
     nlohmann::json data = {
         {"A", 8},
         {"B", 16},
-        {"C", 48},
+        {"C", 52},
         {"D", base},
         {"E", base + 4U},
         {"F", ARM64_REG_X2},
@@ -255,6 +256,20 @@ int main() {
     REQUIRE(decodeLimitFinder.decode_method_instruction_limit() == 2000);
     decodeLimitFinder.set_decode_method_instruction_limit(0);
     REQUIRE(decodeLimitFinder.decode_method_instruction_limit() == 500);
+    REQUIRE(decodeLimitFinder.expected_entry_stride() == 0);
+    REQUIRE(!decodeLimitFinder.set_expected_entry_stride(10));
+    REQUIRE(decodeLimitFinder.expected_entry_stride() == 0);
+    REQUIRE(decodeLimitFinder.set_expected_entry_stride(
+        kSyntheticEntryStride));
+    REQUIRE(decodeLimitFinder.expected_entry_stride() ==
+        kSyntheticEntryStride);
+
+    coord_dec::FindDec missingStrideFinder;
+    REQUIRE(missingStrideFinder.find_dec(kBase) == -1);
+    REQUIRE(missingStrideFinder.failure_stage() ==
+        coord_dec::FindDecFailureStage::RingOffset);
+    REQUIRE(missingStrideFinder.failure_detail() ==
+        coord_dec::FindDecFailureDetail::EntryStrideMissing);
 
     std::array<std::uint32_t, 4> branchWrappedMethod{{
         UINT32_C(0x14000002),
@@ -396,6 +411,10 @@ int main() {
     REQUIRE(remotePlan.plan.memoryParameters.size() == 1);
     REQUIRE(remotePlan.plan.variableParameters.size() == 1);
     REQUIRE(remotePlan.plan.patches.size() == 1);
+    coord_dec::FindDec missingRemoteStrideFinder;
+    REQUIRE(!missingRemoteStrideFinder.import_runtime_plan(remotePlan.plan));
+    REQUIRE(missingRemoteStrideFinder.failure_detail() ==
+        coord_dec::FindDecFailureDetail::EntryStrideMissing);
 
     nlohmann::json oversizedSignedPlan =
         nlohmann::json::parse(remotePayload);
@@ -412,6 +431,7 @@ int main() {
 
     std::array<std::uint8_t, kRemotePlanCodeSize> remoteCode{};
     coord_dec::FindDec remoteFinder;
+    REQUIRE(remoteFinder.set_expected_entry_stride(kSyntheticEntryStride));
     REQUIRE(remoteFinder.set(
         kRemoteMappingBase,
         remoteCode.data(),

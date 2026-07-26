@@ -9,11 +9,6 @@
 namespace lengjing::game::native {
 namespace {
 
-constexpr std::uint64_t kProfile12RootOffset = UINT64_C(0x0E9CC2EC);
-constexpr std::uint64_t kDefaultRootOffset = UINT64_C(0x0E7F7664);
-constexpr std::uint64_t kProfile12PointerOffset = UINT64_C(0x8);
-constexpr std::uint64_t kDefaultPointerOffset = UINT64_C(0xC);
-constexpr std::uint64_t kEntryPointerOffset = UINT64_C(0xA0);
 constexpr std::uint64_t kScanWindowSize = UINT64_C(0x100000);
 constexpr std::uint64_t kScanOverlap = UINT64_C(8);
 constexpr std::size_t kReadPageSize = 4096;
@@ -245,6 +240,7 @@ bool InspectVeneer(const CoordinateExecutionReadCallback& read,
                    std::uint64_t codeEnd,
                    std::uint64_t ldrPc,
                    std::uint64_t relativeEntry,
+                   std::uint64_t returnStubMagic,
                    CoordinateExecutionCandidate* candidate) {
     if (candidate == nullptr || ldrPc < module.guestBase ||
         ldrPc - module.guestBase < 4) {
@@ -258,17 +254,17 @@ bool InspectVeneer(const CoordinateExecutionReadCallback& read,
     }
 
     const std::uint32_t ldr =
-        static_cast<std::uint32_t>(kCoordinateExecutionReturnStubMagic);
+        static_cast<std::uint32_t>(returnStubMagic);
     std::uint64_t thunk = 0;
     unsigned destination = 0;
     if (!ResolveLdrLiteral(
-            read, ldrPc, ldr, 16, &thunk, &destination)) {
+            read, ldrPc, ldr, -1, &thunk, &destination)) {
         return false;
     }
 
     std::uint64_t magic = 0;
     if (!ReadValue(read, ldrPc, &magic) ||
-        magic != kCoordinateExecutionReturnStubMagic) {
+        magic != returnStubMagic) {
         return false;
     }
 
@@ -301,6 +297,7 @@ bool ScanRange(const CoordinateExecutionReadCallback& read,
                std::uint64_t begin,
                std::uint64_t end,
                std::uint64_t relativeEntry,
+               std::uint64_t returnStubMagic,
                const CandidateSink& sink) {
     if (begin >= end) return false;
 
@@ -328,7 +325,7 @@ bool ScanRange(const CoordinateExecutionReadCallback& read,
                 std::uint64_t magic = 0;
                 std::memcpy(
                     &magic, buffer.data() + offset, sizeof(magic));
-                if (magic != kCoordinateExecutionReturnStubMagic) continue;
+                if (magic != returnStubMagic) continue;
 
                 std::uint64_t ldrPc = 0;
                 CoordinateExecutionCandidate candidate{};
@@ -342,6 +339,7 @@ bool ScanRange(const CoordinateExecutionReadCallback& read,
                         codeEnd,
                         ldrPc,
                         relativeEntry,
+                        returnStubMagic,
                         &candidate) &&
                     !sink(candidate)) {
                     return true;
@@ -363,8 +361,10 @@ bool ScanInPriorityOrder(
     const CoordinateExecutionModuleSnapshot& code,
     std::uint64_t scanAnchor,
     std::uint64_t relativeEntry,
+    const CoordinateExecutionLayout& layout,
     const CandidateSink& sink) {
-    if (!read || relativeEntry == 0 || relativeEntry >= code.size) {
+    if (!read || !layout.IsValid() || relativeEntry == 0 ||
+        relativeEntry >= code.size) {
         return false;
     }
 
@@ -386,6 +386,7 @@ bool ScanInPriorityOrder(
             scanAnchor,
             scanAnchor + 16,
             relativeEntry,
+            layout.discovery.returnStubMagic,
             sink)) {
         return true;
     }
@@ -417,6 +418,7 @@ bool ScanInPriorityOrder(
             firstBegin,
             firstEnd,
             relativeEntry,
+            layout.discovery.returnStubMagic,
             sink)) {
         return true;
     }
@@ -430,6 +432,7 @@ bool ScanInPriorityOrder(
             module.guestBase,
             centerBegin,
             relativeEntry,
+            layout.discovery.returnStubMagic,
             sink)) {
         return true;
     }
@@ -443,6 +446,7 @@ bool ScanInPriorityOrder(
             centerEnd,
             moduleEnd,
             relativeEntry,
+            layout.discovery.returnStubMagic,
             sink);
 }
 
@@ -469,40 +473,26 @@ bool NormalizeRelativeEntry(
 
 }  // namespace
 
-CoordinateExecutionProfileOffsets GetCoordinateExecutionProfileOffsets(
-    std::uint32_t scanProfile) noexcept {
-    if (scanProfile == 1 || scanProfile == 2) {
-        return CoordinateExecutionProfileOffsets{
-            kProfile12RootOffset,
-            kProfile12PointerOffset,
-            kEntryPointerOffset,
-        };
-    }
-    return CoordinateExecutionProfileOffsets{
-        kDefaultRootOffset,
-        kDefaultPointerOffset,
-        kEntryPointerOffset,
-    };
-}
-
 bool ResolveCoordinateExecutionDiscoveryInput(
     const CoordinateExecutionReadCallback& read,
     std::uint64_t configuredModuleBase,
-    std::uint32_t scanProfile,
+    const CoordinateExecutionLayout& layout,
     CoordinateExecutionDiscoveryInput* input) {
-    if (!read || input == nullptr || configuredModuleBase == 0) return false;
+    if (!read || input == nullptr || configuredModuleBase == 0 ||
+        !layout.IsValid()) {
+        return false;
+    }
     *input = {};
 
-    const CoordinateExecutionProfileOffsets profile =
-        GetCoordinateExecutionProfileOffsets(scanProfile);
+    const CoordinateExecutionDiscoveryLayout& discovery = layout.discovery;
     std::uint64_t pointerAddress = 0;
     if (!AddNoOverflow(
             configuredModuleBase,
-            profile.rootOffset,
+            discovery.rootOffset,
             &input->scanAnchor) ||
         !AddNoOverflow(
             input->scanAnchor,
-            profile.pointerOffset,
+            discovery.pointerOffset,
             &pointerAddress)) {
         return false;
     }
@@ -513,7 +503,7 @@ bool ResolveCoordinateExecutionDiscoveryInput(
     if (!IsCanonicalPointer(input->root)) return false;
 
     std::uint64_t entryAddress = 0;
-    return AddNoOverflow(input->root, profile.entryOffset, &entryAddress) &&
+    return AddNoOverflow(input->root, discovery.entryOffset, &entryAddress) &&
         ReadValue(read, entryAddress, &input->rawEntry);
 }
 
@@ -585,7 +575,8 @@ CoordinateExecutionCandidateScanResult ScanCoordinateExecutionCandidates(
     const CoordinateExecutionModuleSnapshot& module,
     const CoordinateExecutionModuleSnapshot& code,
     std::uint64_t scanAnchor,
-    std::uint64_t relativeEntry) {
+    std::uint64_t relativeEntry,
+    const CoordinateExecutionLayout& layout) {
     CoordinateExecutionCandidateScanResult result{};
     result.candidates.reserve(16);
     const CandidateSink sink = [&result](
@@ -605,7 +596,7 @@ CoordinateExecutionCandidateScanResult ScanCoordinateExecutionCandidates(
         return true;
     };
     static_cast<void>(ScanInPriorityOrder(
-        read, module, code, scanAnchor, relativeEntry, sink));
+        read, module, code, scanAnchor, relativeEntry, layout, sink));
     return result;
 }
 
@@ -615,18 +606,18 @@ DiscoverCoordinateExecutionCandidates(
     const CoordinateExecutionModuleSnapshot& module,
     const CoordinateExecutionModuleSnapshot& code,
     std::uint64_t configuredModuleBase,
-    std::uint32_t scanProfile) {
+    const CoordinateExecutionLayout& layout) {
     std::uint64_t scanAnchor = 0;
     std::uint64_t relativeEntry = 0;
     CoordinateExecutionDiscoveryInput input{};
     if (!ResolveCoordinateExecutionDiscoveryInput(
-            read, configuredModuleBase, scanProfile, &input) ||
+            read, configuredModuleBase, layout, &input) ||
         !NormalizeRelativeEntry(code, input.rawEntry, &relativeEntry)) {
         return {};
     }
     scanAnchor = input.scanAnchor;
     return ScanCoordinateExecutionCandidates(
-        read, module, code, scanAnchor, relativeEntry);
+        read, module, code, scanAnchor, relativeEntry, layout);
 }
 
 bool ScanFirstCoordinateExecutionCandidate(
@@ -635,6 +626,7 @@ bool ScanFirstCoordinateExecutionCandidate(
     const CoordinateExecutionModuleSnapshot& code,
     std::uint64_t scanAnchor,
     std::uint64_t relativeEntry,
+    const CoordinateExecutionLayout& layout,
     CoordinateExecutionCandidate* candidate) {
     if (candidate == nullptr) return false;
     *candidate = {};
@@ -646,7 +638,7 @@ bool ScanFirstCoordinateExecutionCandidate(
         return false;
     };
     static_cast<void>(ScanInPriorityOrder(
-        read, module, code, scanAnchor, relativeEntry, sink));
+        read, module, code, scanAnchor, relativeEntry, layout, sink));
     return found;
 }
 
@@ -655,14 +647,14 @@ bool DiscoverFirstCoordinateExecutionCandidate(
     const CoordinateExecutionModuleSnapshot& module,
     const CoordinateExecutionModuleSnapshot& code,
     std::uint64_t configuredModuleBase,
-    std::uint32_t scanProfile,
+    const CoordinateExecutionLayout& layout,
     CoordinateExecutionCandidate* candidate) {
     if (candidate == nullptr) return false;
     *candidate = {};
     std::uint64_t relativeEntry = 0;
     CoordinateExecutionDiscoveryInput input{};
     return ResolveCoordinateExecutionDiscoveryInput(
-               read, configuredModuleBase, scanProfile, &input) &&
+               read, configuredModuleBase, layout, &input) &&
         NormalizeRelativeEntry(code, input.rawEntry, &relativeEntry) &&
         ScanFirstCoordinateExecutionCandidate(
                read,
@@ -670,6 +662,7 @@ bool DiscoverFirstCoordinateExecutionCandidate(
                code,
                input.scanAnchor,
                relativeEntry,
+               layout,
                candidate);
 }
 
