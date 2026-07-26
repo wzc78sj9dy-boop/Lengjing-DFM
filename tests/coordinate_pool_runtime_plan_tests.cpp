@@ -251,6 +251,11 @@ int main() {
             kBase + 4U, kBase, false, 2000) == 2000);
 
     coord_dec::FindDec decodeLimitFinder;
+    REQUIRE(decodeLimitFinder.entry_method_instruction_limit() == 5000);
+    decodeLimitFinder.set_entry_method_instruction_limit(6000);
+    REQUIRE(decodeLimitFinder.entry_method_instruction_limit() == 6000);
+    decodeLimitFinder.set_entry_method_instruction_limit(0);
+    REQUIRE(decodeLimitFinder.entry_method_instruction_limit() == 5000);
     REQUIRE(decodeLimitFinder.decode_method_instruction_limit() == 500);
     decodeLimitFinder.set_decode_method_instruction_limit(2000);
     REQUIRE(decodeLimitFinder.decode_method_instruction_limit() == 2000);
@@ -270,6 +275,23 @@ int main() {
         coord_dec::FindDecFailureStage::RingOffset);
     REQUIRE(missingStrideFinder.failure_detail() ==
         coord_dec::FindDecFailureDetail::EntryStrideMissing);
+
+    std::vector<std::uint32_t> extendedEntryMethod(5002, 0);
+    coord_dec::FindDec extendedEntryFinder;
+    REQUIRE(extendedEntryFinder.set_expected_entry_stride(
+        kSyntheticEntryStride));
+    REQUIRE(extendedEntryFinder.set(
+        kBase,
+        extendedEntryMethod.data(),
+        static_cast<std::uint32_t>(
+            extendedEntryMethod.size() * sizeof(std::uint32_t))) == 0);
+    REQUIRE(extendedEntryFinder.find_dec(kBase) == -1);
+    REQUIRE(extendedEntryFinder.failure_stage() ==
+        coord_dec::FindDecFailureStage::EntryMethod);
+    extendedEntryFinder.set_entry_method_instruction_limit(6000);
+    REQUIRE(extendedEntryFinder.find_dec(kBase) == -1);
+    REQUIRE(extendedEntryFinder.failure_stage() ==
+        coord_dec::FindDecFailureStage::V87Marker);
 
     std::array<std::uint32_t, 4> branchWrappedMethod{{
         UINT32_C(0x14000002),
@@ -313,6 +335,10 @@ int main() {
             0);
     };
     const std::set<std::string> indexDependencies{"index"};
+    REQUIRE(coord_dec::IsRingIndexSuccessorInstructionGap(10, 11));
+    REQUIRE(coord_dec::IsRingIndexSuccessorInstructionGap(10, 14));
+    REQUIRE(!coord_dec::IsRingIndexSuccessorInstructionGap(10, 10));
+    REQUIRE(!coord_dec::IsRingIndexSuccessorInstructionGap(10, 19));
     const auto currentIndex = makeModuloEight(0);
     const auto nextIndex = makeModuloEight(1);
     const auto skippedIndex = makeModuloEight(2);

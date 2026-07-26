@@ -134,6 +134,8 @@ list(APPEND LENGJING_SOURCES
 list(FILTER LENGJING_SOURCES EXCLUDE REGEX "/imgui_demo\\.cpp$")
 list(FILTER LENGJING_SOURCES EXCLUDE REGEX
     "/game/native/CoordinateDecrypt3Runtime\\.cpp$")
+list(FILTER LENGJING_SOURCES EXCLUDE REGEX
+    "/game/native/CoordinatePoolRemote(Client|Plan)\\.cpp$")
 if(NOT LENGJING_ENABLE_PROJECTILE_TRACKING)
     list(FILTER LENGJING_SOURCES EXCLUDE REGEX
         "/game/native/(TrackingPageBinding|TrajectoryHook)\\.cpp$")

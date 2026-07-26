@@ -57,6 +57,21 @@ namespace {
 		}
 	}
 
+	bool is_store_instruction(arm64_insn id) {
+		switch (id) {
+		case ARM64_INS_STR:
+		case ARM64_INS_STRB:
+		case ARM64_INS_STRH:
+		case ARM64_INS_STUR:
+		case ARM64_INS_STURB:
+		case ARM64_INS_STURH:
+		case ARM64_INS_STP:
+			return true;
+		default:
+			return false;
+		}
+	}
+
 	bool writes_reg(const cs_insn* insn, arm64_reg reg) {
 		if (!insn || !insn->detail) return false;
 		reg = normalize_gp_reg(reg);
@@ -260,6 +275,56 @@ namespace {
 		return subset.size() < superset.size() &&
 			std::includes(superset.begin(), superset.end(),
 				subset.begin(), subset.end());
+	}
+
+	bool has_safe_ring_successor_window(method* entry, uint32_t first,
+		uint32_t second) {
+		if (!entry ||
+			!coord_dec::IsRingIndexSuccessorInstructionGap(first, second)) {
+			return false;
+		}
+
+		const arm64_reg multiplier = normalize_gp_reg(entry->reg(first, 2));
+		const arm64_reg base = normalize_gp_reg(entry->reg(first, 3));
+		const arm64_reg first_result = normalize_gp_reg(entry->reg(first, 0));
+		const arm64_reg next_value = normalize_gp_reg(entry->reg(second, 1));
+		if (multiplier == ARM64_REG_INVALID || base == ARM64_REG_INVALID ||
+			first_result == ARM64_REG_INVALID ||
+			next_value == ARM64_REG_INVALID ||
+			multiplier != normalize_gp_reg(entry->reg(second, 2)) ||
+			base != normalize_gp_reg(entry->reg(second, 3))) {
+			return false;
+		}
+
+		for (uint32_t current = first + 1; current < second; ++current) {
+			const cs_insn* instruction = entry->get_insn(current);
+			if (!instruction || !instruction->detail ||
+				instruction->detail->arm64.writeback) {
+				return false;
+			}
+			bool writes_memory = instruction && is_store_instruction(
+				static_cast<arm64_insn>(instruction->id));
+			const auto& arm64 = instruction->detail->arm64;
+			for (uint8_t index = 0; index < arm64.op_count; ++index) {
+				const auto& operand = arm64.operands[index];
+				if (operand.type == ARM64_OP_MEM &&
+					(operand.access & CS_AC_WRITE) != 0) {
+					writes_memory = true;
+					break;
+				}
+			}
+			if (is_control_flow(instruction) || writes_memory ||
+				instruction->id == ARM64_INS_BL ||
+				instruction->id == ARM64_INS_BLR ||
+				instruction->id == ARM64_INS_SVC ||
+				writes_reg(instruction, multiplier) ||
+				writes_reg(instruction, base) ||
+				writes_reg(instruction, first_result) ||
+				writes_reg(instruction, next_value)) {
+				return false;
+			}
+		}
+		return true;
 	}
 }
 
@@ -773,11 +838,8 @@ namespace coord_dec {
 		if (current_candidate < 0 &&
 			first_uses_ring && second_uses_ring &&
 			candidates[0].dependencies == candidates[1].dependencies &&
-			candidates[1].madd == candidates[0].madd + 1 &&
-			entry->reg(candidates[0].madd, 2) ==
-				entry->reg(candidates[1].madd, 2) &&
-			entry->reg(candidates[0].madd, 3) ==
-				entry->reg(candidates[1].madd, 3)) {
+			has_safe_ring_successor_window(
+				entry, candidates[0].madd, candidates[1].madd)) {
 			successor_relation = DetectRingIndexSuccessorRelation(
 				candidates[0].expr,
 				candidates[1].expr,
@@ -1037,7 +1099,8 @@ namespace coord_dec {
 		finder f;
 		f.is_ret(0);
 
-		entry = binary_.create_method("entry", entry_address, f, 5000);
+		entry = binary_.create_method(
+			"entry", entry_address, f, entry_method_instruction_limit_);
 		if (!entry) {
 			return -1;
 		}
