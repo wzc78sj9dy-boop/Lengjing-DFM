@@ -143,10 +143,29 @@ int CoordinateProbeDriver() {
         : 0;
 }
 
-bool CoordinateDecrypt2Probe() {
+lengjing::ui::CoordinateDecryptSelection CoordinateProbeSelection() {
+    const char* mode = std::getenv("LENGJING_COORDINATE_PROBE_MODE");
+    if (mode != nullptr && mode[0] != '\0' && mode[1] == '\0') {
+        switch (mode[0]) {
+            case '1':
+                return lengjing::ui::CoordinateDecryptSelection::Decrypt1;
+            case '2':
+                return lengjing::ui::CoordinateDecryptSelection::Decrypt2;
+            case '3':
+                return lengjing::ui::CoordinateDecryptSelection::Decrypt3;
+            case '4':
+                return lengjing::ui::CoordinateDecryptSelection::Decrypt4;
+            case '5':
+                return lengjing::ui::CoordinateDecryptSelection::Decrypt5;
+            case '6':
+                return lengjing::ui::CoordinateDecryptSelection::Decrypt6;
+        }
+    }
     const char* value =
         std::getenv("LENGJING_COORDINATE_PROBE_DECRYPT2");
-    return value != nullptr && value[0] == '1' && value[1] == '\0';
+    return value != nullptr && value[0] == '1' && value[1] == '\0'
+        ? lengjing::ui::CoordinateDecryptSelection::Decrypt2
+        : lengjing::ui::CoordinateDecryptSelection::Decrypt1;
 }
 
 int RunCoordinateProbe(
@@ -176,10 +195,7 @@ int RunCoordinateProbe(
     options.algorithmPosition = algorithmPosition;
     lengjing::game::FeatureSettings settings;
     lengjing::ui::SelectCoordinateDecrypt(
-        settings.visual,
-        CoordinateDecrypt2Probe()
-            ? lengjing::ui::CoordinateDecryptSelection::Decrypt2
-            : lengjing::ui::CoordinateDecryptSelection::Decrypt1);
+        settings.visual, CoordinateProbeSelection());
     lengjing::game::GameRuntime runtime(
         lengjing::game::CreateNativeGameBackend());
     runtime.UpdateSettings(settings);

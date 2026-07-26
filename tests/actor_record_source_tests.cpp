@@ -11,6 +11,7 @@ void RunActorRecordSourceTests() {
     using lengjing::game::native::MergeActorRecordSource;
     using lengjing::game::native::MergeCurrentLevelActorRecordSources;
     using lengjing::game::native::ReadActorRecordSourceWithFallback;
+    using lengjing::game::native::ResolveActorCoordinateSubject;
 
     constexpr std::uintptr_t actor = 0x1000;
     const ActorRecordSource decoded =
@@ -86,6 +87,53 @@ void RunActorRecordSourceTests() {
             return std::uintptr_t{0};
         });
     REQUIRE(pointerReads == 2);
+
+    int subjectReads = 0;
+    const auto validSubject = [](std::uintptr_t pointer) {
+        return pointer >= 0x4000 && pointer <= 0x6000;
+    };
+    REQUIRE(ResolveActorCoordinateSubject(
+                pendingOrdinary,
+                [&](std::uintptr_t) {
+                    ++subjectReads;
+                    return std::uintptr_t{0};
+                },
+                validSubject) == 0x4000);
+    REQUIRE(subjectReads == 0);
+
+    ActorRecordSource uncachedOrdinary = MakeOrdinaryActorRecord(actor);
+    REQUIRE(ResolveActorCoordinateSubject(
+                uncachedOrdinary,
+                [&](std::uintptr_t address) {
+                    ++subjectReads;
+                    return address == actor + 0x180
+                        ? std::uintptr_t{0x5000}
+                        : std::uintptr_t{0};
+                },
+                validSubject) == 0x5000);
+    REQUIRE(subjectReads == 1);
+
+    subjectReads = 0;
+    REQUIRE(ResolveActorCoordinateSubject(
+                uncachedOrdinary,
+                [&](std::uintptr_t address) {
+                    ++subjectReads;
+                    return address == actor + 0x3E0
+                        ? std::uintptr_t{0x6000}
+                        : std::uintptr_t{0};
+                },
+                validSubject) == 0x6000);
+    REQUIRE(subjectReads == 2);
+
+    subjectReads = 0;
+    REQUIRE(ResolveActorCoordinateSubject(
+                uncachedOrdinary,
+                [&](std::uintptr_t) {
+                    ++subjectReads;
+                    return std::uintptr_t{0};
+                },
+                validSubject) == 0);
+    REQUIRE(subjectReads == 2);
 
     int ignoredReads = 0;
     ActorRecordSource resolvedOnly = decoded;

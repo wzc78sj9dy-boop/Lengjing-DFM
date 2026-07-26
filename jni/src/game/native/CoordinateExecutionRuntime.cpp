@@ -11,35 +11,62 @@
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include <sys/stat.h>
 
 namespace lengjing::game::native {
 namespace {
 
 constexpr std::uint64_t kPageSize = 4096;
 constexpr std::uint64_t kPageMask = ~(kPageSize - 1);
-constexpr std::uint64_t kSyntheticStackBase = UINT64_C(0x1FFFC0000);
-constexpr std::uint64_t kSyntheticStackTop = UINT64_C(0x200000000);
 constexpr std::uint64_t kSyntheticStackSize =
-    kSyntheticStackTop - kSyntheticStackBase;
+    kCoordinateExecutionSyntheticStackTop -
+    kCoordinateExecutionSyntheticStackBase;
 constexpr std::size_t kMaximumMappedPages = 4096;
+constexpr std::uint32_t kCoordinateExecutionTcgBufferSize =
+    UINT32_C(32) * 1024U * 1024U;
+constexpr std::size_t kMaximumEngineExecutions = 64;
+constexpr auto kPersistentCodeVerificationInterval =
+    std::chrono::seconds(1);
+constexpr std::size_t kPersistentCodeVerificationPagesPerRun = 1;
 
 constexpr std::uint32_t kPacgaMask = 0xFFE0FC00U;
 constexpr std::uint32_t kPacgaOpcode = 0x9AC03000U;
 constexpr std::uint32_t kSvcMask = 0xFFE0001FU;
 constexpr std::uint32_t kSvcOpcode = 0xD4000001U;
-
-constexpr std::uint64_t kSysFcntl = 25;
-constexpr std::uint64_t kSysIoctl = 29;
-constexpr std::uint64_t kSysLseek = 62;
-constexpr std::uint64_t kSysFutex = 98;
-constexpr std::uint64_t kSysGetPid = 172;
-constexpr std::uint64_t kSysGetTid = 178;
-constexpr std::uint64_t kSysGetRandom = 278;
+constexpr std::uint64_t kSubjectLoadInstructionOffset = UINT64_C(0xF4C);
+constexpr std::uint64_t kCallbackInstructionOffset = UINT64_C(0x1000);
+constexpr std::uint64_t kCallbackReturnOffset = UINT64_C(0x1004);
+constexpr std::uint64_t kCallbackIndexOffset = UINT64_C(0x28A4);
+constexpr std::uint64_t kCallbackCopyPrepareOffset = UINT64_C(0x3130);
+constexpr std::uint64_t kCallbackCopyAfterOffset = UINT64_C(0x3148);
+constexpr std::uint64_t kCallbackTablePointerCodeOffset = UINT64_C(0xCD844);
+constexpr std::uint64_t kCallbackTableValueCodeOffset = UINT64_C(0xCD848);
+constexpr std::uint64_t kCallbackLockCodeOffset = UINT64_C(0xCC67C);
+constexpr std::uint64_t kCallbackLockReturnCodeOffset = UINT64_C(0xCC680);
+constexpr std::uint64_t kCallbackFirstCallCodeOffset = UINT64_C(0xCD750);
+constexpr std::uint64_t kCallbackFirstReturnCodeOffset = UINT64_C(0xCD754);
+constexpr std::uint64_t kCallbackExternalCallCodeOffset = UINT64_C(0xCD77C);
+constexpr std::uint64_t kCallbackExternalReturnCodeOffset = UINT64_C(0xCD780);
+constexpr std::uint64_t kCallbackPrimaryGateWriteCodeOffset = UINT64_C(0xCD79C);
+constexpr std::uint64_t kCallbackAlternateGateWriteCodeOffset = UINT64_C(0xCDF34);
+constexpr std::uint64_t kCallbackGateCodeOffset = UINT64_C(0xCD024);
+constexpr std::uint64_t kCallbackRecordCountCodeOffset = UINT64_C(0xCC964);
+constexpr std::uint64_t kCallbackTargetKeyCodeOffset = UINT64_C(0xCC98C);
+constexpr std::uint64_t kCallbackRingSetupCodeOffset = UINT64_C(0xCCA38);
+constexpr std::uint64_t kCallbackRingProbeCodeOffset = UINT64_C(0xCC240);
+constexpr std::uint64_t kCallbackRingHitCodeOffset = UINT64_C(0xCDA38);
+constexpr std::uint64_t kCallbackDispatchCodeOffset = UINT64_C(0xCBF50);
+constexpr std::uint64_t kCallbackDispatchReturnCodeOffset = UINT64_C(0xCBF54);
+constexpr std::uint64_t kCallbackResultPrepareCodeOffset = UINT64_C(0xCC004);
+constexpr std::uint64_t kCallbackResultCodeOffset = UINT64_C(0xCC018);
 
 int XRegisterId(std::uint32_t index) noexcept {
     if (index <= 28) {
@@ -106,21 +133,40 @@ CoordinateExecutionResult Success(
     return result;
 }
 
-bool IsSupportedSvc(std::uint64_t number) noexcept {
-    return number == kSysFcntl || number == kSysIoctl ||
-        number == kSysLseek || number == kSysFutex ||
-        number == kSysGetPid || number == kSysGetTid ||
-        number == kSysGetRandom;
+bool ReadDescriptorEnd(std::int32_t threadId,
+                       std::int32_t descriptor,
+                       std::int64_t& result) {
+    result = -1;
+    if (threadId <= 0 || descriptor < 0) return false;
+    const std::string path = "/proc/" + std::to_string(threadId) +
+        "/fd/" + std::to_string(descriptor);
+    struct stat status {};
+    if (::stat(path.c_str(), &status) != 0 || status.st_size < 0) {
+        return false;
+    }
+    result = static_cast<std::int64_t>(status.st_size);
+    return true;
 }
 
 }  // namespace
 
 struct CoordinateExecutionRuntime::Impl {
+    struct alignas(kPageSize) CachedPageBacking {
+        std::array<std::uint8_t, kPageSize> bytes{};
+        std::array<std::uint8_t, kPageSize> snapshot{};
+    };
+
     struct CachedPage {
         std::uint64_t guestAddress = 0;
         std::uint64_t remoteAddress = 0;
+        std::shared_ptr<CachedPageBacking> backing;
         std::vector<uc_hook> instructionHooks;
+        std::vector<std::uint64_t> instructionHookAddresses;
     };
+
+    ~Impl() {
+        CloseEngine();
+    }
 
     CoordinateExecutionResult Execute(
         MemoryTransport& memoryValue,
@@ -132,7 +178,6 @@ struct CoordinateExecutionRuntime::Impl {
         const ProcessExecutionContext& executionContextValue,
         const CoordinateExecutionRequest& requestValue) noexcept {
         std::lock_guard<std::mutex> lock(mutex);
-        CloseEngine();
         probe = {};
         request = {};
         plan = {};
@@ -177,11 +222,25 @@ struct CoordinateExecutionRuntime::Impl {
                     CoordinateExecutionRuntimeError::InvalidRequest);
             }
 
+            const bool reuseEngine = CanReuseEngine(
+                memoryValue,
+                moduleBaseValue,
+                moduleSizeValue,
+                codeBaseValue,
+                codeSizeValue,
+                requestValue.mode,
+                executionPlan);
+            if (!reuseEngine) CloseEngine();
+
             memory = &memoryValue;
             codeBase = codeBaseValue;
             codeSize = codeSizeValue;
             subject = NormalizeCoordinateExecutionPointer(subjectValue);
+            evidence.inputSubject = subject;
             executionContext = executionContextValue;
+            descriptorThreadId = executionContext.threadId;
+            descriptorEnds.clear();
+            exclusiveMonitorInvalid = true;
             request = requestValue;
             plan = executionPlan;
             ctrEl0 = ReadHostCtrEl0();
@@ -192,7 +251,20 @@ struct CoordinateExecutionRuntime::Impl {
                     CoordinateExecutionStatus::EvidenceFailure,
                     CoordinateExecutionRuntimeError::ReturnStubInvalid);
             }
-            if (!OpenEngine()) {
+            if (engine != nullptr && !ResetEngineForRun()) {
+                CloseEngine();
+                memory = &memoryValue;
+            }
+            if (engine == nullptr &&
+                (!OpenEngine() ||
+                 !CaptureEngineIdentity(
+                     memoryValue,
+                     moduleBaseValue,
+                     moduleSizeValue,
+                     codeBaseValue,
+                     codeSizeValue,
+                     requestValue.mode,
+                     executionPlan))) {
                 return Fail(
                     CoordinateExecutionStatus::BackendUnavailable,
                     probe.error == CoordinateExecutionRuntimeError::None
@@ -228,6 +300,7 @@ struct CoordinateExecutionRuntime::Impl {
             probe.stage = CoordinateExecutionRuntimeStage::Executing;
             hookFailed = false;
             hookRuntimeError = CoordinateExecutionRuntimeError::None;
+            ++engineExecutionCount;
             const uc_err error = uc_emu_start(
                 engine,
                 plan.entryPc,
@@ -269,9 +342,9 @@ struct CoordinateExecutionRuntime::Impl {
                     probe.error = CoordinateExecutionRuntimeError::EvidenceInvalid;
                 }
             }
-            CloseEngine();
             return result;
         } catch (...) {
+            CloseEngine();
             return Fail(
                 CoordinateExecutionStatus::BackendUnavailable,
                 CoordinateExecutionRuntimeError::EngineSetupFailed);
@@ -303,6 +376,7 @@ private:
         self->probe.faultSize = size;
         self->probe.faultValue = value;
         try {
+            static_cast<void>(self->CanonicalizeTaggedFaultBase(type));
             const bool loaded = self->MapRemotePage(address);
             if (!loaded) {
                 self->hookFailed = true;
@@ -314,6 +388,7 @@ private:
             }
             return loaded;
         } catch (...) {
+            self->enginePoisoned = true;
             self->FailHook(
                 address,
                 CoordinateExecutionRuntimeError::RemotePageReadFailed);
@@ -329,7 +404,14 @@ private:
                                 void* userData) {
         auto* self = static_cast<Impl*>(userData);
         if (self == nullptr || self->hookFailed) return;
-        self->CaptureWrite(address, size, value);
+        try {
+            self->MarkSyntheticStackDirty(address, size);
+            self->CaptureWrite(address, size, value);
+        } catch (...) {
+            self->enginePoisoned = true;
+            self->FailHook(
+                address, CoordinateExecutionRuntimeError::EmulationFailed);
+        }
     }
 
     static void CodeHook(uc_engine*,
@@ -338,7 +420,13 @@ private:
                          void* userData) {
         auto* self = static_cast<Impl*>(userData);
         if (self == nullptr || self->hookFailed) return;
-        self->HandleInstruction(address);
+        try {
+            self->HandleInstruction(address);
+        } catch (...) {
+            self->enginePoisoned = true;
+            self->FailHook(
+                address, CoordinateExecutionRuntimeError::EmulationFailed);
+        }
     }
 
     static std::uint32_t MrsHook(uc_engine* targetEngine,
@@ -385,8 +473,197 @@ private:
         probe.status = status;
         probe.error = error;
         probe.evidence = evidence;
-        CloseEngine();
+        if (enginePoisoned) CloseEngine();
         return Failure(status);
+    }
+
+    bool CanReuseEngine(
+        MemoryTransport& memoryValue,
+        std::uintptr_t moduleBaseValue,
+        std::size_t moduleSizeValue,
+        std::uintptr_t codeBaseValue,
+        std::size_t codeSizeValue,
+        CoordinateExecutionMode modeValue,
+        const CoordinateExecutionPlan& executionPlan) const noexcept {
+        return engine != nullptr && !enginePoisoned && engineIdentityValid &&
+            engineExecutionCount < kMaximumEngineExecutions &&
+            engineMemory == &memoryValue &&
+            engineModuleBase == moduleBaseValue &&
+            engineModuleSize == moduleSizeValue &&
+            engineCodeBase == codeBaseValue &&
+            engineCodeSize == codeSizeValue &&
+            engineMode == modeValue &&
+            SameEnginePlan(enginePlan, executionPlan);
+    }
+
+    static bool SameEnginePlan(
+        const CoordinateExecutionPlan& left,
+        const CoordinateExecutionPlan& right) noexcept {
+        return left.entryPc == right.entryPc &&
+            left.hookPc == right.hookPc &&
+            left.returnStub == right.returnStub &&
+            left.lr == right.lr &&
+            left.expectedStackBase == right.expectedStackBase &&
+            left.seedSlotBeforeRun == right.seedSlotBeforeRun &&
+            left.seedSlotAtHook == right.seedSlotAtHook &&
+            left.requireReturnStub == right.requireReturnStub &&
+            left.verifyReturnStubMagic == right.verifyReturnStubMagic;
+    }
+
+    bool CaptureEngineIdentity(
+        MemoryTransport& memoryValue,
+        std::uintptr_t moduleBaseValue,
+        std::size_t moduleSizeValue,
+        std::uintptr_t codeBaseValue,
+        std::size_t codeSizeValue,
+        CoordinateExecutionMode modeValue,
+        const CoordinateExecutionPlan& executionPlan) noexcept {
+        if (engine == nullptr) return false;
+        engineMemory = &memoryValue;
+        engineModuleBase = moduleBaseValue;
+        engineModuleSize = moduleSizeValue;
+        engineCodeBase = codeBaseValue;
+        engineCodeSize = codeSizeValue;
+        engineMode = modeValue;
+        enginePlan = executionPlan;
+        engineIdentityValid = true;
+        codeSnapshotVerifiedAt = std::chrono::steady_clock::now();
+        return true;
+    }
+
+    bool IsPersistentPage(const CachedPage& page) const noexcept {
+        const auto contains = [&page](std::uint64_t address) {
+            const std::uint64_t normalized =
+                NormalizeCoordinateExecutionPointer(address);
+            return normalized >= page.guestAddress &&
+                normalized - page.guestAddress < kPageSize;
+        };
+        const bool codePage = page.remoteAddress >= engineCodeBase &&
+            page.remoteAddress - engineCodeBase < engineCodeSize;
+        return codePage || contains(enginePlan.entryPc) ||
+            contains(enginePlan.hookPc) || contains(enginePlan.returnStub);
+    }
+
+    bool RemoveInstructionHooks(CachedPage& page) noexcept {
+        bool removed = true;
+        if (engine != nullptr) {
+            for (const uc_hook hook : page.instructionHooks) {
+                removed = uc_hook_del(engine, hook) == UC_ERR_OK && removed;
+            }
+        }
+        for (const std::uint64_t address : page.instructionHookAddresses) {
+            hookedAddresses.erase(address);
+        }
+        page.instructionHooks.clear();
+        page.instructionHookAddresses.clear();
+        return removed;
+    }
+
+    bool ResetEngineForRun() {
+        if (engine == nullptr || enginePoisoned) return false;
+
+        std::unordered_set<std::uint64_t> retainedBackings;
+        for (const auto& entry : pages) {
+            const CachedPage& page = entry.second;
+            if (IsPersistentPage(page)) {
+                retainedBackings.insert(page.remoteAddress);
+            }
+        }
+        const auto now = std::chrono::steady_clock::now();
+        const bool verifyPersistentCode =
+            codeSnapshotVerifiedAt.time_since_epoch().count() == 0 ||
+            now < codeSnapshotVerifiedAt ||
+            now - codeSnapshotVerifiedAt >=
+                kPersistentCodeVerificationInterval;
+        if (verifyPersistentCode) {
+            std::vector<std::uint64_t> verificationPages{
+                retainedBackings.begin(), retainedBackings.end()};
+            std::sort(verificationPages.begin(), verificationPages.end());
+            if (codeSnapshotVerificationPageCount !=
+                verificationPages.size()) {
+                codeSnapshotVerificationCursor = 0;
+                codeSnapshotVerificationPageCount =
+                    verificationPages.size();
+            }
+            std::size_t verifiedPages = 0;
+            while (codeSnapshotVerificationCursor <
+                       verificationPages.size() &&
+                   verifiedPages <
+                       kPersistentCodeVerificationPagesPerRun) {
+                const std::uint64_t remoteAddress =
+                    verificationPages[codeSnapshotVerificationCursor];
+                const auto backing = pageBackings.find(remoteAddress);
+                if (backing == pageBackings.end()) return false;
+                std::array<std::uint8_t, kPageSize> current{};
+                game::CoordinateReadDiagnostic diagnostic{};
+                if (!ReadRemoteMemory(
+                        remoteAddress,
+                        current.data(),
+                        current.size(),
+                        diagnostic)) {
+                    probe.read = diagnostic;
+                    probe.error =
+                        CoordinateExecutionRuntimeError::RemotePageReadFailed;
+                    return false;
+                }
+                if (current != backing->second->snapshot) return false;
+                ++codeSnapshotVerificationCursor;
+                ++verifiedPages;
+            }
+            if (codeSnapshotVerificationCursor >=
+                verificationPages.size()) {
+                codeSnapshotVerificationCursor = 0;
+                codeSnapshotVerifiedAt = now;
+            }
+        }
+
+        for (auto iterator = pages.begin(); iterator != pages.end();) {
+            CachedPage& page = iterator->second;
+            if (IsPersistentPage(page)) {
+                ++iterator;
+                continue;
+            }
+            const std::uint64_t guestAddress = page.guestAddress;
+            if (!RemoveInstructionHooks(page) ||
+                uc_mem_unmap(engine, guestAddress, kPageSize) != UC_ERR_OK) {
+                return false;
+            }
+            mappedPages.erase(guestAddress);
+            iterator = pages.erase(iterator);
+        }
+
+        bool restoredPersistentCode = false;
+        for (auto iterator = pageBackings.begin();
+             iterator != pageBackings.end();) {
+            if (retainedBackings.find(iterator->first) ==
+                retainedBackings.end()) {
+                iterator = pageBackings.erase(iterator);
+                continue;
+            }
+            if (iterator->second->bytes != iterator->second->snapshot) {
+                iterator->second->bytes = iterator->second->snapshot;
+                restoredPersistentCode = true;
+            }
+            ++iterator;
+        }
+        if (restoredPersistentCode &&
+            uc_ctl_flush_tb(engine) != UC_ERR_OK) {
+            return false;
+        }
+
+        static const std::array<std::uint8_t, kPageSize> zeroPage{};
+        for (const std::uint64_t page : dirtyStackPages) {
+            if (uc_mem_write(
+                    engine, page, zeroPage.data(), zeroPage.size()) !=
+                UC_ERR_OK) {
+                return false;
+            }
+        }
+        dirtyStackPages.clear();
+        hookFailed = false;
+        hookRuntimeError = CoordinateExecutionRuntimeError::None;
+        exclusiveMonitorInvalid = true;
+        return true;
     }
 
     bool VerifyHostReturnStubMagic() {
@@ -423,9 +700,11 @@ private:
             return false;
         }
         static_cast<void>(uc_ctl_set_cpu_model(engine, UC_CPU_ARM64_MAX));
-        if (uc_mem_map(
+        if (uc_ctl_set_tcg_buffer_size(
+                engine, kCoordinateExecutionTcgBufferSize) != UC_ERR_OK ||
+            uc_mem_map(
                 engine,
-                kSyntheticStackBase,
+                kCoordinateExecutionSyntheticStackBase,
                 kSyntheticStackSize,
                 UC_PROT_READ | UC_PROT_WRITE) != UC_ERR_OK ||
             uc_mem_map(
@@ -464,8 +743,8 @@ private:
             CloseEngine();
             return false;
         }
-        for (std::uint64_t page = kSyntheticStackBase;
-             page < kSyntheticStackTop;
+        for (std::uint64_t page = kCoordinateExecutionSyntheticStackBase;
+             page < kCoordinateExecutionSyntheticStackTop;
              page += kPageSize) {
             mappedPages.insert(page);
         }
@@ -479,14 +758,32 @@ private:
             engine = nullptr;
         }
         pages.clear();
+        pageBackings.clear();
         mappedPages.clear();
         hookedAddresses.clear();
+        dirtyStackPages.clear();
+        exclusiveMonitorInvalid = true;
         memoryFaultHook = 0;
         memoryWriteHook = 0;
         mrsHook = 0;
         memory = nullptr;
+        engineMemory = nullptr;
+        engineModuleBase = 0;
+        engineModuleSize = 0;
+        engineCodeBase = 0;
+        engineCodeSize = 0;
+        engineMode = static_cast<CoordinateExecutionMode>(0);
+        enginePlan = {};
+        engineIdentityValid = false;
+        codeSnapshotVerifiedAt = {};
+        codeSnapshotVerificationCursor = 0;
+        codeSnapshotVerificationPageCount = 0;
+        engineExecutionCount = 0;
+        enginePoisoned = false;
         hookFailed = false;
         hookRuntimeError = CoordinateExecutionRuntimeError::None;
+        descriptorThreadId = -1;
+        descriptorEnds.clear();
     }
 
     bool PrepareRegisters() {
@@ -533,11 +830,35 @@ private:
             !EnsureGuestRange(slot, sizeof(subject))) {
             return false;
         }
-        return uc_mem_write(engine, slot, &subject, sizeof(subject)) ==
-            UC_ERR_OK;
+        if (uc_mem_write(engine, slot, &subject, sizeof(subject)) !=
+            UC_ERR_OK) {
+            return false;
+        }
+        MarkSyntheticStackDirty(slot, sizeof(subject));
+        evidence.seedSubject = subject;
+        evidence.seedSlot = NormalizeCoordinateExecutionPointer(slot);
+        return true;
+    }
+
+    void MarkSyntheticStackDirty(std::uint64_t address,
+                                 std::size_t size) {
+        if (size == 0 ||
+            address < kCoordinateExecutionSyntheticStackBase ||
+            address >= kCoordinateExecutionSyntheticStackTop) {
+            return;
+        }
+        const std::uint64_t maximum =
+            kCoordinateExecutionSyntheticStackTop - address;
+        const std::uint64_t boundedSize = std::min<std::uint64_t>(size, maximum);
+        const std::uint64_t last = address + boundedSize - 1;
+        for (std::uint64_t page = address & kPageMask;; page += kPageSize) {
+            dirtyStackPages.insert(page);
+            if (page == (last & kPageMask)) break;
+        }
     }
 
     bool EnsureGuestRange(std::uint64_t address, std::size_t size) {
+        address = NormalizeCoordinateExecutionPointer(address);
         if (engine == nullptr || size == 0 ||
             size - 1 > std::numeric_limits<std::uint64_t>::max() - address) {
             return false;
@@ -559,47 +880,139 @@ private:
         return true;
     }
 
+    bool CanonicalizeTaggedFaultBase(uc_mem_type type) {
+        if (type != UC_MEM_READ_UNMAPPED &&
+            type != UC_MEM_WRITE_UNMAPPED) {
+            return false;
+        }
+        std::uint64_t pc = 0;
+        if (uc_reg_read(engine, UC_ARM64_REG_PC, &pc) != UC_ERR_OK) {
+            return false;
+        }
+        pc = NormalizeCoordinateExecutionPointer(pc);
+        if (!ContainsCoordinateExecutionCodeAddress(codeBase, codeSize, pc)) {
+            return false;
+        }
+
+        std::uint32_t instruction = 0;
+        if (uc_mem_read(engine, pc, &instruction, sizeof(instruction)) !=
+                UC_ERR_OK ||
+            !IsCoordinateExecutionTaggedMemoryInstruction(instruction)) {
+            return false;
+        }
+        const std::uint32_t baseRegister =
+            CoordinateExecutionMemoryBaseRegister(instruction);
+        if (baseRegister == 31U) return false;
+
+        std::uint64_t value = 0;
+        if (!ReadXRegister(baseRegister, value)) return false;
+        const std::uint64_t canonical =
+            NormalizeCoordinateExecutionPointer(value);
+        if (canonical == value ||
+            !IsCoordinateExecutionCanonicalFaultBase(canonical) ||
+            !WriteXRegister(baseRegister, canonical)) {
+            return false;
+        }
+        ++evidence.taggedBaseRewriteCount;
+        evidence.taggedBaseRegister = baseRegister;
+        evidence.taggedBaseBefore = value;
+        evidence.taggedBaseAfter = canonical;
+        return true;
+    }
+
     bool MapRemotePage(std::uint64_t faultAddress) {
         if (engine == nullptr || memory == nullptr) return false;
         const std::uint64_t guestPage = faultAddress & kPageMask;
         if (mappedPages.find(guestPage) != mappedPages.end()) return true;
-        if (pages.size() >= kMaximumMappedPages) {
-            probe.error = CoordinateExecutionRuntimeError::GuestPageMapFailed;
-            return false;
-        }
         const std::uint64_t remotePage =
-            NormalizeCoordinateExecutionPointer(guestPage) & kPageMask;
+            NormalizeCoordinateExecutionPointer(faultAddress) & kPageMask;
         if (!IsCoordinateExecutionPointer(remotePage)) {
             probe.error = CoordinateExecutionRuntimeError::RemotePageReadFailed;
             return false;
         }
 
-        std::array<std::uint8_t, kPageSize> bytes{};
-        game::CoordinateReadDiagnostic diagnostic{};
-        if (!ReadRemoteMemory(
-                remotePage, bytes.data(), bytes.size(), diagnostic)) {
-            probe.read = diagnostic;
-            probe.error = CoordinateExecutionRuntimeError::RemotePageReadFailed;
+        auto backingIterator = pageBackings.find(remotePage);
+        if (backingIterator == pageBackings.end()) {
+            auto backing = std::make_shared<CachedPageBacking>();
+            game::CoordinateReadDiagnostic diagnostic{};
+            if (!ReadRemoteMemory(
+                    remotePage,
+                    backing->bytes.data(),
+                    backing->bytes.size(),
+                    diagnostic)) {
+                probe.read = diagnostic;
+                probe.error =
+                    CoordinateExecutionRuntimeError::RemotePageReadFailed;
+                return false;
+            }
+            backing->snapshot = backing->bytes;
+            backingIterator =
+                pageBackings.emplace(remotePage, std::move(backing)).first;
+        }
+
+        const auto mapAlias = [&](std::uint64_t aliasPage) {
+            if (mappedPages.find(aliasPage) != mappedPages.end()) return true;
+            if (pages.size() >= kMaximumMappedPages) {
+                probe.error =
+                    CoordinateExecutionRuntimeError::GuestPageMapFailed;
+                return false;
+            }
+            const std::shared_ptr<CachedPageBacking>& backing =
+                backingIterator->second;
+            CachedPage page{aliasPage, remotePage, backing, {}, {}};
+            bool mapped = false;
+            try {
+                if (uc_mem_map_ptr(
+                        engine,
+                        aliasPage,
+                        kPageSize,
+                        UC_PROT_ALL,
+                        backing->bytes.data()) != UC_ERR_OK) {
+                    probe.error =
+                        CoordinateExecutionRuntimeError::GuestPageMapFailed;
+                    return false;
+                }
+                mapped = true;
+                if (!InstallInstructionHooks(page, backing->bytes)) {
+                    if (uc_mem_unmap(engine, aliasPage, kPageSize) !=
+                        UC_ERR_OK) {
+                        enginePoisoned = true;
+                    }
+                    return false;
+                }
+                const auto inserted =
+                    pages.emplace(aliasPage, std::move(page));
+                if (!inserted.second) {
+                    enginePoisoned = true;
+                    return false;
+                }
+                mappedPages.insert(aliasPage);
+                return true;
+            } catch (...) {
+                enginePoisoned = true;
+                auto tracked = pages.find(aliasPage);
+                if (tracked != pages.end()) {
+                    static_cast<void>(RemoveInstructionHooks(tracked->second));
+                    pages.erase(tracked);
+                } else {
+                    static_cast<void>(RemoveInstructionHooks(page));
+                }
+                mappedPages.erase(aliasPage);
+                if (mapped) {
+                    static_cast<void>(
+                        uc_mem_unmap(engine, aliasPage, kPageSize));
+                }
+                throw;
+            }
+        };
+
+        if (!mapAlias(remotePage)) {
             return false;
         }
-        if (uc_mem_map(engine, guestPage, kPageSize, UC_PROT_ALL) != UC_ERR_OK) {
+        if (guestPage != remotePage && !mapAlias(guestPage)) {
             probe.error = CoordinateExecutionRuntimeError::GuestPageMapFailed;
             return false;
         }
-        if (uc_mem_write(
-                engine, guestPage, bytes.data(), bytes.size()) != UC_ERR_OK) {
-            static_cast<void>(uc_mem_unmap(engine, guestPage, kPageSize));
-            probe.error = CoordinateExecutionRuntimeError::GuestPageWriteFailed;
-            return false;
-        }
-
-        CachedPage page{guestPage, remotePage, {}};
-        if (!InstallInstructionHooks(page, bytes)) {
-            static_cast<void>(uc_mem_unmap(engine, guestPage, kPageSize));
-            return false;
-        }
-        pages.emplace(guestPage, std::move(page));
-        mappedPages.insert(guestPage);
         return true;
     }
 
@@ -642,11 +1055,63 @@ private:
         };
         appendIfInPage(plan.hookPc);
         if (plan.returnStub != 0) appendIfInPage(plan.returnStub);
+        const auto appendHookOffset = [&](std::uint64_t offset) {
+            std::uint64_t address = 0;
+            if (CoordinateExecutionAdd(plan.hookPc, offset, address)) {
+                appendIfInPage(address);
+            }
+        };
+        appendHookOffset(kSubjectLoadInstructionOffset);
+        appendHookOffset(kCallbackInstructionOffset);
+        appendHookOffset(kCallbackReturnOffset);
+        const auto appendCallbackOffset = [&](std::uint64_t offset) {
+            std::uint64_t address = 0;
+            if (evidence.callbackTarget != 0 &&
+                CoordinateExecutionAdd(
+                    NormalizeCoordinateExecutionPointer(
+                        evidence.callbackTarget),
+                    offset,
+                    address)) {
+                appendIfInPage(address);
+            }
+        };
+        appendCallbackOffset(kCallbackIndexOffset);
+        appendCallbackOffset(kCallbackCopyPrepareOffset);
+        appendCallbackOffset(kCallbackCopyAfterOffset);
+        const auto appendCodeOffset = [&](std::uint64_t offset) {
+            std::uint64_t address = 0;
+            if (CoordinateExecutionAdd(codeBase, offset, address)) {
+                appendIfInPage(address);
+            }
+        };
+        appendCodeOffset(kCallbackTablePointerCodeOffset);
+        appendCodeOffset(kCallbackTableValueCodeOffset);
+        appendCodeOffset(kCallbackLockCodeOffset);
+        appendCodeOffset(kCallbackLockReturnCodeOffset);
+        appendCodeOffset(kCallbackFirstCallCodeOffset);
+        appendCodeOffset(kCallbackFirstReturnCodeOffset);
+        appendCodeOffset(kCallbackExternalCallCodeOffset);
+        appendCodeOffset(kCallbackExternalReturnCodeOffset);
+        appendCodeOffset(kCallbackPrimaryGateWriteCodeOffset);
+        appendCodeOffset(kCallbackAlternateGateWriteCodeOffset);
+        appendCodeOffset(kCallbackGateCodeOffset);
+        appendCodeOffset(kCallbackRecordCountCodeOffset);
+        appendCodeOffset(kCallbackTargetKeyCodeOffset);
+        appendCodeOffset(kCallbackRingSetupCodeOffset);
+        appendCodeOffset(kCallbackRingProbeCodeOffset);
+        appendCodeOffset(kCallbackRingHitCodeOffset);
+        appendCodeOffset(kCallbackDispatchCodeOffset);
+        appendCodeOffset(kCallbackDispatchReturnCodeOffset);
+        appendCodeOffset(kCallbackResultPrepareCodeOffset);
+        appendCodeOffset(kCallbackResultCodeOffset);
         for (std::size_t offset = 0; offset <= bytes.size() - 4; offset += 4) {
             std::uint32_t instruction = 0;
             std::memcpy(&instruction, bytes.data() + offset, sizeof(instruction));
             if ((instruction & kPacgaMask) == kPacgaOpcode ||
-                (instruction & kSvcMask) == kSvcOpcode) {
+                (instruction & kSvcMask) == kSvcOpcode ||
+                IsCoordinateExecutionLoadExclusiveInstruction(instruction) ||
+                IsCoordinateExecutionStoreExclusiveInstruction(instruction) ||
+                IsCoordinateExecutionClearExclusiveInstruction(instruction)) {
                 addresses.push_back(page.guestAddress + offset);
             }
         }
@@ -666,32 +1131,481 @@ private:
                     address,
                     address) != UC_ERR_OK) {
                 hookedAddresses.erase(address);
+                if (!RemoveInstructionHooks(page)) enginePoisoned = true;
                 probe.error =
                     CoordinateExecutionRuntimeError::InstructionHookSetupFailed;
                 return false;
             }
             page.instructionHooks.push_back(hook);
+            page.instructionHookAddresses.push_back(address);
         }
         return true;
     }
 
-    void HandleInstruction(std::uint64_t address) noexcept {
+    void HandleInstruction(std::uint64_t address) {
         if (address == plan.hookPc) {
-            evidence.hitHookPc = true;
-            std::uint64_t x1 = 0;
-            if (uc_reg_read(engine, UC_ARM64_REG_X1, &x1) != UC_ERR_OK) {
-                FailHook(
-                    address,
-                    CoordinateExecutionRuntimeError::RegisterSetupFailed);
-                return;
+            ++evidence.hookCount;
+            if (ShouldInitializeCoordinateExecutionHook(
+                    evidence.hookInitialized, address, plan.hookPc)) {
+                std::uint64_t x0 = 0;
+                std::uint64_t x1 = 0;
+                std::uint64_t x2 = 0;
+                if (uc_reg_read(engine, UC_ARM64_REG_X0, &x0) != UC_ERR_OK ||
+                    uc_reg_read(engine, UC_ARM64_REG_X1, &x1) != UC_ERR_OK ||
+                    uc_reg_read(engine, UC_ARM64_REG_X2, &x2) != UC_ERR_OK) {
+                    FailHook(
+                        address,
+                        CoordinateExecutionRuntimeError::RegisterSetupFailed);
+                    return;
+                }
+                evidence.hookX0 = x0;
+                evidence.hookX1 = x1;
+                evidence.hookX2 = x2;
+                const std::uint64_t stackBase =
+                    NormalizeCoordinateExecutionPointer(x1);
+                if (!IsCoordinateExecutionStackBase(stackBase)) {
+                    FailHook(
+                        address,
+                        CoordinateExecutionRuntimeError::EvidenceInvalid);
+                    return;
+                }
+                std::uint64_t snapshotAddress = 0;
+                if (CoordinateExecutionAdd(
+                        stackBase,
+                        kCoordinateExecutionResultSlotOffset,
+                        snapshotAddress)) {
+                    static_cast<void>(uc_mem_read(
+                        engine,
+                        snapshotAddress,
+                        &evidence.hookSlotValue,
+                        sizeof(evidence.hookSlotValue)));
+                }
+                if (CoordinateExecutionAdd(
+                        stackBase,
+                        kCoordinateExecutionResultSlotOffset + 8,
+                        snapshotAddress)) {
+                    static_cast<void>(uc_mem_read(
+                        engine,
+                        snapshotAddress,
+                        &evidence.hookSnapshotX1,
+                        sizeof(evidence.hookSnapshotX1)));
+                }
+                if (CoordinateExecutionAdd(
+                        stackBase,
+                        kCoordinateExecutionResultSlotOffset + 0x10,
+                        snapshotAddress)) {
+                    static_cast<void>(uc_mem_read(
+                        engine,
+                        snapshotAddress,
+                        &evidence.hookSnapshotX2,
+                        sizeof(evidence.hookSnapshotX2)));
+                }
+                if (plan.seedSlotAtHook && !SeedResultSlot(stackBase)) {
+                    FailHook(
+                        address,
+                        CoordinateExecutionRuntimeError::GuestPageWriteFailed);
+                    return;
+                }
+                evidence.stackBase = stackBase;
+                evidence.hookInitialized = true;
+                evidence.hitHookPc = true;
             }
-            evidence.stackBase = NormalizeCoordinateExecutionPointer(x1);
-            if (plan.seedSlotAtHook &&
-                !SeedResultSlot(evidence.stackBase)) {
-                FailHook(
-                    address,
-                    CoordinateExecutionRuntimeError::GuestPageWriteFailed);
-                return;
+        }
+        std::uint64_t probeAddress = 0;
+        if (CoordinateExecutionAdd(
+                plan.hookPc,
+                kSubjectLoadInstructionOffset,
+                probeAddress) &&
+            address == probeAddress) {
+            ++evidence.subjectLoadCount;
+            static_cast<void>(ReadXRegister(11, evidence.subjectLoadX11));
+            static_cast<void>(ReadXRegister(9, evidence.subjectLoadAddress));
+            static_cast<void>(uc_mem_read(
+                engine,
+                NormalizeCoordinateExecutionPointer(
+                    evidence.subjectLoadAddress),
+                &evidence.subjectLoadValue,
+                sizeof(evidence.subjectLoadValue)));
+        }
+        if (CoordinateExecutionAdd(
+                plan.hookPc,
+                kCallbackInstructionOffset,
+                probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackCount;
+            static_cast<void>(ReadXRegister(0, evidence.callbackX0));
+            static_cast<void>(ReadXRegister(1, evidence.callbackX1));
+            static_cast<void>(ReadXRegister(2, evidence.callbackX2));
+            static_cast<void>(ReadXRegister(8, evidence.callbackTarget));
+            const std::uint64_t callbackX1 =
+                NormalizeCoordinateExecutionPointer(evidence.callbackX1);
+            std::uint64_t callbackX1End = 0;
+            if (IsCoordinateExecutionPointer(callbackX1) &&
+                CoordinateExecutionAdd(callbackX1, 0x18, callbackX1End) &&
+                EnsureGuestRange(callbackX1, 0x18) &&
+                uc_mem_read(
+                    engine,
+                    callbackX1,
+                    &evidence.callbackX1Value0,
+                    sizeof(evidence.callbackX1Value0)) == UC_ERR_OK &&
+                uc_mem_read(
+                    engine,
+                    callbackX1 + 8,
+                    &evidence.callbackX1Value8,
+                    sizeof(evidence.callbackX1Value8)) == UC_ERR_OK &&
+                uc_mem_read(
+                    engine,
+                    callbackX1 + 0x10,
+                    &evidence.callbackX1Value10,
+                    sizeof(evidence.callbackX1Value10)) == UC_ERR_OK) {
+                evidence.callbackX1SnapshotValid = true;
+            }
+        }
+        if (CoordinateExecutionAdd(
+                plan.hookPc,
+                kCallbackReturnOffset,
+                probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackReturnCount;
+            static_cast<void>(ReadXRegister(0, evidence.callbackReturnX0));
+        }
+        const std::uint64_t callbackTarget =
+            NormalizeCoordinateExecutionPointer(evidence.callbackTarget);
+        if (callbackTarget != 0 &&
+            CoordinateExecutionAdd(
+                callbackTarget, kCallbackIndexOffset, probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackIndexCount;
+            static_cast<void>(ReadXRegister(0, evidence.callbackIndex));
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackTablePointerCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackTableProbeCount;
+            static_cast<void>(
+                ReadXRegister(8, evidence.callbackTablePointer));
+            static_cast<void>(ReadXRegister(0, evidence.callbackTableIndex));
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackTableValueCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            static_cast<void>(ReadXRegister(8, evidence.callbackTableValue));
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackLockCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            static_cast<void>(
+                ReadXRegister(0, evidence.callbackMutexRecord));
+            static_cast<void>(ReadXRegister(9, evidence.callbackLockTarget));
+            const std::uint64_t record = NormalizeCoordinateExecutionPointer(
+                evidence.callbackMutexRecord);
+            if (IsCoordinateExecutionPointer(record)) {
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    record,
+                    &evidence.callbackMutexBeforeLock,
+                    sizeof(evidence.callbackMutexBeforeLock)));
+            }
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackLockReturnCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            static_cast<void>(ReadXRegister(0, evidence.callbackLockReturn));
+            const std::uint64_t record = NormalizeCoordinateExecutionPointer(
+                evidence.callbackMutexRecord);
+            if (IsCoordinateExecutionPointer(record)) {
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    record,
+                    &evidence.callbackMutexAfterLock,
+                sizeof(evidence.callbackMutexAfterLock)));
+            }
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackFirstCallCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackFirstCallCount;
+            static_cast<void>(
+                ReadXRegister(8, evidence.callbackFirstTarget));
+            static_cast<void>(
+                ReadXRegister(0, evidence.callbackFirstArgument));
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackFirstReturnCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackFirstReturnCount;
+            static_cast<void>(
+                ReadXRegister(0, evidence.callbackFirstReturn));
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackExternalCallCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackExternalCallCount;
+            static_cast<void>(
+                ReadXRegister(8, evidence.callbackExternalTarget));
+            static_cast<void>(ReadXRegister(0, evidence.callbackExternalX0));
+            static_cast<void>(ReadXRegister(1, evidence.callbackExternalX1));
+            static_cast<void>(ReadXRegister(2, evidence.callbackExternalX2));
+            static_cast<void>(ReadXRegister(3, evidence.callbackExternalX3));
+            if (TryHandleDescriptorEndQuery(address)) return;
+            if (hookFailed) return;
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackExternalReturnCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackExternalReturnCount;
+            static_cast<void>(
+                ReadXRegister(0, evidence.callbackExternalReturn));
+            std::uint64_t context = 0;
+            if (ReadXRegister(21, context)) {
+                context = NormalizeCoordinateExecutionPointer(context);
+                if (IsCoordinateExecutionPointer(context)) {
+                    static_cast<void>(uc_mem_read(
+                        engine,
+                        context + 0x3098,
+                        &evidence.callbackExternalExpected,
+                        sizeof(evidence.callbackExternalExpected)));
+                }
+            }
+            std::uint64_t sp = 0;
+            if (uc_reg_read(engine, UC_ARM64_REG_SP, &sp) == UC_ERR_OK) {
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    sp + 0xE8,
+                    &evidence.callbackExternalPriorGate,
+                    sizeof(evidence.callbackExternalPriorGate)));
+            }
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackPrimaryGateWriteCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackPrimaryGateWriteCount;
+            std::uint64_t value = 0;
+            if (ReadXRegister(8, value)) {
+                evidence.callbackPrimaryGateWriteValue =
+                    static_cast<std::uint32_t>(value);
+            }
+            std::uint64_t sp = 0;
+            if (uc_reg_read(engine, UC_ARM64_REG_SP, &sp) == UC_ERR_OK) {
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    sp + 0x1EC,
+                    &evidence.callbackPrimaryGateSource,
+                    sizeof(evidence.callbackPrimaryGateSource)));
+            }
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackAlternateGateWriteCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackAlternateGateWriteCount;
+            std::uint64_t value = 0;
+            if (ReadXRegister(8, value)) {
+                evidence.callbackAlternateGateWriteValue =
+                    static_cast<std::uint32_t>(value);
+            }
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackGateCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackGateProbeCount;
+            std::uint64_t state = 0;
+            if (ReadXRegister(9, state)) {
+                evidence.callbackGateState =
+                    static_cast<std::uint32_t>(state);
+            }
+            std::uint64_t sp = 0;
+            if (uc_reg_read(engine, UC_ARM64_REG_SP, &sp) == UC_ERR_OK) {
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    sp + 0xDC,
+                    &evidence.callbackGateFlag,
+                    sizeof(evidence.callbackGateFlag)));
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    sp + 0xE0,
+                    &evidence.callbackGateSnapshotA,
+                    sizeof(evidence.callbackGateSnapshotA)));
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    sp + 0xE4,
+                    &evidence.callbackGateSnapshotB,
+                    sizeof(evidence.callbackGateSnapshotB)));
+            }
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackRecordCountCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            std::uint64_t count = 0;
+            if (ReadXRegister(10, count)) {
+                evidence.callbackRecordCount =
+                    static_cast<std::uint32_t>(count);
+            }
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackTargetKeyCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            static_cast<void>(ReadXRegister(8, evidence.callbackTargetKey));
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackRingSetupCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            static_cast<void>(ReadXRegister(10, evidence.callbackRingBase));
+            static_cast<void>(
+                ReadXRegister(8, evidence.callbackRingIndexArray));
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackRingProbeCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackRingProbeCount;
+            static_cast<void>(ReadXRegister(9, evidence.callbackRingRowKey));
+            std::uint64_t rowIndex = 0;
+            if (ReadXRegister(8, rowIndex)) {
+                evidence.callbackRingRowIndex =
+                    static_cast<std::int64_t>(rowIndex);
+            }
+            std::uint64_t sp = 0;
+            if (uc_reg_read(engine, UC_ARM64_REG_SP, &sp) == UC_ERR_OK) {
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    sp + 0x1BC,
+                    &evidence.callbackRingMid,
+                    sizeof(evidence.callbackRingMid)));
+            }
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackRingHitCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackRingHitCount;
+            static_cast<void>(ReadXRegister(22, evidence.callbackRingHitRow));
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackDispatchCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackDispatchCount;
+            static_cast<void>(
+                ReadXRegister(8, evidence.callbackDispatchTarget));
+            static_cast<void>(
+                ReadXRegister(0, evidence.callbackDispatchArgument));
+            static_cast<void>(
+                ReadCallbackPoolIndex(evidence.callbackPoolIndexBefore));
+            const std::uint64_t record = NormalizeCoordinateExecutionPointer(
+                evidence.callbackMutexRecord);
+            if (IsCoordinateExecutionPointer(record)) {
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    record,
+                    &evidence.callbackMutexBeforeUnlock,
+                    sizeof(evidence.callbackMutexBeforeUnlock)));
+            }
+        }
+        if (CoordinateExecutionAdd(
+                codeBase,
+                kCallbackDispatchReturnCodeOffset,
+                probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackDispatchReturnCount;
+            static_cast<void>(
+                ReadXRegister(0, evidence.callbackDispatchReturn));
+            static_cast<void>(
+                ReadCallbackPoolIndex(evidence.callbackPoolIndexAfter));
+            const std::uint64_t record = NormalizeCoordinateExecutionPointer(
+                evidence.callbackMutexRecord);
+            if (IsCoordinateExecutionPointer(record)) {
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    record,
+                    &evidence.callbackMutexAfterUnlock,
+                    sizeof(evidence.callbackMutexAfterUnlock)));
+            }
+        }
+        if (CoordinateExecutionAdd(
+                codeBase,
+                kCallbackResultPrepareCodeOffset,
+                probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackResultCount;
+            static_cast<void>(
+                ReadXRegister(8, evidence.callbackResultIndex));
+            static_cast<void>(
+                ReadXRegister(9, evidence.callbackResultBase));
+        }
+        if (CoordinateExecutionAdd(
+                codeBase, kCallbackResultCodeOffset, probeAddress) &&
+            address == probeAddress) {
+            static_cast<void>(
+                ReadXRegister(8, evidence.callbackResultPointer));
+            evidence.callbackResultPositionValid = CapturePositionBits(
+                evidence.callbackResultPointer,
+                0x10,
+                evidence.callbackResultPositionX,
+                evidence.callbackResultPositionY,
+                evidence.callbackResultPositionZ);
+        }
+        if (callbackTarget != 0 &&
+            CoordinateExecutionAdd(
+                callbackTarget, kCallbackCopyPrepareOffset, probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackCopyPrepareCount;
+            static_cast<void>(
+                ReadXRegister(13, evidence.callbackCopySource));
+            static_cast<void>(
+                ReadXRegister(11, evidence.callbackCopyDestination));
+            const std::uint64_t source = NormalizeCoordinateExecutionPointer(
+                evidence.callbackCopySource);
+            if (IsCoordinateExecutionPointer(source) &&
+                EnsureGuestRange(source, 0x20)) {
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    source,
+                    &evidence.callbackCopySourceValue0,
+                    sizeof(evidence.callbackCopySourceValue0)));
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    source + 8,
+                    &evidence.callbackCopySourceValue8,
+                    sizeof(evidence.callbackCopySourceValue8)));
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    source + 0x10,
+                    &evidence.callbackCopySourceValue10,
+                    sizeof(evidence.callbackCopySourceValue10)));
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    source + 0x18,
+                    &evidence.callbackCopySourceValue18,
+                    sizeof(evidence.callbackCopySourceValue18)));
+            }
+        }
+        if (callbackTarget != 0 &&
+            CoordinateExecutionAdd(
+                callbackTarget, kCallbackCopyAfterOffset, probeAddress) &&
+            address == probeAddress) {
+            ++evidence.callbackCopyAfterCount;
+            const std::uint64_t destination =
+                NormalizeCoordinateExecutionPointer(
+                    evidence.callbackCopyDestination);
+            if (IsCoordinateExecutionPointer(destination) &&
+                EnsureGuestRange(destination, 0x20)) {
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    destination,
+                    &evidence.callbackCopyDestinationValue0,
+                    sizeof(evidence.callbackCopyDestinationValue0)));
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    destination + 8,
+                    &evidence.callbackCopyDestinationValue8,
+                    sizeof(evidence.callbackCopyDestinationValue8)));
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    destination + 0x10,
+                    &evidence.callbackCopyDestinationValue10,
+                    sizeof(evidence.callbackCopyDestinationValue10)));
+                static_cast<void>(uc_mem_read(
+                    engine,
+                    destination + 0x18,
+                    &evidence.callbackCopyDestinationValue18,
+                    sizeof(evidence.callbackCopyDestinationValue18)));
             }
         }
         if (ShouldRedirectCoordinateExecutionReturn(plan, address)) {
@@ -715,7 +1629,43 @@ private:
             FailHook(address, CoordinateExecutionRuntimeError::EmulationFailed);
             return;
         }
-        if ((instruction & kPacgaMask) == kPacgaOpcode) {
+        if (IsCoordinateExecutionLoadExclusiveInstruction(instruction)) {
+            ++evidence.exclusiveLoadCount;
+            evidence.lastExclusiveInstruction = instruction;
+            exclusiveMonitorInvalid =
+                CoordinateExecutionExclusiveMonitorInvalidAfterInstruction(
+                    exclusiveMonitorInvalid, instruction);
+        } else if (IsCoordinateExecutionClearExclusiveInstruction(
+                       instruction)) {
+            ++evidence.exclusiveClearCount;
+            evidence.lastExclusiveInstruction = instruction;
+            exclusiveMonitorInvalid =
+                CoordinateExecutionExclusiveMonitorInvalidAfterInstruction(
+                    exclusiveMonitorInvalid, instruction);
+        } else if (IsCoordinateExecutionStoreExclusiveInstruction(
+                       instruction)) {
+            ++evidence.exclusiveStoreCount;
+            evidence.lastExclusiveInstruction = instruction;
+            const std::uint32_t statusRegister =
+                CoordinateExecutionStoreExclusiveStatusRegister(instruction);
+            evidence.exclusiveStoreStatusRegister = statusRegister;
+            if (exclusiveMonitorInvalid) {
+                exclusiveMonitorInvalid =
+                    CoordinateExecutionExclusiveMonitorInvalidAfterInstruction(
+                        exclusiveMonitorInvalid, instruction);
+                ++evidence.exclusiveStoreFailureCount;
+                if (!WriteXRegister(statusRegister, 1) ||
+                    !SkipInstruction(address)) {
+                    FailHook(
+                        address,
+                        CoordinateExecutionRuntimeError::EmulationFailed);
+                }
+                return;
+            }
+            exclusiveMonitorInvalid =
+                CoordinateExecutionExclusiveMonitorInvalidAfterInstruction(
+                    exclusiveMonitorInvalid, instruction);
+        } else if ((instruction & kPacgaMask) == kPacgaOpcode) {
             HandlePacga(address, instruction);
         } else if ((instruction & kSvcMask) == kSvcOpcode) {
             HandleSvc(address);
@@ -751,6 +1701,10 @@ private:
             FailHook(address, CoordinateExecutionRuntimeError::PacgaUnavailable);
             return;
         }
+        ++evidence.pacgaCount;
+        evidence.lastPacgaSource = sourceValue;
+        evidence.lastPacgaModifier = modifierValue;
+        evidence.lastPacgaResult = result;
         if (!WriteXRegister(destination, result) || !SkipInstruction(address)) {
             FailHook(address, CoordinateExecutionRuntimeError::EmulationFailed);
         }
@@ -758,51 +1712,63 @@ private:
 
     void HandleSvc(std::uint64_t address) noexcept {
         std::uint64_t number = 0;
-        if (!ReadXRegister(8, number) || !IsSupportedSvc(number)) {
+        if (!ReadXRegister(8, number)) {
             FailHook(address, CoordinateExecutionRuntimeError::UnsupportedSvc);
             return;
         }
-
-        std::uint64_t result = 0;
-        bool success = true;
-        if (number == kSysFcntl) {
-            std::uint64_t command = 0;
-            success = ReadXRegister(1, command);
-            result = command == 1 ? 1 : 0;
-        } else if (number == kSysFutex) {
-            std::uint64_t addressArgument = 0;
-            std::uint64_t operation = 0;
-            success = ReadXRegister(0, addressArgument) &&
-                ReadXRegister(1, operation);
-            const std::uint64_t kind = operation & 0x7FU;
-            if (success && (kind == 0 || kind == 9)) {
-                const std::uint32_t zero = 0;
-                success = WriteGuestMemory(
-                    addressArgument, &zero, sizeof(zero));
-                result = static_cast<std::uint64_t>(
-                    static_cast<std::int64_t>(-11));
-            }
-        } else if (number == kSysGetPid || number == kSysGetTid) {
-            result = 1000;
-        } else if (number == kSysGetRandom) {
-            std::uint64_t destination = 0;
-            std::uint64_t requested = 0;
-            success = ReadXRegister(0, destination) &&
-                ReadXRegister(1, requested);
-            const std::size_t count = static_cast<std::size_t>(
-                std::min<std::uint64_t>(requested, 16));
-            std::array<std::uint8_t, 16> bytes{};
-            bytes.fill(66);
-            if (success && count != 0) {
-                success = WriteGuestMemory(destination, bytes.data(), count);
-            }
-            result = count;
+        switch (evidence.svcCount) {
+            case 0: evidence.svcNumber0 = number; break;
+            case 1: evidence.svcNumber1 = number; break;
+            case 2: evidence.svcNumber2 = number; break;
+            case 3: evidence.svcNumber3 = number; break;
+            default: break;
         }
-
-        if (!success || !WriteXRegister(0, result) ||
+        ++evidence.svcCount;
+        evidence.lastSvcNumber = number;
+        ++evidence.exclusiveClearCount;
+        exclusiveMonitorInvalid = true;
+        if (!WriteXRegister(0, CoordinateExecutionSvcResult(number)) ||
             !SkipInstruction(address)) {
             FailHook(address, CoordinateExecutionRuntimeError::EmulationFailed);
         }
+    }
+
+    bool TryHandleDescriptorEndQuery(std::uint64_t address) {
+        std::uint64_t number = 0;
+        std::uint64_t descriptorValue = 0;
+        std::uint64_t offset = 0;
+        std::uint64_t whence = 0;
+        if (!ReadXRegister(0, number) ||
+            !ReadXRegister(1, descriptorValue) ||
+            !ReadXRegister(2, offset) ||
+            !ReadXRegister(3, whence) ||
+            !IsCoordinateExecutionDescriptorEndQuery(
+                number, offset, whence)) {
+            return false;
+        }
+
+        const std::int32_t descriptor =
+            static_cast<std::int32_t>(descriptorValue);
+        std::int64_t result = -1;
+        const auto cached = descriptorEnds.find(descriptor);
+        if (cached != descriptorEnds.end()) {
+            result = cached->second;
+        } else if (ReadDescriptorEnd(
+                       executionContext.threadId, descriptor, result)) {
+            descriptorEnds.emplace(descriptor, result);
+        } else {
+            return false;
+        }
+
+        const std::uint64_t returnPc = address + 4;
+        ++evidence.descriptorEndQueryCount;
+        evidence.descriptorEndQueryFd = descriptor;
+        evidence.descriptorEndQueryResult = result;
+        if (!WriteXRegister(0, static_cast<std::uint64_t>(result)) ||
+            !WriteXRegister(30, returnPc) || !SkipInstruction(address)) {
+            FailHook(address, CoordinateExecutionRuntimeError::EmulationFailed);
+        }
+        return true;
     }
 
     void CaptureWrite(std::uint64_t address,
@@ -827,7 +1793,39 @@ private:
         }
 
         std::uint64_t pc = 0;
-        if (uc_reg_read(engine, UC_ARM64_REG_PC, &pc) != UC_ERR_OK) return;
+        if (uc_reg_read(engine, UC_ARM64_REG_PC, &pc) != UC_ERR_OK ||
+            uc_reg_read(engine, UC_ARM64_REG_SP, &evidence.capturedSp) !=
+                UC_ERR_OK ||
+            !ReadXRegister(8, evidence.capturedX8) ||
+            !ReadXRegister(9, evidence.capturedX9) ||
+            !ReadXRegister(12, evidence.capturedX12) ||
+            !ReadXRegister(21, evidence.capturedX21)) {
+            return;
+        }
+        const auto readLocal = [&](std::uint64_t offset,
+                                   std::uint64_t& value) {
+            std::uint64_t localAddress = 0;
+            return CoordinateExecutionAdd(
+                       evidence.capturedSp, offset, localAddress) &&
+                uc_mem_read(engine, localAddress, &value, sizeof(value)) ==
+                UC_ERR_OK;
+        };
+        static_cast<void>(readLocal(0x60, evidence.capturedLocal60));
+        static_cast<void>(readLocal(0x1C8, evidence.capturedLocal1C8));
+        static_cast<void>(readLocal(0x208, evidence.capturedLocal208));
+        static_cast<void>(readLocal(0x238, evidence.capturedLocal238));
+        std::uint64_t fieldAddress = 0;
+        if (CoordinateExecutionAdd(
+                NormalizeCoordinateExecutionPointer(
+                    evidence.capturedLocal238),
+                0x2298,
+                fieldAddress)) {
+            static_cast<void>(uc_mem_read(
+                engine,
+                fieldAddress,
+                &evidence.capturedLocal238Field,
+                sizeof(evidence.capturedLocal238Field)));
+        }
         evidence.captureValid = true;
         ++evidence.captureCount;
         evidence.capturedPc = pc;
@@ -911,6 +1909,59 @@ private:
             uc_reg_read(engine, XRegisterId(index), &value) == UC_ERR_OK;
     }
 
+    bool CapturePositionBits(std::uint64_t base,
+                             std::uint64_t offset,
+                             std::uint32_t& x,
+                             std::uint32_t& y,
+                             std::uint32_t& z) const {
+        base = NormalizeCoordinateExecutionPointer(base);
+        std::uint64_t address = 0;
+        CoordinateExecutionPosition position{};
+        if (!IsCoordinateExecutionPointer(base) ||
+            !CoordinateExecutionAdd(base, offset, address) ||
+            uc_mem_read(engine, address, &position, sizeof(position)) !=
+                UC_ERR_OK) {
+            return false;
+        }
+        x = std::bit_cast<std::uint32_t>(position.x);
+        y = std::bit_cast<std::uint32_t>(position.y);
+        z = std::bit_cast<std::uint32_t>(position.z);
+        return true;
+    }
+
+    bool ReadCallbackPoolIndex(std::uint64_t& value) const {
+        value = 0;
+        std::uint64_t sp = 0;
+        std::uint64_t context = 0;
+        std::uint64_t selector = 0;
+        if (uc_reg_read(engine, UC_ARM64_REG_SP, &sp) != UC_ERR_OK ||
+            !ReadXRegister(21, context) ||
+            uc_mem_read(
+                engine,
+                sp + 0x230,
+                &selector,
+                sizeof(selector)) != UC_ERR_OK ||
+            selector >
+                (std::numeric_limits<std::uint64_t>::max() - context) / 8) {
+            return false;
+        }
+        std::uint64_t slot = context + selector * 8;
+        std::uint64_t pointer = 0;
+        if (!CoordinateExecutionAdd(slot, 0x2D40, slot) ||
+            uc_mem_read(engine, slot, &pointer, sizeof(pointer)) != UC_ERR_OK) {
+            return false;
+        }
+        pointer = NormalizeCoordinateExecutionPointer(pointer);
+        std::int32_t index = 0;
+        if (!IsCoordinateExecutionPointer(pointer) ||
+            uc_mem_read(engine, pointer, &index, sizeof(index)) != UC_ERR_OK) {
+            return false;
+        }
+        value = static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(index));
+        return true;
+    }
+
     bool WriteXRegister(std::uint32_t index, std::uint64_t value) {
         return index == 31 ||
             uc_reg_write(engine, XRegisterId(index), &value) == UC_ERR_OK;
@@ -922,13 +1973,6 @@ private:
         }
         const std::uint64_t next = address + 4;
         return uc_reg_write(engine, UC_ARM64_REG_PC, &next) == UC_ERR_OK;
-    }
-
-    bool WriteGuestMemory(std::uint64_t address,
-                          const void* bytes,
-                          std::size_t size) {
-        return bytes != nullptr && EnsureGuestRange(address, size) &&
-            uc_mem_write(engine, address, bytes, size) == UC_ERR_OK;
     }
 
     void FailHook(std::uint64_t address,
@@ -959,8 +2003,29 @@ private:
     CoordinateExecutionRuntimeError hookRuntimeError =
         CoordinateExecutionRuntimeError::None;
     std::unordered_map<std::uint64_t, CachedPage> pages;
+    std::unordered_map<
+        std::uint64_t,
+        std::shared_ptr<CachedPageBacking>> pageBackings;
     std::unordered_set<std::uint64_t> mappedPages;
     std::unordered_set<std::uint64_t> hookedAddresses;
+    std::unordered_set<std::uint64_t> dirtyStackPages;
+    MemoryTransport* engineMemory = nullptr;
+    std::uintptr_t engineModuleBase = 0;
+    std::size_t engineModuleSize = 0;
+    std::uintptr_t engineCodeBase = 0;
+    std::size_t engineCodeSize = 0;
+    CoordinateExecutionMode engineMode =
+        static_cast<CoordinateExecutionMode>(0);
+    CoordinateExecutionPlan enginePlan{};
+    bool engineIdentityValid = false;
+    std::chrono::steady_clock::time_point codeSnapshotVerifiedAt{};
+    std::size_t codeSnapshotVerificationCursor = 0;
+    std::size_t codeSnapshotVerificationPageCount = 0;
+    std::size_t engineExecutionCount = 0;
+    bool exclusiveMonitorInvalid = true;
+    bool enginePoisoned = false;
+    std::int32_t descriptorThreadId = -1;
+    std::unordered_map<std::int32_t, std::int64_t> descriptorEnds;
 };
 
 CoordinateExecutionRuntime::CoordinateExecutionRuntime()

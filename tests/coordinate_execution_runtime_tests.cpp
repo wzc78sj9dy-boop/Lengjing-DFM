@@ -1,5 +1,6 @@
 #include "game/native/CoordinateExecutionRuntime.h"
 
+#include <array>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -17,14 +18,32 @@ namespace {
 
 using lengjing::game::native::BuildCoordinateExecutionPlan;
 using lengjing::game::native::CoordinateExecutionMode;
+using lengjing::game::native::CoordinateExecutionMemoryBaseRegister;
+using lengjing::game::native::
+    CoordinateExecutionExclusiveMonitorInvalidAfterInstruction;
+using lengjing::game::native::CoordinateExecutionStoreExclusiveStatusRegister;
 using lengjing::game::native::CoordinateExecutionRequest;
 using lengjing::game::native::CoordinateExecutionStatus;
 using lengjing::game::native::ContainsCoordinateExecutionCodeAddress;
+using lengjing::game::native::CoordinateExecutionSvcResult;
 using lengjing::game::native::IsCoordinateExecutionPointer;
+using lengjing::game::native::IsCoordinateExecutionCanonicalFaultBase;
+using lengjing::game::native::IsCoordinateExecutionClearExclusiveInstruction;
+using lengjing::game::native::IsCoordinateExecutionDescriptorEndQuery;
+using lengjing::game::native::IsCoordinateExecutionLoadExclusiveInstruction;
+using lengjing::game::native::IsCoordinateExecutionStackBase;
+using lengjing::game::native::IsCoordinateExecutionStoreExclusiveInstruction;
+using lengjing::game::native::IsCoordinateExecutionTaggedMemoryInstruction;
 using lengjing::game::native::NormalizeCoordinateExecutionPointer;
+using lengjing::game::native::ShouldInitializeCoordinateExecutionHook;
 using lengjing::game::native::ShouldRedirectCoordinateExecutionReturn;
 using lengjing::game::native::kCoordinateExecutionDefaultFrame;
+using lengjing::game::native::kCoordinateExecutionDefaultFp;
+using lengjing::game::native::kCoordinateExecutionDefaultSp;
+using lengjing::game::native::kCoordinateExecutionResultSlotOffset;
 using lengjing::game::native::kCoordinateExecutionStopPc;
+using lengjing::game::native::kCoordinateExecutionSyntheticStackBase;
+using lengjing::game::native::kCoordinateExecutionSyntheticStackTop;
 
 constexpr std::uint64_t kModuleBase = UINT64_C(0x0000007000000000);
 constexpr std::size_t kModuleSize = 0x200000;
@@ -49,6 +68,119 @@ void TestAbiAndPointers() {
     REQUIRE(!ContainsCoordinateExecutionCodeAddress(
         kModuleBase, kModuleSize, kModuleBase + kModuleSize));
     REQUIRE(kModuleBase + kModuleSize < kCodeBase);
+}
+
+void TestSyntheticStackContract() {
+    REQUIRE(kCoordinateExecutionSyntheticStackTop -
+                kCoordinateExecutionSyntheticStackBase ==
+            UINT64_C(0x100000));
+    REQUIRE(!IsCoordinateExecutionStackBase(
+        kCoordinateExecutionSyntheticStackBase - 1));
+    REQUIRE(IsCoordinateExecutionStackBase(
+        kCoordinateExecutionSyntheticStackBase));
+    REQUIRE(IsCoordinateExecutionStackBase(
+        kCoordinateExecutionSyntheticStackTop - 1));
+    REQUIRE(!IsCoordinateExecutionStackBase(
+        kCoordinateExecutionSyntheticStackTop));
+    REQUIRE(IsCoordinateExecutionStackBase(kCoordinateExecutionDefaultFrame));
+    REQUIRE(IsCoordinateExecutionStackBase(kCoordinateExecutionDefaultFp));
+    REQUIRE(IsCoordinateExecutionStackBase(kCoordinateExecutionDefaultSp));
+    REQUIRE(kCoordinateExecutionDefaultFrame +
+                kCoordinateExecutionResultSlotOffset <
+            kCoordinateExecutionSyntheticStackTop);
+    REQUIRE(IsCoordinateExecutionStackBase(kNormalizedSubject));
+    REQUIRE(IsCoordinateExecutionStackBase(kSubject));
+    REQUIRE(!IsCoordinateExecutionStackBase(UINT64_C(0x1000)));
+}
+
+void TestHookInitializationGate() {
+    constexpr std::uint64_t kHookPc = kCodeBase + 0x1000;
+    REQUIRE(ShouldInitializeCoordinateExecutionHook(false, kHookPc, kHookPc));
+    REQUIRE(!ShouldInitializeCoordinateExecutionHook(true, kHookPc, kHookPc));
+    REQUIRE(!ShouldInitializeCoordinateExecutionHook(
+        false, kHookPc + 4, kHookPc));
+}
+
+void TestSvcContract() {
+    REQUIRE(CoordinateExecutionSvcResult(25) == 0);
+    REQUIRE(CoordinateExecutionSvcResult(29) == 0);
+    REQUIRE(CoordinateExecutionSvcResult(56) == 0);
+    REQUIRE(CoordinateExecutionSvcResult(62) == 0);
+    REQUIRE(CoordinateExecutionSvcResult(96) == 0);
+    REQUIRE(CoordinateExecutionSvcResult(98) == 0);
+    REQUIRE(CoordinateExecutionSvcResult(160) == 0);
+    REQUIRE(CoordinateExecutionSvcResult(172) == 1);
+    REQUIRE(CoordinateExecutionSvcResult(178) == 1);
+    REQUIRE(CoordinateExecutionSvcResult(278) == 0);
+    REQUIRE(CoordinateExecutionSvcResult(UINT64_MAX) == 0);
+    REQUIRE(IsCoordinateExecutionDescriptorEndQuery(62, 0, 2));
+    REQUIRE(!IsCoordinateExecutionDescriptorEndQuery(62, 1, 2));
+    REQUIRE(!IsCoordinateExecutionDescriptorEndQuery(62, 0, 1));
+    REQUIRE(!IsCoordinateExecutionDescriptorEndQuery(178, 0, 2));
+}
+
+void TestTaggedMemoryInstructionContract() {
+    REQUIRE(IsCoordinateExecutionTaggedMemoryInstruction(
+        UINT32_C(4181723400)));
+    REQUIRE(CoordinateExecutionMemoryBaseRegister(
+                UINT32_C(4181723400)) ==
+            8);
+    REQUIRE(!IsCoordinateExecutionTaggedMemoryInstruction(
+        UINT32_C(0xD503201F)));
+    REQUIRE(IsCoordinateExecutionCanonicalFaultBase(
+        UINT64_C(0x734D178C00)));
+    REQUIRE(!IsCoordinateExecutionCanonicalFaultBase(
+        UINT64_C(0x2000000000)));
+}
+
+void TestExclusiveMonitorContract() {
+    constexpr std::array<std::uint32_t, 8> kLoadExclusiveOpcodes{
+        UINT32_C(0x88407C00), UINT32_C(0x8840FC00),
+        UINT32_C(0x88607C00), UINT32_C(0x8860FC00),
+        UINT32_C(0xC8407C00), UINT32_C(0xC840FC00),
+        UINT32_C(0xC8607C00), UINT32_C(0xC860FC00)};
+    constexpr std::array<std::uint32_t, 8> kStoreExclusiveOpcodes{
+        UINT32_C(0x88007C00), UINT32_C(0x8800FC00),
+        UINT32_C(0x88207C00), UINT32_C(0x8820FC00),
+        UINT32_C(0xC8007C00), UINT32_C(0xC800FC00),
+        UINT32_C(0xC8207C00), UINT32_C(0xC820FC00)};
+    for (const std::uint32_t instruction : kLoadExclusiveOpcodes) {
+        REQUIRE(IsCoordinateExecutionLoadExclusiveInstruction(instruction));
+        REQUIRE(!IsCoordinateExecutionStoreExclusiveInstruction(instruction));
+    }
+    for (const std::uint32_t instruction : kStoreExclusiveOpcodes) {
+        REQUIRE(IsCoordinateExecutionStoreExclusiveInstruction(instruction));
+        REQUIRE(!IsCoordinateExecutionLoadExclusiveInstruction(instruction));
+    }
+    REQUIRE(IsCoordinateExecutionLoadExclusiveInstruction(
+        UINT32_C(0x885F7D6A)));
+    REQUIRE(IsCoordinateExecutionStoreExclusiveInstruction(
+        UINT32_C(0x88097D6A)));
+    REQUIRE(CoordinateExecutionStoreExclusiveStatusRegister(
+                UINT32_C(0x88097D6A)) ==
+            9);
+    REQUIRE(IsCoordinateExecutionClearExclusiveInstruction(
+        UINT32_C(0xD503305F)));
+    REQUIRE(IsCoordinateExecutionClearExclusiveInstruction(
+        UINT32_C(0xD5033F5F)));
+    REQUIRE(!IsCoordinateExecutionClearExclusiveInstruction(
+        UINT32_C(0xD503201F)));
+
+    bool invalid = true;
+    invalid = CoordinateExecutionExclusiveMonitorInvalidAfterInstruction(
+        invalid, UINT32_C(0x885F7D6A));
+    REQUIRE(!invalid);
+    invalid = CoordinateExecutionExclusiveMonitorInvalidAfterInstruction(
+        invalid, UINT32_C(0xD5033F5F));
+    REQUIRE(invalid);
+    invalid = CoordinateExecutionExclusiveMonitorInvalidAfterInstruction(
+        invalid, UINT32_C(0x885F7D6A));
+    REQUIRE(!invalid);
+    invalid = CoordinateExecutionExclusiveMonitorInvalidAfterInstruction(
+        invalid, UINT32_C(0x88097D6A));
+    REQUIRE(invalid);
+    REQUIRE(CoordinateExecutionExclusiveMonitorInvalidAfterInstruction(
+        invalid, UINT32_C(0xD503201F)));
 }
 
 void TestKnownRelativeCandidate() {
@@ -246,6 +378,11 @@ void TestInvalidRequests() {
 
 int main() {
     TestAbiAndPointers();
+    TestSyntheticStackContract();
+    TestHookInitializationGate();
+    TestSvcContract();
+    TestTaggedMemoryInstructionContract();
+    TestExclusiveMonitorContract();
     TestKnownRelativeCandidate();
     TestUnknownRelativeCandidate();
     TestKnownCandidateRequiresContext();

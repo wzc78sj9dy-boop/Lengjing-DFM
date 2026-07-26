@@ -15,6 +15,10 @@ struct ProcessExecutionContext;
 
 inline constexpr std::uint64_t kCoordinateExecutionStopPc =
     UINT64_C(0x0000000400000000);
+inline constexpr std::uint64_t kCoordinateExecutionSyntheticStackBase =
+    UINT64_C(0x00000001FFF00000);
+inline constexpr std::uint64_t kCoordinateExecutionSyntheticStackTop =
+    UINT64_C(0x0000000200000000);
 inline constexpr std::uint64_t kCoordinateExecutionDefaultFrame =
     UINT64_C(0x00000001FFFF7000);
 inline constexpr std::uint64_t kCoordinateExecutionDefaultSp =
@@ -130,12 +134,146 @@ struct CoordinateExecutionEvidence {
     bool hitStopPc = false;
     bool hitReturnStub = false;
     bool hitHookPc = false;
+    bool hookInitialized = false;
     bool returnStubMagicVerifiedBeforeRun = false;
     bool captureValid = false;
+    std::uint64_t inputSubject = 0;
+    std::uint64_t hookCount = 0;
+    std::uint64_t hookX0 = 0;
+    std::uint64_t hookX1 = 0;
+    std::uint64_t hookX2 = 0;
+    std::uint64_t hookSlotValue = 0;
+    std::uint64_t hookSnapshotX1 = 0;
+    std::uint64_t hookSnapshotX2 = 0;
+    std::uint64_t subjectLoadCount = 0;
+    std::uint64_t subjectLoadX11 = 0;
+    std::uint64_t subjectLoadAddress = 0;
+    std::uint64_t subjectLoadValue = 0;
+    std::uint64_t callbackCount = 0;
+    std::uint64_t callbackX0 = 0;
+    std::uint64_t callbackX1 = 0;
+    std::uint64_t callbackX2 = 0;
+    std::uint64_t callbackTarget = 0;
+    bool callbackX1SnapshotValid = false;
+    std::uint64_t callbackX1Value0 = 0;
+    std::uint64_t callbackX1Value8 = 0;
+    std::uint64_t callbackX1Value10 = 0;
+    std::uint64_t callbackReturnCount = 0;
+    std::uint64_t callbackReturnX0 = 0;
+    std::uint64_t callbackIndexCount = 0;
+    std::uint64_t callbackIndex = 0;
+    std::uint64_t callbackTableProbeCount = 0;
+    std::uint64_t callbackTablePointer = 0;
+    std::uint64_t callbackTableIndex = 0;
+    std::uint64_t callbackTableValue = 0;
+    std::uint64_t callbackMutexRecord = 0;
+    std::uint64_t callbackLockTarget = 0;
+    std::uint32_t callbackMutexBeforeLock = 0;
+    std::uint64_t callbackLockReturn = 0;
+    std::uint32_t callbackMutexAfterLock = 0;
+    std::uint32_t callbackMutexBeforeUnlock = 0;
+    std::uint32_t callbackMutexAfterUnlock = 0;
+    std::uint64_t callbackFirstCallCount = 0;
+    std::uint64_t callbackFirstTarget = 0;
+    std::uint64_t callbackFirstArgument = 0;
+    std::uint64_t callbackFirstReturnCount = 0;
+    std::uint64_t callbackFirstReturn = 0;
+    std::uint64_t callbackExternalCallCount = 0;
+    std::uint64_t callbackExternalTarget = 0;
+    std::uint64_t callbackExternalX0 = 0;
+    std::uint64_t callbackExternalX1 = 0;
+    std::uint64_t callbackExternalX2 = 0;
+    std::uint64_t callbackExternalX3 = 0;
+    std::uint64_t callbackExternalReturnCount = 0;
+    std::uint64_t callbackExternalReturn = 0;
+    std::uint32_t callbackExternalExpected = 0;
+    std::uint32_t callbackExternalPriorGate = 0;
+    std::uint64_t callbackPrimaryGateWriteCount = 0;
+    std::uint32_t callbackPrimaryGateWriteValue = 0;
+    std::uint32_t callbackPrimaryGateSource = 0;
+    std::uint64_t callbackAlternateGateWriteCount = 0;
+    std::uint32_t callbackAlternateGateWriteValue = 0;
+    std::uint64_t callbackGateProbeCount = 0;
+    std::uint8_t callbackGateFlag = 0;
+    std::int32_t callbackGateSnapshotA = 0;
+    std::int32_t callbackGateSnapshotB = 0;
+    std::uint32_t callbackGateState = 0;
+    std::uint32_t callbackRecordCount = 0;
+    std::uint64_t callbackTargetKey = 0;
+    std::uint64_t callbackRingBase = 0;
+    std::uint64_t callbackRingIndexArray = 0;
+    std::uint64_t callbackRingProbeCount = 0;
+    std::uint64_t callbackRingRowKey = 0;
+    std::int64_t callbackRingRowIndex = 0;
+    std::int32_t callbackRingMid = 0;
+    std::uint64_t callbackRingHitCount = 0;
+    std::uint64_t callbackRingHitRow = 0;
+    std::uint64_t callbackDispatchCount = 0;
+    std::uint64_t callbackDispatchTarget = 0;
+    std::uint64_t callbackDispatchArgument = 0;
+    std::uint64_t callbackPoolIndexBefore = 0;
+    std::uint64_t callbackDispatchReturnCount = 0;
+    std::uint64_t callbackDispatchReturn = 0;
+    std::uint64_t callbackPoolIndexAfter = 0;
+    std::uint64_t callbackResultCount = 0;
+    std::uint64_t callbackResultIndex = 0;
+    std::uint64_t callbackResultBase = 0;
+    std::uint64_t callbackResultPointer = 0;
+    bool callbackResultPositionValid = false;
+    std::uint32_t callbackResultPositionX = 0;
+    std::uint32_t callbackResultPositionY = 0;
+    std::uint32_t callbackResultPositionZ = 0;
+    std::uint64_t callbackCopyPrepareCount = 0;
+    std::uint64_t callbackCopySource = 0;
+    std::uint64_t callbackCopyDestination = 0;
+    std::uint64_t callbackCopySourceValue0 = 0;
+    std::uint64_t callbackCopySourceValue8 = 0;
+    std::uint64_t callbackCopySourceValue10 = 0;
+    std::uint64_t callbackCopySourceValue18 = 0;
+    std::uint64_t callbackCopyAfterCount = 0;
+    std::uint64_t callbackCopyDestinationValue0 = 0;
+    std::uint64_t callbackCopyDestinationValue8 = 0;
+    std::uint64_t callbackCopyDestinationValue10 = 0;
+    std::uint64_t callbackCopyDestinationValue18 = 0;
+    std::uint64_t exclusiveLoadCount = 0;
+    std::uint64_t exclusiveClearCount = 0;
+    std::uint64_t exclusiveStoreCount = 0;
+    std::uint64_t exclusiveStoreFailureCount = 0;
+    std::uint32_t lastExclusiveInstruction = 0;
+    std::uint64_t svcCount = 0;
+    std::uint64_t svcNumber0 = 0;
+    std::uint64_t svcNumber1 = 0;
+    std::uint64_t svcNumber2 = 0;
+    std::uint64_t svcNumber3 = 0;
+    std::uint64_t lastSvcNumber = 0;
+    std::uint32_t exclusiveStoreStatusRegister = 0;
+    std::uint64_t descriptorEndQueryCount = 0;
+    std::int32_t descriptorEndQueryFd = -1;
+    std::int64_t descriptorEndQueryResult = -1;
+    std::uint64_t taggedBaseRewriteCount = 0;
+    std::uint32_t taggedBaseRegister = 0;
+    std::uint64_t taggedBaseBefore = 0;
+    std::uint64_t taggedBaseAfter = 0;
+    std::uint64_t pacgaCount = 0;
+    std::uint64_t lastPacgaSource = 0;
+    std::uint64_t lastPacgaModifier = 0;
+    std::uint64_t lastPacgaResult = 0;
+    std::uint64_t seedSubject = 0;
+    std::uint64_t seedSlot = 0;
     std::uint64_t captureCount = 0;
     std::uint64_t capturedPc = 0;
     std::uint64_t capturedSlot = 0;
     std::uint64_t capturedObject = 0;
+    std::uint64_t capturedSp = 0;
+    std::uint64_t capturedX8 = 0;
+    std::uint64_t capturedX9 = 0;
+    std::uint64_t capturedX12 = 0;
+    std::uint64_t capturedX21 = 0;
+    std::uint64_t capturedLocal60 = 0;
+    std::uint64_t capturedLocal1C8 = 0;
+    std::uint64_t capturedLocal208 = 0;
+    std::uint64_t capturedLocal238 = 0;
+    std::uint32_t capturedLocal238Field = 0;
     std::uint64_t stackBase = 0;
     std::uint64_t finalPc = 0;
     std::size_t capturedWriteSize = 0;
@@ -163,6 +301,84 @@ constexpr std::uint64_t NormalizeCoordinateExecutionPointer(
     return value & kCoordinateExecutionPointerMask;
 }
 
+constexpr bool IsCoordinateExecutionTaggedMemoryInstruction(
+    std::uint32_t instruction) noexcept {
+    return (instruction & UINT32_C(0x3B000000)) ==
+            UINT32_C(0x39000000) ||
+        (instruction & UINT32_C(0x3B200C00)) ==
+            UINT32_C(0x38200800) ||
+        (instruction & UINT32_C(0x3B200C00)) ==
+            UINT32_C(0x38200000);
+}
+
+constexpr std::uint32_t CoordinateExecutionMemoryBaseRegister(
+    std::uint32_t instruction) noexcept {
+    return (instruction >> 5U) & UINT32_C(0x1F);
+}
+
+constexpr bool IsCoordinateExecutionLoadExclusiveInstruction(
+    std::uint32_t instruction) noexcept {
+    switch (instruction & UINT32_C(0xFFE0FC00)) {
+        case UINT32_C(0x88407C00):
+        case UINT32_C(0x8840FC00):
+        case UINT32_C(0x88607C00):
+        case UINT32_C(0x8860FC00):
+        case UINT32_C(0xC8407C00):
+        case UINT32_C(0xC840FC00):
+        case UINT32_C(0xC8607C00):
+        case UINT32_C(0xC860FC00):
+            return true;
+        default:
+            return false;
+    }
+}
+
+constexpr bool IsCoordinateExecutionStoreExclusiveInstruction(
+    std::uint32_t instruction) noexcept {
+    switch (instruction & UINT32_C(0xFFE0FC00)) {
+        case UINT32_C(0x88007C00):
+        case UINT32_C(0x8800FC00):
+        case UINT32_C(0x88207C00):
+        case UINT32_C(0x8820FC00):
+        case UINT32_C(0xC8007C00):
+        case UINT32_C(0xC800FC00):
+        case UINT32_C(0xC8207C00):
+        case UINT32_C(0xC820FC00):
+            return true;
+        default:
+            return false;
+    }
+}
+
+constexpr bool IsCoordinateExecutionClearExclusiveInstruction(
+    std::uint32_t instruction) noexcept {
+    return (instruction & UINT32_C(0xFFFFF0FF)) ==
+        UINT32_C(0xD503305F);
+}
+
+constexpr std::uint32_t CoordinateExecutionStoreExclusiveStatusRegister(
+    std::uint32_t instruction) noexcept {
+    return (instruction >> 16U) & UINT32_C(0x1F);
+}
+
+constexpr bool CoordinateExecutionExclusiveMonitorInvalidAfterInstruction(
+    bool current,
+    std::uint32_t instruction) noexcept {
+    if (IsCoordinateExecutionLoadExclusiveInstruction(instruction)) {
+        return false;
+    }
+    if (IsCoordinateExecutionClearExclusiveInstruction(instruction) ||
+        IsCoordinateExecutionStoreExclusiveInstruction(instruction)) {
+        return true;
+    }
+    return current;
+}
+
+constexpr bool IsCoordinateExecutionCanonicalFaultBase(
+    std::uint64_t value) noexcept {
+    return (value >> 37U) >= 3U && value < UINT64_C(0x8000000001);
+}
+
 constexpr bool ShouldRedirectCoordinateExecutionReturn(
     const CoordinateExecutionPlan& plan,
     std::uint64_t pc) noexcept {
@@ -176,6 +392,33 @@ constexpr bool IsCoordinateExecutionPointer(std::uint64_t value) noexcept {
         NormalizeCoordinateExecutionPointer(value);
     return pointer >= kCoordinateExecutionPointerMin &&
         pointer <= kCoordinateExecutionPointerMax;
+}
+
+constexpr bool IsCoordinateExecutionStackBase(std::uint64_t value) noexcept {
+    const std::uint64_t pointer =
+        NormalizeCoordinateExecutionPointer(value);
+    return IsCoordinateExecutionPointer(pointer) ||
+        (pointer >= kCoordinateExecutionSyntheticStackBase &&
+         pointer < kCoordinateExecutionSyntheticStackTop);
+}
+
+constexpr bool ShouldInitializeCoordinateExecutionHook(
+    bool initialized,
+    std::uint64_t address,
+    std::uint64_t hookPc) noexcept {
+    return !initialized && address == hookPc;
+}
+
+constexpr std::uint64_t CoordinateExecutionSvcResult(
+    std::uint64_t number) noexcept {
+    return number == 172 || number == 178 ? 1 : 0;
+}
+
+constexpr bool IsCoordinateExecutionDescriptorEndQuery(
+    std::uint64_t number,
+    std::uint64_t offset,
+    std::uint64_t whence) noexcept {
+    return number == 62 && offset == 0 && whence == 2;
 }
 
 constexpr bool IsCoordinateExecutionMode(CoordinateExecutionMode mode) noexcept {

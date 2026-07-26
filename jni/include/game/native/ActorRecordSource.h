@@ -20,6 +20,7 @@ struct ActorRecordSource {
 
 inline constexpr std::uintptr_t kOrdinaryActorRootOffset = 0x180;
 inline constexpr std::uintptr_t kOrdinaryActorMeshOffset = 0x3D0;
+inline constexpr std::uintptr_t kOrdinaryActorAlternateRootOffset = 0x3E0;
 
 inline ActorRecordSource MakeResolvedActorRecord(
     std::uintptr_t actor,
@@ -116,6 +117,22 @@ void FillOrdinaryActorPointers(
         source.ordinaryMesh =
             readPointer(source.actor + kOrdinaryActorMeshOffset);
     }
+}
+
+template <typename ReadPointer, typename ValidatePointer>
+std::uintptr_t ResolveActorCoordinateSubject(
+    const ActorRecordSource& source,
+    ReadPointer&& readPointer,
+    ValidatePointer&& validatePointer) {
+    std::uintptr_t subject = source.ordinaryRoot;
+    if (!validatePointer(subject) && source.actor != 0) {
+        subject = readPointer(source.actor + kOrdinaryActorRootOffset);
+    }
+    if (!validatePointer(subject) && source.actor != 0) {
+        subject = readPointer(
+            source.actor + kOrdinaryActorAlternateRootOffset);
+    }
+    return validatePointer(subject) ? subject : 0;
 }
 
 template <typename PreferredRead, typename OrdinaryRead>

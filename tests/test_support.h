@@ -31,6 +31,7 @@ void RunCharacterComponentTransformTests();
 void RunCloudLayoutStartupPolicyTests();
 void RunCloudLayoutTests();
 void RunCoordinateDecryptBackendRouteTests();
+void RunCoordinateExecutionCachePolicyTests();
 void RunCoordinatePoolCloudLayoutStandaloneTests();
 void RunCpuMailboxPolicyTests();
 void RunFrameProjectionTests();

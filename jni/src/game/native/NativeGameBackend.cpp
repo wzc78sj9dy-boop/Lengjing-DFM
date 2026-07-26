@@ -27,6 +27,7 @@
 #include "game/native/CharacterPositionResolver.h"
 #include "game/native/CoordinateDecryptBackendRoute.h"
 #include "game/native/CoordinateDecrypt2Runtime.h"
+#include "game/native/CoordinateExecutionCachePolicy.h"
 #include "game/native/CoordinateExecutionDecoder.h"
 #include "game/native/CoordinateOutputPolicy.h"
 #include "game/native/CoordinatePoolRuntime.h"
@@ -96,6 +97,7 @@ constexpr std::int32_t kMaximumActorCount = 10000;
 constexpr std::int32_t kMaximumWorldObjectCount = 65536;
 constexpr std::size_t kMaximumNameLength = 249;
 constexpr std::uint64_t kCoordinateTraceIntervalFrames = 30;
+constexpr std::size_t kCoordinateExecutionDecodeTraceLimit = 32;
 constexpr std::array<std::string_view, 2> kGameModuleNames{
     "libUE4.so",
     "libUnreal.so",
@@ -1476,6 +1478,7 @@ public:
         frame = GameFrame{};
         frame.sequence = sequence;
         coordinateTraceFrame_ = sequence;
+        coordinateExecutionDecodeTraceCount_ = 0;
         if (IsCoordinateTraceEnabled()) {
             coordinateTraceRecords_.clear();
         }
@@ -1509,7 +1512,7 @@ public:
             ui::ResolveCoordinateDecryptSelection(settings.visual);
         const native::CoordinateDecryptBackendRoute decryptRoute =
             native::ResolveCoordinateDecryptBackendRoute(
-                decryptSelection, true);
+                decryptSelection, false);
         const bool requestedHardwareBreakpoint =
             decryptRoute.coordinateDecrypt2;
         const bool requestedCoordinateReplay =
@@ -1569,6 +1572,7 @@ public:
         coordinateDecrypt2Index_ = requestedCoordinateDecrypt2Index;
         coordinateExecutionMode_ = requestedCoordinateExecutionMode;
         if (coordinateExecutionModeChanged) {
+            coordinateExecutionPositionCache_.clear();
             coordinateExecutionDecoder_.Reset();
             coordinateExecutionDiscoveryInput_ = {};
             coordinateExecutionCodeBase_ = 0;
@@ -1633,6 +1637,8 @@ public:
         }
         algorithmFrameAttemptCount_ = 0;
         algorithmFrameSuccessCount_ = 0;
+        coordinateExecutionFrameAttemptCount_ = 0;
+        coordinateExecutionFrameSuccessCount_ = 0;
         algorithmFrameOutputError_ = CoordinateDecryptError::None;
         algorithmFrameFailure_ = {};
         algorithmFrameAgedDecodedFailure_ = false;
@@ -3207,6 +3213,9 @@ private:
         std::chrono::steady_clock::time_point updatedAt{};
         std::chrono::steady_clock::time_point observedAt{};
         native::DecodedPositionCacheIdentity identity{};
+        std::uintptr_t component = 0;
+        std::chrono::steady_clock::time_point verifiedAt{};
+        std::chrono::steady_clock::time_point verificationAttemptedAt{};
     };
 
     struct DecodedPositionPendingEntry {
@@ -4913,14 +4922,369 @@ private:
             cached = coordinateExecutionPositionCache_.end();
         }
 
-        ++algorithmAttemptCount_;
         ++algorithmFrameAttemptCount_;
+        const bool verifyCachedObject =
+            cached == coordinateExecutionPositionCache_.end() ||
+            native::ShouldVerifyCoordinateExecutionCache(
+                actor,
+                cached->second.verifiedAt,
+                cached->second.verificationAttemptedAt,
+                now);
+        bool cachedObjectReadAttempted = false;
+        if (cached != coordinateExecutionPositionCache_.end() &&
+            !verifyCachedObject &&
+            IsValidPointer(cached->second.component)) {
+            cachedObjectReadAttempted = true;
+            Vec3 raw{};
+            if (ReadValue(
+                    cached->second.component +
+                        native::kCoordinateExecutionPositionOffset,
+                    raw) &&
+                IsFinite(raw)) {
+                const Vec3 adjusted = AdjustDecodedPosition(raw);
+                cached->second.position = adjusted;
+                cached->second.updatedAt = now;
+                cached->second.observedAt = now;
+                position = adjusted;
+                ++algorithmFrameSuccessCount_;
+                if (positionSource != nullptr) {
+                    *positionSource =
+                        native::CharacterPositionSource::Decoded;
+                }
+                if (IsCoordinateTraceEnabled()) {
+                    auto& record = coordinateTraceRecords_[actor];
+                    record = CoordinateTraceRecord{};
+                    record.root = subject;
+                    record.component = cached->second.component;
+                    record.raw = raw;
+                    record.output = adjusted;
+                    record.source = CoordinateTraceSource::Cache;
+                    record.attempted = true;
+                }
+                return true;
+            }
+            cached->second.component = 0;
+        }
+        if (cached != coordinateExecutionPositionCache_.end() &&
+            !verifyCachedObject && !cachedObjectReadAttempted &&
+            antiFlicker &&
+            native::CanRetainDecodedPosition(
+                true,
+                cached->second.identity,
+                identity,
+                cached->second.updatedAt,
+                now)) {
+            cached->second.observedAt = now;
+            position = cached->second.position;
+            ++algorithmFrameSuccessCount_;
+            if (positionSource != nullptr) {
+                *positionSource = native::CharacterPositionSource::Decoded;
+            }
+            if (IsCoordinateTraceEnabled()) {
+                auto& record = coordinateTraceRecords_[actor];
+                record = CoordinateTraceRecord{};
+                record.root = subject;
+                record.component = cached->second.component;
+                record.output = position;
+                record.source = CoordinateTraceSource::Cache;
+                record.attempted = true;
+            }
+            return true;
+        }
+
+        if (cached != coordinateExecutionPositionCache_.end()) {
+            cached->second.verificationAttemptedAt = now;
+        }
+        ++algorithmAttemptCount_;
+        ++coordinateExecutionFrameAttemptCount_;
         native::CoordinateExecutionPosition decoded{};
         const bool available = memory_ != nullptr &&
             coordinateExecutionDecoder_.Decode(subject, decoded);
         const native::CoordinateExecutionDecoderProbe executionProbe =
             coordinateExecutionDecoder_.Probe();
         const Vec3 raw{decoded.x, decoded.y, decoded.z};
+        if (IsCoordinateTraceEnabled() &&
+            ShouldWriteCoordinateFrameTrace(coordinateTraceFrame_) &&
+            coordinateExecutionDecodeTraceCount_ <
+                kCoordinateExecutionDecodeTraceLimit) {
+            ++coordinateExecutionDecodeTraceCount_;
+            const native::CoordinateExecutionPlan& plan =
+                executionProbe.runtime.plan;
+            const native::CoordinateExecutionEvidence& evidence =
+                executionProbe.runtime.evidence;
+            const native::CoordinateExecutionCandidate& candidate =
+                executionProbe.lastCandidate;
+            std::fprintf(
+                stderr,
+                "[coordinate-execution-decode] frame=%llu actor=%llx "
+                "subject=%llx q0=%llx q1=%llx q2=%llx q3=%llx "
+                "candidate_index=%llu known=%d entry=%llx hook=%llx "
+                "plan_x0=%llx plan_x1=%llx plan_x2=%llx lr=%llx "
+                "input_subject=%llx hook_count=%llu hook_initialized=%d "
+                "hook_x0=%llx hook_x1=%llx hook_x2=%llx stack=%llx "
+                "hook_slot=%llx snapshot_x1=%llx snapshot_x2=%llx "
+                "subject_load_count=%llu subject_load_x11=%llx "
+                "subject_load_address=%llx subject_load_value=%llx "
+                "callback_count=%llu callback_x0=%llx callback_x1=%llx "
+                "callback_x2=%llx callback_target=%llx "
+                "callback_x1_valid=%d callback_x1_v0=%llx "
+                "callback_x1_v8=%llx callback_x1_v10=%llx "
+                "callback_return_count=%llu callback_return_x0=%llx "
+                "callback_index_count=%llu callback_index=%llx "
+                "table_probe_count=%llu table_pointer=%llx "
+                "table_index=%llx table_value=%llx "
+                "mutex_record=%llx lock_target=%llx "
+                "mutex_before_lock=%x lock_return=%llx "
+                "mutex_after_lock=%x mutex_before_unlock=%x "
+                "mutex_after_unlock=%x first_call_count=%llu "
+                "first_target=%llx first_argument=%llx "
+                "first_return_count=%llu "
+                "first_return=%llx external_call_count=%llu "
+                "external_target=%llx external_x0=%llx external_x1=%llx "
+                "external_x2=%llx external_x3=%llx "
+                "external_return_count=%llu external_return=%llx "
+                "external_expected=%x external_prior_gate=%x "
+                "descriptor_end_count=%llu descriptor_end_fd=%d "
+                "descriptor_end_result=%lld "
+                "primary_gate_write_count=%llu primary_gate_write=%x "
+                "primary_gate_source=%x alternate_gate_write_count=%llu "
+                "alternate_gate_write=%x gate_count=%llu gate_flag=%u "
+                "gate_snapshot_a=%d gate_snapshot_b=%d gate_state=%x "
+                "record_count=%u "
+                "target_key=%llx ring_base=%llx ring_indices=%llx "
+                "ring_probe_count=%llu ring_row_key=%llx "
+                "ring_row_index=%lld ring_mid=%d ring_hit_count=%llu "
+                "ring_hit_row=%llx "
+                "dispatch_count=%llu dispatch_target=%llx "
+                "dispatch_argument=%llx pool_index_before=%lld "
+                "dispatch_return_count=%llu dispatch_return=%llx "
+                "pool_index_after=%lld result_count=%llu result_index=%lld "
+                "result_base=%llx result_pointer=%llx "
+                "result_position_valid=%d result_position=%08x/%08x/%08x "
+                "copy_prepare_count=%llu copy_source=%llx "
+                "copy_destination=%llx copy_source_v0=%llx "
+                "copy_source_v8=%llx copy_source_v10=%llx "
+                "copy_source_v18=%llx copy_after_count=%llu "
+                "copy_destination_v0=%llx copy_destination_v8=%llx "
+                "copy_destination_v10=%llx copy_destination_v18=%llx "
+                "exclusive_load_count=%llu exclusive_clear_count=%llu "
+                "exclusive_store_count=%llu exclusive_store_fail=%llu "
+                "exclusive_instruction=%08x exclusive_status_reg=%u "
+                "svc_count=%llu svc0=%llu svc1=%llu svc2=%llu svc3=%llu "
+                "last_svc=%llu tagged_base_count=%llu "
+                "tagged_base_reg=%u tagged_base_before=%llx "
+                "tagged_base_after=%llx pacga_count=%llu "
+                "pacga_source=%llx pacga_modifier=%llx pacga_result=%llx "
+                "seed_subject=%llx seed_slot=%llx capture_count=%llu "
+                "captured_pc=%llx captured_slot=%llx "
+                "captured_object=%llx capture_sp=%llx capture_x8=%llx "
+                "capture_x9=%llx capture_x12=%llx capture_x21=%llx "
+                "local60=%llx local1c8=%llx local208=%llx local238=%llx "
+                "local238_field=%x available=%d runtime_error=%u "
+                "runtime_status=%u raw=(%.3f,%.3f,%.3f)\n",
+                static_cast<unsigned long long>(coordinateTraceFrame_),
+                static_cast<unsigned long long>(actor),
+                static_cast<unsigned long long>(subject),
+                static_cast<unsigned long long>(candidate.q0),
+                static_cast<unsigned long long>(candidate.q1),
+                static_cast<unsigned long long>(candidate.q2),
+                static_cast<unsigned long long>(candidate.q3),
+                static_cast<unsigned long long>(
+                    executionProbe.lastCandidateIndex),
+                executionProbe.knownCandidate ? 1 : 0,
+                static_cast<unsigned long long>(plan.entryPc),
+                static_cast<unsigned long long>(plan.hookPc),
+                static_cast<unsigned long long>(plan.x0),
+                static_cast<unsigned long long>(plan.x1),
+                static_cast<unsigned long long>(plan.x2),
+                static_cast<unsigned long long>(plan.lr),
+                static_cast<unsigned long long>(evidence.inputSubject),
+                static_cast<unsigned long long>(evidence.hookCount),
+                evidence.hookInitialized ? 1 : 0,
+                static_cast<unsigned long long>(evidence.hookX0),
+                static_cast<unsigned long long>(evidence.hookX1),
+                static_cast<unsigned long long>(evidence.hookX2),
+                static_cast<unsigned long long>(evidence.stackBase),
+                static_cast<unsigned long long>(evidence.hookSlotValue),
+                static_cast<unsigned long long>(evidence.hookSnapshotX1),
+                static_cast<unsigned long long>(evidence.hookSnapshotX2),
+                static_cast<unsigned long long>(evidence.subjectLoadCount),
+                static_cast<unsigned long long>(evidence.subjectLoadX11),
+                static_cast<unsigned long long>(evidence.subjectLoadAddress),
+                static_cast<unsigned long long>(evidence.subjectLoadValue),
+                static_cast<unsigned long long>(evidence.callbackCount),
+                static_cast<unsigned long long>(evidence.callbackX0),
+                static_cast<unsigned long long>(evidence.callbackX1),
+                static_cast<unsigned long long>(evidence.callbackX2),
+                static_cast<unsigned long long>(evidence.callbackTarget),
+                evidence.callbackX1SnapshotValid ? 1 : 0,
+                static_cast<unsigned long long>(evidence.callbackX1Value0),
+                static_cast<unsigned long long>(evidence.callbackX1Value8),
+                static_cast<unsigned long long>(evidence.callbackX1Value10),
+                static_cast<unsigned long long>(
+                    evidence.callbackReturnCount),
+                static_cast<unsigned long long>(
+                    evidence.callbackReturnX0),
+                static_cast<unsigned long long>(
+                    evidence.callbackIndexCount),
+                static_cast<unsigned long long>(evidence.callbackIndex),
+                static_cast<unsigned long long>(
+                    evidence.callbackTableProbeCount),
+                static_cast<unsigned long long>(
+                    evidence.callbackTablePointer),
+                static_cast<unsigned long long>(evidence.callbackTableIndex),
+                static_cast<unsigned long long>(evidence.callbackTableValue),
+                static_cast<unsigned long long>(evidence.callbackMutexRecord),
+                static_cast<unsigned long long>(evidence.callbackLockTarget),
+                static_cast<unsigned int>(evidence.callbackMutexBeforeLock),
+                static_cast<unsigned long long>(evidence.callbackLockReturn),
+                static_cast<unsigned int>(evidence.callbackMutexAfterLock),
+                static_cast<unsigned int>(evidence.callbackMutexBeforeUnlock),
+                static_cast<unsigned int>(evidence.callbackMutexAfterUnlock),
+                static_cast<unsigned long long>(
+                    evidence.callbackFirstCallCount),
+                static_cast<unsigned long long>(evidence.callbackFirstTarget),
+                static_cast<unsigned long long>(evidence.callbackFirstArgument),
+                static_cast<unsigned long long>(
+                    evidence.callbackFirstReturnCount),
+                static_cast<unsigned long long>(
+                    evidence.callbackFirstReturn),
+                static_cast<unsigned long long>(
+                    evidence.callbackExternalCallCount),
+                static_cast<unsigned long long>(
+                    evidence.callbackExternalTarget),
+                static_cast<unsigned long long>(evidence.callbackExternalX0),
+                static_cast<unsigned long long>(evidence.callbackExternalX1),
+                static_cast<unsigned long long>(evidence.callbackExternalX2),
+                static_cast<unsigned long long>(evidence.callbackExternalX3),
+                static_cast<unsigned long long>(
+                    evidence.callbackExternalReturnCount),
+                static_cast<unsigned long long>(
+                    evidence.callbackExternalReturn),
+                static_cast<unsigned int>(evidence.callbackExternalExpected),
+                static_cast<unsigned int>(
+                    evidence.callbackExternalPriorGate),
+                static_cast<unsigned long long>(
+                    evidence.descriptorEndQueryCount),
+                static_cast<int>(evidence.descriptorEndQueryFd),
+                static_cast<long long>(evidence.descriptorEndQueryResult),
+                static_cast<unsigned long long>(
+                    evidence.callbackPrimaryGateWriteCount),
+                static_cast<unsigned int>(
+                    evidence.callbackPrimaryGateWriteValue),
+                static_cast<unsigned int>(
+                    evidence.callbackPrimaryGateSource),
+                static_cast<unsigned long long>(
+                    evidence.callbackAlternateGateWriteCount),
+                static_cast<unsigned int>(
+                    evidence.callbackAlternateGateWriteValue),
+                static_cast<unsigned long long>(
+                    evidence.callbackGateProbeCount),
+                static_cast<unsigned int>(evidence.callbackGateFlag),
+                static_cast<int>(evidence.callbackGateSnapshotA),
+                static_cast<int>(evidence.callbackGateSnapshotB),
+                static_cast<unsigned int>(evidence.callbackGateState),
+                static_cast<unsigned int>(evidence.callbackRecordCount),
+                static_cast<unsigned long long>(evidence.callbackTargetKey),
+                static_cast<unsigned long long>(evidence.callbackRingBase),
+                static_cast<unsigned long long>(
+                    evidence.callbackRingIndexArray),
+                static_cast<unsigned long long>(
+                    evidence.callbackRingProbeCount),
+                static_cast<unsigned long long>(evidence.callbackRingRowKey),
+                static_cast<long long>(evidence.callbackRingRowIndex),
+                static_cast<int>(evidence.callbackRingMid),
+                static_cast<unsigned long long>(evidence.callbackRingHitCount),
+                static_cast<unsigned long long>(evidence.callbackRingHitRow),
+                static_cast<unsigned long long>(evidence.callbackDispatchCount),
+                static_cast<unsigned long long>(
+                    evidence.callbackDispatchTarget),
+                static_cast<unsigned long long>(
+                    evidence.callbackDispatchArgument),
+                static_cast<long long>(evidence.callbackPoolIndexBefore),
+                static_cast<unsigned long long>(
+                    evidence.callbackDispatchReturnCount),
+                static_cast<unsigned long long>(
+                    evidence.callbackDispatchReturn),
+                static_cast<long long>(evidence.callbackPoolIndexAfter),
+                static_cast<unsigned long long>(evidence.callbackResultCount),
+                static_cast<long long>(evidence.callbackResultIndex),
+                static_cast<unsigned long long>(evidence.callbackResultBase),
+                static_cast<unsigned long long>(evidence.callbackResultPointer),
+                evidence.callbackResultPositionValid ? 1 : 0,
+                static_cast<unsigned int>(evidence.callbackResultPositionX),
+                static_cast<unsigned int>(evidence.callbackResultPositionY),
+                static_cast<unsigned int>(evidence.callbackResultPositionZ),
+                static_cast<unsigned long long>(
+                    evidence.callbackCopyPrepareCount),
+                static_cast<unsigned long long>(
+                    evidence.callbackCopySource),
+                static_cast<unsigned long long>(
+                    evidence.callbackCopyDestination),
+                static_cast<unsigned long long>(
+                    evidence.callbackCopySourceValue0),
+                static_cast<unsigned long long>(
+                    evidence.callbackCopySourceValue8),
+                static_cast<unsigned long long>(
+                    evidence.callbackCopySourceValue10),
+                static_cast<unsigned long long>(
+                    evidence.callbackCopySourceValue18),
+                static_cast<unsigned long long>(
+                    evidence.callbackCopyAfterCount),
+                static_cast<unsigned long long>(
+                    evidence.callbackCopyDestinationValue0),
+                static_cast<unsigned long long>(
+                    evidence.callbackCopyDestinationValue8),
+                static_cast<unsigned long long>(
+                    evidence.callbackCopyDestinationValue10),
+                static_cast<unsigned long long>(
+                    evidence.callbackCopyDestinationValue18),
+                static_cast<unsigned long long>(evidence.exclusiveLoadCount),
+                static_cast<unsigned long long>(evidence.exclusiveClearCount),
+                static_cast<unsigned long long>(evidence.exclusiveStoreCount),
+                static_cast<unsigned long long>(
+                    evidence.exclusiveStoreFailureCount),
+                static_cast<unsigned int>(evidence.lastExclusiveInstruction),
+                static_cast<unsigned int>(
+                    evidence.exclusiveStoreStatusRegister),
+                static_cast<unsigned long long>(evidence.svcCount),
+                static_cast<unsigned long long>(evidence.svcNumber0),
+                static_cast<unsigned long long>(evidence.svcNumber1),
+                static_cast<unsigned long long>(evidence.svcNumber2),
+                static_cast<unsigned long long>(evidence.svcNumber3),
+                static_cast<unsigned long long>(evidence.lastSvcNumber),
+                static_cast<unsigned long long>(
+                    evidence.taggedBaseRewriteCount),
+                static_cast<unsigned int>(evidence.taggedBaseRegister),
+                static_cast<unsigned long long>(evidence.taggedBaseBefore),
+                static_cast<unsigned long long>(evidence.taggedBaseAfter),
+                static_cast<unsigned long long>(evidence.pacgaCount),
+                static_cast<unsigned long long>(evidence.lastPacgaSource),
+                static_cast<unsigned long long>(evidence.lastPacgaModifier),
+                static_cast<unsigned long long>(evidence.lastPacgaResult),
+                static_cast<unsigned long long>(evidence.seedSubject),
+                static_cast<unsigned long long>(evidence.seedSlot),
+                static_cast<unsigned long long>(evidence.captureCount),
+                static_cast<unsigned long long>(evidence.capturedPc),
+                static_cast<unsigned long long>(evidence.capturedSlot),
+                static_cast<unsigned long long>(evidence.capturedObject),
+                static_cast<unsigned long long>(evidence.capturedSp),
+                static_cast<unsigned long long>(evidence.capturedX8),
+                static_cast<unsigned long long>(evidence.capturedX9),
+                static_cast<unsigned long long>(evidence.capturedX12),
+                static_cast<unsigned long long>(evidence.capturedX21),
+                static_cast<unsigned long long>(evidence.capturedLocal60),
+                static_cast<unsigned long long>(evidence.capturedLocal1C8),
+                static_cast<unsigned long long>(evidence.capturedLocal208),
+                static_cast<unsigned long long>(evidence.capturedLocal238),
+                static_cast<unsigned int>(evidence.capturedLocal238Field),
+                available ? 1 : 0,
+                static_cast<unsigned int>(executionProbe.runtime.error),
+                static_cast<unsigned int>(executionProbe.runtime.status),
+                static_cast<double>(raw.x),
+                static_cast<double>(raw.y),
+                static_cast<double>(raw.z));
+        }
         if (available && IsFinite(raw)) {
             const Vec3 adjusted = AdjustDecodedPosition(raw);
             coordinateExecutionPositionCache_[actor] =
@@ -4929,9 +5293,13 @@ private:
                     now,
                     now,
                     identity,
+                    executionProbe.lastObject,
+                    now,
+                    now,
                 };
             position = adjusted;
             ++algorithmSuccessCount_;
+            ++coordinateExecutionFrameSuccessCount_;
             ++algorithmFrameSuccessCount_;
             if (positionSource != nullptr) {
                 *positionSource = native::CharacterPositionSource::Decoded;
@@ -4968,7 +5336,7 @@ private:
                 auto& record = coordinateTraceRecords_[actor];
                 record = CoordinateTraceRecord{};
                 record.root = subject;
-                record.component = executionProbe.lastObject;
+                record.component = cached->second.component;
                 record.output = position;
                 record.guestPc = executionProbe.runtime.plan.entryPc;
                 record.source = CoordinateTraceSource::Cache;
@@ -6255,12 +6623,16 @@ private:
         }
 #endif
         if (UsesCoordinateExecutionRuntime()) {
-            std::uintptr_t subject = record.ordinaryRoot;
-            if (!IsValidPointer(subject)) {
-                subject = ReadPointer(
-                    record.actor + native::kOrdinaryActorRootOffset);
-            }
-            if (!IsValidPointer(subject)) return false;
+            const std::uintptr_t subject =
+                native::ResolveActorCoordinateSubject(
+                    record,
+                    [this](std::uintptr_t address) {
+                        return ReadPointer(address);
+                    },
+                    [](std::uintptr_t pointer) {
+                        return IsValidPointer(pointer);
+                    });
+            if (subject == 0) return false;
             return ReadCharacterPosition(
                 record.actor,
                 subject,
@@ -8872,6 +9244,13 @@ private:
     }
 
     void RefreshCoordinateExecutionDiscovery() {
+        const bool hadDiscovery =
+            coordinateExecutionDiscoveryInput_.rawEntry != 0 ||
+            coordinateExecutionCodeBase_ != 0 ||
+            coordinateExecutionCodeSize_ != 0;
+        const std::uintptr_t previousCodeBase =
+            coordinateExecutionCodeBase_;
+        const std::size_t previousCodeSize = coordinateExecutionCodeSize_;
         coordinateExecutionScanProfile_ =
             native::ResolveCoordinateExecutionScanProfile(
                 options_.gameVersionIndex);
@@ -8896,6 +9275,10 @@ private:
                 moduleBase_,
                 coordinateExecutionScanProfile_,
                 &input)) {
+            if (hadDiscovery || !coordinateExecutionPositionCache_.empty()) {
+                coordinateExecutionPositionCache_.clear();
+                coordinateExecutionDecoder_.Reset();
+            }
             coordinateExecutionDiscoveryInput_ = {};
             coordinateExecutionCodeBase_ = 0;
             coordinateExecutionCodeSize_ = 0;
@@ -8924,6 +9307,8 @@ private:
             native::CoordinateExecutionCodeRange codeRange{};
             if (!FindCoordinateExecutionCodeRange(
                     processId_, input.root, input.rawEntry, codeRange)) {
+                coordinateExecutionPositionCache_.clear();
+                coordinateExecutionDecoder_.Reset();
                 coordinateExecutionDiscoveryInput_ = input;
                 coordinateExecutionCodeBase_ = 0;
                 coordinateExecutionCodeSize_ = 0;
@@ -8933,6 +9318,8 @@ private:
                     std::numeric_limits<std::uintptr_t>::max() ||
                 codeRange.Size() >
                     std::numeric_limits<std::size_t>::max()) {
+                coordinateExecutionPositionCache_.clear();
+                coordinateExecutionDecoder_.Reset();
                 coordinateExecutionDiscoveryInput_ = input;
                 coordinateExecutionCodeBase_ = 0;
                 coordinateExecutionCodeSize_ = 0;
@@ -8944,7 +9331,13 @@ private:
                 static_cast<std::size_t>(codeRange.Size());
         }
         coordinateExecutionDiscoveryInput_ = input;
-        if (discoveryChanged) coordinateExecutionDecoder_.Reset();
+        const bool codeRangeChanged =
+            previousCodeBase != coordinateExecutionCodeBase_ ||
+            previousCodeSize != coordinateExecutionCodeSize_;
+        if (discoveryChanged || codeRangeChanged) {
+            coordinateExecutionPositionCache_.clear();
+            coordinateExecutionDecoder_.Reset();
+        }
     }
 
     native::AlgorithmExecutionContextRefreshKey
@@ -9042,6 +9435,9 @@ private:
                     CurrentCoordinateExecutionCodeTarget(),
                     refreshed)) {
                 if (algorithmExecutionContextReady_) {
+                    if (coordinateExecutionSelected) {
+                        coordinateExecutionPositionCache_.clear();
+                    }
                     algorithmPositionRuntime_.Invalidate();
                     algorithmReplayPagePolicy_.Invalidate();
                 }
@@ -9049,13 +9445,32 @@ private:
                 algorithmExecutionContextReady_ = false;
                 algorithmExecutionContextRefreshPolicy_.MarkFailed();
             } else {
-                if (!algorithmExecutionContextReady_ ||
+                const bool executionContextChanged =
+                    !algorithmExecutionContextReady_ ||
                     algorithmExecutionContext_.generation !=
                         refreshed.generation ||
                     algorithmExecutionContext_.threadId !=
                         refreshed.threadId ||
                     algorithmExecutionContext_.threadStartTimeTicks !=
-                        refreshed.threadStartTimeTicks) {
+                        refreshed.threadStartTimeTicks ||
+                    algorithmExecutionContext_.tpidrEl0 !=
+                        refreshed.tpidrEl0 ||
+                    algorithmExecutionContext_.pacgaLow !=
+                        refreshed.pacgaLow ||
+                    algorithmExecutionContext_.pacgaHigh !=
+                        refreshed.pacgaHigh ||
+                    algorithmExecutionContext_.pacgaOracle.data !=
+                        refreshed.pacgaOracle.data ||
+                    algorithmExecutionContext_.pacgaOracle.modifier !=
+                        refreshed.pacgaOracle.modifier ||
+                    algorithmExecutionContext_.pacgaOracle.result !=
+                        refreshed.pacgaOracle.result ||
+                    algorithmExecutionContext_.pacgaOracle.available !=
+                        refreshed.pacgaOracle.available;
+                if (executionContextChanged) {
+                    if (coordinateExecutionSelected) {
+                        coordinateExecutionPositionCache_.clear();
+                    }
                     algorithmPositionRuntime_.Invalidate();
                     algorithmReplayPagePolicy_.Invalidate();
                 }
@@ -9538,26 +9953,44 @@ private:
         bool infrastructureProbeFailed) {
         EvaluateAlgorithmExecutionHealth();
         if (infrastructureProbeFailed) return;
+        const native::CoordinateExecutionHealthSample health =
+            native::ResolveCoordinateExecutionHealthSample(
+                UsesCoordinateExecutionRuntime(),
+                static_cast<std::size_t>(algorithmFrameAttemptCount_),
+                static_cast<std::size_t>(algorithmFrameSuccessCount_),
+                static_cast<std::size_t>(
+                    coordinateExecutionFrameAttemptCount_),
+                static_cast<std::size_t>(
+                    coordinateExecutionFrameSuccessCount_));
         algorithmReplayBackoffPolicy_.ObserveFrame(
-            static_cast<std::size_t>(algorithmFrameAttemptCount_),
-            static_cast<std::size_t>(algorithmFrameSuccessCount_),
+            health.attempts,
+            health.successes,
             std::chrono::steady_clock::now());
     }
 
     void EvaluateAlgorithmExecutionHealth() {
+        const bool coordinateExecution = UsesCoordinateExecutionRuntime();
+        const native::CoordinateExecutionHealthSample health =
+            native::ResolveCoordinateExecutionHealthSample(
+                coordinateExecution,
+                static_cast<std::size_t>(algorithmFrameAttemptCount_),
+                static_cast<std::size_t>(algorithmFrameSuccessCount_),
+                static_cast<std::size_t>(
+                    coordinateExecutionFrameAttemptCount_),
+                static_cast<std::size_t>(
+                    coordinateExecutionFrameSuccessCount_));
         if (!UsesAnyCoordinateDecryptRuntime() || !CoordinateEntryReady() ||
-            !algorithmExecutionContextReady_ ||
-            algorithmFrameAttemptCount_ == 0) {
+            !algorithmExecutionContextReady_) {
             if (!UsesAnyCoordinateDecryptRuntime() ||
                 !algorithmExecutionContextReady_) {
                 algorithmFailureSince_ = {};
             }
             return;
         }
-        if (native::IsCoordinateFrameHealthy(
-                static_cast<std::size_t>(algorithmFrameAttemptCount_),
-                static_cast<std::size_t>(algorithmFrameSuccessCount_),
-                algorithmFrameAgedDecodedFailure_)) {
+        if (!health.HasAttempt()) {
+            return;
+        }
+        if (health.IsHealthy()) {
             algorithmFailureSince_ = {};
             return;
         }
@@ -9582,6 +10015,7 @@ private:
         algorithmExecutionContextReady_ = false;
         algorithmExecutionContextRefreshPolicy_.Invalidate();
         coordinatePoolReady_ = false;
+        coordinateExecutionPositionCache_.clear();
         coordinateExecutionDecoder_.Reset();
         algorithmEntryValidationAt_ = {};
         algorithmPositionRuntime_.Invalidate();
@@ -9638,6 +10072,12 @@ private:
 
     CoordinateFailure CurrentCoordinateFailure() const {
         if (UsesCoordinateExecutionRuntime()) {
+            if (native::IsCoordinateFrameHealthy(
+                    static_cast<std::size_t>(algorithmFrameAttemptCount_),
+                    static_cast<std::size_t>(algorithmFrameSuccessCount_),
+                    algorithmFrameAgedDecodedFailure_)) {
+                return {};
+            }
             const native::CoordinateExecutionDecoderProbe executionProbe =
                 coordinateExecutionDecoder_.Probe();
             const CoordinateDecryptError executionError =
@@ -9928,6 +10368,8 @@ private:
         algorithmSuccessCount_ = 0;
         algorithmFrameAttemptCount_ = 0;
         algorithmFrameSuccessCount_ = 0;
+        coordinateExecutionFrameAttemptCount_ = 0;
+        coordinateExecutionFrameSuccessCount_ = 0;
         algorithmFrameOutputError_ = CoordinateDecryptError::None;
         algorithmFrameFailure_ = {};
         algorithmFrameAgedDecodedFailure_ = false;
@@ -10088,6 +10530,8 @@ private:
 #endif
     std::uint64_t algorithmFrameAttemptCount_ = 0;
     std::uint64_t algorithmFrameSuccessCount_ = 0;
+    std::uint64_t coordinateExecutionFrameAttemptCount_ = 0;
+    std::uint64_t coordinateExecutionFrameSuccessCount_ = 0;
     CoordinateDecryptError algorithmFrameOutputError_ =
         CoordinateDecryptError::None;
     CoordinateFailure algorithmFrameFailure_{};
@@ -10125,6 +10569,7 @@ private:
     std::unordered_map<std::uintptr_t, CoordinateTraceRecord>
         coordinateTraceRecords_;
     std::uint64_t coordinateTraceFrame_ = 0;
+    std::size_t coordinateExecutionDecodeTraceCount_ = 0;
     std::unordered_map<std::uintptr_t, BoneCacheEntry> boneCache_;
     std::chrono::steady_clock::time_point lastBoneAuditLogAt_{};
     std::unordered_map<std::int32_t, std::string> nameCache_;

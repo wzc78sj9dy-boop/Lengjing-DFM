@@ -26,6 +26,7 @@ add_executable(lengjing_tests
     coordinate_pool_cloud_layout_standalone_tests.cpp
     config_tests.cpp
     coordinate_decrypt_backend_route_tests.cpp
+    coordinate_execution_cache_policy_tests.cpp
     coordinate_pool_policy_tests.cpp
     coordinate_output_policy_tests.cpp
     cpu_mailbox_policy_tests.cpp
