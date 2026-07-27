@@ -384,7 +384,8 @@ private:
     }
 
     bool PrepareCodeSnapshot() {
-        if (snapshotMemory == memory &&
+        if (request.mode != CoordinateExecutionMode::Emulate &&
+            snapshotMemory == memory &&
             snapshotThreadId == executionContext.threadId &&
             snapshotThreadStartTimeTicks ==
                 executionContext.threadStartTimeTicks &&
@@ -1201,14 +1202,13 @@ private:
                 CoordinateExecutionMode::Emulate
             ? UINT64_C(0x5000)
             : UINT64_C(0x4000);
+        if (configured > UINT64_MAX - (aliasBytes - 1U)) return;
         const std::uint64_t aliasBase = configured & kPageMask;
-        for (std::uint64_t offset = 0; offset < aliasBytes;
-             offset += kPageSize) {
-            static_cast<void>(MapRemotePage(aliasBase + offset));
-        }
-        if (request.mode != CoordinateExecutionMode::Emulate) {
-            static_cast<void>(
-                EnsureGuestRange(canonical & kPageMask, 0x10000));
+        const std::uint64_t aliasLast =
+            (configured + aliasBytes - 1U) & kPageMask;
+        for (std::uint64_t page = aliasBase;; page += kPageSize) {
+            static_cast<void>(MapRemotePage(page));
+            if (page == aliasLast) break;
         }
     }
 
@@ -2337,7 +2337,12 @@ private:
 
         if (branch.IsCall()) {
             ++evidence.unknownExternalCallCount;
-            const std::uint64_t result = AllocateFakeDescriptor();
+            const bool mode1Absolute =
+                request.mode == CoordinateExecutionMode::Emulate &&
+                IsAbsoluteEntryAddress(address);
+            const std::uint64_t result = mode1Absolute
+                ? 0
+                : AllocateFakeDescriptor();
             if (!CompleteExternalCall(returnPc, true, result)) {
                 FailHook(
                     address,
@@ -2348,7 +2353,11 @@ private:
 
         ++evidence.unknownExternalJumpCount;
         std::uint64_t link = 0;
-        const std::uint64_t result = 1;
+        const std::uint64_t result =
+            request.mode == CoordinateExecutionMode::Emulate &&
+                IsAbsoluteEntryAddress(address)
+            ? 0
+            : 1;
         if (!ReadXRegister(30, link) || !WriteXRegister(0, result)) {
             FailHook(address, CoordinateExecutionRuntimeError::EmulationFailed);
             return;

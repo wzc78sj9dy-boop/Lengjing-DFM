@@ -261,6 +261,23 @@ void TestOutOfRangeControlFlowBoundaries() {
                 .dispatch ==
             game::CoordinateBackendDispatch::CompiledBlock);
 
+    const auto negativeConditionalBytes = Encode(
+        std::array<std::uint32_t, 2>{
+            UINT32_C(0x54FFFFE0),
+            UINT32_C(0xD503201F),
+        });
+    game::CoordinateExecutionBackendCache negativeConditional;
+    REQUIRE(negativeConditional.BuildJit(
+        kCodeBase,
+        negativeConditionalBytes.data(),
+        negativeConditionalBytes.size()));
+    REQUIRE(negativeConditional.Blocks().size() == 1);
+    REQUIRE(game::SelectCoordinateBackendSlice(
+                game::CoordinateExecutionMode::Jit,
+                negativeConditional,
+                kCodeBase + 4)
+                .dispatch == game::CoordinateBackendDispatch::Dynamic);
+
     const auto branchBytes = Encode(std::array<std::uint32_t, 2>{
         UINT32_C(0x17FFFFFF),
         UINT32_C(0xD503201F),

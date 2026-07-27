@@ -668,7 +668,8 @@ void PopulatePredecodedOperands(
 bool DecodeDirectTarget(std::uint32_t instruction,
                         std::size_t offset,
                         std::size_t codeSize,
-                        std::size_t& target) noexcept {
+                        std::size_t& target,
+                        bool* targetNonNegative = nullptr) noexcept {
     std::int64_t displacement = 0;
     if ((instruction >> 26U) == 5U || (instruction >> 26U) == 37U) {
         displacement = SignExtend(instruction & UINT32_C(0x03FFFFFF), 26) * 4;
@@ -695,6 +696,9 @@ bool DecodeDirectTarget(std::uint32_t instruction,
         return false;
     }
     const std::int64_t result = base + displacement;
+    if (targetNonNegative != nullptr) {
+        *targetNonNegative = result >= 0;
+    }
     if (result < 0 || static_cast<std::uint64_t>(result) + 4U > codeSize) {
         return false;
     }
@@ -862,9 +866,10 @@ bool CoordinateExecutionBackendCache::BuildJit(std::uint64_t codeBase,
                 continue;
             }
             std::size_t target = 0;
+            bool targetNonNegative = false;
             const bool hasInRangeTarget = DecodeDirectTarget(
                     instruction, index * sizeof(std::uint32_t), codeSize,
-                    target);
+                    target, &targetNonNegative);
             if (hasInRangeTarget) {
                 starts[target / sizeof(std::uint32_t)] = true;
             }
@@ -884,7 +889,8 @@ bool CoordinateExecutionBackendCache::BuildJit(std::uint64_t codeBase,
                     UINT32_C(0x34000000) ||
                 (instruction & UINT32_C(0x7E000000)) ==
                     UINT32_C(0x36000000);
-            if ((unconditionalOrIndirect || conditional ||
+            if ((unconditionalOrIndirect ||
+                 (conditional && targetNonNegative) ||
                  hasInRangeTarget) &&
                 index + 1 < count) {
                 starts[index + 1] = true;
