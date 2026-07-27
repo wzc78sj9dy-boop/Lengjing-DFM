@@ -276,6 +276,9 @@ int PtracePacgaOracleReader::Read(
         const int error = errno != 0 ? errno : EIO;
         return fail(error);
     }
+    if (completed.programCounter != instruction.address + 4U) {
+        return fail(ENOEXEC);
+    }
     result = completed.registers[destinationRegister];
 
     if (!WriteRegisterSet(

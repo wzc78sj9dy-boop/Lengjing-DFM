@@ -467,7 +467,7 @@ void PopulatePredecodedOperands(
         static_cast<void>(DecodeLogicalImmediateMask(instruction, mask));
         setRegister(1, 0);
         setRegister(2, 5);
-        SetRecordValue(record, 8, mask);
+        SetRecordValue(record, 8, static_cast<std::uint32_t>(mask));
         SetRecordValue(record, 16, mask);
         return;
     }
@@ -877,7 +877,15 @@ bool CoordinateExecutionBackendCache::BuildJit(std::uint64_t codeBase,
                     UINT32_C(0xD63F0000) ||
                 (instruction & UINT32_C(0xFFFFFC1F)) ==
                     UINT32_C(0xD65F0000);
-            if ((unconditionalOrIndirect || hasInRangeTarget) &&
+            const bool conditional =
+                (instruction & UINT32_C(0xFF000010)) ==
+                    UINT32_C(0x54000000) ||
+                (instruction & UINT32_C(0x7E000000)) ==
+                    UINT32_C(0x34000000) ||
+                (instruction & UINT32_C(0x7E000000)) ==
+                    UINT32_C(0x36000000);
+            if ((unconditionalOrIndirect || conditional ||
+                 hasInRangeTarget) &&
                 index + 1 < count) {
                 starts[index + 1] = true;
             }

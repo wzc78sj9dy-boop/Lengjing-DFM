@@ -17,6 +17,8 @@ inline constexpr std::uint64_t kCoordinateExecutionStopPc =
     UINT64_C(0x0000000400000000);
 inline constexpr std::uint64_t kCoordinateExecutionSyntheticStackBase =
     UINT64_C(0x00000001FFF00000);
+inline constexpr std::uint64_t kCoordinateExecutionMode1SyntheticStackBase =
+    UINT64_C(0x00000001FFFC0000);
 inline constexpr std::uint64_t kCoordinateExecutionSyntheticStackTop =
     UINT64_C(0x0000000200000000);
 inline constexpr std::uint64_t kCoordinateExecutionDefaultFrame =
@@ -34,6 +36,13 @@ enum class CoordinateExecutionMode : std::uint8_t {
     Predecode = 3,
     Jit = 4,
 };
+
+constexpr std::uint64_t CoordinateExecutionSyntheticStackBase(
+    CoordinateExecutionMode mode) noexcept {
+    return mode == CoordinateExecutionMode::Emulate
+        ? kCoordinateExecutionMode1SyntheticStackBase
+        : kCoordinateExecutionSyntheticStackBase;
+}
 
 enum class CoordinateExecutionStatus : std::uint8_t {
     Idle = 0,

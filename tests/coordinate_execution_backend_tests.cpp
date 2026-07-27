@@ -107,6 +107,14 @@ void TestRecordOperands() {
     REQUIRE(ReadRecordValue<std::uint64_t>(logical, 8) == UINT64_C(0xFF));
     REQUIRE(ReadRecordValue<std::uint64_t>(logical, 16) == UINT64_C(0xFF));
 
+    const auto wideLogical = game::PredecodeCoordinateInstruction(
+        UINT32_C(0x9240DC00));
+    REQUIRE(wideLogical.category == 17);
+    REQUIRE(ReadRecordValue<std::uint64_t>(wideLogical, 8) ==
+            UINT64_C(0xFFFFFFFF));
+    REQUIRE(ReadRecordValue<std::uint64_t>(wideLogical, 16) ==
+            UINT64_C(0x00FFFFFFFFFFFFFF));
+
     const auto branch = game::PredecodeCoordinateInstruction(
         UINT32_C(0x14000002));
     REQUIRE(ReadRecordValue<std::int32_t>(branch, 24) == 8);
@@ -239,18 +247,19 @@ void TestMaximumBlockLength() {
 
 void TestOutOfRangeControlFlowBoundaries() {
     const auto conditionalBytes = Encode(std::array<std::uint32_t, 2>{
-        UINT32_C(0x54FFFFE0),
+        UINT32_C(0x54000040),
         UINT32_C(0xD503201F),
     });
     game::CoordinateExecutionBackendCache conditional;
     REQUIRE(conditional.BuildJit(
         kCodeBase, conditionalBytes.data(), conditionalBytes.size()));
-    REQUIRE(conditional.Blocks().size() == 1);
+    REQUIRE(conditional.Blocks().size() == 2);
     REQUIRE(game::SelectCoordinateBackendSlice(
                 game::CoordinateExecutionMode::Jit,
                 conditional,
                 kCodeBase + 4)
-                .dispatch == game::CoordinateBackendDispatch::Dynamic);
+                .dispatch ==
+            game::CoordinateBackendDispatch::CompiledBlock);
 
     const auto branchBytes = Encode(std::array<std::uint32_t, 2>{
         UINT32_C(0x17FFFFFF),

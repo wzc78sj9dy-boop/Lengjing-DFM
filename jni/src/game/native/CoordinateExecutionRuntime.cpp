@@ -29,9 +29,6 @@ namespace {
 
 constexpr std::uint64_t kPageSize = 4096;
 constexpr std::uint64_t kPageMask = ~(kPageSize - 1);
-constexpr std::uint64_t kSyntheticStackSize =
-    kCoordinateExecutionSyntheticStackTop -
-    kCoordinateExecutionSyntheticStackBase;
 constexpr std::size_t kMaximumMappedPages = 4096;
 constexpr std::uint32_t kCoordinateExecutionTcgBufferSize =
     UINT32_C(32) * 1024U * 1024U;
@@ -41,6 +38,7 @@ constexpr std::uint64_t kIoctlPayloadFieldOffset = UINT64_C(0xD88);
 constexpr std::uint64_t kIoctlStackSearchPrefix = UINT64_C(0x100);
 constexpr std::uint64_t kIoctlStackSearchSuffix = UINT64_C(0x800);
 constexpr std::uint64_t kIoctlStackClearEnd = UINT64_C(0x300);
+constexpr std::size_t kMaximumPacgaOracleCount = 64;
 
 constexpr std::uint32_t kPacgaMask = 0xFFE0FC00U;
 constexpr std::uint32_t kPacgaOpcode = 0x9AC03000U;
@@ -238,7 +236,7 @@ struct CoordinateExecutionRuntime::Impl {
             exclusiveMonitorInvalid = true;
             request = requestValue;
             plan = executionPlan;
-            if (!PrepareExecutionBackend()) {
+            if (!PrepareCodeSnapshot() || !PrepareExecutionBackend()) {
                 return Fail(
                     CoordinateExecutionStatus::BackendUnavailable,
                     CoordinateExecutionRuntimeError::EngineSetupFailed);
@@ -283,6 +281,7 @@ struct CoordinateExecutionRuntime::Impl {
                     CoordinateExecutionStatus::BackendUnavailable,
                     CoordinateExecutionRuntimeError::RegisterSetupFailed);
             }
+            PreloadConfiguredRanges();
             if (plan.seedSlotBeforeRun &&
                 !SeedResultSlot(plan.expectedStackBase)) {
                 return Fail(
@@ -361,17 +360,69 @@ struct CoordinateExecutionRuntime::Impl {
         std::lock_guard<std::mutex> lock(mutex);
         CloseEngine();
         ResetBackendCache();
+        ResetCodeSnapshot();
         ctrEl0 = 0;
         ctrEl0Initialized = false;
         probe = {};
     }
 
 private:
+    void ResetCodeSnapshot() noexcept {
+        codeSnapshot.clear();
+        snapshotMemory = nullptr;
+        snapshotThreadId = -1;
+        snapshotThreadStartTimeTicks = 0;
+        snapshotCodeBase = 0;
+        snapshotCodeSize = 0;
+    }
+
     void ResetBackendCache() noexcept {
         backendCache.Reset();
         backendMemory = nullptr;
         backendThreadId = -1;
         backendThreadStartTimeTicks = 0;
+    }
+
+    bool PrepareCodeSnapshot() {
+        if (snapshotMemory == memory &&
+            snapshotThreadId == executionContext.threadId &&
+            snapshotThreadStartTimeTicks ==
+                executionContext.threadStartTimeTicks &&
+            snapshotCodeBase == codeBase && snapshotCodeSize == codeSize &&
+            codeSnapshot.size() == codeSize) {
+            return true;
+        }
+
+        ResetCodeSnapshot();
+        ResetBackendCache();
+        try {
+            codeSnapshot.resize(codeSize);
+        } catch (...) {
+            ResetCodeSnapshot();
+            return false;
+        }
+        for (std::size_t offset = 0; offset < codeSnapshot.size();) {
+            const std::size_t chunk = std::min<std::size_t>(
+                kPageSize, codeSnapshot.size() - offset);
+            game::CoordinateReadDiagnostic diagnostic{};
+            if (!ReadRemoteMemory(
+                    codeBase + offset,
+                    codeSnapshot.data() + offset,
+                    chunk,
+                    diagnostic)) {
+                probe.read = diagnostic;
+                ResetCodeSnapshot();
+                return false;
+            }
+            offset += chunk;
+        }
+        snapshotMemory = memory;
+        snapshotThreadId = executionContext.threadId;
+        snapshotThreadStartTimeTicks =
+            executionContext.threadStartTimeTicks;
+        snapshotCodeBase = codeBase;
+        snapshotCodeSize = codeSize;
+        return true;
     }
 
     bool PrepareExecutionBackend() {
@@ -400,32 +451,11 @@ private:
             ResetBackendCache();
         }
 
-        std::vector<std::uint8_t> snapshot;
-        try {
-            snapshot.resize(codeSize);
-        } catch (...) {
-            return false;
-        }
-        for (std::size_t offset = 0; offset < snapshot.size();) {
-            const std::size_t chunk = std::min<std::size_t>(
-                kPageSize, snapshot.size() - offset);
-            game::CoordinateReadDiagnostic diagnostic{};
-            if (!ReadRemoteMemory(
-                    codeBase + offset,
-                    snapshot.data() + offset,
-                    chunk,
-                    diagnostic)) {
-                probe.read = diagnostic;
-                ResetBackendCache();
-                return false;
-            }
-            offset += chunk;
-        }
         const bool prepared = request.mode == CoordinateExecutionMode::Predecode
             ? backendCache.BuildPredecode(
-                  codeBase, snapshot.data(), snapshot.size())
+                  codeBase, codeSnapshot.data(), codeSnapshot.size())
             : backendCache.BuildJit(
-                  codeBase, snapshot.data(), snapshot.size());
+                  codeBase, codeSnapshot.data(), codeSnapshot.size());
         if (!prepared) {
             ResetBackendCache();
         } else {
@@ -449,77 +479,12 @@ private:
     }
 
     uc_err RunExecutionBackend() {
-        if (request.mode != CoordinateExecutionMode::Predecode &&
-            request.mode != CoordinateExecutionMode::Jit) {
-            return uc_emu_start(
-                engine,
-                plan.entryPc,
-                kCoordinateExecutionStopPc,
-                plan.timeoutMicros,
-                plan.instructionBudget);
-        }
-
-        const auto started = std::chrono::steady_clock::now();
-        std::uint64_t remainingBudget = plan.instructionBudget;
-        if (uc_reg_write(engine, UC_ARM64_REG_PC, &plan.entryPc) !=
-            UC_ERR_OK) {
-            return UC_ERR_EXCEPTION;
-        }
-        while (remainingBudget != 0 && !hookFailed) {
-            std::uint64_t pc = 0;
-            if (uc_reg_read(engine, UC_ARM64_REG_PC, &pc) != UC_ERR_OK) {
-                return UC_ERR_EXCEPTION;
-            }
-            if (pc == kCoordinateExecutionStopPc) return UC_ERR_OK;
-
-            const auto elapsed = std::chrono::duration_cast<
-                std::chrono::microseconds>(
-                std::chrono::steady_clock::now() - started);
-            if (elapsed.count() < 0 ||
-                static_cast<std::uint64_t>(elapsed.count()) >=
-                    plan.timeoutMicros) {
-                return UC_ERR_OK;
-            }
-
-            CoordinateBackendSlice slice = SelectCoordinateBackendSlice(
-                request.mode, backendCache, pc);
-            if (slice.dispatch == CoordinateBackendDispatch::Advance) {
-                if (!SkipInstruction(pc)) {
-                    hookFailed = true;
-                    hookRuntimeError =
-                        CoordinateExecutionRuntimeError::EmulationFailed;
-                    return UC_ERR_OK;
-                }
-                ++evidence.backendInstructionCount;
-                ++evidence.backendAdvanceCount;
-                --remainingBudget;
-                continue;
-            }
-
-            if (slice.dispatch == CoordinateBackendDispatch::Dynamic) {
-                ++evidence.backendFallbackCount;
-            } else if (slice.dispatch ==
-                       CoordinateBackendDispatch::CompiledBlock) {
-                ++evidence.backendBlockCount;
-            }
-            const std::uint64_t count = std::min<std::uint64_t>(
-                std::max<std::uint32_t>(slice.instructionCount, 1U),
-                remainingBudget);
-            const std::uint64_t remainingMicros = std::max<std::uint64_t>(
-                plan.timeoutMicros -
-                    static_cast<std::uint64_t>(elapsed.count()),
-                1U);
-            const uc_err error = uc_emu_start(
-                engine,
-                pc,
-                kCoordinateExecutionStopPc,
-                remainingMicros,
-                count);
-            evidence.backendInstructionCount += count;
-            remainingBudget -= count;
-            if (error != UC_ERR_OK) return error;
-        }
-        return UC_ERR_OK;
+        return uc_emu_start(
+            engine,
+            plan.entryPc,
+            kCoordinateExecutionStopPc,
+            plan.timeoutMicros,
+            plan.instructionBudget);
     }
 
     static bool MemoryFaultHook(uc_engine*,
@@ -679,6 +644,7 @@ private:
             libcBegin = 0;
             libcEnd = 0;
             libcIoctl = 0;
+            libcSyscall = 0;
             MappedModuleRange range{};
             if (FindMappedModuleRange(
                     executionContext.threadId, "libc.so", range) ||
@@ -696,6 +662,12 @@ private:
                 ResolveLocalLibcSymbolOffset("ioctl", ioctlOffset) &&
                 ioctlOffset < libcEnd - libcBegin) {
                 libcIoctl = libcBegin + ioctlOffset;
+            }
+            std::uint64_t syscallOffset = 0;
+            if (libcBegin != 0 && libcEnd > libcBegin &&
+                ResolveLocalLibcSymbolOffset("syscall", syscallOffset) &&
+                syscallOffset < libcEnd - libcBegin) {
+                libcSyscall = libcBegin + syscallOffset;
             }
         }
         evidence.libcBegin = libcBegin;
@@ -748,6 +720,9 @@ private:
                 oracle.result = result;
                 return;
             }
+        }
+        if (pacgaOracles.size() >= kMaximumPacgaOracleCount) {
+            pacgaOracles.erase(pacgaOracles.begin());
         }
         pacgaOracles.push_back({data, modifier, result});
     }
@@ -849,6 +824,10 @@ private:
     }
 
     bool OpenEngine() {
+        const std::uint64_t syntheticStackBase =
+            CoordinateExecutionSyntheticStackBase(request.mode);
+        const std::uint64_t syntheticStackSize =
+            kCoordinateExecutionSyntheticStackTop - syntheticStackBase;
         if (uc_open(UC_ARCH_ARM64, UC_MODE_ARM, &engine) != UC_ERR_OK) {
             engine = nullptr;
             probe.error = CoordinateExecutionRuntimeError::EngineSetupFailed;
@@ -859,8 +838,8 @@ private:
                 engine, kCoordinateExecutionTcgBufferSize) != UC_ERR_OK ||
             uc_mem_map(
                 engine,
-                kCoordinateExecutionSyntheticStackBase,
-                kSyntheticStackSize,
+                syntheticStackBase,
+                syntheticStackSize,
                 UC_PROT_READ | UC_PROT_WRITE) != UC_ERR_OK ||
             uc_mem_map(
                 engine,
@@ -911,7 +890,7 @@ private:
             CloseEngine();
             return false;
         }
-        for (std::uint64_t page = kCoordinateExecutionSyntheticStackBase;
+        for (std::uint64_t page = syntheticStackBase;
              page < kCoordinateExecutionSyntheticStackTop;
              page += kPageSize) {
             mappedPages.insert(page);
@@ -1008,8 +987,10 @@ private:
 
     void MarkSyntheticStackDirty(std::uint64_t address,
                                  std::size_t size) {
+        const std::uint64_t syntheticStackBase =
+            CoordinateExecutionSyntheticStackBase(request.mode);
         if (size == 0 ||
-            address < kCoordinateExecutionSyntheticStackBase ||
+            address < syntheticStackBase ||
             address >= kCoordinateExecutionSyntheticStackTop) {
             return;
         }
@@ -1101,7 +1082,10 @@ private:
         if (backingIterator == pageBackings.end()) {
             auto backing = std::make_shared<CachedPageBacking>();
             game::CoordinateReadDiagnostic diagnostic{};
-            if (!ReadRemoteMemory(
+            const bool snapshotPage = CopyCodeSnapshotPage(
+                remotePage, backing->bytes);
+            if (!snapshotPage &&
+                !ReadRemoteMemory(
                     remotePage,
                     backing->bytes.data(),
                     backing->bytes.size(),
@@ -1179,6 +1163,53 @@ private:
             return false;
         }
         return true;
+    }
+
+    bool CopyCodeSnapshotPage(
+        std::uint64_t remotePage,
+        std::array<std::uint8_t, kPageSize>& destination) const noexcept {
+        if (snapshotMemory != memory || snapshotCodeBase == 0 ||
+            snapshotCodeSize < kPageSize ||
+            codeSnapshot.size() != snapshotCodeSize ||
+            remotePage < snapshotCodeBase) {
+            return false;
+        }
+        const std::uint64_t offset = remotePage - snapshotCodeBase;
+        if ((offset & (kPageSize - 1U)) != 0 ||
+            offset > snapshotCodeSize - kPageSize) {
+            return false;
+        }
+        std::memcpy(
+            destination.data(),
+            codeSnapshot.data() + static_cast<std::size_t>(offset),
+            destination.size());
+        return true;
+    }
+
+    void PreloadConfiguredRanges() {
+        const std::uint64_t configured = request.mode ==
+                CoordinateExecutionMode::Emulate
+            ? request.candidate.q0
+            : request.shared.x0Override;
+        const std::uint64_t canonical =
+            NormalizeCoordinateExecutionPointer(configured);
+        if (configured == 0 || !IsCoordinateExecutionPointer(canonical)) {
+            return;
+        }
+
+        const std::uint64_t aliasBytes = request.mode ==
+                CoordinateExecutionMode::Emulate
+            ? UINT64_C(0x5000)
+            : UINT64_C(0x4000);
+        const std::uint64_t aliasBase = configured & kPageMask;
+        for (std::uint64_t offset = 0; offset < aliasBytes;
+             offset += kPageSize) {
+            static_cast<void>(MapRemotePage(aliasBase + offset));
+        }
+        if (request.mode != CoordinateExecutionMode::Emulate) {
+            static_cast<void>(
+                EnsureGuestRange(canonical & kPageMask, 0x10000));
+        }
     }
 
     bool ReadRemoteMemory(
@@ -1332,6 +1363,8 @@ private:
         const CoordinateBackendSlice backendSlice =
             SelectCoordinateBackendSlice(request.mode, backendCache, address);
         if (backendSlice.dispatch == CoordinateBackendDispatch::Advance) {
+            ++evidence.backendInstructionCount;
+            ++evidence.backendAdvanceCount;
             if (!SkipInstruction(address)) {
                 FailHook(
                     address,
@@ -2088,7 +2121,9 @@ private:
                 return false;
             }
             stackPointer = NormalizeCoordinateExecutionPointer(stackPointer);
-            if (stackPointer < kCoordinateExecutionSyntheticStackBase ||
+            const std::uint64_t syntheticStackBase =
+                CoordinateExecutionSyntheticStackBase(request.mode);
+            if (stackPointer < syntheticStackBase ||
                 stackPointer >= kCoordinateExecutionSyntheticStackTop) {
                 return false;
             }
@@ -2120,15 +2155,17 @@ private:
                           std::uint64_t& payload) {
         payload = 0;
         stackPointer = NormalizeCoordinateExecutionPointer(stackPointer);
-        if (stackPointer < kCoordinateExecutionSyntheticStackBase ||
+        const std::uint64_t syntheticStackBase =
+            CoordinateExecutionSyntheticStackBase(request.mode);
+        if (stackPointer < syntheticStackBase ||
             stackPointer >= kCoordinateExecutionSyntheticStackTop) {
             return false;
         }
 
         const std::uint64_t begin =
-            stackPointer < kCoordinateExecutionSyntheticStackBase +
+            stackPointer < syntheticStackBase +
                                kIoctlStackSearchPrefix
-            ? kCoordinateExecutionSyntheticStackBase
+            ? syntheticStackBase
             : stackPointer - kIoctlStackSearchPrefix;
         const std::uint64_t end = std::min<std::uint64_t>(
             stackPointer > kCoordinateExecutionSyntheticStackTop -
@@ -2164,7 +2201,9 @@ private:
 
     void ClearIoctlStackValues(std::uint64_t stackPointer) {
         stackPointer = NormalizeCoordinateExecutionPointer(stackPointer);
-        if (stackPointer < kCoordinateExecutionSyntheticStackBase ||
+        const std::uint64_t syntheticStackBase =
+            CoordinateExecutionSyntheticStackBase(request.mode);
+        if (stackPointer < syntheticStackBase ||
             stackPointer >= kCoordinateExecutionSyntheticStackTop ||
             stackPointer > kCoordinateExecutionSyntheticStackTop -
                                kIoctlStackSearchPrefix) {
@@ -2235,6 +2274,13 @@ private:
             IsLibcTarget(target);
     }
 
+    static bool IsLibcSymbolTarget(std::uint64_t target,
+                                   std::uint64_t symbol) noexcept {
+        target = NormalizeCoordinateExecutionPointer(target);
+        symbol = NormalizeCoordinateExecutionPointer(symbol);
+        return symbol != 0 && target >= symbol && target - symbol < 16;
+    }
+
     void HandleBranch(
         std::uint64_t address,
         std::uint32_t instruction,
@@ -2256,6 +2302,23 @@ private:
         evidence.lastExternalBranchTarget = target;
         if (IsLibcTarget(target)) {
             ++evidence.libcBranchCount;
+            if (request.mode == CoordinateExecutionMode::Emulate) {
+                if (branch.IsCall() &&
+                    IsLibcSymbolTarget(target, libcSyscall) &&
+                    TryHandleDescriptorEndQuery(returnPc)) {
+                    return;
+                }
+                if (branch.IsCall() &&
+                    IsLibcSymbolTarget(target, libcIoctl)) {
+                    std::uint64_t requestValue = 0;
+                    if (ReadXRegister(1, requestValue) &&
+                        IsCoordinateExecutionIoctlRequest(requestValue) &&
+                        TryHandleIoctl(libcIoctl, returnPc)) {
+                        return;
+                    }
+                }
+                return;
+            }
             if (branch.IsCall() &&
                 TryHandleDescriptorEndQuery(returnPc)) {
                 return;
@@ -2570,6 +2633,7 @@ private:
     std::uint64_t libcBegin = 0;
     std::uint64_t libcEnd = 0;
     std::uint64_t libcIoctl = 0;
+    std::uint64_t libcSyscall = 0;
     std::uint32_t nextFakeDescriptor = kFirstFakeDescriptor;
     std::unordered_map<std::int32_t, FakeFile> fakeFiles;
     bool emptyFakeFileSeen = false;
@@ -2578,6 +2642,12 @@ private:
     std::uint64_t pacgaThreadStartTimeTicks = 0;
     std::uint64_t pacgaTpidrEl0 = 0;
     std::vector<CachedPacgaOracle> pacgaOracles;
+    std::vector<std::uint8_t> codeSnapshot;
+    MemoryTransport* snapshotMemory = nullptr;
+    std::int32_t snapshotThreadId = -1;
+    std::uint64_t snapshotThreadStartTimeTicks = 0;
+    std::uint64_t snapshotCodeBase = 0;
+    std::size_t snapshotCodeSize = 0;
     CoordinateExecutionBackendCache backendCache;
     MemoryTransport* backendMemory = nullptr;
     std::int32_t backendThreadId = -1;

@@ -26,6 +26,7 @@ using lengjing::game::native::CoordinateExecutionBranchKind;
 using lengjing::game::native::CoordinateExecutionStoreExclusiveStatusRegister;
 using lengjing::game::native::CoordinateExecutionRequest;
 using lengjing::game::native::CoordinateExecutionStatus;
+using lengjing::game::native::CoordinateExecutionSyntheticStackBase;
 using lengjing::game::native::ContainsCoordinateExecutionCodeAddress;
 using lengjing::game::native::CoordinateExecutionSvcResult;
 using lengjing::game::native::DecodeCoordinateExecutionBranch;
@@ -49,6 +50,7 @@ using lengjing::game::native::ShouldRedirectCoordinateExecutionReturn;
 using lengjing::game::native::kCoordinateExecutionDefaultFrame;
 using lengjing::game::native::kCoordinateExecutionDefaultFp;
 using lengjing::game::native::kCoordinateExecutionDefaultSp;
+using lengjing::game::native::kCoordinateExecutionMode1SyntheticStackBase;
 using lengjing::game::native::kCoordinateExecutionStopPc;
 using lengjing::game::native::kCoordinateExecutionSyntheticStackBase;
 using lengjing::game::native::kCoordinateExecutionSyntheticStackTop;
@@ -106,6 +108,12 @@ void TestSyntheticStackContract() {
     REQUIRE(kCoordinateExecutionSyntheticStackTop -
                 kCoordinateExecutionSyntheticStackBase ==
             UINT64_C(0x100000));
+    REQUIRE(CoordinateExecutionSyntheticStackBase(
+                CoordinateExecutionMode::Emulate) ==
+            kCoordinateExecutionMode1SyntheticStackBase);
+    REQUIRE(CoordinateExecutionSyntheticStackBase(
+                CoordinateExecutionMode::Interpret) ==
+            kCoordinateExecutionSyntheticStackBase);
     REQUIRE(!IsCoordinateExecutionStackBase(
         kCoordinateExecutionSyntheticStackBase - 1));
     REQUIRE(IsCoordinateExecutionStackBase(
