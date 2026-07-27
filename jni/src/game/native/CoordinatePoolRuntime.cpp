@@ -824,14 +824,25 @@ struct CoordinatePoolRuntime::Impl {
             ShouldValidateCoordinatePoolCode(
                 targetFrame,
                 nextCodeValidationFrame,
-                codeValidationRequested)) {
+                codeValidationRequested,
+                codeChangeConfirmation.Pending())) {
             const CodeValidationResult validation =
                 ValidateCodeFingerprintsUnlocked();
             codeValidationRequested = false;
             if (validation == CodeValidationResult::Changed) {
-                analysisInvalidated = true;
-                resetAnalysis = true;
+                if (codeChangeConfirmation.ObserveChanged()) {
+                    analysisInvalidated = true;
+                    resetAnalysis = true;
+                } else {
+                    nextCodeValidationFrame =
+                        NextCoordinatePoolCodeValidationFrame(
+                            targetFrame, false);
+                    ClearReadDiagnosticUnlocked();
+                }
             } else {
+                if (validation == CodeValidationResult::Unchanged) {
+                    codeChangeConfirmation.ObserveStable();
+                }
                 nextCodeValidationFrame =
                     NextCoordinatePoolCodeValidationFrame(
                         targetFrame,
@@ -2856,6 +2867,20 @@ private:
             return false;
         }
 
+        const CoordinatePoolCodeRange codeRange =
+            ResolveCoordinatePoolPlanCodeRange(
+                result.key.mappingBase,
+                currentBytes.size(),
+                result.plan.entryStart,
+                result.plan.v87End,
+                result.plan.searchEnd,
+                result.plan.parameterEnd);
+        if (!codeRange.IsValid()) {
+            MarkRemotePlanTerminalUnlocked(
+                CoordinatePoolRemotePlanState::PlanRejected);
+            return false;
+        }
+
         auto candidate = std::unique_ptr<pool::coord_dec::FindDec>(
             new (std::nothrow) pool::coord_dec::FindDec());
         if (candidate == nullptr ||
@@ -2870,11 +2895,14 @@ private:
             return false;
         }
 
+        const std::size_t codeOffset = static_cast<std::size_t>(
+            codeRange.address - result.key.mappingBase);
         std::vector<CodeRangeFingerprint> fingerprints;
         fingerprints.push_back(CodeRangeFingerprint{
-            result.key.mappingBase,
-            currentBytes.size(),
-            result.key.codeFingerprint,
+            codeRange.address,
+            codeRange.size,
+            CoordinatePoolCodeFingerprint(
+                currentBytes.data() + codeOffset, codeRange.size),
         });
         if (!CommitFinderUnlocked(
                 std::move(candidate),
@@ -4899,6 +4927,7 @@ private:
         analysisInvalidated = false;
         nextCodeValidationFrame = 0;
         codeValidationRequested = false;
+        codeChangeConfirmation.Reset();
         ClearReadDiagnosticUnlocked();
         probe.stage = CoordinatePoolRuntimeStage::Idle;
         probe.error = CoordinatePoolRuntimeError::None;
@@ -4956,6 +4985,7 @@ private:
         analysisInvalidated = false;
         nextCodeValidationFrame = 0;
         codeValidationRequested = false;
+        codeChangeConfirmation.Reset();
         frame = 0;
         lastPoolPointer = 0;
         predictedPoolBlockCount = 0;
@@ -5072,6 +5102,7 @@ private:
     ExecutableMappingIndex executableMappingIndex{};
     std::uint64_t nextCodeValidationFrame = 0;
     bool codeValidationRequested = false;
+    CoordinatePoolCodeChangeConfirmation codeChangeConfirmation{};
     uc_engine* engine = nullptr;
     uc_hook memoryHook = 0;
     uc_hook mrsHook = 0;

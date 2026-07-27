@@ -9,6 +9,7 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::CodeMethodLoadResult;
     using lengjing::game::native::CaptureCoordinatePoolMappingSnapshot;
     using lengjing::game::native::CoordinatePoolCodeFingerprint;
+    using lengjing::game::native::CoordinatePoolCodeChangeConfirmation;
     using lengjing::game::native::CoordinatePoolCodeIdentityChanged;
     using lengjing::game::native::CoordinatePoolContextIdentityChanged;
     using lengjing::game::native::CoordinatePoolEnvironmentFlagEnabled;
@@ -48,6 +49,7 @@ void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::
         ResolveCoordinatePoolIndexedRootAddresses;
     using lengjing::game::native::ResolveCoordinatePoolDecryptMode;
+    using lengjing::game::native::ResolveCoordinatePoolPlanCodeRange;
     using lengjing::game::native::InferCoordinatePoolDecryptIndexOffset;
     using lengjing::game::native::IsCoordinatePoolMethodLoadFatal;
     using lengjing::game::native::
@@ -1173,6 +1175,66 @@ void RunCoordinatePoolPolicyTests() {
         false));
     REQUIRE(NextCoordinatePoolCodeValidationFrame(UINT64_MAX, true) ==
         UINT64_MAX);
+
+    constexpr std::uint64_t planMappingStart = UINT64_C(0x10000000);
+    constexpr std::size_t planMappingSize = 0x2000;
+    constexpr std::uint64_t planEntry = planMappingStart + 0x400;
+    const auto planCodeRange = ResolveCoordinatePoolPlanCodeRange(
+        planMappingStart,
+        planMappingSize,
+        planEntry,
+        planEntry + 0x40,
+        planEntry + 0x80,
+        planEntry + 0x60);
+    REQUIRE(planCodeRange.IsValid());
+    REQUIRE(planCodeRange.address == planEntry);
+    REQUIRE(planCodeRange.size == 0x84);
+    std::array<std::uint8_t, planMappingSize> planMapping{};
+    const std::size_t planCodeOffset = static_cast<std::size_t>(
+        planCodeRange.address - planMappingStart);
+    const std::uint64_t planCodeFingerprint = CoordinatePoolCodeFingerprint(
+        planMapping.data() + planCodeOffset, planCodeRange.size);
+    planMapping[0x100] = 1;
+    REQUIRE(planCodeFingerprint == CoordinatePoolCodeFingerprint(
+        planMapping.data() + planCodeOffset, planCodeRange.size));
+    planMapping[planCodeOffset] = 1;
+    REQUIRE(planCodeFingerprint != CoordinatePoolCodeFingerprint(
+        planMapping.data() + planCodeOffset, planCodeRange.size));
+    REQUIRE(!ResolveCoordinatePoolPlanCodeRange(
+        planMappingStart,
+        planMappingSize,
+        planMappingStart - 4,
+        planEntry + 0x40,
+        planEntry + 0x80,
+        planEntry + 0x60).IsValid());
+    REQUIRE(!ResolveCoordinatePoolPlanCodeRange(
+        planMappingStart,
+        planMappingSize,
+        planEntry,
+        planEntry + planMappingSize,
+        planEntry + 0x80,
+        planEntry + 0x60).IsValid());
+
+    CoordinatePoolCodeChangeConfirmation changeConfirmation;
+    REQUIRE(!changeConfirmation.Pending());
+    REQUIRE(!changeConfirmation.ObserveChanged());
+    REQUIRE(changeConfirmation.Pending());
+    REQUIRE(!ShouldValidateCoordinatePoolCode(
+        100,
+        108,
+        true,
+        changeConfirmation.Pending()));
+    REQUIRE(ShouldValidateCoordinatePoolCode(
+        108,
+        108,
+        false,
+        changeConfirmation.Pending()));
+    changeConfirmation.ObserveStable();
+    REQUIRE(!changeConfirmation.Pending());
+    REQUIRE(!changeConfirmation.ObserveChanged());
+    REQUIRE(changeConfirmation.ObserveChanged());
+    changeConfirmation.Reset();
+    REQUIRE(!changeConfirmation.Pending());
 
     using lengjing::game::CoordinateReadDiagnostic;
     using lengjing::game::CoordinateReadFailure;

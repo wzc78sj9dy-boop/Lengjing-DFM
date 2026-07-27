@@ -1130,6 +1130,66 @@ struct CoordinatePoolRootSnapshot {
     std::uint64_t entry = 0;
 };
 
+struct CoordinatePoolCodeRange {
+    std::uint64_t address = 0;
+    std::size_t size = 0;
+
+    constexpr bool IsValid() const noexcept {
+        return address != 0 && size != 0;
+    }
+};
+
+constexpr CoordinatePoolCodeRange ResolveCoordinatePoolPlanCodeRange(
+    std::uint64_t mappingStart,
+    std::size_t mappingSize,
+    std::uint64_t entryStart,
+    std::uint64_t v87End,
+    std::uint64_t searchEnd,
+    std::uint64_t parameterEnd) noexcept {
+    if (mappingStart == 0 || mappingSize == 0 ||
+        mappingStart > UINT64_MAX - mappingSize) {
+        return {};
+    }
+    std::uint64_t methodEnd = v87End;
+    if (searchEnd > methodEnd) methodEnd = searchEnd;
+    if (parameterEnd > methodEnd) methodEnd = parameterEnd;
+    if (entryStart < mappingStart || methodEnd < entryStart ||
+        methodEnd > UINT64_MAX - sizeof(std::uint32_t)) {
+        return {};
+    }
+    const std::uint64_t rangeEnd = methodEnd + sizeof(std::uint32_t);
+    const std::uint64_t mappingEnd = mappingStart + mappingSize;
+    if (rangeEnd > mappingEnd) return {};
+    return {
+        entryStart,
+        static_cast<std::size_t>(rangeEnd - entryStart),
+    };
+}
+
+class CoordinatePoolCodeChangeConfirmation final {
+public:
+    bool ObserveChanged() noexcept {
+        if (pending_) return true;
+        pending_ = true;
+        return false;
+    }
+
+    void ObserveStable() noexcept {
+        pending_ = false;
+    }
+
+    void Reset() noexcept {
+        pending_ = false;
+    }
+
+    bool Pending() const noexcept {
+        return pending_;
+    }
+
+private:
+    bool pending_ = false;
+};
+
 constexpr bool CoordinatePoolRootSnapshotsMatch(
     const CoordinatePoolRootSnapshot& left,
     const CoordinatePoolRootSnapshot& right) noexcept {
@@ -1246,7 +1306,16 @@ inline std::uint64_t CoordinatePoolCodeFingerprint(
 constexpr bool ShouldValidateCoordinatePoolCode(
     std::uint64_t frame,
     std::uint64_t nextValidationFrame,
-    bool requested) noexcept {
+    bool requested,
+    bool changeConfirmationPending = false) noexcept {
+    if (changeConfirmationPending) {
+        if (nextValidationFrame == kCoordinatePoolCodeValidationIdleFrame) {
+            return false;
+        }
+        return frame >= nextValidationFrame ||
+            nextValidationFrame - frame >
+                kCoordinatePoolCodeValidationRetryFrames;
+    }
     if (requested) return true;
     if (nextValidationFrame == kCoordinatePoolCodeValidationIdleFrame) {
         return false;
