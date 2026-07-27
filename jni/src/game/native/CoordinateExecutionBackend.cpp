@@ -17,6 +17,51 @@ constexpr std::int64_t SignExtend(std::uint64_t value,
     return static_cast<std::int64_t>((value ^ sign) - sign);
 }
 
+bool DecodeLogicalImmediateMask(std::uint32_t instruction,
+                                std::uint64_t& mask) noexcept {
+    const bool wide = (instruction & UINT32_C(0x80000000)) != 0;
+    const std::uint32_t immediateS = (instruction >> 10U) & 0x3FU;
+    const std::uint32_t immediateR = (instruction >> 16U) & 0x3FU;
+    unsigned length = 0;
+    if ((instruction & UINT32_C(0x00400000)) != 0) {
+        length = 6;
+    } else {
+        std::uint32_t inverted = (~immediateS) & 0x3FU;
+        if (inverted == 0) return false;
+        while ((inverted >>= 1U) != 0) ++length;
+    }
+    if (length == 0) return false;
+
+    const unsigned elementBits = 1U << length;
+    const std::uint64_t elementMask = elementBits == 64U
+        ? UINT64_MAX
+        : (UINT64_C(1) << elementBits) - 1U;
+    const unsigned onesCount =
+        (immediateS & (elementBits - 1U)) + 1U;
+    const std::uint64_t ones = onesCount == 64U
+        ? UINT64_MAX
+        : (UINT64_C(1) << onesCount) - 1U;
+    const unsigned rotation = immediateR & (elementBits - 1U);
+    std::uint64_t element = ones;
+    if (rotation != 0) {
+        element = ((ones >> rotation) |
+                   (ones << (elementBits - rotation))) &
+            elementMask;
+    }
+    for (unsigned bits = elementBits;
+         bits < (wide ? 64U : 32U);
+         bits *= 2U) {
+        element |= element << bits;
+    }
+    mask = wide ? element : static_cast<std::uint32_t>(element);
+    return true;
+}
+
+bool IsLogicalImmediateDecodable(std::uint32_t instruction) noexcept {
+    std::uint64_t mask = 0;
+    return DecodeLogicalImmediateMask(instruction, mask);
+}
+
 bool DecodeImmediateCategory(std::uint32_t instruction,
                              std::uint8_t& category) noexcept {
     const std::uint32_t kind = (instruction >> 23U) & 7U;
@@ -29,6 +74,7 @@ bool DecodeImmediateCategory(std::uint32_t instruction,
                 (wide ? 1U : 5U) + ((instruction >> 29U) & 3U));
             return true;
         case 4:
+            if (!IsLogicalImmediateDecodable(instruction)) return false;
             category = static_cast<std::uint8_t>(
                 (wide ? 17U : 21U) + operation);
             return true;
@@ -120,6 +166,23 @@ bool DecodeLoadStoreCategory(std::uint32_t instruction,
         category = 120;
         return true;
     }
+    if ((instruction & UINT32_C(0x04000000)) == 0 &&
+        (instruction & UINT32_C(0x80000000)) != 0 &&
+        (instruction & UINT32_C(0x10000000)) == 0 &&
+        (high == 2U || high == 6U || high == 10U || high == 14U)) {
+        const std::uint32_t operation = (instruction >> 23U) & 7U;
+        const bool load = (instruction & UINT32_C(0x00400000)) != 0;
+        if (operation == 2U) {
+            category = load ? 56 : 57;
+        } else if (operation == 3U) {
+            category = load ? 58 : 59;
+        } else if (operation == 1U) {
+            category = load ? 60 : 61;
+        } else {
+            return false;
+        }
+        return true;
+    }
     if ((instruction & UINT32_C(0x3F000000)) ==
         UINT32_C(0x18000000)) {
         if ((instruction & UINT32_C(0x40000000)) == 0) return false;
@@ -133,14 +196,37 @@ bool DecodeLoadStoreCategory(std::uint32_t instruction,
         category = 119;
     } else if ((instruction & UINT32_C(0x3B000000)) ==
                UINT32_C(0x39000000)) {
-        category = 118;
+        const std::uint32_t size = instruction >> 30U;
+        const std::uint32_t operation = (instruction >> 22U) & 3U;
+        if (operation == 0U) {
+            static constexpr std::uint8_t categories[]{48, 49, 47, 46};
+            category = categories[size];
+        } else if (operation == 1U) {
+            static constexpr std::uint8_t categories[]{41, 42, 40, 39};
+            category = categories[size];
+        } else if (operation == 2U && size == 2U) {
+            category = 43;
+        } else {
+            return false;
+        }
     } else if ((instruction & UINT32_C(0x3B200C00)) ==
                    UINT32_C(0x38000C00) ||
                (instruction & UINT32_C(0x3B200C00)) ==
                    UINT32_C(0x38000400)) {
-        category = 118;
-    } else if ((instruction & UINT32_C(0x3F000000)) ==
-               UINT32_C(0x08000000)) {
+        const bool postIndexed =
+            (instruction & UINT32_C(0x3B200C00)) ==
+            UINT32_C(0x38000400);
+        const std::uint32_t operation = (instruction >> 22U) & 3U;
+        if ((instruction >> 30U) == 3U && operation <= 1U) {
+            if (operation == 1U) {
+                category = postIndexed ? 53 : 52;
+            } else {
+                category = postIndexed ? 55 : 54;
+            }
+        } else {
+            category = 118;
+        }
+    } else if (IsCoordinateExecutionStoreExclusiveInstruction(instruction)) {
         category = 114;
     } else {
         category = 118;
@@ -182,12 +268,18 @@ bool DecodeRegisterCategory(std::uint32_t instruction,
     const std::uint32_t operation = (instruction >> 21U) & 0xFU;
     const bool wide = (instruction & UINT32_C(0x80000000)) != 0;
     if (!operationGroup && (operation & 8U) == 0) {
+        if (!wide && (instruction & UINT32_C(0x00008000)) != 0) {
+            return false;
+        }
         const std::uint32_t variant = (instruction >> 29U) & 3U;
         category = static_cast<std::uint8_t>(
             (wide ? 25U : 29U) + variant);
         return true;
     }
     if (!operationGroup && (operation & 9U) == 8U) {
+        if (!wide && (instruction & UINT32_C(0x00008000)) != 0) {
+            return false;
+        }
         category = static_cast<std::uint8_t>(
             wide ? ((instruction & UINT32_C(0x20000000)) != 0 ? 11 : 9)
                  : ((instruction & UINT32_C(0x20000000)) != 0 ? 15 : 13));
@@ -203,19 +295,48 @@ bool DecodeRegisterCategory(std::uint32_t instruction,
         return true;
     }
     if (operationGroup && (operation & 8U) == 8U) {
-        category = (operation & 7U) == 0 ? 85 : 123;
+        if ((operation & 7U) != 0) {
+            category = 123;
+        } else if (wide) {
+            category = (instruction & UINT32_C(0x00008000)) != 0 ? 86 : 85;
+        } else {
+            category = (instruction & UINT32_C(0x00008000)) != 0 ? 90 : 89;
+        }
         return true;
     }
     if (operationGroup && operation == 6U) {
-        category = wide ? 91 : 117;
+        if (!wide) {
+            category = 117;
+            return true;
+        }
+        switch ((instruction >> 10U) & 0x3FU) {
+            case 2:
+                category = 91;
+                break;
+            case 8:
+                category = 93;
+                break;
+            case 9:
+                category = 94;
+                break;
+            case 10:
+                category = 95;
+                break;
+            default:
+                category = 122;
+                break;
+        }
         return true;
     }
     if (operationGroup && (operation == 2U || operation == 3U)) {
         category = 121;
         return true;
     }
-    category = 122;
-    return true;
+    if (operationGroup && (operation == 0U || operation == 1U)) {
+        category = 122;
+        return true;
+    }
+    return false;
 }
 
 bool DecodeCategory(std::uint32_t instruction,
@@ -281,6 +402,267 @@ bool DecodeCategory(std::uint32_t instruction,
     }
     category = 117;
     return true;
+}
+
+void SetRecordByte(CoordinatePredecodedInstruction& record,
+                   std::size_t offset,
+                   std::uint8_t value) noexcept {
+    reinterpret_cast<std::uint8_t*>(&record)[offset] = value;
+}
+
+template <typename Value>
+void SetRecordValue(CoordinatePredecodedInstruction& record,
+                    std::size_t offset,
+                    Value value) noexcept {
+    std::memcpy(
+        reinterpret_cast<std::uint8_t*>(&record) + offset,
+        &value,
+        sizeof(value));
+}
+
+void PopulatePredecodedOperands(
+    CoordinatePredecodedInstruction& record) noexcept {
+    const std::uint32_t instruction = record.instruction;
+    const auto setRegister = [&](std::size_t offset, unsigned shift) {
+        SetRecordByte(
+            record,
+            offset,
+            static_cast<std::uint8_t>((instruction >> shift) & 0x1FU));
+    };
+    const auto setBranch19 = [&] {
+        const std::int64_t value = SignExtend(
+            (instruction >> 5U) & 0x7FFFFU, 19) * 4;
+        SetRecordValue(record, 24, static_cast<std::int32_t>(value));
+    };
+    const auto setBranch14 = [&] {
+        const std::int64_t value = SignExtend(
+            (instruction >> 5U) & 0x3FFFU, 14) * 4;
+        SetRecordValue(record, 24, static_cast<std::int32_t>(value));
+    };
+
+    if (record.category >= 1 && record.category <= 8) {
+        setRegister(1, 0);
+        setRegister(2, 5);
+        SetRecordValue(record, 8, (instruction >> 10U) & 0xFFFU);
+        SetRecordByte(
+            record,
+            28,
+            (instruction & UINT32_C(0x00400000)) != 0 ? 12 : 0);
+        return;
+    }
+    if (record.category >= 9 && record.category <= 16) {
+        setRegister(1, 0);
+        setRegister(2, 5);
+        setRegister(3, 16);
+        SetRecordByte(
+            record,
+            28,
+            static_cast<std::uint8_t>(
+                ((instruction >> 10U) & 0x3FU) |
+                (((instruction >> 22U) & 3U) << 6U)));
+        return;
+    }
+    if (record.category >= 17 && record.category <= 24) {
+        std::uint64_t mask = 0;
+        static_cast<void>(DecodeLogicalImmediateMask(instruction, mask));
+        setRegister(1, 0);
+        setRegister(2, 5);
+        SetRecordValue(record, 8, mask);
+        SetRecordValue(record, 16, mask);
+        return;
+    }
+    if (record.category >= 25 && record.category <= 32) {
+        setRegister(1, 0);
+        setRegister(2, 5);
+        setRegister(3, 16);
+        SetRecordByte(
+            record,
+            28,
+            static_cast<std::uint8_t>(
+                ((instruction >> 10U) & 0x3FU) |
+                (((instruction >> 22U) & 3U) << 6U)));
+        SetRecordByte(
+            record,
+            29,
+            static_cast<std::uint8_t>((instruction >> 21U) & 1U));
+        return;
+    }
+    if (record.category >= 33 && record.category <= 38) {
+        setRegister(1, 0);
+        SetRecordValue(
+            record,
+            8,
+            static_cast<std::uint32_t>(
+                static_cast<std::uint16_t>(instruction >> 5U)));
+        SetRecordByte(
+            record,
+            28,
+            static_cast<std::uint8_t>(16U * ((instruction >> 21U) & 3U)));
+        return;
+    }
+    if ((record.category >= 39 && record.category <= 43) ||
+        (record.category >= 46 && record.category <= 49)) {
+        setRegister(1, 0);
+        setRegister(2, 5);
+        SetRecordValue(
+            record,
+            8,
+            ((instruction >> 10U) & 0xFFFU) << (instruction >> 30U));
+        return;
+    }
+    if (record.category >= 52 && record.category <= 55) {
+        setRegister(1, 0);
+        setRegister(2, 5);
+        SetRecordValue(
+            record,
+            24,
+            static_cast<std::int32_t>(SignExtend(
+                (instruction >> 12U) & 0x1FFU, 9)));
+        return;
+    }
+    if (record.category >= 56 && record.category <= 61) {
+        setRegister(1, 0);
+        setRegister(2, 5);
+        setRegister(3, 10);
+        SetRecordValue(
+            record,
+            24,
+            static_cast<std::int32_t>(SignExtend(
+                (instruction >> 15U) & 0x7FU, 7) * 8));
+        return;
+    }
+    switch (record.category) {
+        case 62:
+            setRegister(1, 0);
+            setBranch19();
+            break;
+        case 63:
+        case 64: {
+            const std::int64_t value = SignExtend(
+                instruction & UINT32_C(0x03FFFFFF), 26) * 4;
+            SetRecordValue(record, 24, static_cast<std::int32_t>(value));
+            break;
+        }
+        case 65:
+            SetRecordByte(
+                record,
+                29,
+                static_cast<std::uint8_t>(instruction & 0xFU));
+            setBranch19();
+            break;
+        case 66:
+        case 67:
+        case 68:
+        case 69:
+            setRegister(1, 0);
+            setBranch19();
+            break;
+        case 70:
+        case 71:
+            setRegister(1, 0);
+            SetRecordValue(
+                record,
+                8,
+                ((instruction >> 19U) & 0x1FU) |
+                    (32U * (instruction >> 31U)));
+            setBranch14();
+            break;
+        case 72:
+        case 73:
+        case 74:
+            setRegister(2, 5);
+            break;
+        case 77:
+        case 78:
+        case 79:
+        case 80:
+        case 81:
+        case 82:
+        case 83:
+        case 84:
+            setRegister(1, 0);
+            setRegister(2, 5);
+            setRegister(3, 16);
+            SetRecordByte(
+                record,
+                29,
+                static_cast<std::uint8_t>((instruction >> 12U) & 0xFU));
+            break;
+        case 85:
+        case 86:
+        case 89:
+        case 90:
+            setRegister(1, 0);
+            setRegister(2, 5);
+            setRegister(3, 16);
+            SetRecordByte(
+                record,
+                29,
+                static_cast<std::uint8_t>((instruction >> 10U) & 0x1FU));
+            break;
+        case 91:
+        case 93:
+        case 94:
+        case 95:
+        case 97:
+        case 98:
+        case 99:
+        case 100:
+            setRegister(1, 0);
+            setRegister(2, 5);
+            if (record.category >= 91 && record.category <= 95) {
+                setRegister(3, 16);
+            }
+            break;
+        case 106:
+            setRegister(1, 0);
+            SetRecordValue(
+                record,
+                8,
+                static_cast<std::uint32_t>(
+                    static_cast<std::uint16_t>(instruction >> 5U)));
+            break;
+        case 107:
+            setRegister(1, 0);
+            break;
+        case 108:
+        case 109:
+            setRegister(1, 0);
+            setRegister(2, 5);
+            SetRecordValue(
+                record,
+                30,
+                static_cast<std::uint16_t>((instruction >> 16U) & 0x3FU));
+            SetRecordValue(
+                record,
+                32,
+                static_cast<std::uint16_t>((instruction >> 10U) & 0x3FU));
+            break;
+        case 112: {
+            setRegister(1, 0);
+            const std::uint32_t immediate =
+                (((instruction >> 29U) & 3U) |
+                 (4U * ((instruction >> 5U) & 0x7FFFFU))) << 12U;
+            SetRecordValue(record, 24, immediate);
+            break;
+        }
+        case 113: {
+            setRegister(1, 0);
+            std::uint32_t immediate =
+                ((instruction >> 29U) & 3U) |
+                (4U * ((instruction >> 5U) & 0x7FFFFU));
+            if ((immediate & UINT32_C(0x00100000)) != 0) {
+                immediate |= UINT32_C(0xFFE00000);
+            }
+            SetRecordValue(record, 24, immediate);
+            break;
+        }
+        case 114:
+            setRegister(1, 16);
+            break;
+        default:
+            break;
+    }
 }
 
 bool DecodeDirectTarget(std::uint32_t instruction,
@@ -411,15 +793,6 @@ CoordinatePredecodedInstruction PredecodeCoordinateInstruction(
     std::uint32_t instruction) noexcept {
     CoordinatePredecodedInstruction decoded{};
     decoded.instruction = instruction;
-    decoded.registers[0] = static_cast<std::uint8_t>(instruction & 0x1FU);
-    decoded.registers[1] =
-        static_cast<std::uint8_t>((instruction >> 5U) & 0x1FU);
-    decoded.registers[2] =
-        static_cast<std::uint8_t>((instruction >> 16U) & 0x1FU);
-    decoded.operands[0] = (instruction >> 10U) & 0xFFFU;
-    decoded.operands[1] = (instruction >> 12U) & 0xFFFFU;
-    decoded.operands[2] = (instruction >> 5U) & 0x7FFFFU;
-    decoded.operands[3] = instruction & 0x03FFFFFFU;
 
     if (!DecodeCategory(instruction, decoded.category)) {
         decoded.category = IsCoordinateExecutionIgnorableInstruction(
@@ -427,6 +800,7 @@ CoordinatePredecodedInstruction PredecodeCoordinateInstruction(
             ? kCoordinatePredecodeAdvanceCategory
             : kCoordinatePredecodeRawCategory;
     }
+    PopulatePredecodedOperands(decoded);
     return decoded;
 }
 

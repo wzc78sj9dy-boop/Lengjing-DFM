@@ -27,6 +27,7 @@
 #include "game/native/CharacterPositionResolver.h"
 #include "game/native/CoordinateDecryptBackendRoute.h"
 #include "game/native/CoordinateDecrypt2Runtime.h"
+#include "game/native/CoordinateExecutionCachePolicy.h"
 #include "game/native/CoordinateExecutionDecoder.h"
 #include "game/native/CoordinateOutputPolicy.h"
 #include "game/native/CoordinatePoolRuntime.h"

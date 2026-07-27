@@ -29,6 +29,17 @@ std::array<std::uint8_t, Size * sizeof(std::uint32_t)> Encode(
     return bytes;
 }
 
+template <typename Value>
+Value ReadRecordValue(const game::CoordinatePredecodedInstruction& record,
+                      std::size_t offset) {
+    Value value{};
+    std::memcpy(
+        &value,
+        reinterpret_cast<const std::uint8_t*>(&record) + offset,
+        sizeof(value));
+    return value;
+}
+
 void TestRecordLayoutAndCategories() {
     REQUIRE(sizeof(game::CoordinatePredecodedInstruction) == 40);
     REQUIRE(offsetof(game::CoordinatePredecodedInstruction, instruction) == 4);
@@ -38,6 +49,32 @@ void TestRecordLayoutAndCategories() {
                 .category == 63);
     REQUIRE(game::PredecodeCoordinateInstruction(UINT32_C(0xD53BD040))
                 .category == 106);
+    REQUIRE(game::PredecodeCoordinateInstruction(UINT32_C(0xF9400020))
+                .category == 39);
+    REQUIRE(game::PredecodeCoordinateInstruction(UINT32_C(0xF9000020))
+                .category == 46);
+    REQUIRE(game::PredecodeCoordinateInstruction(UINT32_C(0xA9400440))
+                .category == 120);
+    REQUIRE(game::PredecodeCoordinateInstruction(UINT32_C(0xE9400440))
+                .category == 56);
+    REQUIRE(game::PredecodeCoordinateInstruction(UINT32_C(0xE9000440))
+                .category == 57);
+    REQUIRE(game::PredecodeCoordinateInstruction(UINT32_C(0xF8408C20))
+                .category == 52);
+    REQUIRE(game::PredecodeCoordinateInstruction(UINT32_C(0xF8408420))
+                .category == 53);
+    REQUIRE(game::PredecodeCoordinateInstruction(UINT32_C(0x88097D6A))
+                .category == 114);
+    REQUIRE(game::PredecodeCoordinateInstruction(UINT32_C(0x9AC02000))
+                .category == 93);
+    REQUIRE(game::PredecodeCoordinateInstruction(UINT32_C(0x9B000000))
+                .category == 85);
+    REQUIRE(game::PredecodeCoordinateInstruction(UINT32_C(0x9B008000))
+                .category == 86);
+    REQUIRE(game::PredecodeCoordinateInstruction(UINT32_C(0x1200FC00))
+                .category == game::kCoordinatePredecodeRawCategory);
+    REQUIRE(game::PredecodeCoordinateInstruction(UINT32_C(0x0B008000))
+                .category == game::kCoordinatePredecodeRawCategory);
     REQUIRE(game::PredecodeCoordinateInstruction(UINT32_C(0x1E202800))
                 .category == game::kCoordinatePredecodeRawCategory);
     REQUIRE(game::PredecodeCoordinateInstruction(UINT32_C(0x55434241))
@@ -53,6 +90,46 @@ void TestIgnorableInstructionPolicy() {
         UINT32_C(0x55434241)));
     REQUIRE(!game::IsCoordinateExecutionIgnorableInstruction(
         UINT32_C(0x14000002)));
+}
+
+void TestRecordOperands() {
+    const auto add = game::PredecodeCoordinateInstruction(
+        UINT32_C(0x91001420));
+    REQUIRE(add.category == 1);
+    REQUIRE(add.registers[0] == 0);
+    REQUIRE(add.registers[1] == 1);
+    REQUIRE(ReadRecordValue<std::uint32_t>(add, 8) == 5);
+    REQUIRE(ReadRecordValue<std::uint8_t>(add, 28) == 0);
+
+    const auto logical = game::PredecodeCoordinateInstruction(
+        UINT32_C(0x92401C20));
+    REQUIRE(logical.category == 17);
+    REQUIRE(ReadRecordValue<std::uint64_t>(logical, 8) == UINT64_C(0xFF));
+    REQUIRE(ReadRecordValue<std::uint64_t>(logical, 16) == UINT64_C(0xFF));
+
+    const auto branch = game::PredecodeCoordinateInstruction(
+        UINT32_C(0x14000002));
+    REQUIRE(ReadRecordValue<std::int32_t>(branch, 24) == 8);
+
+    const auto pair = game::PredecodeCoordinateInstruction(
+        UINT32_C(0xE9400440));
+    REQUIRE(pair.registers[0] == 0);
+    REQUIRE(pair.registers[1] == 2);
+    REQUIRE(pair.registers[2] == 1);
+    REQUIRE(ReadRecordValue<std::int32_t>(pair, 24) == 0);
+
+    const auto exclusive = game::PredecodeCoordinateInstruction(
+        UINT32_C(0x88097D6A));
+    REQUIRE(exclusive.registers[0] == 9);
+    REQUIRE(exclusive.registers[1] == 0);
+    REQUIRE(exclusive.registers[2] == 0);
+
+    const auto raw = game::PredecodeCoordinateInstruction(
+        UINT32_C(0x1E202800));
+    REQUIRE(raw.operands[0] == 0);
+    REQUIRE(raw.operands[1] == 0);
+    REQUIRE(raw.operands[2] == 0);
+    REQUIRE(raw.operands[3] == 0);
 }
 
 void TestPredecodeCacheAndFallback() {
@@ -196,6 +273,7 @@ void TestOutOfRangeControlFlowBoundaries() {
 int main() {
     TestRecordLayoutAndCategories();
     TestIgnorableInstructionPolicy();
+    TestRecordOperands();
     TestPredecodeCacheAndFallback();
     TestJitControlFlowAndBlocks();
     TestPredecodedRunsStopAtControlFlowAndFallback();

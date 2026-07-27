@@ -1974,7 +1974,11 @@ private:
     }
 
     bool IsAbsoluteEntryAddress(std::uint64_t address) const noexcept {
-        if (plan.entryPc == plan.hookPc) return false;
+        const bool hasAbsoluteEntry =
+            request.mode == CoordinateExecutionMode::Emulate
+            ? request.candidate.q2 != 0
+            : request.shared.absoluteEntry != 0;
+        if (!hasAbsoluteEntry) return false;
         const std::uint64_t begin =
             NormalizeCoordinateExecutionPointer(plan.entryPc) & kPageMask;
         address = NormalizeCoordinateExecutionPointer(address);

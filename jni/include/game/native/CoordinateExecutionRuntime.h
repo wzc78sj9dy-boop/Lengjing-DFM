@@ -709,10 +709,7 @@ constexpr CoordinateExecutionPlan BuildCoordinateExecutionPlan(
         if ((plan.entryPc & 3U) != 0 || plan.entryPc == 0) {
             return CoordinateExecutionPlan{};
         }
-        plan.x0 = request.shared.x0Override != 0
-            ? NormalizeCoordinateExecutionPointer(
-                  request.shared.x0Override)
-            : subject;
+        plan.x0 = subject;
         plan.x1 = subject;
         plan.lr = returnStub;
         plan.returnStub = returnStub;

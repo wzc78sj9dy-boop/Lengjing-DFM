@@ -464,7 +464,7 @@ void TestSharedAbsoluteEntry() {
     REQUIRE(plan.valid);
     REQUIRE(plan.entryPc == request.shared.absoluteEntry);
     REQUIRE(plan.hookPc == kCodeBase + 0x5000);
-    REQUIRE(plan.x0 == request.shared.x0Override);
+    REQUIRE(plan.x0 == kNormalizedSubject);
     REQUIRE(plan.x1 == kNormalizedSubject);
     REQUIRE(plan.lr == request.shared.returnStub);
     REQUIRE(plan.returnStub == request.shared.returnStub);
