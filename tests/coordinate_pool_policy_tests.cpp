@@ -8,8 +8,11 @@
 void RunCoordinatePoolPolicyTests() {
     using lengjing::game::native::CodeMethodLoadResult;
     using lengjing::game::native::CaptureCoordinatePoolMappingSnapshot;
+    using lengjing::game::native::
+        CanPreserveCoordinatePoolDecryptIndexLock;
     using lengjing::game::native::CoordinatePoolCodeFingerprint;
     using lengjing::game::native::CoordinatePoolCodeChangeConfirmation;
+    using lengjing::game::native::ContainsCoordinatePoolCodeInstruction;
     using lengjing::game::native::CoordinatePoolCodeIdentityChanged;
     using lengjing::game::native::CoordinatePoolContextIdentityChanged;
     using lengjing::game::native::CoordinatePoolEnvironmentFlagEnabled;
@@ -1176,6 +1179,19 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(NextCoordinatePoolCodeValidationFrame(UINT64_MAX, true) ==
         UINT64_MAX);
 
+    REQUIRE(CanPreserveCoordinatePoolDecryptIndexLock(
+        true, true, 8, 8, 10));
+    REQUIRE(!CanPreserveCoordinatePoolDecryptIndexLock(
+        false, true, 8, 8, 10));
+    REQUIRE(!CanPreserveCoordinatePoolDecryptIndexLock(
+        true, false, 8, 8, 10));
+    REQUIRE(!CanPreserveCoordinatePoolDecryptIndexLock(
+        true, true, 8, 7, 10));
+    REQUIRE(!CanPreserveCoordinatePoolDecryptIndexLock(
+        true, true, 8, 8, 8));
+    REQUIRE(!CanPreserveCoordinatePoolDecryptIndexLock(
+        true, true, 8, 8, 1));
+
     constexpr std::uint64_t planMappingStart = UINT64_C(0x10000000);
     constexpr std::size_t planMappingSize = 0x2000;
     constexpr std::uint64_t planEntry = planMappingStart + 0x400;
@@ -1189,6 +1205,12 @@ void RunCoordinatePoolPolicyTests() {
     REQUIRE(planCodeRange.IsValid());
     REQUIRE(planCodeRange.address == planEntry);
     REQUIRE(planCodeRange.size == 0x84);
+    REQUIRE(ContainsCoordinatePoolCodeInstruction(
+        planCodeRange, planEntry));
+    REQUIRE(ContainsCoordinatePoolCodeInstruction(
+        planCodeRange, planEntry + 0x80));
+    REQUIRE(!ContainsCoordinatePoolCodeInstruction(
+        planCodeRange, planEntry + 0x84));
     std::array<std::uint8_t, planMappingSize> planMapping{};
     const std::size_t planCodeOffset = static_cast<std::size_t>(
         planCodeRange.address - planMappingStart);

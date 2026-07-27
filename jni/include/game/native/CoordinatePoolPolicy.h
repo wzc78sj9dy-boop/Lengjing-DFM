@@ -1139,6 +1139,26 @@ struct CoordinatePoolCodeRange {
     }
 };
 
+constexpr bool ContainsCoordinatePoolCodeInstruction(
+    const CoordinatePoolCodeRange& range,
+    std::uint64_t address) noexcept {
+    return range.IsValid() && address >= range.address &&
+        range.size >= sizeof(std::uint32_t) &&
+        address - range.address <= range.size - sizeof(std::uint32_t);
+}
+
+constexpr bool CanPreserveCoordinatePoolDecryptIndexLock(
+    bool indexedPointers,
+    bool locked,
+    std::uint8_t selectedOffset,
+    std::uint8_t effectiveOffset,
+    std::size_t blockCount) noexcept {
+    return indexedPointers && locked && blockCount >= 2 &&
+        blockCount <= kCoordinatePoolMaximumBlockCount &&
+        IsCoordinatePoolDecryptIndexCandidateOffsetValid(selectedOffset) &&
+        selectedOffset == effectiveOffset && effectiveOffset < blockCount;
+}
+
 constexpr CoordinatePoolCodeRange ResolveCoordinatePoolPlanCodeRange(
     std::uint64_t mappingStart,
     std::size_t mappingSize,

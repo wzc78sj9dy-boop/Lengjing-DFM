@@ -820,6 +820,7 @@ struct CoordinatePoolRuntime::Impl {
         const bool runtimeContextChanged = finder != nullptr &&
             CoordinatePoolContextIdentityChanged(previousRoot, nextRoot);
         bool resetAnalysis = analysisInvalidated || codeIdentityChanged;
+        bool preserveStableDecryptIndex = false;
         if (!resetAnalysis && finder != nullptr &&
             ShouldValidateCoordinatePoolCode(
                 targetFrame,
@@ -831,6 +832,14 @@ struct CoordinatePoolRuntime::Impl {
             codeValidationRequested = false;
             if (validation == CodeValidationResult::Changed) {
                 if (codeChangeConfirmation.ObserveChanged()) {
+                    preserveStableDecryptIndex =
+                        !codeIdentityChanged &&
+                        CanPreserveCoordinatePoolDecryptIndexLock(
+                            indexedPointers,
+                            decryptIndexCalibration.IsLocked(),
+                            decryptIndexCalibration.Selected(),
+                            effectiveDecryptIndexOffset,
+                            decryptIndexCalibrationBlockCount);
                     analysisInvalidated = true;
                     resetAnalysis = true;
                 } else {
@@ -852,7 +861,9 @@ struct CoordinatePoolRuntime::Impl {
                 }
             }
         }
-        if (resetAnalysis) ResetAnalysisUnlocked();
+        if (resetAnalysis) {
+            ResetAnalysisUnlocked(preserveStableDecryptIndex);
+        }
         if (!resetAnalysis && runtimeContextChanged &&
             !InvalidateRuntimeContextUnlocked()) {
             SetError(CoordinatePoolRuntimeError::EngineSetupFailed);
@@ -2880,6 +2891,8 @@ private:
                 CoordinatePoolRemotePlanState::PlanRejected);
             return false;
         }
+        const std::vector<pool::coord_dec::RuntimePatch> planPatches =
+            result.plan.patches;
 
         auto candidate = std::unique_ptr<pool::coord_dec::FindDec>(
             new (std::nothrow) pool::coord_dec::FindDec());
@@ -2904,6 +2917,21 @@ private:
             CoordinatePoolCodeFingerprint(
                 currentBytes.data() + codeOffset, codeRange.size),
         });
+        for (const pool::coord_dec::RuntimePatch& patch : planPatches) {
+            if (ContainsCoordinatePoolCodeInstruction(
+                    codeRange, patch.address)) {
+                continue;
+            }
+            const std::size_t patchOffset = static_cast<std::size_t>(
+                patch.address - result.key.mappingBase);
+            fingerprints.push_back(CodeRangeFingerprint{
+                patch.address,
+                sizeof(patch.instruction),
+                CoordinatePoolCodeFingerprint(
+                    currentBytes.data() + patchOffset,
+                    sizeof(patch.instruction)),
+            });
+        }
         if (!CommitFinderUnlocked(
                 std::move(candidate),
                 std::move(mappingIndex),
@@ -4816,7 +4844,19 @@ private:
         }
     }
 
-    void ResetAnalysisUnlocked() {
+    void ResetAnalysisUnlocked(bool preserveStableDecryptIndex = false) {
+        const bool preserveIndexLock = preserveStableDecryptIndex &&
+            CanPreserveCoordinatePoolDecryptIndexLock(
+                indexedPointers,
+                decryptIndexCalibration.IsLocked(),
+                decryptIndexCalibration.Selected(),
+                effectiveDecryptIndexOffset,
+                decryptIndexCalibrationBlockCount);
+        const CoordinatePoolDecryptIndexCalibration preservedCalibration =
+            decryptIndexCalibration;
+        const std::uint8_t preservedBlockCount =
+            decryptIndexCalibrationBlockCount;
+        const std::uint8_t preservedOffset = effectiveDecryptIndexOffset;
         CloseEngineUnlocked();
         if (remotePlanClient != nullptr) remotePlanClient->Reset();
         remotePlanPending = false;
@@ -4865,6 +4905,16 @@ private:
             kCoordinatePoolUnknownDecryptIndexOffset;
         pendingDecryptIndexFrame =
             std::numeric_limits<std::uint64_t>::max();
+        if (preserveIndexLock) {
+            decryptIndexCalibration = preservedCalibration;
+            decryptIndexCalibrationBlockCount = preservedBlockCount;
+            decryptIndexCalibrationProgressFrame = frame;
+            decryptIndexCalibrationLastEvidence =
+                decryptIndexCalibration.Evidence();
+            effectiveDecryptIndexOffset = preservedOffset;
+            decryptIndexFlickerSwitch.Lock(
+                preservedOffset, preservedBlockCount, frame);
+        }
         poolPointerRefreshFrame =
             std::numeric_limits<std::uint64_t>::max();
         ringSlots.clear();
