@@ -3,9 +3,6 @@
 #include "auth/CloudLayout.h"
 #include "game/native/ActorRecordResolver.h"
 #include "game/native/ActorRecordSource.h"
-#include "game/native/CoordinateExecutionLayout.h"
-#include "game/native/CoordinatePoolRuntime.h"
-#include "game/native/MemoryTransport.h"
 
 #include <array>
 #include <cstdint>
@@ -94,91 +91,6 @@ constexpr bool IsCloudOffsetLayoutValid(
         layout.geometryInstancePointerOffsets[1];
 }
 
-constexpr CoordinatePoolRuntimeLayout MakeCoordinatePoolLayout(
-    const auth::CloudCoordinatePoolLayout& pool) noexcept {
-    return {
-        pool.rootRva,
-        pool.bridgeOffset,
-        pool.contextOffset,
-        pool.entryOffset,
-        pool.componentKeyOffset,
-        pool.entryStride,
-        pool.poolHeadSkip,
-        pool.ringRefreshFrames,
-    };
-}
-
-constexpr CoordinateExecutionLayout MakeCoordinateExecutionLayout(
-    const auth::CloudExecutionLayout& execution,
-    std::uint32_t scanProfile) noexcept {
-    const auth::CloudExecutionHookOffsetLayout& hooks =
-        execution.hookOffsets;
-    const auth::CloudExecutionFieldOffsetLayout& fields =
-        execution.fieldOffsets;
-    const auth::CloudExecutionDiscoveryLayout& discovery =
-        execution.hasProfile12Discovery &&
-            (scanProfile == 1 || scanProfile == 2)
-        ? execution.profile12Discovery
-        : execution.discovery;
-    return {
-        {
-            discovery.rootOffset,
-            discovery.pointerOffset,
-            discovery.entryOffset,
-            discovery.returnStubMagic,
-        },
-        {
-            execution.result.slotOffset,
-            execution.result.positionOffset,
-        },
-        {
-            hooks.subjectLoad,
-            hooks.callbackEntry,
-            hooks.callbackReturn,
-            hooks.callbackIndex,
-            hooks.callbackCopyPrepare,
-            hooks.callbackCopyAfter,
-            hooks.tablePointer,
-            hooks.tableValue,
-            hooks.lock,
-            hooks.lockReturn,
-            hooks.firstCall,
-            hooks.firstReturn,
-            hooks.externalCall,
-            hooks.externalReturn,
-            hooks.primaryGateWrite,
-            hooks.alternateGateWrite,
-            hooks.gateProbe,
-            hooks.recordCount,
-            hooks.targetKey,
-            hooks.ringSetup,
-            hooks.ringProbe,
-            hooks.ringHit,
-            hooks.dispatch,
-            hooks.dispatchReturn,
-            hooks.resultPrepare,
-            hooks.result,
-        },
-        {
-            fields.contextExpected,
-            fields.stackPriorGate,
-            fields.stackPrimaryGateSource,
-            fields.stackGateFlag,
-            fields.stackGateSnapshotA,
-            fields.stackGateSnapshotB,
-            fields.stackRingMid,
-            fields.objectPosition,
-            fields.stackCaptureA,
-            fields.stackCaptureB,
-            fields.stackCaptureC,
-            fields.stackCaptureD,
-            fields.captureField,
-            fields.stackPoolSelector,
-            fields.contextPoolTable,
-        },
-    };
-}
-
 }  // namespace detail
 
 struct RuntimeLayoutOverride {
@@ -189,19 +101,14 @@ struct RuntimeLayoutOverride {
     ActorSubjectLayout actorSubject{};
     std::uintptr_t trackingMatrixRootOffset = 0;
     std::uintptr_t componentPositionFlagOffset = 0;
-    CoordinatePoolRuntimeLayout coordinatePool{};
-    CoordinatePoolRuntimeLayout coordinateDecrypt2Pool{};
-    CoordinateReplayTransportLayout coordinateTransport{};
-    CoordinateExecutionLayout coordinateExecution{};
-    CoordinateExecutionContextLayout coordinateExecutionContext{};
+    std::uintptr_t firstVeneerRva = 0;
 };
 
 inline std::optional<RuntimeLayoutOverride> BuildRuntimeLayoutOverride(
     const auth::CloudLayoutDocument* document,
     std::string_view expectedPackage,
     std::string_view expectedModule,
-    std::string_view runtimeBuildId,
-    std::uint32_t scanProfile = 0) noexcept {
+    std::string_view runtimeBuildId) noexcept {
     if (document == nullptr || expectedPackage.empty() ||
         expectedModule.empty() || runtimeBuildId.empty() ||
         document->schemaVersion != auth::kCloudLayoutSchemaVersion ||
@@ -217,8 +124,6 @@ inline std::optional<RuntimeLayoutOverride> BuildRuntimeLayoutOverride(
         document->layout.actorRecords;
     const auth::CloudActorSubjectLayout& subject =
         document->layout.actorSubject;
-    const auth::CloudDecryptMode1Layout& mode1 = document->decrypt.mode1;
-    const auth::CloudDecryptMode2Layout& mode2 = document->decrypt.mode2;
     RuntimeLayoutOverride result{};
     result.namePoolOffset = document->layout.namePoolOffset;
     result.worldOffset = document->layout.worldOffset;
@@ -243,35 +148,13 @@ inline std::optional<RuntimeLayoutOverride> BuildRuntimeLayoutOverride(
         document->layout.trackingMatrixRootOffset;
     result.componentPositionFlagOffset =
         document->layout.componentPositionFlagOffset;
-    result.coordinatePool = detail::MakeCoordinatePoolLayout(mode1.pool);
-    result.coordinateDecrypt2Pool =
-        detail::MakeCoordinatePoolLayout(mode2.pool);
-    result.coordinateTransport = {
-        mode1.pool.rootRva,
-        mode1.pool.bridgeOffset,
-        mode1.pool.entryOffset,
-        mode1.pacgaData,
-        mode1.pacgaModifier,
-    };
-    result.coordinateExecution =
-        detail::MakeCoordinateExecutionLayout(
-            document->decrypt.execution, scanProfile);
-    result.coordinateExecutionContext = {
-        document->decrypt.execution.context.threadName,
-        document->decrypt.execution.context.oracleOpcode,
-    };
+    result.firstVeneerRva = document->decrypt.firstVeneerRva;
 
-    const bool rootsConflict =
-        result.coordinatePool.rootRva == result.namePoolOffset ||
-        result.coordinatePool.rootRva == result.worldOffset ||
-        result.coordinateDecrypt2Pool.rootRva == result.namePoolOffset ||
-        result.coordinateDecrypt2Pool.rootRva == result.worldOffset;
-    if (rootsConflict || !result.actorSubject.IsValid() ||
-        !result.coordinatePool.IsValid() ||
-        !result.coordinateDecrypt2Pool.IsValid() ||
-        !result.coordinateTransport.IsValid() ||
-        !result.coordinateExecution.IsValid() ||
-        !result.coordinateExecutionContext.IsValid()) {
+    if (!result.actorSubject.IsValid() ||
+        !detail::IsOptionalOffsetValid(
+            result.firstVeneerRva, 4,
+            detail::kMaximumModuleOffset, 4) ||
+        result.firstVeneerRva == 0) {
         return std::nullopt;
     }
     return result;

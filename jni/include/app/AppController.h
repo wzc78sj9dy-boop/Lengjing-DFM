@@ -1,9 +1,5 @@
 #pragma once
 
-#ifndef LENGJING_ENABLE_ALGORITHM_COORDINATE
-#define LENGJING_ENABLE_ALGORITHM_COORDINATE 0
-#endif
-
 #include "config/LocalConfig.h"
 #include "game/GameRuntime.h"
 #include "render/overlay_renderer.h"
@@ -93,18 +89,9 @@ private:
     ui::UiModel model_{};
     game::RuntimeStatus lastStatus_{};
     bool coordinateDecryptSuccessNotified_ = false;
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-    bool algorithmCoordinateSuccessNotified_ = false;
-#endif
     game::CoordinateDecryptError lastReportedCoordinateError_ =
         game::CoordinateDecryptError::None;
     int lastReportedCoordinateSystemError_ = 0;
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-    game::native::AlgorithmCoordinateDiagnostic
-        lastReportedAlgorithmCoordinate_{};
-    game::native::RuntimeCoordinateCodecDiagnostic
-        lastReportedRuntimeCoordinateCodec_{};
-#endif
     game::RuntimeError lastReportedRuntimeError_ =
         game::RuntimeError::None;
     int lastReportedRuntimeSystemError_ = 0;

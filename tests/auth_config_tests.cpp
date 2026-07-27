@@ -13,7 +13,6 @@ void RunAuthConfigTests() {
     REQUIRE(!kDefaultT3AuthConfig.IsCoordinateSuiteConfigured());
     REQUIRE(!kDefaultT3AuthConfig.targetPackage.empty());
     REQUIRE(!kDefaultT3AuthConfig.targetModule.empty());
-    REQUIRE(!kDefaultCoordinateRemotePlanConfig.IsConfigured());
 
     constexpr CloudVariableConfig complete{
         "CALL_CODE", "VALUE_ID", "VALUE_NAME"};
@@ -28,7 +27,4 @@ void RunAuthConfigTests() {
     REQUIRE(configured.IsLoginConfigured());
     REQUIRE(configured.IsCoordinateSuiteConfigured());
 
-    constexpr CoordinateRemotePlanConfig remotePlan{
-        "http://HOST:8080/decrypt/parse", {}, "/data/adb/device-seed"};
-    REQUIRE(remotePlan.IsConfigured());
 }

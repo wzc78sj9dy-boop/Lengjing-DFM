@@ -13,13 +13,10 @@
     } while (false)
 
 void RunConfigTests();
-void RunCoordinatePoolPolicyTests();
-void RunCoordinateOutputPolicyTests();
 void RunActorFrameVisitSetTests();
 void RunActorRecordRefreshPolicyTests();
 void RunActorRecordSourceTests();
 void RunActorRecordResolverTests();
-void RunAlgorithmPositionPolicyTests();
 void RunAimGuidePolicyTests();
 void RunAimModePolicyTests();
 void RunAimPredictionTests();
@@ -30,21 +27,15 @@ void RunCardInputPolicyTests();
 void RunCharacterComponentTransformTests();
 void RunCloudLayoutStartupPolicyTests();
 void RunCloudLayoutTests();
-void RunCoordinateDecryptBackendRouteTests();
-void RunCoordinateExecutionCachePolicyTests();
 void RunCpuMailboxPolicyTests();
 void RunFrameProjectionTests();
 void RunGameVersionPolicyTests();
 void RunGeometrySceneBuildPolicyTests();
-#if 0
 void RunHardwareBreakpointCoordinateRuntimeTests();
-#endif
 void RunHudMapTests();
 void RunKernelModuleCatalogTests();
 void RunOverlayContrastPolicyTests();
-#if 0
 void RunPerfExecutionBreakpointTests();
-#endif
 void RunPlayerBoundsTests();
 void RunPlayerDetailReadPolicyTests();
 void RunPlayerTracerPolicyTests();

@@ -12,7 +12,6 @@ add_executable(lengjing_tests
     actor_record_refresh_policy_tests.cpp
     actor_record_source_tests.cpp
     actor_record_resolver_tests.cpp
-    algorithm_position_policy_tests.cpp
     aim_guide_policy_tests.cpp
     aim_mode_policy_tests.cpp
     aim_prediction_tests.cpp
@@ -24,20 +23,16 @@ add_executable(lengjing_tests
     cloud_layout_startup_policy_tests.cpp
     cloud_layout_tests.cpp
     config_tests.cpp
-    coordinate_decrypt_backend_route_tests.cpp
-    coordinate_execution_cache_policy_tests.cpp
-    coordinate_pool_policy_tests.cpp
-    coordinate_output_policy_tests.cpp
     cpu_mailbox_policy_tests.cpp
-    # execution_veneer_locator_tests.cpp
+    execution_veneer_locator_tests.cpp
     frame_projection_tests.cpp
     game_version_policy_tests.cpp
     geometry_scene_build_policy_tests.cpp
-    # hardware_breakpoint_coordinate_runtime_tests.cpp
+    hardware_breakpoint_coordinate_runtime_tests.cpp
     hud_map_tests.cpp
     kernel_module_catalog_tests.cpp
     overlay_contrast_policy_tests.cpp
-    # perf_execution_breakpoint_tests.cpp
+    perf_execution_breakpoint_tests.cpp
     player_bounds_tests.cpp
     player_detail_read_policy_tests.cpp
     player_tracer_policy_tests.cpp
@@ -62,9 +57,9 @@ add_executable(lengjing_tests
     ../jni/src/auth/RemoteAuth.cpp
     ../jni/src/config/LocalConfig.cpp
     ../jni/src/game/GameRuntime.cpp
-    # ../jni/src/game/native/ExecutionVeneerLocator.cpp
-    # ../jni/src/game/native/HardwareBreakpointCoordinateRuntime.cpp
-    # ../jni/src/game/native/PerfExecutionBreakpoint.cpp
+    ../jni/src/game/native/ExecutionVeneerLocator.cpp
+    ../jni/src/game/native/HardwareBreakpointCoordinateRuntime.cpp
+    ../jni/src/game/native/PerfExecutionBreakpoint.cpp
     ../jni/src/game/native/RemoteElfIdentity.cpp
     ../jni/src/game/native/TrackingPageBinding.cpp
     ../jni/src/platform/PerformanceTrace.cpp
@@ -87,273 +82,3 @@ else()
 endif()
 
 add_test(NAME lengjing_tests COMMAND lengjing_tests)
-
-add_executable(algorithm_coordinate_reader_tests
-    algorithm_coordinate_reader_tests.cpp
-)
-
-target_include_directories(algorithm_coordinate_reader_tests PRIVATE
-    ../jni/include
-)
-
-if(MSVC)
-    target_compile_options(algorithm_coordinate_reader_tests PRIVATE /W4 /utf-8)
-else()
-    target_compile_options(algorithm_coordinate_reader_tests PRIVATE
-        -Wall -Wextra -Wpedantic
-    )
-endif()
-
-add_test(
-    NAME algorithm_coordinate_reader_tests
-    COMMAND algorithm_coordinate_reader_tests
-)
-
-add_executable(runtime_coordinate_codec_tests
-    runtime_coordinate_codec_tests.cpp
-)
-
-target_include_directories(runtime_coordinate_codec_tests PRIVATE
-    ../jni/include
-)
-
-if(MSVC)
-    target_compile_options(runtime_coordinate_codec_tests PRIVATE /W4 /utf-8)
-else()
-    target_compile_options(runtime_coordinate_codec_tests PRIVATE
-        -Wall -Wextra -Wpedantic
-    )
-endif()
-
-add_test(
-    NAME runtime_coordinate_codec_tests
-    COMMAND runtime_coordinate_codec_tests
-)
-
-add_executable(algorithm_coordinate_config_tests
-    algorithm_coordinate_config_tests.cpp
-    ../jni/src/config/LocalConfig.cpp
-)
-
-target_include_directories(algorithm_coordinate_config_tests PRIVATE
-    ../jni/include
-    ../jni/lib
-)
-
-target_compile_definitions(algorithm_coordinate_config_tests PRIVATE
-    LENGJING_ENABLE_ALGORITHM_COORDINATE=1
-    LENGJING_ENABLE_PROJECTILE_TRACKING=0
-)
-
-if(MSVC)
-    target_compile_options(algorithm_coordinate_config_tests PRIVATE
-        /W4 /utf-8
-    )
-else()
-    target_compile_options(algorithm_coordinate_config_tests PRIVATE
-        -Wall -Wextra -Wpedantic
-    )
-endif()
-
-add_test(
-    NAME algorithm_coordinate_config_tests
-    COMMAND algorithm_coordinate_config_tests
-)
-
-add_executable(coordinate_pool_runtime_plan_tests
-    coordinate_pool_runtime_plan_tests.cpp
-    ../jni/src/game/native/CoordinatePoolRemotePlan.cpp
-    ../jni/src/game/native/coordinate_pool_internal/Analyze.cpp
-    ../jni/src/game/native/coordinate_pool_internal/FindDec.cpp
-)
-
-target_include_directories(coordinate_pool_runtime_plan_tests PRIVATE
-    ../jni/include
-    ../jni/lib/capstone/include
-)
-
-if(MSVC)
-    target_compile_options(coordinate_pool_runtime_plan_tests PRIVATE /W4 /utf-8)
-else()
-    target_compile_options(coordinate_pool_runtime_plan_tests PRIVATE
-        -Wall -Wextra -Wpedantic
-    )
-endif()
-
-add_test(
-    NAME coordinate_pool_runtime_plan_tests
-    COMMAND coordinate_pool_runtime_plan_tests
-)
-
-add_executable(coordinate_pool_remote_client_tests
-    coordinate_pool_remote_client_tests.cpp
-    ../jni/lib/t3/t3sdk.cpp
-    ../jni/src/game/native/CoordinatePoolRemoteClient.cpp
-    ../jni/src/game/native/CoordinatePoolRemotePlan.cpp
-)
-
-target_include_directories(coordinate_pool_remote_client_tests PRIVATE
-    ../jni/include
-    ../jni/lib
-    ../jni/lib/capstone/include
-)
-
-if(WIN32)
-    target_link_libraries(coordinate_pool_remote_client_tests PRIVATE
-        ws2_32
-        iphlpapi
-    )
-endif()
-
-if(MSVC)
-    target_compile_options(coordinate_pool_remote_client_tests PRIVATE
-        /W4 /utf-8
-    )
-else()
-    target_compile_options(coordinate_pool_remote_client_tests PRIVATE
-        -Wall -Wextra -Wpedantic
-    )
-endif()
-
-add_test(
-    NAME coordinate_pool_remote_client_tests
-    COMMAND coordinate_pool_remote_client_tests
-)
-
-add_executable(coordinate_entry_branch_policy_tests
-    coordinate_entry_branch_policy_tests.cpp
-)
-
-target_include_directories(coordinate_entry_branch_policy_tests PRIVATE
-    ../jni/include
-)
-
-if(MSVC)
-    target_compile_options(coordinate_entry_branch_policy_tests PRIVATE
-        /W4 /utf-8
-    )
-else()
-    target_compile_options(coordinate_entry_branch_policy_tests PRIVATE
-        -Wall -Wextra -Wpedantic
-    )
-endif()
-
-add_test(
-    NAME coordinate_entry_branch_policy_tests
-    COMMAND coordinate_entry_branch_policy_tests
-)
-
-add_executable(thread_execution_context_provider_tests
-    thread_execution_context_provider_tests.cpp
-    ../jni/src/game/native/ThreadContextDeviceTransport.cpp
-    ../jni/src/game/native/ThreadExecutionContextProvider.cpp
-)
-
-target_include_directories(thread_execution_context_provider_tests PRIVATE
-    ../jni/include
-)
-
-if(MSVC)
-    target_compile_options(thread_execution_context_provider_tests PRIVATE
-        /W4 /utf-8
-    )
-else()
-    target_compile_options(thread_execution_context_provider_tests PRIVATE
-        -Wall -Wextra -Wpedantic
-    )
-endif()
-
-add_test(
-    NAME thread_execution_context_provider_tests
-    COMMAND thread_execution_context_provider_tests
-)
-
-add_executable(ptrace_execution_context_provider_tests
-    ptrace_execution_context_provider_tests.cpp
-    ../jni/src/game/native/PtraceExecutionContextProvider.cpp
-    ../jni/src/game/native/ThreadExecutionContextProvider.cpp
-)
-
-target_include_directories(ptrace_execution_context_provider_tests PRIVATE
-    ../jni/include
-)
-
-if(MSVC)
-    target_compile_options(ptrace_execution_context_provider_tests PRIVATE
-        /W4 /utf-8
-    )
-else()
-    target_compile_options(ptrace_execution_context_provider_tests PRIVATE
-        -Wall -Wextra -Wpedantic
-    )
-endif()
-
-add_test(
-    NAME ptrace_execution_context_provider_tests
-    COMMAND ptrace_execution_context_provider_tests
-)
-
-add_executable(pacga_operand_resolver_tests
-    pacga_operand_resolver_tests.cpp
-    ../jni/src/game/native/PacgaOperandResolver.cpp
-)
-
-target_include_directories(pacga_operand_resolver_tests PRIVATE
-    ../jni/include
-)
-
-if(MSVC)
-    target_compile_options(pacga_operand_resolver_tests PRIVATE /W4 /utf-8)
-else()
-    target_compile_options(pacga_operand_resolver_tests PRIVATE
-        -Wall -Wextra -Wpedantic
-    )
-endif()
-
-add_test(
-    NAME pacga_operand_resolver_tests
-    COMMAND pacga_operand_resolver_tests
-)
-
-function(add_coordinate_execution_test target)
-    add_executable(${target} ${ARGN})
-    target_include_directories(${target} PRIVATE ../jni/include)
-    if(MSVC)
-        target_compile_options(${target} PRIVATE /W4 /utf-8)
-    else()
-        target_compile_options(${target} PRIVATE
-            -Wall -Wextra -Wpedantic
-        )
-    endif()
-    add_test(NAME ${target} COMMAND ${target})
-endfunction()
-
-add_coordinate_execution_test(
-    coordinate_execution_candidate_tests
-    coordinate_execution_candidate_tests.cpp
-    ../jni/src/game/native/CoordinateExecutionCandidate.cpp
-)
-
-add_coordinate_execution_test(
-    coordinate_execution_runtime_tests
-    coordinate_execution_runtime_tests.cpp
-)
-
-add_coordinate_execution_test(
-    coordinate_execution_backend_tests
-    coordinate_execution_backend_tests.cpp
-    ../jni/src/game/native/CoordinateExecutionBackend.cpp
-)
-
-add_coordinate_execution_test(
-    coordinate_execution_decoder_tests
-    coordinate_execution_decoder_tests.cpp
-    ../jni/src/game/native/CoordinateExecutionDecoder.cpp
-    ../jni/src/game/native/CoordinateExecutionCandidate.cpp
-)
-
-add_coordinate_execution_test(
-    arm64_pacga_tests
-    arm64_pacga_tests.cpp
-    ../jni/src/game/native/Arm64Pacga.cpp
-)

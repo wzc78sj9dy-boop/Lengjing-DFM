@@ -11,10 +11,6 @@
 #include <string>
 #include <thread>
 
-#ifndef LENGJING_ENABLE_ALGORITHM_COORDINATE
-#define LENGJING_ENABLE_ALGORITHM_COORDINATE 0
-#endif
-
 namespace {
 
 using namespace std::chrono_literals;
@@ -33,8 +29,6 @@ struct BackendState {
     std::atomic_bool selfAimSetting{false};
     std::atomic_bool projectileTrackingSetting{false};
     std::atomic_bool coordinateDecryptSetting{false};
-    std::atomic_bool hardwareBreakpointDecryptSetting{false};
-    std::atomic_bool algorithmDecryptSetting{false};
     std::atomic_bool frameReady{true};
     std::atomic<std::uint16_t> coordinateError{0};
     std::atomic_int coordinateSystemError{0};
@@ -81,69 +75,12 @@ public:
             settings.aim.trajectoryTracking);
         state_->coordinateDecryptSetting.store(
             settings.visual.coordinateDecrypt);
-        state_->hardwareBreakpointDecryptSetting.store(
-            settings.visual.hardwareBreakpointDecrypt);
-        state_->algorithmDecryptSetting.store(
-            settings.visual.algorithmDecrypt);
-        probe.algorithmCoordinateRequested =
-            settings.visual.algorithmDecrypt;
-        probe.algorithmCoordinateActive =
-            settings.visual.algorithmDecrypt;
-        probe.algorithmCoordinateRuntimeReady =
-            probe.algorithmCoordinateActive;
-        probe.algorithmCoordinateTableReady = false;
-        probe.algorithmCoordinateRefreshes =
-            probe.algorithmCoordinateActive ? 7 : 0;
-        probe.algorithmCoordinateResolveAttempts =
-            probe.algorithmCoordinateActive ? 7 : 0;
-        probe.algorithmCoordinateResolveSuccesses =
-            probe.algorithmCoordinateActive ? 7 : 0;
-        probe.algorithmCoordinateAttempts =
-            probe.algorithmCoordinateActive ? 11 : 0;
-        probe.algorithmCoordinateSuccesses =
-            probe.algorithmCoordinateActive ? 5 : 0;
-        probe.algorithmCoordinateObjectAttempts =
-            probe.algorithmCoordinateActive ? 6 : 0;
-        probe.algorithmCoordinateObjectSuccesses =
-            probe.algorithmCoordinateActive ? 5 : 0;
-        probe.algorithmCoordinateFallbacks =
-            probe.algorithmCoordinateActive ? 1 : 0;
-        probe.algorithmCoordinateSource = probe.algorithmCoordinateActive
-            ? lengjing::game::native::AlgorithmCoordinateSource::RuntimeObject
-            : lengjing::game::native::AlgorithmCoordinateSource::None;
-        probe.algorithmCoordinateRuntime = {};
-        if (probe.algorithmCoordinateActive) {
-            probe.algorithmCoordinateRuntime.stage =
-                lengjing::game::native::
-                    RuntimeCoordinateCodecStage::RingDecoded;
-            probe.algorithmCoordinateRuntime.object = 0x50000000U;
-            probe.algorithmCoordinateRuntime.decodedX = 1.0f;
-            probe.algorithmCoordinateRuntime.decodedY = 2.0f;
-            probe.algorithmCoordinateRuntime.decodedZ = 3.0f;
-        }
         error = frame.ready ? std::string{} : "waiting";
         probe.coordinateError =
             static_cast<lengjing::game::CoordinateDecryptError>(
                 state_->coordinateError.load());
         probe.coordinateSystemError =
             state_->coordinateSystemError.load();
-        probe.coordinateRead = {};
-        if (probe.coordinateError ==
-            lengjing::game::CoordinateDecryptError::
-                EntryCodeReadPermissionDenied) {
-            probe.coordinateRead.stage =
-                lengjing::game::CoordinateReadStage::CodePage;
-            probe.coordinateRead.primaryPath =
-                lengjing::game::CoordinateReadPath::ProcessVm;
-            probe.coordinateRead.lastPath =
-                lengjing::game::CoordinateReadPath::ProcMem;
-            probe.coordinateRead.failure =
-                lengjing::game::CoordinateReadFailure::PermissionDenied;
-            probe.coordinateRead.address = 0x12345000U;
-            probe.coordinateRead.size = 4096;
-            probe.coordinateRead.systemError =
-                probe.coordinateSystemError;
-        }
         probe.runtimeError = static_cast<lengjing::game::RuntimeError>(
             state_->runtimeError.load());
         probe.runtimeSystemError = state_->runtimeSystemError.load();
@@ -249,118 +186,30 @@ void RunRuntimeTests() {
     REQUIRE(state->selfAimSetting.load());
     REQUIRE(!state->projectileTrackingSetting.load());
     REQUIRE(!state->coordinateDecryptSetting.load());
-    REQUIRE(!state->hardwareBreakpointDecryptSetting.load());
-    REQUIRE(!state->algorithmDecryptSetting.load());
 
     settings.visual.coordinateDecrypt = true;
     runtime.UpdateSettings(settings);
     REQUIRE(WaitFor([&] {
-        return state->coordinateDecryptSetting.load() &&
-            !state->hardwareBreakpointDecryptSetting.load() &&
-            !state->algorithmDecryptSetting.load();
+        return state->coordinateDecryptSetting.load();
     }));
 
     settings.visual.coordinateDecrypt = false;
-    settings.visual.hardwareBreakpointDecrypt = true;
     runtime.UpdateSettings(settings);
     REQUIRE(WaitFor([&] {
-        return !state->coordinateDecryptSetting.load() &&
-            state->hardwareBreakpointDecryptSetting.load() &&
-            !state->algorithmDecryptSetting.load();
-    }));
-
-    settings.visual.hardwareBreakpointDecrypt = false;
-    settings.visual.algorithmDecrypt = true;
-    runtime.UpdateSettings(settings);
-    REQUIRE(WaitFor([&] {
-        return !state->coordinateDecryptSetting.load() &&
-            !state->hardwareBreakpointDecryptSetting.load() &&
-            state->algorithmDecryptSetting.load();
-    }));
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-    REQUIRE(WaitFor([&] {
-        const lengjing::game::RuntimeStatus status = runtime.Status();
-        return status.algorithmCoordinateRequested &&
-            status.algorithmCoordinateActive &&
-            status.algorithmCoordinateRuntimeReady &&
-            status.algorithmCoordinateRefreshes == 7 &&
-            status.algorithmCoordinateResolveAttempts == 7 &&
-            status.algorithmCoordinateResolveSuccesses == 7 &&
-            status.algorithmCoordinateAttempts == 11 &&
-            status.algorithmCoordinateSuccesses == 5 &&
-            status.algorithmCoordinateObjectAttempts == 6 &&
-            status.algorithmCoordinateObjectSuccesses == 5 &&
-            status.algorithmCoordinateFallbacks == 1 &&
-            status.algorithmCoordinateSource ==
-                lengjing::game::native::
-                    AlgorithmCoordinateSource::RuntimeObject &&
-            status.algorithmCoordinateRuntime.object == 0x50000000U &&
-            status.algorithmCoordinateRuntime.decodedZ == 3.0f;
-    }));
-#else
-    {
-        const lengjing::game::RuntimeStatus status = runtime.Status();
-        REQUIRE(!status.algorithmCoordinateRequested);
-        REQUIRE(!status.algorithmCoordinateActive);
-        REQUIRE(!status.algorithmCoordinateRuntimeReady);
-        REQUIRE(status.algorithmCoordinateRefreshes == 0);
-        REQUIRE(status.algorithmCoordinateAttempts == 0);
-        REQUIRE(status.algorithmCoordinateSuccesses == 0);
-    }
-#endif
-
-    settings.visual.coordinateDecrypt = true;
-    runtime.UpdateSettings(settings);
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-    REQUIRE(WaitFor([&] {
-        return state->coordinateDecryptSetting.load() &&
-            !state->hardwareBreakpointDecryptSetting.load() &&
-            state->algorithmDecryptSetting.load() &&
-            runtime.Status().algorithmCoordinateActive;
-    }));
-#else
-    REQUIRE(WaitFor([&] {
-        return state->coordinateDecryptSetting.load() &&
-            !state->hardwareBreakpointDecryptSetting.load() &&
-            state->algorithmDecryptSetting.load();
-    }));
-#endif
-
-    settings.visual.coordinateDecrypt = false;
-    settings.visual.hardwareBreakpointDecrypt = true;
-    settings.visual.algorithmDecrypt = false;
-    runtime.UpdateSettings(settings);
-    REQUIRE(WaitFor([&] {
-        return !state->coordinateDecryptSetting.load() &&
-            state->hardwareBreakpointDecryptSetting.load() &&
-            !state->algorithmDecryptSetting.load();
-    }));
-
-    settings.visual.coordinateDecrypt = false;
-    settings.visual.hardwareBreakpointDecrypt = false;
-    runtime.UpdateSettings(settings);
-    REQUIRE(WaitFor([&] {
-        return !state->coordinateDecryptSetting.load() &&
-            !state->hardwareBreakpointDecryptSetting.load() &&
-            !state->algorithmDecryptSetting.load();
+        return !state->coordinateDecryptSetting.load();
     }));
 
     state->coordinateError.store(
         lengjing::game::CoordinateDecryptErrorCode(
             lengjing::game::CoordinateDecryptError::
-                EntryCodeReadPermissionDenied));
+                MemoryTransportUnavailable));
     state->coordinateSystemError.store(-EACCES);
     REQUIRE(WaitFor([&] {
         const lengjing::game::RuntimeStatus status = runtime.Status();
         return status.coordinateError ==
                 lengjing::game::CoordinateDecryptError::
-                    EntryCodeReadPermissionDenied &&
-            status.coordinateSystemError == -EACCES &&
-            status.coordinateRead.stage ==
-                lengjing::game::CoordinateReadStage::CodePage &&
-            status.coordinateRead.failure ==
-                lengjing::game::CoordinateReadFailure::PermissionDenied &&
-            status.coordinateRead.address == 0x12345000U;
+                    MemoryTransportUnavailable &&
+            status.coordinateSystemError == -EACCES;
     }));
 
     state->coordinateError.store(0);
@@ -369,8 +218,7 @@ void RunRuntimeTests() {
         const lengjing::game::RuntimeStatus status = runtime.Status();
         return status.coordinateError ==
                 lengjing::game::CoordinateDecryptError::None &&
-            status.coordinateSystemError == 0 &&
-            !status.coordinateRead.HasFailure();
+            status.coordinateSystemError == 0;
     }));
 
     state->runtimeError.store(

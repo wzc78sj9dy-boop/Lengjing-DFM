@@ -21,7 +21,13 @@ using Json = nlohmann::json;
 
 constexpr std::uint64_t kMaximumModuleOffset = 0xffffffffULL;
 constexpr std::uint64_t kMaximumObjectOffset = 0xffffULL;
-constexpr std::uint64_t kMaximumExecutionFieldOffset = 0xffffULL;
+constexpr std::uint64_t kPreviousCloudLayoutSchemaVersion = 4;
+constexpr std::string_view kCoordinatePackage =
+    "com.tencent.tmgp.dfm";
+constexpr std::string_view kCoordinateModule = "libUE4.so";
+constexpr std::string_view kCoordinateBuildId =
+    "8187ddb9edbc9d5201201ffd7b008df3bfe533db";
+constexpr std::string_view kCoordinateFirstVeneerRva = "0xe7f5514";
 
 struct ParseFailure {
     CloudLayoutStatus status = CloudLayoutStatus::SchemaMismatch;
@@ -80,14 +86,6 @@ bool IsValidBuildId(std::string_view value) noexcept {
     });
 }
 
-bool IsValidThreadName(std::string_view value) noexcept {
-    if (value.empty() || value.size() > 15) return false;
-    return std::all_of(value.begin(), value.end(), [](char character) {
-        const auto byte = static_cast<unsigned char>(character);
-        return byte >= 0x20U && byte <= 0x7eU;
-    });
-}
-
 bool ParseUnsigned(const Json& value,
                    std::uint64_t minimum,
                    std::uint64_t maximum,
@@ -100,40 +98,6 @@ bool ParseUnsigned(const Json& value,
         return false;
     }
     const auto parsed = value.get<std::uint64_t>();
-    if (parsed < minimum || parsed > maximum) {
-        failure.status = CloudLayoutStatus::RangeError;
-        failure.detail = std::string(field) + " is outside the accepted range";
-        return false;
-    }
-    output = parsed;
-    return true;
-}
-
-bool ParseSigned(const Json& value,
-                 std::int64_t minimum,
-                 std::int64_t maximum,
-                 std::int64_t& output,
-                 std::string_view field,
-                 ParseFailure& failure) {
-    if (!value.is_number_integer()) {
-        failure.status = CloudLayoutStatus::SchemaMismatch;
-        failure.detail = std::string(field) + " must be an integer";
-        return false;
-    }
-    std::int64_t parsed = 0;
-    if (value.is_number_unsigned()) {
-        const auto unsignedValue = value.get<std::uint64_t>();
-        if (unsignedValue > static_cast<std::uint64_t>(
-                                std::numeric_limits<std::int64_t>::max())) {
-            failure.status = CloudLayoutStatus::RangeError;
-            failure.detail = std::string(field) +
-                " is outside the accepted range";
-            return false;
-        }
-        parsed = static_cast<std::int64_t>(unsignedValue);
-    } else {
-        parsed = value.get<std::int64_t>();
-    }
     if (parsed < minimum || parsed > maximum) {
         failure.status = CloudLayoutStatus::RangeError;
         failure.detail = std::string(field) + " is outside the accepted range";
@@ -309,58 +273,6 @@ bool ParseActorSubject(const Json& values,
     return true;
 }
 
-bool ParsePool(const Json& values,
-               CloudCoordinatePoolLayout& layout,
-               std::string_view prefix,
-               ParseFailure& failure) {
-    if (!HasExactArraySize(values, 8)) {
-        failure.detail = std::string(prefix) +
-            " must contain exactly 8 values";
-        return false;
-    }
-    const auto field = [&](std::size_t index) {
-        return std::string(prefix) + "[" + std::to_string(index) + "]";
-    };
-    std::int64_t contextOffset = 0;
-    std::uint64_t stride = 0;
-    std::uint64_t headSkip = 0;
-    std::uint64_t refreshFrames = 0;
-    if (!ParseOffset(values.at(0), 4, kMaximumModuleOffset, 4, false,
-                     layout.rootRva, field(0), failure) ||
-        !ParseOffset(values.at(1), 0, kMaximumExecutionFieldOffset, 4, true,
-                     layout.bridgeOffset, field(1), failure) ||
-        !ParseSigned(values.at(2), -0x10000, 0x10000, contextOffset,
-                     field(2), failure)) {
-        return false;
-    }
-    if (contextOffset == 0 || contextOffset % 8 != 0) {
-        failure.status = CloudLayoutStatus::RangeError;
-        failure.detail = field(2) + " must be nonzero and 8-byte aligned";
-        return false;
-    }
-    if (!ParseOffset(values.at(3), 8, kMaximumExecutionFieldOffset, 8,
-                     false, layout.entryOffset, field(3), failure) ||
-        !ParseOffset(values.at(4), 8, kMaximumObjectOffset, 8, false,
-                     layout.componentKeyOffset, field(4), failure) ||
-        !ParseUnsigned(values.at(5), 12, 4096, stride, field(5), failure) ||
-        !ParseUnsigned(values.at(6), 0, 4084, headSkip, field(6), failure) ||
-        !ParseUnsigned(values.at(7), 1, 3600, refreshFrames, field(7),
-                       failure)) {
-        return false;
-    }
-    if (stride % 4 != 0 || headSkip + 12 > stride ||
-        layout.rootRva > kMaximumModuleOffset - layout.bridgeOffset) {
-        failure.status = CloudLayoutStatus::RangeError;
-        failure.detail = std::string(prefix) + " values are inconsistent";
-        return false;
-    }
-    layout.contextOffset = static_cast<std::int32_t>(contextOffset);
-    layout.entryStride = static_cast<std::uint32_t>(stride);
-    layout.poolHeadSkip = static_cast<std::uint32_t>(headSkip);
-    layout.ringRefreshFrames = static_cast<std::uint32_t>(refreshFrames);
-    return true;
-}
-
 bool ParseLayout(const Json& values,
                  CloudOffsetLayout& layout,
                  ParseFailure& failure) {
@@ -410,257 +322,16 @@ bool ParseLayout(const Json& values,
                     layout.componentPositionFlagOffset, "d[0][6]", failure);
 }
 
-bool ParseMode1(const Json& values,
-                CloudDecryptMode1Layout& layout,
-                ParseFailure& failure) {
-    if (!HasExactArraySize(values, 3)) {
-        failure.detail = "d[1][0] must contain exactly 3 values";
-        return false;
-    }
-    if (!ParsePool(values.at(0), layout.pool, "d[1][0][0]", failure) ||
-        !ParseHexUnsigned(values.at(1), 0,
-                          std::numeric_limits<std::uint64_t>::max(),
-                          layout.pacgaData, "d[1][0][1]", failure) ||
-        !ParseHexUnsigned(values.at(2), 0,
-                          std::numeric_limits<std::uint64_t>::max(),
-                          layout.pacgaModifier, "d[1][0][2]", failure)) {
-        return false;
-    }
-    if (layout.pacgaData == 0 && layout.pacgaModifier == 0) {
-        failure.status = CloudLayoutStatus::RangeError;
-        failure.detail = "mode 1 PACGA inputs must not both be zero";
-        return false;
-    }
-    return true;
-}
-
-bool ParseMode2(const Json& values,
-                CloudDecryptMode2Layout& layout,
-                ParseFailure& failure) {
-    if (!HasExactArraySize(values, 1)) {
-        failure.detail = "d[1][1] must contain exactly 1 value";
-        return false;
-    }
-    return ParsePool(values.at(0), layout.pool, "d[1][1][0]", failure);
-}
-
-bool ParseDiscovery(const Json& values,
-                    CloudExecutionDiscoveryLayout& layout,
-                    std::string_view prefix,
-                    ParseFailure& failure) {
-    if (!HasExactArraySize(values, 4)) {
-        failure.detail = std::string(prefix) +
-            " must contain exactly 4 values";
-        return false;
-    }
-    const auto field = [prefix](std::size_t index) {
-        return std::string(prefix) + "[" + std::to_string(index) + "]";
-    };
-    return ParseOffset(values.at(0), 4, kMaximumModuleOffset, 4, false,
-                       layout.rootOffset, field(0), failure) &&
-        ParseOffset(values.at(1), 4, kMaximumExecutionFieldOffset, 4,
-                    false, layout.pointerOffset, field(1),
-                    failure) &&
-        ParseOffset(values.at(2), 8, kMaximumExecutionFieldOffset, 8,
-                    false, layout.entryOffset, field(2), failure) &&
-        ParseHexUnsigned(values.at(3), 1,
-                         std::numeric_limits<std::uint64_t>::max(),
-                         layout.returnStubMagic, field(3),
-                         failure);
-}
-
-bool ParseDiscoveryProfiles(const Json& values,
-                            CloudExecutionLayout& layout,
-                            ParseFailure& failure) {
-    layout.discovery = {};
-    layout.profile12Discovery = {};
-    layout.hasProfile12Discovery = false;
-    if (HasExactArraySize(values, 4)) {
-        return ParseDiscovery(
-            values, layout.discovery, "d[1][2][0]", failure);
-    }
-    if (!HasExactArraySize(values, 2)) {
-        failure.detail =
-            "d[1][2][0] must contain one or two discovery profiles";
-        return false;
-    }
-    if (!ParseDiscovery(
-            values.at(0),
-            layout.discovery,
-            "d[1][2][0][0]",
-            failure) ||
-        !ParseDiscovery(
-            values.at(1),
-            layout.profile12Discovery,
-            "d[1][2][0][1]",
-            failure)) {
-        return false;
-    }
-    layout.hasProfile12Discovery = true;
-    return true;
-}
-
-bool ParseResult(const Json& values,
-                 CloudExecutionResultLayout& layout,
-                 ParseFailure& failure) {
-    if (!HasExactArraySize(values, 2)) {
-        failure.detail = "d[1][2][1] must contain exactly 2 values";
-        return false;
-    }
-    return ParseOffset(values.at(0), 8, kMaximumExecutionFieldOffset, 8,
-                       false, layout.slotOffset, "d[1][2][1][0]",
-                       failure) &&
-        ParseOffset(values.at(1), 4, kMaximumExecutionFieldOffset, 4,
-                    false, layout.positionOffset, "d[1][2][1][1]",
-                    failure);
-}
-
-bool ParseHookOffsets(const Json& values,
-                      CloudExecutionHookOffsetLayout& layout,
-                      ParseFailure& failure) {
-    using Member = std::uintptr_t CloudExecutionHookOffsetLayout::*;
-    static constexpr Member members[] = {
-        &CloudExecutionHookOffsetLayout::subjectLoad,
-        &CloudExecutionHookOffsetLayout::callbackEntry,
-        &CloudExecutionHookOffsetLayout::callbackReturn,
-        &CloudExecutionHookOffsetLayout::callbackIndex,
-        &CloudExecutionHookOffsetLayout::callbackCopyPrepare,
-        &CloudExecutionHookOffsetLayout::callbackCopyAfter,
-        &CloudExecutionHookOffsetLayout::tablePointer,
-        &CloudExecutionHookOffsetLayout::tableValue,
-        &CloudExecutionHookOffsetLayout::lock,
-        &CloudExecutionHookOffsetLayout::lockReturn,
-        &CloudExecutionHookOffsetLayout::firstCall,
-        &CloudExecutionHookOffsetLayout::firstReturn,
-        &CloudExecutionHookOffsetLayout::externalCall,
-        &CloudExecutionHookOffsetLayout::externalReturn,
-        &CloudExecutionHookOffsetLayout::primaryGateWrite,
-        &CloudExecutionHookOffsetLayout::alternateGateWrite,
-        &CloudExecutionHookOffsetLayout::gateProbe,
-        &CloudExecutionHookOffsetLayout::recordCount,
-        &CloudExecutionHookOffsetLayout::targetKey,
-        &CloudExecutionHookOffsetLayout::ringSetup,
-        &CloudExecutionHookOffsetLayout::ringProbe,
-        &CloudExecutionHookOffsetLayout::ringHit,
-        &CloudExecutionHookOffsetLayout::dispatch,
-        &CloudExecutionHookOffsetLayout::dispatchReturn,
-        &CloudExecutionHookOffsetLayout::resultPrepare,
-        &CloudExecutionHookOffsetLayout::result,
-    };
-    constexpr std::size_t count = sizeof(members) / sizeof(members[0]);
-    if (!HasExactArraySize(values, count)) {
-        failure.detail = "d[1][2][2] must contain exactly 26 values";
-        return false;
-    }
-    for (std::size_t index = 0; index < count; ++index) {
-        const std::string field =
-            "d[1][2][2][" + std::to_string(index) + "]";
-        if (!ParseOffset(values.at(index), 4, kMaximumModuleOffset, 4,
-                         true, layout.*members[index], field, failure)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool ParseFieldOffsets(const Json& values,
-                       CloudExecutionFieldOffsetLayout& layout,
-                       ParseFailure& failure) {
-    using Member = std::uintptr_t CloudExecutionFieldOffsetLayout::*;
-    static constexpr Member members[] = {
-        &CloudExecutionFieldOffsetLayout::contextExpected,
-        &CloudExecutionFieldOffsetLayout::stackPriorGate,
-        &CloudExecutionFieldOffsetLayout::stackPrimaryGateSource,
-        &CloudExecutionFieldOffsetLayout::stackGateFlag,
-        &CloudExecutionFieldOffsetLayout::stackGateSnapshotA,
-        &CloudExecutionFieldOffsetLayout::stackGateSnapshotB,
-        &CloudExecutionFieldOffsetLayout::stackRingMid,
-        &CloudExecutionFieldOffsetLayout::objectPosition,
-        &CloudExecutionFieldOffsetLayout::stackCaptureA,
-        &CloudExecutionFieldOffsetLayout::stackCaptureB,
-        &CloudExecutionFieldOffsetLayout::stackCaptureC,
-        &CloudExecutionFieldOffsetLayout::stackCaptureD,
-        &CloudExecutionFieldOffsetLayout::captureField,
-        &CloudExecutionFieldOffsetLayout::stackPoolSelector,
-        &CloudExecutionFieldOffsetLayout::contextPoolTable,
-    };
-    constexpr std::size_t count = sizeof(members) / sizeof(members[0]);
-    if (!HasExactArraySize(values, count)) {
-        failure.detail = "d[1][2][3] must contain exactly 15 values";
-        return false;
-    }
-    for (std::size_t index = 0; index < count; ++index) {
-        const std::string field =
-            "d[1][2][3][" + std::to_string(index) + "]";
-        if (!ParseOffset(values.at(index), 4,
-                         kMaximumExecutionFieldOffset, 4, true,
-                         layout.*members[index], field, failure)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool ParseContext(const Json& values,
-                  CloudExecutionContextLayout& layout,
-                  ParseFailure& failure) {
-    if (!HasExactArraySize(values, 2)) {
-        failure.detail = "d[1][2][4] must contain exactly 2 values";
-        return false;
-    }
-    if (!values.at(0).is_string()) {
-        failure.detail = "d[1][2][4][0] must be a string";
-        return false;
-    }
-    layout.threadName = values.at(0).get<std::string>();
-    if (!IsValidThreadName(layout.threadName)) {
-        failure.status = CloudLayoutStatus::RangeError;
-        failure.detail = "d[1][2][4][0] is outside the accepted range";
-        return false;
-    }
-    std::uint64_t opcode = 0;
-    if (!ParseHexUnsigned(values.at(1), 1, UINT32_MAX, opcode,
-                          "d[1][2][4][1]", failure)) {
-        return false;
-    }
-    const auto encoded = static_cast<std::uint32_t>(opcode);
-    const std::uint32_t destination = encoded & 0x1fU;
-    const std::uint32_t data = (encoded >> 5U) & 0x1fU;
-    const std::uint32_t modifier = (encoded >> 16U) & 0x1fU;
-    if ((encoded & UINT32_C(0xFFE0FC00)) != UINT32_C(0x9AC03000) ||
-        destination == 31U || data == 31U || modifier == 31U) {
-        failure.status = CloudLayoutStatus::RangeError;
-        failure.detail = "d[1][2][4][1] is invalid";
-        return false;
-    }
-    layout.oracleOpcode = encoded;
-    return true;
-}
-
-bool ParseExecution(const Json& values,
-                    CloudExecutionLayout& layout,
-                    ParseFailure& failure) {
-    if (!HasExactArraySize(values, 5)) {
-        failure.detail = "d[1][2] must contain exactly 5 values";
-        return false;
-    }
-    return ParseDiscoveryProfiles(values.at(0), layout, failure) &&
-        ParseResult(values.at(1), layout.result, failure) &&
-        ParseHookOffsets(values.at(2), layout.hookOffsets, failure) &&
-        ParseFieldOffsets(values.at(3), layout.fieldOffsets, failure) &&
-        ParseContext(values.at(4), layout.context, failure);
-}
-
 bool ParseDecrypt(const Json& values,
                   CloudDecryptLayout& layout,
                   ParseFailure& failure) {
-    if (!HasExactArraySize(values, 3)) {
-        failure.detail = "d[1] must contain exactly 3 values";
+    if (!HasExactArraySize(values, 1)) {
+        failure.detail = "d[1] must contain exactly 1 value";
         return false;
     }
-    return ParseMode1(values.at(0), layout.mode1, failure) &&
-        ParseMode2(values.at(1), layout.mode2, failure) &&
-        ParseExecution(values.at(2), layout.execution, failure);
+    return ParseOffset(
+        values.at(0), 4, kMaximumModuleOffset, 4, false,
+        layout.firstVeneerRva, "d[1][0]", failure);
 }
 
 bool ParseData(const Json& values,
@@ -672,6 +343,25 @@ bool ParseData(const Json& values,
     }
     return ParseLayout(values.at(0), document.layout, failure) &&
         ParseDecrypt(values.at(1), document.decrypt, failure);
+}
+
+bool UpgradeRemoteLayout(Json& root,
+                         const CloudRuntimeTarget& target,
+                         const std::string& buildId,
+                         std::uint64_t& schemaVersion) {
+    if (schemaVersion != kPreviousCloudLayoutSchemaVersion ||
+        target.packageName != kCoordinatePackage ||
+        target.moduleName != kCoordinateModule ||
+        buildId != kCoordinateBuildId ||
+        !HasExactArraySize(root.at("d"), 2) ||
+        !root.at("d").at(0).is_array() ||
+        !root.at("d").at(1).is_array()) {
+        return false;
+    }
+    root["v"] = kCloudLayoutSchemaVersion;
+    root["d"][1] = Json::array({kCoordinateFirstVeneerRva});
+    schemaVersion = kCloudLayoutSchemaVersion;
+    return true;
 }
 
 bool SameIdentity(const CloudRuntimeIdentity& left,
@@ -694,67 +384,8 @@ bool SameActorRecords(const CloudActorRecordLayout& left,
                right.maximumPlainCount, right.fallbackPlainCount);
 }
 
-bool SamePool(const CloudCoordinatePoolLayout& left,
-              const CloudCoordinatePoolLayout& right) noexcept {
-    return std::tie(
-               left.rootRva, left.bridgeOffset, left.contextOffset,
-               left.entryOffset, left.componentKeyOffset, left.entryStride,
-               left.poolHeadSkip, left.ringRefreshFrames) ==
-        std::tie(
-               right.rootRva, right.bridgeOffset, right.contextOffset,
-               right.entryOffset, right.componentKeyOffset, right.entryStride,
-               right.poolHeadSkip, right.ringRefreshFrames);
-}
-
-bool SameHooks(const CloudExecutionHookOffsetLayout& left,
-               const CloudExecutionHookOffsetLayout& right) noexcept {
-    return std::tie(
-               left.subjectLoad, left.callbackEntry, left.callbackReturn,
-               left.callbackIndex, left.callbackCopyPrepare,
-               left.callbackCopyAfter, left.tablePointer, left.tableValue,
-               left.lock, left.lockReturn, left.firstCall, left.firstReturn,
-               left.externalCall, left.externalReturn, left.primaryGateWrite,
-               left.alternateGateWrite, left.gateProbe, left.recordCount,
-               left.targetKey, left.ringSetup, left.ringProbe, left.ringHit,
-               left.dispatch, left.dispatchReturn, left.resultPrepare,
-               left.result) ==
-        std::tie(
-               right.subjectLoad, right.callbackEntry, right.callbackReturn,
-               right.callbackIndex, right.callbackCopyPrepare,
-               right.callbackCopyAfter, right.tablePointer, right.tableValue,
-               right.lock, right.lockReturn, right.firstCall,
-               right.firstReturn, right.externalCall, right.externalReturn,
-               right.primaryGateWrite, right.alternateGateWrite,
-               right.gateProbe, right.recordCount, right.targetKey,
-               right.ringSetup, right.ringProbe, right.ringHit,
-               right.dispatch, right.dispatchReturn, right.resultPrepare,
-               right.result);
-}
-
-bool SameFields(const CloudExecutionFieldOffsetLayout& left,
-                const CloudExecutionFieldOffsetLayout& right) noexcept {
-    return std::tie(
-               left.contextExpected, left.stackPriorGate,
-               left.stackPrimaryGateSource, left.stackGateFlag,
-               left.stackGateSnapshotA, left.stackGateSnapshotB,
-               left.stackRingMid, left.objectPosition, left.stackCaptureA,
-               left.stackCaptureB, left.stackCaptureC, left.stackCaptureD,
-               left.captureField, left.stackPoolSelector,
-               left.contextPoolTable) ==
-        std::tie(
-               right.contextExpected, right.stackPriorGate,
-               right.stackPrimaryGateSource, right.stackGateFlag,
-               right.stackGateSnapshotA, right.stackGateSnapshotB,
-               right.stackRingMid, right.objectPosition,
-               right.stackCaptureA, right.stackCaptureB, right.stackCaptureC,
-               right.stackCaptureD, right.captureField,
-               right.stackPoolSelector, right.contextPoolTable);
-}
-
 bool Equivalent(const CloudLayoutDocument& left,
                 const CloudLayoutDocument& right) noexcept {
-    const auto& le = left.decrypt.execution;
-    const auto& re = right.decrypt.execution;
     return left.schemaVersion == right.schemaVersion &&
         left.revision == right.revision &&
         SameIdentity(left.identity, right.identity) &&
@@ -776,33 +407,8 @@ bool Equivalent(const CloudLayoutDocument& left,
             right.layout.componentPositionFlagOffset) &&
         SameActorRecords(left.layout.actorRecords,
                          right.layout.actorRecords) &&
-        SamePool(left.decrypt.mode1.pool, right.decrypt.mode1.pool) &&
-        left.decrypt.mode1.pacgaData == right.decrypt.mode1.pacgaData &&
-        left.decrypt.mode1.pacgaModifier ==
-            right.decrypt.mode1.pacgaModifier &&
-        SamePool(left.decrypt.mode2.pool, right.decrypt.mode2.pool) &&
-        std::tie(
-            le.discovery.rootOffset, le.discovery.pointerOffset,
-            le.discovery.entryOffset, le.discovery.returnStubMagic,
-            le.profile12Discovery.rootOffset,
-            le.profile12Discovery.pointerOffset,
-            le.profile12Discovery.entryOffset,
-            le.profile12Discovery.returnStubMagic,
-            le.hasProfile12Discovery,
-            le.result.slotOffset, le.result.positionOffset,
-            le.context.threadName, le.context.oracleOpcode) ==
-        std::tie(
-            re.discovery.rootOffset, re.discovery.pointerOffset,
-            re.discovery.entryOffset, re.discovery.returnStubMagic,
-            re.profile12Discovery.rootOffset,
-            re.profile12Discovery.pointerOffset,
-            re.profile12Discovery.entryOffset,
-            re.profile12Discovery.returnStubMagic,
-            re.hasProfile12Discovery,
-            re.result.slotOffset, re.result.positionOffset,
-            re.context.threadName, re.context.oracleOpcode) &&
-        SameHooks(le.hookOffsets, re.hookOffsets) &&
-        SameFields(le.fieldOffsets, re.fieldOffsets);
+        left.decrypt.firstVeneerRva ==
+            right.decrypt.firstVeneerRva;
 }
 
 CloudLayoutUpdateResult Failure(
@@ -880,7 +486,7 @@ CloudLayoutUpdateResult CloudLayoutStore::ValidateAndPublish(
 
     if (!HasExactKeys(root, {"v", "b", "r", "d"})) {
         return Failure(CloudLayoutStatus::SchemaMismatch,
-                       "root keys do not match schema version 4", previous);
+                       "root keys do not match schema version 5", previous);
     }
 
     ParseFailure failure;
@@ -890,10 +496,6 @@ CloudLayoutUpdateResult CloudLayoutStore::ValidateAndPublish(
                        failure)) {
         return Failure(failure.status, std::move(failure.detail), previous);
     }
-    if (schemaVersion != kCloudLayoutSchemaVersion) {
-        return Failure(CloudLayoutStatus::SchemaMismatch,
-                       "unsupported cloud layout schema version", previous);
-    }
     if (!root.at("b").is_string()) {
         return Failure(CloudLayoutStatus::SchemaMismatch,
                        "b must be a string", previous);
@@ -902,6 +504,11 @@ CloudLayoutUpdateResult CloudLayoutStore::ValidateAndPublish(
     if (!IsValidBuildId(buildId)) {
         return Failure(CloudLayoutStatus::IdentityMismatch,
                        "b is malformed", previous);
+    }
+    if (schemaVersion != kCloudLayoutSchemaVersion &&
+        !UpgradeRemoteLayout(root, target_, buildId, schemaVersion)) {
+        return Failure(CloudLayoutStatus::SchemaMismatch,
+                       "unsupported cloud layout schema version", previous);
     }
     if (!ParseUnsigned(root.at("r"), 1,
                        std::numeric_limits<std::uint64_t>::max(), revision,

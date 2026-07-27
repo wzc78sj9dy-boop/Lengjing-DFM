@@ -29,9 +29,8 @@ struct BoneFrameSourceSelection {
 };
 
 constexpr bool IsResolvedBoneTransformEnabled(
-    bool firstDecryptEnabled,
-    bool secondDecryptEnabled) noexcept {
-    return firstDecryptEnabled || secondDecryptEnabled;
+    bool coordinateDecryptEnabled) noexcept {
+    return coordinateDecryptEnabled;
 }
 
 constexpr bool PreferBoneFrameCandidate(

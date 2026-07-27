@@ -1,5 +1,3 @@
-#if 0
-
 #include "game/native/PerfExecutionBreakpoint.h"
 #include "test_support.h"
 
@@ -138,7 +136,6 @@ void TestUnsupportedHostIsExplicit() {
 #if !defined(__linux__) || !defined(__aarch64__)
     REQUIRE(!lengjing::game::native::PerfExecutionBreakpoint::
                 IsSupported());
-#endif
 }
 
 }  // namespace

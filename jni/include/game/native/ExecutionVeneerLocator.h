@@ -1,7 +1,5 @@
 #pragma once
 
-#if 0
-
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -18,5 +16,3 @@ bool LocateSecondExecutionVeneer(
     std::uintptr_t& secondVeneerAddress);
 
 }  // namespace lengjing::game::native
-
-#endif

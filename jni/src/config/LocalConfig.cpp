@@ -1,21 +1,14 @@
 #include "config/LocalConfig.h"
 
 #include "game/ProjectileTrackingFeature.h"
-#include "game/native/CoordinatePoolPolicy.h"
 #include "vendor/json.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
-#include <limits>
 #include <utility>
-
-#ifndef LENGJING_ENABLE_ALGORITHM_COORDINATE
-#define LENGJING_ENABLE_ALGORITHM_COORDINATE 0
-#endif
 
 namespace lengjing::config {
 namespace {
@@ -160,12 +153,6 @@ Json Serialize(const ui::UiModel& model) {
             {"model_geometry", model.visual.modelGeometry},
             {"visibility_color", model.visual.visibilityColor},
             {"coordinate_decrypt", model.visual.coordinateDecrypt},
-            {"coordinate_decrypt2", model.visual.hardwareBreakpointDecrypt},
-            {"coordinate_decrypt2_index", model.visual.coordinateDecrypt2Index},
-            {"coordinate_decrypt3", model.visual.coordinateDecrypt3},
-            {"coordinate_decrypt4", model.visual.coordinateDecrypt4},
-            {"coordinate_decrypt5", model.visual.coordinateDecrypt5},
-            {"coordinate_decrypt6", model.visual.coordinateDecrypt6},
             {"box", model.visual.box},
             {"snapline", model.visual.snapline},
             {"skeleton", model.visual.skeleton},
@@ -243,9 +230,6 @@ Json Serialize(const ui::UiModel& model) {
             {"toast_notifications", model.system.toastNotifications},
         }},
     };
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-    root["visual"]["algorithm_decrypt"] = model.visual.algorithmDecrypt;
-#endif
     return root;
 }
 
@@ -267,38 +251,6 @@ void Apply(const Json& root, ui::UiModel& model) {
     LOAD_VISUAL_BOOL(modelGeometry, "model_geometry");
     LOAD_VISUAL_BOOL(visibilityColor, "visibility_color");
     LOAD_VISUAL_BOOL(coordinateDecrypt, "coordinate_decrypt");
-    const int legacyCoordinateDecrypt2Index = ReadNumber(
-        visual,
-        "coordinate_decrypt_index",
-        model.visual.coordinateDecrypt2Index,
-        0,
-        static_cast<int>(
-            game::native::kCoordinatePoolMaximumDecryptIndexOffset));
-    model.visual.coordinateDecrypt2Index = ReadNumber(
-        visual,
-        "coordinate_decrypt2_index",
-        legacyCoordinateDecrypt2Index,
-        0,
-        static_cast<int>(
-            game::native::kCoordinatePoolMaximumDecryptIndexOffset));
-    model.visual.hardwareBreakpointDecrypt =
-        ReadBool(visual, "coordinate_decrypt2", false);
-    model.visual.coordinateDecrypt3 =
-        ReadBool(visual, "coordinate_decrypt3", false);
-    model.visual.coordinateDecrypt4 =
-        ReadBool(visual, "coordinate_decrypt4", false);
-    model.visual.coordinateDecrypt5 =
-        ReadBool(visual, "coordinate_decrypt5", false);
-    model.visual.coordinateDecrypt6 =
-        ReadBool(visual, "coordinate_decrypt6", false);
-    ui::SelectCoordinateDecrypt(
-        model.visual,
-        ui::ResolveCoordinateDecryptSelection(model.visual));
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-    LOAD_VISUAL_BOOL(algorithmDecrypt, "algorithm_decrypt");
-#else
-    model.visual.algorithmDecrypt = false;
-#endif
     LOAD_VISUAL_BOOL(box, "box");
     LOAD_VISUAL_BOOL(snapline, "snapline");
     LOAD_VISUAL_BOOL(skeleton, "skeleton");
@@ -484,9 +436,6 @@ const std::string& LocalConfig::Path() const noexcept {
 }
 
 bool LocalConfig::Load(ui::UiModel& model, std::string* error) const {
-#if !LENGJING_ENABLE_ALGORITHM_COORDINATE
-    model.visual.algorithmDecrypt = false;
-#endif
     std::ifstream stream(path_, std::ios::binary);
     if (!stream.is_open()) {
         if (errno == ENOENT) {

@@ -1,7 +1,3 @@
-#ifndef LENGJING_ENABLE_ALGORITHM_COORDINATE
-#define LENGJING_ENABLE_ALGORITHM_COORDINATE 0
-#endif
-
 #include "game/GameBackend.h"
 #include "game/aim/AimController.h"
 #include "game/aim/AimGuidePolicy.h"
@@ -17,27 +13,14 @@
 #include "game/native/ActorRecordRefreshPolicy.h"
 #include "game/native/ActorRecordResolver.h"
 #include "game/native/ActorRecordSource.h"
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-#include "game/native/AlgorithmCoordinateReader.h"
-#endif
-#include "game/native/AlgorithmPositionPolicy.h"
-#include "game/native/AlgorithmReplayPolicy.h"
 #include "game/native/BoneFrameSource.h"
 #include "game/native/CharacterComponentTransform.h"
 #include "game/native/CharacterPositionResolver.h"
-#include "game/native/CoordinateDecryptBackendRoute.h"
-#include "game/native/CoordinateDecrypt2Runtime.h"
-#include "game/native/CoordinateExecutionCachePolicy.h"
-#include "game/native/CoordinateExecutionDecoder.h"
-#include "game/native/CoordinateOutputPolicy.h"
-#include "game/native/CoordinatePoolRuntime.h"
 #include "game/native/ExecutionVeneerLocator.h"
 #include "game/native/FrameProjection.h"
 #include "game/native/GeometryRuntime.h"
 #include "game/native/GeometrySceneBuildPolicy.h"
-#if 0
 #include "game/native/HardwareBreakpointCoordinateRuntime.h"
-#endif
 #include "game/native/HudMapProjection.h"
 #include "game/native/MemoryTransport.h"
 #include "game/native/PlayerBounds.h"
@@ -46,9 +29,6 @@
 #include "game/native/PositionReadModePolicy.h"
 #include "game/native/ProjectileSpeedReader.h"
 #include "game/native/RemoteElfIdentity.h"
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-#include "game/native/RuntimeCoordinateCodec.h"
-#endif
 #include "game/native/RuntimeLayoutOverride.h"
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
 #include "game/native/TrajectoryHook.h"
@@ -60,7 +40,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <charconv>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -95,8 +74,8 @@ constexpr std::uintptr_t kMinimumRemoteAddress = 0x10000000ULL;
 constexpr std::uintptr_t kMaximumRemoteAddress = 0x10000000000ULL;
 constexpr std::int32_t kMaximumWorldObjectCount = 65536;
 constexpr std::size_t kMaximumNameLength = 249;
+constexpr std::uintptr_t kCoordinateIdOffset = 0x2D8;
 constexpr std::uint64_t kCoordinateTraceIntervalFrames = 30;
-constexpr std::size_t kCoordinateExecutionDecodeTraceLimit = 32;
 constexpr std::array<std::string_view, 2> kGameModuleNames{
     "libUE4.so",
     "libUnreal.so",
@@ -107,205 +86,9 @@ constexpr bool ShouldWriteCoordinateFrameTrace(
     return frame < 5 || (frame % kCoordinateTraceIntervalFrames) == 0;
 }
 
-std::uintptr_t ForcedCoordinateProbeComponent() noexcept {
-#if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
-    const char* value = std::getenv(
-        "LENGJING_COORDINATE_FORCE_COMPONENT");
-    if (value == nullptr || value[0] == '\0') return 0;
-    std::string_view text(value);
-    if (text.size() > 2 && text[0] == '0' &&
-        (text[1] == 'x' || text[1] == 'X')) {
-        text.remove_prefix(2);
-    }
-    std::uintptr_t component = 0;
-    const auto parsed = std::from_chars(
-        text.data(), text.data() + text.size(), component, 16);
-    return parsed.ec == std::errc{} &&
-            parsed.ptr == text.data() + text.size() &&
-            component >= kMinimumRemoteAddress &&
-            component < kMaximumRemoteAddress
-        ? component
-        : 0;
-#else
-    return 0;
-#endif
-}
-
-CoordinateDecryptError CoordinatePoolError(
-    native::CoordinatePoolRuntimeError error,
-    const CoordinateReadDiagnostic& read) noexcept {
-    using native::CoordinatePoolRuntimeError;
-    if (read.HasFailure() && read.stage == CoordinateReadStage::CodePage) {
-        return CoordinateReadError(read.failure);
-    }
-    switch (error) {
-        case CoordinatePoolRuntimeError::None:
-            return CoordinateDecryptError::None;
-        case CoordinatePoolRuntimeError::InvalidInput:
-            return CoordinateDecryptError::InvalidConfiguration;
-        case CoordinatePoolRuntimeError::RootReadFailed:
-            return CoordinateDecryptError::RootReadFailed;
-        case CoordinatePoolRuntimeError::EntryResolveFailed:
-            return CoordinateDecryptError::EntryResolveFailed;
-        case CoordinatePoolRuntimeError::EntryMappingMissing:
-            return CoordinateDecryptError::EntryMappingMissing;
-        case CoordinatePoolRuntimeError::EntryMappingFragmented:
-            return CoordinateDecryptError::EntryMappingFragmented;
-        case CoordinatePoolRuntimeError::EntryMappingChanged:
-            return CoordinateDecryptError::EntryMappingChanged;
-        case CoordinatePoolRuntimeError::EntryPageReadFailed:
-            return CoordinateDecryptError::EntryCodePageReadFailed;
-        case CoordinatePoolRuntimeError::EntryCodeReadFailed:
-        case CoordinatePoolRuntimeError::CodeReadFailed:
-            return read.HasFailure()
-                ? CoordinateReadError(read.failure)
-                : CoordinateDecryptError::EntryCodeReadFailed;
-        case CoordinatePoolRuntimeError::AnalysisFailed:
-            return CoordinateDecryptError::CodeAnalysisFailed;
-        case CoordinatePoolRuntimeError::EngineSetupFailed:
-            return CoordinateDecryptError::EngineSetupFailed;
-        case CoordinatePoolRuntimeError::ContextMissing:
-            return CoordinateDecryptError::ContextDataInvalid;
-        case CoordinatePoolRuntimeError::ParameterExecutionFailed:
-            return CoordinateDecryptError::ParameterExecutionFailed;
-        case CoordinatePoolRuntimeError::ParameterReadFailed:
-            return CoordinateDecryptError::ParameterReadFailed;
-        case CoordinatePoolRuntimeError::PoolPointerReadFailed:
-            return CoordinateDecryptError::PoolPointerReadFailed;
-        case CoordinatePoolRuntimeError::RingSearchFailed:
-            return CoordinateDecryptError::RingSearchFailed;
-        case CoordinatePoolRuntimeError::RingPreparationFailed:
-            return CoordinateDecryptError::RingPreparationFailed;
-        case CoordinatePoolRuntimeError::RingExecutionFailed:
-            return CoordinateDecryptError::RingExecutionFailed;
-        case CoordinatePoolRuntimeError::RingRegisterReadFailed:
-            return CoordinateDecryptError::RingRegisterReadFailed;
-        case CoordinatePoolRuntimeError::RingValueInvalid:
-            return CoordinateDecryptError::RingValueInvalid;
-        case CoordinatePoolRuntimeError::PositionReadFailed:
-            return CoordinateDecryptError::PositionReadFailed;
-        case CoordinatePoolRuntimeError::PositionNotFinite:
-            return CoordinateDecryptError::OutputNotFinite;
-        case CoordinatePoolRuntimeError::PositionUnstable:
-            return CoordinateDecryptError::OutputUnstable;
-        case CoordinatePoolRuntimeError::SlotLayoutPending:
-            return CoordinateDecryptError::PoolSlotLayoutPending;
-        case CoordinatePoolRuntimeError::SlotLayoutConflict:
-            return CoordinateDecryptError::PoolSlotLayoutConflict;
-        case CoordinatePoolRuntimeError::SlotLayoutEvidenceMissing:
-            return CoordinateDecryptError::PoolSlotLayoutEvidenceMissing;
-    }
-    return CoordinateDecryptError::UnhandledException;
-}
-
-CoordinateDecryptError AlgorithmPositionError(
-    native::AlgorithmPositionRuntimeError error) noexcept {
-    using native::AlgorithmPositionRuntimeError;
-    switch (error) {
-        case AlgorithmPositionRuntimeError::None:
-            return CoordinateDecryptError::None;
-        case AlgorithmPositionRuntimeError::InvalidInput:
-            return CoordinateDecryptError::ReplayInvalidInput;
-        case AlgorithmPositionRuntimeError::EngineSetupFailed:
-            return CoordinateDecryptError::ReplayEngineSetupFailed;
-        case AlgorithmPositionRuntimeError::PageRefreshFailed:
-            return CoordinateDecryptError::ReplayPageRefreshFailed;
-        case AlgorithmPositionRuntimeError::RegisterSetupFailed:
-            return CoordinateDecryptError::ReplayRegisterSetupFailed;
-        case AlgorithmPositionRuntimeError::EmulationFailed:
-            return CoordinateDecryptError::ReplayEmulationFailed;
-        case AlgorithmPositionRuntimeError::MemoryHookFailed:
-            return CoordinateDecryptError::ReplayMemoryHookFailed;
-        case AlgorithmPositionRuntimeError::Timeout:
-            return CoordinateDecryptError::ReplayTimeout;
-        case AlgorithmPositionRuntimeError::ReturnPcMismatch:
-            return CoordinateDecryptError::ReplayReturnPcMismatch;
-        case AlgorithmPositionRuntimeError::ResultReadFailed:
-            return CoordinateDecryptError::ReplayResultReadFailed;
-        case AlgorithmPositionRuntimeError::ResultInvalid:
-            return CoordinateDecryptError::ReplayResultInvalid;
-        case AlgorithmPositionRuntimeError::PacgaUnavailable:
-            return CoordinateDecryptError::ReplayPacgaUnavailable;
-        case AlgorithmPositionRuntimeError::UnsupportedSvc:
-            return CoordinateDecryptError::ReplayUnsupportedSvc;
-        case AlgorithmPositionRuntimeError::ContextStale:
-            return CoordinateDecryptError::ReplayContextStale;
-        case AlgorithmPositionRuntimeError::FaultAddressInvalid:
-            return CoordinateDecryptError::ReplayFaultAddressInvalid;
-        case AlgorithmPositionRuntimeError::GuestPageMapFailed:
-            return CoordinateDecryptError::ReplayGuestPageMapFailed;
-        case AlgorithmPositionRuntimeError::RemotePageReadFailed:
-            return CoordinateDecryptError::ReplayRemotePageReadFailed;
-        case AlgorithmPositionRuntimeError::GuestPageWriteFailed:
-            return CoordinateDecryptError::ReplayGuestPageWriteFailed;
-        case AlgorithmPositionRuntimeError::InstructionHookSetupFailed:
-            return CoordinateDecryptError::ReplayInstructionHookSetupFailed;
-    }
-    return CoordinateDecryptError::ReplayExecutionFailed;
-}
-
-CoordinateDecryptError CoordinateExecutionError(
-    const native::CoordinateExecutionDecoderProbe& probe) noexcept {
-    using native::CoordinateExecutionDecoderError;
-    using native::CoordinateExecutionRuntimeError;
-    switch (probe.runtime.error) {
-        case CoordinateExecutionRuntimeError::None:
-            break;
-        case CoordinateExecutionRuntimeError::InvalidRequest:
-            return CoordinateDecryptError::InvalidConfiguration;
-        case CoordinateExecutionRuntimeError::ReturnStubInvalid:
-            return CoordinateDecryptError::ReplayResultInvalid;
-        case CoordinateExecutionRuntimeError::EngineSetupFailed:
-            return CoordinateDecryptError::ReplayEngineSetupFailed;
-        case CoordinateExecutionRuntimeError::RegisterSetupFailed:
-            return CoordinateDecryptError::ReplayRegisterSetupFailed;
-        case CoordinateExecutionRuntimeError::RemotePageReadFailed:
-            return CoordinateDecryptError::ReplayRemotePageReadFailed;
-        case CoordinateExecutionRuntimeError::GuestPageMapFailed:
-            return CoordinateDecryptError::ReplayGuestPageMapFailed;
-        case CoordinateExecutionRuntimeError::GuestPageWriteFailed:
-            return CoordinateDecryptError::ReplayGuestPageWriteFailed;
-        case CoordinateExecutionRuntimeError::InstructionHookSetupFailed:
-            return CoordinateDecryptError::ReplayInstructionHookSetupFailed;
-        case CoordinateExecutionRuntimeError::PacgaUnavailable:
-            return CoordinateDecryptError::ReplayPacgaUnavailable;
-        case CoordinateExecutionRuntimeError::UnsupportedSvc:
-            return CoordinateDecryptError::ReplayUnsupportedSvc;
-        case CoordinateExecutionRuntimeError::EmulationFailed:
-            return CoordinateDecryptError::ReplayEmulationFailed;
-        case CoordinateExecutionRuntimeError::ReturnPcMismatch:
-            return CoordinateDecryptError::ReplayReturnPcMismatch;
-        case CoordinateExecutionRuntimeError::EvidenceInvalid:
-            return CoordinateDecryptError::ReplayResultInvalid;
-        case CoordinateExecutionRuntimeError::ResultReadFailed:
-            return CoordinateDecryptError::ReplayResultReadFailed;
-        case CoordinateExecutionRuntimeError::ResultInvalid:
-            return probe.status ==
-                    native::CoordinateExecutionStatus::ReadOrCoordinateFailure
-                ? CoordinateDecryptError::OutputNotFinite
-                : CoordinateDecryptError::ReplayResultInvalid;
-    }
-    switch (probe.error) {
-        case CoordinateExecutionDecoderError::None:
-            return CoordinateDecryptError::None;
-        case CoordinateExecutionDecoderError::InvalidMode:
-        case CoordinateExecutionDecoderError::InvalidRefresh:
-            return CoordinateDecryptError::InvalidConfiguration;
-        case CoordinateExecutionDecoderError::CandidateDiscoveryFailed:
-        case CoordinateExecutionDecoderError::NotReady:
-            return CoordinateDecryptError::EntryResolveFailed;
-        case CoordinateExecutionDecoderError::BackendUnavailable:
-            return CoordinateDecryptError::MemoryTransportUnavailable;
-        case CoordinateExecutionDecoderError::ExecutionFailed:
-            return CoordinateDecryptError::ReplayExecutionFailed;
-    }
-    return CoordinateDecryptError::ReplayExecutionFailed;
-}
-
 struct CoordinateFailure {
     CoordinateDecryptError error = CoordinateDecryptError::None;
     int systemError = 0;
-    CoordinateReadDiagnostic read{};
 };
 
 void SetRuntimeFailure(
@@ -327,99 +110,22 @@ struct Vec3 {
     float z = 0.0f;
 };
 
-native::AlgorithmPosition ToAlgorithmPosition(const Vec3& value) noexcept {
-    return {value.x, value.y, value.z};
-}
-
-Vec3 AdjustDecodedPosition(Vec3 value) noexcept {
-    value.z = native::ResolveDecodedCharacterZ(value.z);
-    return value;
-}
-
 enum class CoordinateTraceSource : std::uint8_t {
     None,
-    Algorithm,
-    Pending,
-    Pool,
-    PoolRetry,
-    Replay,
-    Execution,
-    Cache,
-    StabilityHistory,
-#if 0
     HardwareBreakpoint,
-#endif
     Standard,
     Failure,
 };
 
 const char* CoordinateTraceSourceName(CoordinateTraceSource source) noexcept {
     switch (source) {
-        case CoordinateTraceSource::Algorithm:
-            return "algorithm";
-        case CoordinateTraceSource::Pending:
-            return "pending";
-        case CoordinateTraceSource::Pool:
-            return "pool";
-        case CoordinateTraceSource::PoolRetry:
-            return "pool_retry";
-        case CoordinateTraceSource::Replay:
-            return "replay";
-        case CoordinateTraceSource::Execution:
-            return "execution";
-        case CoordinateTraceSource::Cache:
-            return "cache";
-        case CoordinateTraceSource::StabilityHistory:
-            return "history";
-#if 0
         case CoordinateTraceSource::HardwareBreakpoint:
             return "hardware_breakpoint";
-#endif
         case CoordinateTraceSource::Standard:
             return "standard";
         case CoordinateTraceSource::Failure:
             return "failure";
         case CoordinateTraceSource::None:
-            break;
-    }
-    return "none";
-}
-
-enum class CoordinateStabilityDecision : std::uint8_t {
-    None,
-    SingleRead,
-    FirstNoHistory,
-    FirstNearHistory,
-    SecondNearHistory,
-    SecondNearFirst,
-    SecondPending,
-    SecondConfirmed,
-    HistorySecondFailed,
-    HistorySecondInconsistent,
-};
-
-const char* CoordinateStabilityDecisionName(
-    CoordinateStabilityDecision decision) noexcept {
-    switch (decision) {
-        case CoordinateStabilityDecision::SingleRead:
-            return "single_read";
-        case CoordinateStabilityDecision::FirstNoHistory:
-            return "first_no_history";
-        case CoordinateStabilityDecision::FirstNearHistory:
-            return "first_near_history";
-        case CoordinateStabilityDecision::SecondNearHistory:
-            return "second_near_history";
-        case CoordinateStabilityDecision::SecondNearFirst:
-            return "second_near_first";
-        case CoordinateStabilityDecision::SecondPending:
-            return "second_pending";
-        case CoordinateStabilityDecision::SecondConfirmed:
-            return "second_confirmed";
-        case CoordinateStabilityDecision::HistorySecondFailed:
-            return "history_second_failed";
-        case CoordinateStabilityDecision::HistorySecondInconsistent:
-            return "history_second_inconsistent";
-        case CoordinateStabilityDecision::None:
             break;
     }
     return "none";
@@ -436,31 +142,6 @@ bool IsCoordinateTraceEnabled() noexcept {
     return false;
 #endif
 }
-
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-bool IsCoordinateTableProbeEnabled() noexcept {
-#if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
-    static const bool enabled = [] {
-        const char* value = std::getenv("LENGJING_COORDINATE_TABLE_PROBE");
-        return value != nullptr && value[0] != '\0' && value[0] != '0';
-    }();
-    return enabled;
-#else
-    return false;
-#endif
-}
-#endif
-
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-bool IsAlgorithmCoordinateValidationRequested() noexcept {
-    static const bool requested = [] {
-        const char* value = std::getenv(
-            "LENGJING_ALGORITHM_COORDINATE_VALIDATION");
-        return value != nullptr && value[0] != '\0' && value[0] != '0';
-    }();
-    return requested;
-}
-#endif
 
 struct Rotation {
     float pitch = 0.0f;
@@ -699,50 +380,6 @@ bool IsMappedNamedExecutableAddress(pid_t processId,
             mappedName.substr(separator + 1) == expectedName;
     }
     return false;
-}
-
-bool FindCoordinateExecutionCodeRange(
-    pid_t processId,
-    std::uint64_t root,
-    std::uint64_t rawEntry,
-    native::CoordinateExecutionCodeRange& range) {
-    range = {};
-    if (processId <= 0) return false;
-
-    char path[64]{};
-    std::snprintf(path, sizeof(path), "/proc/%d/maps", processId);
-    std::ifstream input(path);
-    if (!input) return false;
-
-    std::vector<native::CoordinateExecutionCodeRange> ranges;
-    std::string line;
-    while (std::getline(input, line)) {
-        unsigned long long start = 0;
-        unsigned long long end = 0;
-        char permissions[5]{};
-        char name[512]{};
-        const int fields = std::sscanf(
-            line.c_str(),
-            "%llx-%llx %4s %*s %*s %*s %511[^\n]",
-            &start,
-            &end,
-            permissions,
-            name);
-        if (fields < 3) continue;
-
-        const bool anonymous = fields == 3 ||
-            std::string_view(name).substr(0, 5) == "[anon";
-        const std::uint64_t mappingSize = end > start ? end - start : 0;
-        if (!anonymous || permissions[2] != 'x' ||
-            permissions[3] != 'p' ||
-            mappingSize <
-                native::kCoordinateExecutionMinimumCodeRangeSize) {
-            continue;
-        }
-        ranges.push_back(native::CoordinateExecutionCodeRange{start, end});
-    }
-    return native::SelectCoordinateExecutionCodeRange(
-        ranges, root, rawEntry, &range);
 }
 
 bool IsValidPointer(std::uintptr_t address) {
@@ -1315,13 +952,6 @@ public:
             return false;
         }
 
-        native::MappedModuleRange moduleRange{};
-        coordinateExecutionModuleSize_ =
-            native::FindMappedModuleRange(
-                processId_, moduleName_, moduleRange)
-            ? moduleRange.Size()
-            : 0;
-
         moduleBuildId_.clear();
         const bool moduleBuildIdReady =
             native::ReadRemoteElfBuildId(
@@ -1343,20 +973,11 @@ public:
 
         const auto cloudLayout = native::BuildRuntimeLayoutOverride(
             options.cloudLayout.get(), layout_.processName,
-            moduleName_, moduleBuildId_,
-            static_cast<std::uint32_t>(options.gameVersionIndex));
+            moduleName_, moduleBuildId_);
         if (!cloudLayout.has_value() ||
-            !memory_->ConfigureCoordinateReplay(
-                cloudLayout->coordinateTransport) ||
-            !memory_->ConfigureCoordinateExecutionContext(
-                cloudLayout->coordinateExecutionContext) ||
-            !coordinatePoolRuntime_.Configure(
-                cloudLayout->coordinatePool) ||
-            !coordinateDecrypt2Runtime_.Configure(
-                cloudLayout->coordinateDecrypt2Pool) ||
             !characterPositions_.Configure({
                 cloudLayout->actorSubject.rootOffset,
-                cloudLayout->coordinateExecution.result.positionOffset,
+                0x220,
             })) {
             probe.failureKind = RuntimeFailureKind::CloudLayoutRejected;
             SetRuntimeFailure(
@@ -1377,33 +998,7 @@ public:
 #endif
         layout_.componentPositionFlagOffset =
             cloudLayout->componentPositionFlagOffset;
-        coordinateExecutionLayout_ = cloudLayout->coordinateExecution;
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-        runtimeCoordinateCodec_ = native::RuntimeCoordinateCodec(
-            native::RuntimeCoordinateCodecLayout{
-                .positionOffset = static_cast<std::uintptr_t>(
-                    coordinateExecutionLayout_.result.positionOffset),
-            });
-#endif
-
-        RefreshAlgorithmEntry(true);
-
-        const auto algorithmContextReadAt =
-            std::chrono::steady_clock::now();
-        algorithmExecutionContextReady_ =
-            memory_->ReadProcessExecutionContext(
-                moduleBase_, {}, algorithmExecutionContext_);
-        algorithmExecutionContextReady_ =
-            algorithmExecutionContextReady_ &&
-            algorithmExecutionContext_.IsUsable();
-        if (algorithmExecutionContext_.HasThreadContext()) {
-            algorithmExecutionContextRefreshPolicy_.MarkSucceeded(
-                CurrentAlgorithmExecutionContextRefreshKey(false),
-                algorithmContextReadAt);
-        } else {
-            algorithmExecutionContextRefreshPolicy_.MarkFailed();
-        }
-
+        firstVeneerRva_ = cloudLayout->firstVeneerRva;
         if (!aimController_.Start(options.inputMode)) {
             SetRuntimeFailure(
                 probe, RuntimeError::InputChannelStartFailed);
@@ -1436,7 +1031,6 @@ public:
         frame = GameFrame{};
         frame.sequence = sequence;
         coordinateTraceFrame_ = sequence;
-        coordinateExecutionDecodeTraceCount_ = 0;
         if (IsCoordinateTraceEnabled()) {
             coordinateTraceRecords_.clear();
         }
@@ -1466,22 +1060,10 @@ public:
             UpdateGeometryRuntime(settings);
         }
 
-        const ui::CoordinateDecryptSelection decryptSelection =
-            ui::ResolveCoordinateDecryptSelection(settings.visual);
-        const native::CoordinateDecryptBackendRoute decryptRoute =
-            native::ResolveCoordinateDecryptBackendRoute(
-                decryptSelection);
         const bool requestedHardwareBreakpoint =
-            decryptRoute.coordinateDecrypt2;
-        const bool requestedCoordinateReplay =
-            decryptRoute.coordinateReplay;
-        const std::uint8_t requestedCoordinateExecutionMode =
-            decryptRoute.ExecutionModeValue();
-        const bool coordinateExecutionModeChanged =
-            coordinateExecutionMode_ != requestedCoordinateExecutionMode;
+            settings.visual.coordinateDecrypt;
         const bool hardwareBreakpointRequestChanged =
             hardwareBreakpointRequested_ != requestedHardwareBreakpoint;
-#if 0
         if (hardwareBreakpointRequestChanged) {
             hardwareBreakpointRetryAfter_ = {};
             hardwareBreakpointFailure_ = {};
@@ -1504,161 +1086,21 @@ public:
                    hardwareBreakpointRuntime_.IsActive()) {
             static_cast<void>(StopHardwareBreakpointRuntime());
         }
-#endif
         hardwareBreakpointRequested_ = requestedHardwareBreakpoint;
 
-        const bool coordinateRequestChanged =
-            algorithmPositionRequested_ != requestedCoordinateReplay;
-        const std::uint32_t requestedCoordinateDecrypt2Index =
-            static_cast<std::uint32_t>(std::clamp(
-                settings.visual.coordinateDecrypt2Index,
-                0,
-                static_cast<int>(
-                    native::kCoordinatePoolMaximumDecryptIndexOffset)));
-        const bool coordinateDecrypt2IndexChanged =
-            requestedHardwareBreakpoint &&
-            coordinateDecrypt2Index_ != requestedCoordinateDecrypt2Index;
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-        const bool requestedAlgorithmCoordinate =
-            settings.visual.algorithmDecrypt ||
-            IsAlgorithmCoordinateValidationRequested();
-        const bool algorithmCoordinateRequestChanged =
-            algorithmDecryptRequested_ != requestedAlgorithmCoordinate;
-        algorithmDecryptRequested_ = requestedAlgorithmCoordinate;
-#endif
-        algorithmPositionRequested_ = requestedCoordinateReplay;
-        coordinateDecrypt2Index_ = requestedCoordinateDecrypt2Index;
-        coordinateExecutionMode_ = requestedCoordinateExecutionMode;
-        if (coordinateExecutionModeChanged) {
-            coordinateExecutionDecoder_.Reset();
-            coordinateExecutionDiscoveryInput_ = {};
-            coordinateExecutionCodeBase_ = 0;
-            coordinateExecutionCodeSize_ = 0;
-            if (coordinateExecutionMode_ != 0) {
-                static_cast<void>(coordinateExecutionDecoder_.Configure(
-                    static_cast<native::CoordinateExecutionMode>(
-                        coordinateExecutionMode_),
-                    coordinateExecutionLayout_));
-            }
-        }
-        if (coordinateRequestChanged ||
-            hardwareBreakpointRequestChanged ||
-            coordinateExecutionModeChanged) {
-            algorithmReplayBackoffPolicy_.Reset();
-            algorithmReplayPagePolicy_.Invalidate();
-            algorithmFailureSince_ = {};
-            coordinatePoolRuntime_.Reset();
-            coordinateDecrypt2Runtime_.Reset();
-            coordinatePoolReady_ = false;
-            coordinatePoolFrame_ = 0;
-            coordinatePoolBridge_ = 0;
-            coordinatePoolContext_ = 0;
-            coordinatePoolEntry_ = 0;
-        }
-        bool coordinateSourceChanged = coordinateRequestChanged ||
-            hardwareBreakpointRequestChanged ||
-            coordinateDecrypt2IndexChanged ||
-            coordinateExecutionModeChanged;
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-        coordinateSourceChanged =
-            coordinateSourceChanged || algorithmCoordinateRequestChanged;
-#endif
-        if (coordinateSourceChanged) {
+        if (hardwareBreakpointRequestChanged) {
             characterPositions_.Clear();
             positionCache_.clear();
-            decodedPositionCache_.clear();
-            decodedPositionPending_.clear();
             boneCache_.clear();
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-            algorithmCoordinateSnapshot_.clear();
-            algorithmCoordinateTableReady_ = false;
-            algorithmCoordinateTableDiagnostic_ = {};
-            runtimeCoordinateCodec_.Reset();
-            algorithmCoordinateRuntimeReady_ = false;
-            algorithmCoordinateRuntimeDiagnostic_ = {};
-            algorithmCoordinateRefreshCount_ = 0;
-            algorithmCoordinateResolveAttemptCount_ = 0;
-            algorithmCoordinateResolveSuccessCount_ = 0;
-            algorithmCoordinateAttemptCount_ = 0;
-            algorithmCoordinateSuccessCount_ = 0;
-            algorithmCoordinateObjectAttemptCount_ = 0;
-            algorithmCoordinateObjectSuccessCount_ = 0;
-            algorithmCoordinateTableAttemptCount_ = 0;
-            algorithmCoordinateTableSuccessCount_ = 0;
-            algorithmCoordinateFallbackCount_ = 0;
-#endif
         }
-        algorithmFrameAttemptCount_ = 0;
-        algorithmFrameSuccessCount_ = 0;
-        coordinateExecutionFrameAttemptCount_ = 0;
-        coordinateExecutionFrameSuccessCount_ = 0;
-        algorithmFrameOutputError_ = CoordinateDecryptError::None;
-        algorithmFrameFailure_ = {};
-        algorithmFrameAgedDecodedFailure_ = false;
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-        algorithmCoordinateFrameAttemptCount_ = 0;
-        algorithmCoordinateFrameSuccessCount_ = 0;
-        algorithmCoordinateFrameFailure_ = {};
-        algorithmCoordinateFrameSuccess_ = {};
-        algorithmCoordinateFrameRuntimeFailure_ = {};
-        algorithmCoordinateFrameRuntimeSuccess_ = {};
-        algorithmCoordinateFrameSource_ =
-            native::AlgorithmCoordinateSource::None;
-        algorithmCoordinateObjectCache_.clear();
-#endif
-        const bool coordinatePoolSelected =
-            UsesAnyCoordinatePoolRuntime();
-        const bool coordinateExecutionSelected =
-            UsesCoordinateExecutionRuntime();
-        if ((!coordinatePoolSelected && !coordinateExecutionSelected) ||
-            ForcedCoordinateProbeComponent() != 0) {
-            platform::PerformanceTraceScope entryRefreshTrace(
-                platform::PerformancePhase::CoordinateEntryRefresh);
-            RefreshAlgorithmEntry(false);
-        }
-        const auto algorithmFrameNow = std::chrono::steady_clock::now();
-        algorithmReplayAllowedThisFrame_ =
-            !algorithmPositionRequested_ ||
-            coordinatePoolSelected ||
-            algorithmReplayBackoffPolicy_.BeginFrame(algorithmFrameNow);
-        if (algorithmPositionRequested_ &&
-            algorithmReplayAllowedThisFrame_ && !coordinatePoolSelected) {
-            algorithmReplayPagePolicy_.BeginFrame();
-        }
-        if (!algorithmPositionRequested_ ||
-            algorithmReplayAllowedThisFrame_) {
-            platform::PerformanceTraceScope contextRefreshTrace(
-                platform::PerformancePhase::CoordinateContextRefresh);
-            RefreshAlgorithmExecutionContext();
-        }
-        const bool infrastructureProbeFailed =
-            algorithmReplayAllowedThisFrame_ &&
-            ((coordinatePoolSelected &&
-              (!algorithmExecutionContextReady_ || !coordinatePoolReady_)) ||
-             (coordinateExecutionSelected &&
-              !coordinateExecutionDecoder_.Probe().refreshed));
-        if (infrastructureProbeFailed) {
-            algorithmReplayBackoffPolicy_.ObserveFrame(
-                1, 0, algorithmFrameNow);
-        }
-        RunForcedCoordinateProbe();
         UpdateCoordinateProbe(probe);
         const native::PositionReadMode positionMode =
-            native::ResolvePositionReadMode(
-                algorithmPositionRequested_, coordinateExecutionSelected);
+            native::PositionReadMode::Standard;
         if (positionMode != positionReadMode_) {
             characterPositions_.Clear();
-            decodedPositionCache_.clear();
-            decodedPositionPending_.clear();
-            algorithmPositionRuntime_.Invalidate();
-            algorithmReplayPagePolicy_.Invalidate();
-            algorithmExecutionContextRefreshPolicy_.Invalidate();
             boneCache_.clear();
             positionReadMode_ = positionMode;
         }
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-        RefreshAlgorithmCoordinateSources();
-#endif
 
         FrameContext context{};
         RuntimeDiagnostic frameDiagnostic{};
@@ -1717,7 +1159,6 @@ public:
                     geometryRuntime_.RequestValidation();
             }
         }
-#if 0
         if (hardwareBreakpointRequested_ &&
             hardwareBreakpointRuntime_.IsActive()) {
             if (hardwareBreakpointRuntime_.Poll(context.world) &&
@@ -1727,17 +1168,16 @@ public:
             } else if (
                 hardwareBreakpointRuntime_.AcceptedSampleCount() == 0) {
                 hardwareBreakpointFailure_.error =
-                    CoordinateDecryptError::PoolPointerStateInvalid;
+                    CoordinateDecryptError::SampleUnavailable;
             } else if (
                 hardwareBreakpointRuntime_.RecordsBase() == 0) {
                 hardwareBreakpointFailure_.error =
-                    CoordinateDecryptError::PoolPointerValueInvalid;
+                    CoordinateDecryptError::RecordBaseUnavailable;
             } else {
                 hardwareBreakpointFailure_.error =
                     CoordinateDecryptError::PositionReadFailed;
             }
         }
-#endif
         RefreshWorldObjectCache(context, settings);
         if (settings.visual.debugInfo) {
             const std::shared_ptr<const native::GeometrySnapshot> snapshot =
@@ -1898,11 +1338,7 @@ public:
 #endif
         if (actorRecords.empty()) {
             const RuntimeError actorFailure =
-                UsesAnyCoordinatePoolRuntime()
-                ? (actorRecordSnapshot_.decodedRecordArrayLocated
-                    ? RuntimeError::DecodedActorRecordsUnavailable
-                    : RuntimeError::DecodedActorSourceUnavailable)
-                : RuntimeError::ActorListUnavailable;
+                RuntimeError::ActorListUnavailable;
             SetRuntimeFailure(
                 probe, actorFailure);
             error = "数据链等待：人物列表暂不可读";
@@ -2080,7 +1516,7 @@ public:
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
             const native::PositionReadMode actorPositionMode =
                 trackingPlayerClass && actorRecord.resolverRecord
-                ? native::PositionReadMode::Direct
+                ? native::PositionReadMode::ResolvedRecord
                 : positionMode;
 #else
             const native::PositionReadMode actorPositionMode = positionMode;
@@ -2398,17 +1834,11 @@ public:
                         stderr,
                         "[coordinate-trace] frame=%llu actor=%llx "
                         "resolver=%d encrypted=%d ordinary=%d "
-                         "record_root=%llx input_root=%llx ordinary_root=%llx "
+                        "record_root=%llx root=%llx ordinary_root=%llx "
                         "component=%llx available=%d source=%s "
-                        "error=%u sys=%d guest_pc=%llx "
-                        "raw=(%.3f,%.3f,%.3f) xyz=(%.3f,%.3f,%.3f) "
-                         "refresh=(%.3f,%.3f,%.3f) "
-                         "refresh_attempted=%d refresh_ok=%d "
-                         "second=(%.3f,%.3f,%.3f) history=(%.3f,%.3f,%.3f) "
-                        "stability=%s delta=%.3f pending=%zu "
-                        "second_attempted=%d "
-                        "bottom=(%.2f,%.2f) top=(%.2f,%.2f) "
-                        "projected=%d/%d on_screen=%d\n",
+                        "error=%u sys=%d raw=(%.3f,%.3f,%.3f) "
+                        "xyz=(%.3f,%.3f,%.3f) bottom=(%.2f,%.2f) "
+                        "top=(%.2f,%.2f) projected=%d/%d on_screen=%d\n",
                         static_cast<unsigned long long>(coordinateTraceFrame_),
                         static_cast<unsigned long long>(actor),
                         trace->second.resolverRecord ? 1 : 0,
@@ -2422,29 +1852,12 @@ public:
                         CoordinateTraceSourceName(trace->second.source),
                         static_cast<unsigned int>(trace->second.error),
                         trace->second.systemError,
-                        static_cast<unsigned long long>(trace->second.guestPc),
                         trace->second.raw.x,
                         trace->second.raw.y,
                         trace->second.raw.z,
-                         position.x,
-                         position.y,
-                         position.z,
-                         trace->second.refresh.x,
-                         trace->second.refresh.y,
-                         trace->second.refresh.z,
-                         trace->second.refreshAttempted ? 1 : 0,
-                         trace->second.refreshSucceeded ? 1 : 0,
-                         trace->second.second.x,
-                        trace->second.second.y,
-                        trace->second.second.z,
-                        trace->second.history.x,
-                        trace->second.history.y,
-                        trace->second.history.z,
-                        CoordinateStabilityDecisionName(
-                            trace->second.stabilityDecision),
-                        trace->second.stabilityDelta,
-                        trace->second.pendingCount,
-                        trace->second.secondAttempted ? 1 : 0,
+                        position.x,
+                        position.y,
+                        position.z,
                         bodyBottom.x,
                         bodyBottom.y,
                         bodyTop.x,
@@ -2882,13 +2295,6 @@ public:
         platform::RecordPerformanceCount(
             platform::PerformanceCounter::CharacterActors,
             characterActorCount);
-        platform::RecordPerformanceCount(
-            platform::PerformanceCounter::CoordinateAttempts,
-            algorithmFrameAttemptCount_);
-        platform::RecordPerformanceCount(
-            platform::PerformanceCounter::CoordinateSuccesses,
-            algorithmFrameSuccessCount_);
-
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
         const bool requireDecodedNames = !recoveredTrackingActive;
 #else
@@ -2906,7 +2312,7 @@ public:
             lockedTrackingIdentity_ = 0;
             lockedTrackingBone_ = -1;
 #endif
-            FinalizeCoordinateExecutionHealth(infrastructureProbeFailed);
+            UpdateCoordinateProbe(probe);
             UpdateCoordinateProbe(probe);
             return true;
         }
@@ -2939,7 +2345,7 @@ public:
                 entries.resize(static_cast<std::size_t>(frame.highValueList->maxRows));
             }
         }
-        FinalizeCoordinateExecutionHealth(infrastructureProbeFailed);
+        UpdateCoordinateProbe(probe);
         UpdateCoordinateProbe(probe);
         ApplyCoordinateDiagnostic(error, probe);
         const auto boneAuditNow = std::chrono::steady_clock::now();
@@ -3161,42 +2567,19 @@ private:
         std::uintptr_t world = 0;
     };
 
-    struct DecodedPositionCacheEntry {
-        Vec3 position{};
-        std::chrono::steady_clock::time_point updatedAt{};
-        std::chrono::steady_clock::time_point observedAt{};
-        native::DecodedPositionCacheIdentity identity{};
-    };
-
-    struct DecodedPositionPendingEntry {
-        native::AlgorithmPositionPendingSample sample{};
-        native::DecodedPositionCacheIdentity identity{};
-    };
-
     struct CoordinateTraceRecord {
         std::uintptr_t root = 0;
         std::uintptr_t component = 0;
         std::uintptr_t recordRoot = 0;
         std::uintptr_t ordinaryRoot = 0;
         Vec3 raw{};
-        Vec3 refresh{};
-        Vec3 second{};
-        Vec3 history{};
         Vec3 output{};
         Vec2 projectedBottom{};
         Vec2 projectedTop{};
         CoordinateTraceSource source = CoordinateTraceSource::None;
-        CoordinateStabilityDecision stabilityDecision =
-            CoordinateStabilityDecision::None;
-        double stabilityDelta = 0.0;
-        std::size_t pendingCount = 0;
         CoordinateDecryptError error = CoordinateDecryptError::None;
         int systemError = 0;
-        std::uintptr_t guestPc = 0;
         bool attempted = false;
-        bool refreshAttempted = false;
-        bool refreshSucceeded = false;
-        bool secondAttempted = false;
         bool resolverRecord = false;
         bool encryptedRecord = false;
         bool ordinarySource = false;
@@ -3573,7 +2956,7 @@ private:
     }
 
     void RefreshActorRecordSnapshot(FrameContext& context,
-                                    bool decodedRequired) {
+                                    bool resolvedRecordsRequired) {
         platform::PerformanceTraceScope trace(
             platform::PerformancePhase::ActorSnapshot);
         const native::ActorRecordSnapshotKey key{
@@ -3583,7 +2966,7 @@ private:
             context.actorArray,
             context.actorCount,
             context.localPawn,
-            decodedRequired,
+            resolvedRecordsRequired,
         };
         const auto now = std::chrono::steady_clock::now();
         const bool metadataRefreshed =
@@ -3592,7 +2975,7 @@ private:
             ActorRecordSnapshot candidate{};
             candidate.key = key;
             candidate.hasKey = true;
-            if (decodedRequired) {
+            if (resolvedRecordsRequired) {
                 candidate.decodedRecords = CollectDecodedActorRecords(
                     candidate.decodedRecordSourceReady,
                     candidate.decodedRecordsEncrypted);
@@ -3636,18 +3019,18 @@ private:
             actorRecordSnapshot_.decodedRecordsEncrypted;
         context.decodedRecordSourceReady =
             actorRecordSnapshot_.decodedRecordSourceReady &&
-            (!decodedRequired || currentDecodedRecordsReady);
+            (!resolvedRecordsRequired || currentDecodedRecordsReady);
 
         if (IsCoordinateTraceEnabled() &&
             ShouldWriteCoordinateFrameTrace(coordinateTraceFrame_)) {
             std::fprintf(
                 stderr,
-                "[coordinate-trace-snapshot] frame=%llu decoded_required=%d "
-                "decoded_ready=%d encrypted=%d retained=%d records=%zu "
+                "[coordinate-trace-snapshot] frame=%llu resolved_required=%d "
+                "resolved_ready=%d encrypted=%d retained=%d records=%zu "
                 "ordinary_array=%llx "
                 "ordinary_count=%d\n",
                 static_cast<unsigned long long>(coordinateTraceFrame_),
-                decodedRequired ? 1 : 0,
+                resolvedRecordsRequired ? 1 : 0,
                 context.decodedRecordSourceReady ? 1 : 0,
                 actorRecordSnapshot_.decodedRecordsEncrypted ? 1 : 0,
                 actorRecordSnapshot_.decodedRecordSourceRetained ? 1 : 0,
@@ -3658,7 +3041,7 @@ private:
         }
 
         const bool cacheable = !actorRecordSnapshot_.records.empty() &&
-            (!decodedRequired || context.decodedRecordSourceReady);
+            (!resolvedRecordsRequired || context.decodedRecordSourceReady);
         if (cacheable && metadataRefreshed) {
             actorRecordRefreshPolicy_.MarkRefreshed(key, now);
         } else if (!cacheable) {
@@ -4552,19 +3935,17 @@ private:
         context.localController = ReadPointer(localPlayer + 0x30);
         context.localPawn = ReadPointer(context.localController + 0x3F0);
         context.cameraManager = ReadPointer(context.localController + 0x408);
-        const bool decodedRequired =
-            native::ShouldRequireDecodedActorRecords(
+        const bool resolvedRecordsRequired =
+            native::ShouldRequireResolvedActorRecords(
                 positionMode,
-                hardwareBreakpointRequested_,
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
-                trajectoryTracking,
+                trajectoryTracking
 #else
-                false,
+                false
 #endif
-                UsesCoordinateExecutionRuntime()
             );
-        RefreshActorRecordSnapshot(context, decodedRequired);
-        if (decodedRequired && !context.decodedRecordSourceReady) {
+        RefreshActorRecordSnapshot(context, resolvedRecordsRequired);
+        if (resolvedRecordsRequired && !context.decodedRecordSourceReady) {
             failure.error = RuntimeError::ActorSourceUnavailable;
             diagnostic = "数据链等待：人物列表暂不可读";
             return false;
@@ -4650,7 +4031,7 @@ private:
         const std::string localClassName =
             DecodeName(localNameIndex, context.namePool);
         std::uintptr_t localRoot = 0;
-        if (positionMode == native::PositionReadMode::Direct &&
+        if (positionMode == native::PositionReadMode::ResolvedRecord &&
             localRecord != actorRecordSnapshot_.records.end()) {
             localRoot = localRecord->root;
         }
@@ -4674,7 +4055,6 @@ private:
         return true;
     }
 
-#if 0
     bool StartHardwareBreakpointRuntime() {
         hardwareBreakpointFailure_ = {};
         if (memory_ == nullptr || !memory_->IsOpen() ||
@@ -4684,21 +4064,18 @@ private:
             return false;
         }
 
-        const CoordinateExecutionProfile* profile =
-            FindCoordinateExecutionProfile(moduleBuildId_);
-        if (profile == nullptr ||
-            profile->firstVeneerRva == 0 ||
-            (profile->firstVeneerRva & 3U) != 0 ||
+        if (firstVeneerRva_ == 0 ||
+            (firstVeneerRva_ & 3U) != 0 ||
             moduleBase_ >
                 std::numeric_limits<std::uintptr_t>::max() -
-                    profile->firstVeneerRva) {
+                    firstVeneerRva_) {
             hardwareBreakpointFailure_.error =
                 CoordinateDecryptError::InvalidConfiguration;
             return false;
         }
 
         const std::uintptr_t firstVeneerAddress =
-            moduleBase_ + profile->firstVeneerRva;
+            moduleBase_ + firstVeneerRva_;
         if (!IsMappedNamedExecutableAddress(
                 processId_, firstVeneerAddress, moduleName_)) {
             hardwareBreakpointFailure_.error =
@@ -4718,7 +4095,7 @@ private:
         std::uintptr_t breakpointAddress = 0;
         if (!native::LocateSecondExecutionVeneer(
                 moduleBase_,
-                profile->firstVeneerRva,
+                firstVeneerRva_,
                 readMemory,
                 breakpointAddress)) {
             hardwareBreakpointFailure_.error =
@@ -4764,7 +4141,7 @@ private:
             return false;
         }
         hardwareBreakpointFailure_.error =
-            CoordinateDecryptError::PoolPointerStateInvalid;
+            CoordinateDecryptError::SampleUnavailable;
         return true;
     }
 
@@ -4820,7 +4197,6 @@ private:
         position = candidate;
         return true;
     }
-#endif
 
     bool ReadActorPosition(std::uintptr_t actor, Vec3& position, bool allowCache) {
         constexpr auto kCacheLifetime = std::chrono::milliseconds(300);
@@ -4828,12 +4204,9 @@ private:
         const std::uintptr_t component = ReadPointer(
             actor + layout_.actorSubjectLayout.rootOffset);
         Vec3 candidate{};
-        bool valid = IsValidPointer(component) &&
-            ((ReadValue(
-                  component + coordinateExecutionLayout_.result.positionOffset,
-                  candidate) &&
-              IsFinite(candidate) && IsNonzero(candidate)) ||
-             (ReadValue(component + 0x220, candidate) && IsFinite(candidate) && IsNonzero(candidate)));
+        const bool valid = IsValidPointer(component) &&
+            ReadValue(component + 0x220, candidate) &&
+            IsFinite(candidate) && IsNonzero(candidate);
         if (valid) {
             if (allowCache) {
                 positionCache_[actor] =
@@ -4855,1175 +4228,43 @@ private:
         return false;
     }
 
-    bool ReadCoordinateExecutionPosition(
-        std::uintptr_t actor,
-        std::uintptr_t subject,
-        bool,
-        Vec3& position,
-        native::CharacterPositionSource* positionSource) {
-        if (!UsesCoordinateExecutionRuntime() ||
-            !IsValidPointer(actor) ||
-            !native::IsActorCoordinateSubjectPointer(subject)) {
-            return false;
-        }
-
-        ++algorithmFrameAttemptCount_;
-        ++algorithmAttemptCount_;
-        ++coordinateExecutionFrameAttemptCount_;
-        native::CoordinateExecutionPosition decoded{};
-        const bool available = memory_ != nullptr &&
-            coordinateExecutionDecoder_.Decode(subject, decoded);
-        const native::CoordinateExecutionDecoderProbe executionProbe =
-            coordinateExecutionDecoder_.Probe();
-        const Vec3 raw{decoded.x, decoded.y, decoded.z};
-        if (IsCoordinateTraceEnabled() &&
-            ShouldWriteCoordinateFrameTrace(coordinateTraceFrame_) &&
-            coordinateExecutionDecodeTraceCount_ <
-                kCoordinateExecutionDecodeTraceLimit) {
-            ++coordinateExecutionDecodeTraceCount_;
-            const native::CoordinateExecutionPlan& plan =
-                executionProbe.runtime.plan;
-            const native::CoordinateExecutionEvidence& evidence =
-                executionProbe.runtime.evidence;
-            const native::CoordinateExecutionCandidate& candidate =
-                executionProbe.lastCandidate;
-            std::fprintf(
-                stderr,
-                "[coordinate-execution-decode] frame=%llu actor=%llx "
-                "subject=%llx q0=%llx q1=%llx q2=%llx q3=%llx "
-                "candidate_index=%llu known=%d entry=%llx hook=%llx "
-                "plan_x0=%llx plan_x1=%llx plan_x2=%llx lr=%llx "
-                "input_subject=%llx hook_count=%llu hook_initialized=%d "
-                "hook_x0=%llx hook_x1=%llx hook_x2=%llx stack=%llx "
-                "hook_slot=%llx snapshot_x1=%llx snapshot_x2=%llx "
-                "subject_load_count=%llu subject_load_x11=%llx "
-                "subject_load_address=%llx subject_load_value=%llx "
-                "callback_count=%llu callback_x0=%llx callback_x1=%llx "
-                "callback_x2=%llx callback_target=%llx "
-                "callback_x1_valid=%d callback_x1_v0=%llx "
-                "callback_x1_v8=%llx callback_x1_v10=%llx "
-                "callback_return_count=%llu callback_return_x0=%llx "
-                "callback_index_count=%llu callback_index=%llx "
-                "table_probe_count=%llu table_pointer=%llx "
-                "table_index=%llx table_value=%llx "
-                "mutex_record=%llx lock_target=%llx "
-                "mutex_before_lock=%x lock_return=%llx "
-                "mutex_after_lock=%x mutex_before_unlock=%x "
-                "mutex_after_unlock=%x first_call_count=%llu "
-                "first_target=%llx first_argument=%llx "
-                "first_return_count=%llu "
-                "first_return=%llx external_call_count=%llu "
-                "external_target=%llx external_x0=%llx external_x1=%llx "
-                "external_x2=%llx external_x3=%llx "
-                "external_return_count=%llu external_return=%llx "
-                "external_expected=%x external_prior_gate=%x "
-                "descriptor_end_count=%llu descriptor_end_fd=%d "
-                "descriptor_end_result=%lld "
-                "primary_gate_write_count=%llu primary_gate_write=%x "
-                "primary_gate_source=%x alternate_gate_write_count=%llu "
-                "alternate_gate_write=%x gate_count=%llu gate_flag=%u "
-                "gate_snapshot_a=%d gate_snapshot_b=%d gate_state=%x "
-                "record_count=%u "
-                "target_key=%llx ring_base=%llx ring_indices=%llx "
-                "ring_probe_count=%llu ring_row_key=%llx "
-                "ring_row_index=%lld ring_mid=%d ring_hit_count=%llu "
-                "ring_hit_row=%llx "
-                "dispatch_count=%llu dispatch_target=%llx "
-                "dispatch_argument=%llx pool_index_before=%lld "
-                "dispatch_return_count=%llu dispatch_return=%llx "
-                "pool_index_after=%lld result_count=%llu result_index=%lld "
-                "result_base=%llx result_pointer=%llx "
-                "result_position_valid=%d result_position=%08x/%08x/%08x "
-                "copy_prepare_count=%llu copy_source=%llx "
-                "copy_destination=%llx copy_source_v0=%llx "
-                "copy_source_v8=%llx copy_source_v10=%llx "
-                "copy_source_v18=%llx copy_after_count=%llu "
-                "copy_destination_v0=%llx copy_destination_v8=%llx "
-                "copy_destination_v10=%llx copy_destination_v18=%llx "
-                "exclusive_load_count=%llu exclusive_clear_count=%llu "
-                "exclusive_store_count=%llu exclusive_store_fail=%llu "
-                "exclusive_instruction=%08x exclusive_status_reg=%u "
-                "svc_count=%llu svc0=%llu svc1=%llu svc2=%llu svc3=%llu "
-                "last_svc=%llu tagged_base_count=%llu "
-                "tagged_base_reg=%u tagged_base_before=%llx "
-                "tagged_base_after=%llx pacga_count=%llu "
-                "pacga_source=%llx pacga_modifier=%llx pacga_result=%llx "
-                "libc_begin=%llx libc_ioctl=%llx ioctl_count=%llu "
-                "ioctl_payload=%llx ioctl_destination=%llx "
-                "ioctl_stack_clear_count=%llu "
-                "backend_ready=%d backend_instruction_count=%llu "
-                "backend_fallback_count=%llu backend_block_count=%llu "
-                "backend_advance_count=%llu "
-                "seed_subject=%llx seed_slot=%llx capture_count=%llu "
-                "captured_pc=%llx captured_slot=%llx "
-                "captured_object=%llx capture_sp=%llx capture_x8=%llx "
-                "capture_x9=%llx capture_x12=%llx capture_x21=%llx "
-                "local0=%llx local1=%llx local2=%llx local3=%llx "
-                "local_field=%x available=%d runtime_error=%u "
-                "runtime_status=%u raw=(%.3f,%.3f,%.3f)\n",
-                static_cast<unsigned long long>(coordinateTraceFrame_),
-                static_cast<unsigned long long>(actor),
-                static_cast<unsigned long long>(subject),
-                static_cast<unsigned long long>(candidate.q0),
-                static_cast<unsigned long long>(candidate.q1),
-                static_cast<unsigned long long>(candidate.q2),
-                static_cast<unsigned long long>(candidate.q3),
-                static_cast<unsigned long long>(
-                    executionProbe.lastCandidateIndex),
-                executionProbe.knownCandidate ? 1 : 0,
-                static_cast<unsigned long long>(plan.entryPc),
-                static_cast<unsigned long long>(plan.hookPc),
-                static_cast<unsigned long long>(plan.x0),
-                static_cast<unsigned long long>(plan.x1),
-                static_cast<unsigned long long>(plan.x2),
-                static_cast<unsigned long long>(plan.lr),
-                static_cast<unsigned long long>(evidence.inputSubject),
-                static_cast<unsigned long long>(evidence.hookCount),
-                evidence.hookInitialized ? 1 : 0,
-                static_cast<unsigned long long>(evidence.hookX0),
-                static_cast<unsigned long long>(evidence.hookX1),
-                static_cast<unsigned long long>(evidence.hookX2),
-                static_cast<unsigned long long>(evidence.stackBase),
-                static_cast<unsigned long long>(evidence.hookSlotValue),
-                static_cast<unsigned long long>(evidence.hookSnapshotX1),
-                static_cast<unsigned long long>(evidence.hookSnapshotX2),
-                static_cast<unsigned long long>(evidence.subjectLoadCount),
-                static_cast<unsigned long long>(evidence.subjectLoadX11),
-                static_cast<unsigned long long>(evidence.subjectLoadAddress),
-                static_cast<unsigned long long>(evidence.subjectLoadValue),
-                static_cast<unsigned long long>(evidence.callbackCount),
-                static_cast<unsigned long long>(evidence.callbackX0),
-                static_cast<unsigned long long>(evidence.callbackX1),
-                static_cast<unsigned long long>(evidence.callbackX2),
-                static_cast<unsigned long long>(evidence.callbackTarget),
-                evidence.callbackX1SnapshotValid ? 1 : 0,
-                static_cast<unsigned long long>(evidence.callbackX1Value0),
-                static_cast<unsigned long long>(evidence.callbackX1Value8),
-                static_cast<unsigned long long>(evidence.callbackX1Value10),
-                static_cast<unsigned long long>(
-                    evidence.callbackReturnCount),
-                static_cast<unsigned long long>(
-                    evidence.callbackReturnX0),
-                static_cast<unsigned long long>(
-                    evidence.callbackIndexCount),
-                static_cast<unsigned long long>(evidence.callbackIndex),
-                static_cast<unsigned long long>(
-                    evidence.callbackTableProbeCount),
-                static_cast<unsigned long long>(
-                    evidence.callbackTablePointer),
-                static_cast<unsigned long long>(evidence.callbackTableIndex),
-                static_cast<unsigned long long>(evidence.callbackTableValue),
-                static_cast<unsigned long long>(evidence.callbackMutexRecord),
-                static_cast<unsigned long long>(evidence.callbackLockTarget),
-                static_cast<unsigned int>(evidence.callbackMutexBeforeLock),
-                static_cast<unsigned long long>(evidence.callbackLockReturn),
-                static_cast<unsigned int>(evidence.callbackMutexAfterLock),
-                static_cast<unsigned int>(evidence.callbackMutexBeforeUnlock),
-                static_cast<unsigned int>(evidence.callbackMutexAfterUnlock),
-                static_cast<unsigned long long>(
-                    evidence.callbackFirstCallCount),
-                static_cast<unsigned long long>(evidence.callbackFirstTarget),
-                static_cast<unsigned long long>(evidence.callbackFirstArgument),
-                static_cast<unsigned long long>(
-                    evidence.callbackFirstReturnCount),
-                static_cast<unsigned long long>(
-                    evidence.callbackFirstReturn),
-                static_cast<unsigned long long>(
-                    evidence.callbackExternalCallCount),
-                static_cast<unsigned long long>(
-                    evidence.callbackExternalTarget),
-                static_cast<unsigned long long>(evidence.callbackExternalX0),
-                static_cast<unsigned long long>(evidence.callbackExternalX1),
-                static_cast<unsigned long long>(evidence.callbackExternalX2),
-                static_cast<unsigned long long>(evidence.callbackExternalX3),
-                static_cast<unsigned long long>(
-                    evidence.callbackExternalReturnCount),
-                static_cast<unsigned long long>(
-                    evidence.callbackExternalReturn),
-                static_cast<unsigned int>(evidence.callbackExternalExpected),
-                static_cast<unsigned int>(
-                    evidence.callbackExternalPriorGate),
-                static_cast<unsigned long long>(
-                    evidence.descriptorEndQueryCount),
-                static_cast<int>(evidence.descriptorEndQueryFd),
-                static_cast<long long>(evidence.descriptorEndQueryResult),
-                static_cast<unsigned long long>(
-                    evidence.callbackPrimaryGateWriteCount),
-                static_cast<unsigned int>(
-                    evidence.callbackPrimaryGateWriteValue),
-                static_cast<unsigned int>(
-                    evidence.callbackPrimaryGateSource),
-                static_cast<unsigned long long>(
-                    evidence.callbackAlternateGateWriteCount),
-                static_cast<unsigned int>(
-                    evidence.callbackAlternateGateWriteValue),
-                static_cast<unsigned long long>(
-                    evidence.callbackGateProbeCount),
-                static_cast<unsigned int>(evidence.callbackGateFlag),
-                static_cast<int>(evidence.callbackGateSnapshotA),
-                static_cast<int>(evidence.callbackGateSnapshotB),
-                static_cast<unsigned int>(evidence.callbackGateState),
-                static_cast<unsigned int>(evidence.callbackRecordCount),
-                static_cast<unsigned long long>(evidence.callbackTargetKey),
-                static_cast<unsigned long long>(evidence.callbackRingBase),
-                static_cast<unsigned long long>(
-                    evidence.callbackRingIndexArray),
-                static_cast<unsigned long long>(
-                    evidence.callbackRingProbeCount),
-                static_cast<unsigned long long>(evidence.callbackRingRowKey),
-                static_cast<long long>(evidence.callbackRingRowIndex),
-                static_cast<int>(evidence.callbackRingMid),
-                static_cast<unsigned long long>(evidence.callbackRingHitCount),
-                static_cast<unsigned long long>(evidence.callbackRingHitRow),
-                static_cast<unsigned long long>(evidence.callbackDispatchCount),
-                static_cast<unsigned long long>(
-                    evidence.callbackDispatchTarget),
-                static_cast<unsigned long long>(
-                    evidence.callbackDispatchArgument),
-                static_cast<long long>(evidence.callbackPoolIndexBefore),
-                static_cast<unsigned long long>(
-                    evidence.callbackDispatchReturnCount),
-                static_cast<unsigned long long>(
-                    evidence.callbackDispatchReturn),
-                static_cast<long long>(evidence.callbackPoolIndexAfter),
-                static_cast<unsigned long long>(evidence.callbackResultCount),
-                static_cast<long long>(evidence.callbackResultIndex),
-                static_cast<unsigned long long>(evidence.callbackResultBase),
-                static_cast<unsigned long long>(evidence.callbackResultPointer),
-                evidence.callbackResultPositionValid ? 1 : 0,
-                static_cast<unsigned int>(evidence.callbackResultPositionX),
-                static_cast<unsigned int>(evidence.callbackResultPositionY),
-                static_cast<unsigned int>(evidence.callbackResultPositionZ),
-                static_cast<unsigned long long>(
-                    evidence.callbackCopyPrepareCount),
-                static_cast<unsigned long long>(
-                    evidence.callbackCopySource),
-                static_cast<unsigned long long>(
-                    evidence.callbackCopyDestination),
-                static_cast<unsigned long long>(
-                    evidence.callbackCopySourceValue0),
-                static_cast<unsigned long long>(
-                    evidence.callbackCopySourceValue8),
-                static_cast<unsigned long long>(
-                    evidence.callbackCopySourceValue10),
-                static_cast<unsigned long long>(
-                    evidence.callbackCopySourceValue18),
-                static_cast<unsigned long long>(
-                    evidence.callbackCopyAfterCount),
-                static_cast<unsigned long long>(
-                    evidence.callbackCopyDestinationValue0),
-                static_cast<unsigned long long>(
-                    evidence.callbackCopyDestinationValue8),
-                static_cast<unsigned long long>(
-                    evidence.callbackCopyDestinationValue10),
-                static_cast<unsigned long long>(
-                    evidence.callbackCopyDestinationValue18),
-                static_cast<unsigned long long>(evidence.exclusiveLoadCount),
-                static_cast<unsigned long long>(evidence.exclusiveClearCount),
-                static_cast<unsigned long long>(evidence.exclusiveStoreCount),
-                static_cast<unsigned long long>(
-                    evidence.exclusiveStoreFailureCount),
-                static_cast<unsigned int>(evidence.lastExclusiveInstruction),
-                static_cast<unsigned int>(
-                    evidence.exclusiveStoreStatusRegister),
-                static_cast<unsigned long long>(evidence.svcCount),
-                static_cast<unsigned long long>(evidence.svcNumber0),
-                static_cast<unsigned long long>(evidence.svcNumber1),
-                static_cast<unsigned long long>(evidence.svcNumber2),
-                static_cast<unsigned long long>(evidence.svcNumber3),
-                static_cast<unsigned long long>(evidence.lastSvcNumber),
-                static_cast<unsigned long long>(
-                    evidence.taggedBaseRewriteCount),
-                static_cast<unsigned int>(evidence.taggedBaseRegister),
-                static_cast<unsigned long long>(evidence.taggedBaseBefore),
-                static_cast<unsigned long long>(evidence.taggedBaseAfter),
-                static_cast<unsigned long long>(evidence.pacgaCount),
-                static_cast<unsigned long long>(evidence.lastPacgaSource),
-                static_cast<unsigned long long>(evidence.lastPacgaModifier),
-                static_cast<unsigned long long>(evidence.lastPacgaResult),
-                static_cast<unsigned long long>(evidence.libcBegin),
-                static_cast<unsigned long long>(evidence.libcIoctl),
-                static_cast<unsigned long long>(evidence.ioctlCallCount),
-                static_cast<unsigned long long>(evidence.ioctlPayload),
-                static_cast<unsigned long long>(
-                    evidence.ioctlPayloadDestination),
-                static_cast<unsigned long long>(
-                    evidence.ioctlStackClearCount),
-                evidence.backendReady ? 1 : 0,
-                static_cast<unsigned long long>(
-                    evidence.backendInstructionCount),
-                static_cast<unsigned long long>(
-                    evidence.backendFallbackCount),
-                static_cast<unsigned long long>(evidence.backendBlockCount),
-                static_cast<unsigned long long>(evidence.backendAdvanceCount),
-                static_cast<unsigned long long>(evidence.seedSubject),
-                static_cast<unsigned long long>(evidence.seedSlot),
-                static_cast<unsigned long long>(evidence.captureCount),
-                static_cast<unsigned long long>(evidence.capturedPc),
-                static_cast<unsigned long long>(evidence.capturedSlot),
-                static_cast<unsigned long long>(evidence.capturedObject),
-                static_cast<unsigned long long>(evidence.capturedSp),
-                static_cast<unsigned long long>(evidence.capturedX8),
-                static_cast<unsigned long long>(evidence.capturedX9),
-                static_cast<unsigned long long>(evidence.capturedX12),
-                static_cast<unsigned long long>(evidence.capturedX21),
-                static_cast<unsigned long long>(evidence.capturedLocal0),
-                static_cast<unsigned long long>(evidence.capturedLocal1),
-                static_cast<unsigned long long>(evidence.capturedLocal2),
-                static_cast<unsigned long long>(evidence.capturedLocal3),
-                static_cast<unsigned int>(evidence.capturedLocalField),
-                available ? 1 : 0,
-                static_cast<unsigned int>(executionProbe.runtime.error),
-                static_cast<unsigned int>(executionProbe.runtime.status),
-                static_cast<double>(raw.x),
-                static_cast<double>(raw.y),
-                static_cast<double>(raw.z));
-        }
-        if (available && IsFinite(raw)) {
-            coordinateExecutionContextHadSuccess_ = true;
-            const Vec3 adjusted = AdjustDecodedPosition(raw);
-            position = adjusted;
-            ++algorithmSuccessCount_;
-            ++coordinateExecutionFrameSuccessCount_;
-            ++algorithmFrameSuccessCount_;
-            if (positionSource != nullptr) {
-                *positionSource = native::CharacterPositionSource::Decoded;
-            }
-            if (IsCoordinateTraceEnabled()) {
-                auto& record = coordinateTraceRecords_[actor];
-                record = CoordinateTraceRecord{};
-                record.root = subject;
-                record.component = executionProbe.lastObject;
-                record.raw = raw;
-                record.output = adjusted;
-                record.guestPc = executionProbe.runtime.plan.entryPc;
-                record.source = CoordinateTraceSource::Execution;
-                record.attempted = true;
-            }
-            return true;
-        }
-
-        const CoordinateDecryptError executionError =
-            CoordinateExecutionError(executionProbe);
-        const CoordinateFailure failure{
-            executionError != CoordinateDecryptError::None
-                ? executionError
-                : CoordinateDecryptError::PositionReadFailed,
-            executionProbe.runtime.read.systemError,
-            executionProbe.runtime.read,
-        };
-        RecordCoordinateFrameFailure(failure);
-        if (IsCoordinateTraceEnabled()) {
-            auto& record = coordinateTraceRecords_[actor];
-            record = CoordinateTraceRecord{};
-            record.root = subject;
-            record.component = executionProbe.lastObject;
-            record.raw = raw;
-            record.guestPc = executionProbe.runtime.plan.entryPc;
-            record.source = CoordinateTraceSource::Failure;
-            record.attempted = true;
-            record.error = failure.error;
-            record.systemError = failure.systemError;
-        }
-        return false;
-    }
-
     bool ReadCharacterPosition(
         std::uintptr_t actor,
-        std::uintptr_t decodedRoot,
+        std::uintptr_t ordinaryRoot,
         std::string_view className,
-        native::PositionReadMode mode,
+        native::PositionReadMode,
         bool antiFlicker,
         Vec3& position,
         bool localActor = false,
         native::CharacterPositionSource* positionSource = nullptr) {
         platform::PerformanceTraceScope trace(
-            mode == native::PositionReadMode::Direct
-                ? platform::PerformancePhase::CoordinateDecode
-                : platform::PerformancePhase::PositionRead);
+            platform::PerformancePhase::PositionRead);
+        position = Vec3{};
         if (positionSource != nullptr) {
             *positionSource = native::CharacterPositionSource::None;
         }
-        if (mode == native::PositionReadMode::Direct && !localActor &&
-            UsesCoordinateExecutionRuntime()) {
-            return ReadCoordinateExecutionPosition(
-                actor,
-                decodedRoot,
-                antiFlicker,
-                position,
-                positionSource);
-        }
-#if 0
+
         if (hardwareBreakpointRequested_) {
-            position = Vec3{};
             const std::uintptr_t mesh =
                 ReadPointer(actor + layout_.actorSubjectLayout.meshOffset);
-            const bool available =
-                ReadHardwareBreakpointPosition(mesh, position);
-            if (IsCoordinateTraceEnabled()) {
-                auto& traceRecord = coordinateTraceRecords_[actor];
-                traceRecord = CoordinateTraceRecord{};
-                traceRecord.root = decodedRoot;
-                traceRecord.component = mesh;
-                traceRecord.raw = position;
-                traceRecord.output = position;
-                traceRecord.source = available
-                    ? CoordinateTraceSource::HardwareBreakpoint
-                    : CoordinateTraceSource::Failure;
-                traceRecord.attempted = true;
-                if (!available) {
-                    traceRecord.error =
-                        CoordinateDecryptError::PositionReadFailed;
-                }
-            }
-            if (available && positionSource != nullptr) {
-                *positionSource =
-                    native::CharacterPositionSource::HardwareBreakpoint;
-            }
-            return available;
-        }
-#endif
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-        if (IsCoordinateTableProbeEnabled() && algorithmPositionRequested_) {
-            Vec3 tableCandidate{};
-            const bool tableAvailable =
-                ReadAlgorithmCoordinate(actor, 0, tableCandidate, true);
-            std::fprintf(
-                stderr,
-                "[coordinate-table-probe] frame=%llu actor=%llx "
-                "root=%llx available=%d xyz=(%.3f,%.3f,%.3f)\n",
-                static_cast<unsigned long long>(coordinateTraceFrame_),
-                static_cast<unsigned long long>(actor),
-                static_cast<unsigned long long>(decodedRoot),
-                tableAvailable ? 1 : 0,
-                tableCandidate.x,
-                tableCandidate.y,
-                tableCandidate.z);
-        }
-        const bool algorithmCoordinateActive =
-            native::ShouldReadAlgorithmCoordinate(
-                algorithmPositionRequested_,
-                algorithmDecryptRequested_);
-        if (algorithmCoordinateActive) {
-            Vec3 algorithmRaw{};
-            const bool algorithmCoordinateAvailable =
-                ReadAlgorithmCoordinate(
-                    actor,
-                    decodedRoot,
-                    position,
-                    false,
-                    &algorithmRaw);
-            if (IsCoordinateTraceEnabled()) {
-                auto& trace = coordinateTraceRecords_[actor];
-                trace = CoordinateTraceRecord{};
-                trace.root = decodedRoot;
-                trace.component = ReadPointer(
-                    actor + layout_.actorSubjectLayout.rootOffset);
-                trace.raw = algorithmRaw;
-                trace.output = position;
-                trace.source = algorithmCoordinateAvailable
-                    ? CoordinateTraceSource::Algorithm
-                    : CoordinateTraceSource::Failure;
-                trace.attempted = true;
-                if (!algorithmCoordinateAvailable) {
-                    trace.error = CoordinateDecryptError::PositionReadFailed;
-                }
-            }
-            const native::CharacterCoordinateDisposition disposition =
-                native::ResolveCharacterCoordinateDisposition(
-                    algorithmCoordinateActive,
-                    algorithmCoordinateAvailable);
-            if (disposition ==
-                native::CharacterCoordinateDisposition::ReturnAlgorithm) {
-                if (positionSource != nullptr) {
-                    *positionSource = algorithmCoordinateFrameSource_ ==
-                            native::AlgorithmCoordinateSource::RuntimeObject
-                        ? native::CharacterPositionSource::AlgorithmObject
-                        : native::CharacterPositionSource::AlgorithmTable;
-                }
-                return true;
-            }
-            if (disposition == native::CharacterCoordinateDisposition::
-                    ReturnUnavailable) {
-                return false;
-            }
-            ++algorithmCoordinateFallbackCount_;
-            return false;
-        }
-#endif
-        const bool coordinateDecryptRequested =
-            mode == native::PositionReadMode::Direct &&
-            UsesAnyCoordinatePoolRuntime();
-        if (native::ShouldRequireAlgorithmPosition(
-                localActor, coordinateDecryptRequested)) {
-            if (!IsValidPointer(decodedRoot)) return false;
-            auto now = std::chrono::steady_clock::now();
-            const std::uintptr_t coordinateIdentity = decodedRoot;
-            const native::DecodedPositionCacheIdentity currentCacheIdentity{
-                world_,
-                actor,
-                coordinateIdentity,
-            };
-            const auto stalePending = decodedPositionPending_.find(actor);
-            if (stalePending != decodedPositionPending_.end() &&
-                native::ClassifyDecodedPositionCacheIdentity(
-                    stalePending->second.identity,
-                    currentCacheIdentity) !=
-                    native::DecodedPositionCacheIdentityState::Match) {
-                decodedPositionPending_.erase(stalePending);
-            }
-            CoordinateTraceRecord* trace = nullptr;
-            if (IsCoordinateTraceEnabled()) {
-                auto& record = coordinateTraceRecords_[actor];
-                record = CoordinateTraceRecord{};
-                record.root = decodedRoot;
-                record.component = coordinateIdentity;
-                record.attempted = true;
-                trace = &record;
-            }
-            const auto storeDecoded = [&, trace](
-                                           const Vec3& decoded,
-                                           CoordinateTraceSource source) {
-                const Vec3 adjusted = AdjustDecodedPosition(decoded);
-                now = std::chrono::steady_clock::now();
-                decodedPositionPending_.erase(actor);
-                if (IsValidPointer(coordinateIdentity)) {
-                    decodedPositionCache_[actor] =
-                        DecodedPositionCacheEntry{
-                            adjusted,
-                            now,
-                            now,
-                            currentCacheIdentity,
-                        };
-                }
-                position = adjusted;
-                if (trace != nullptr) {
-                    trace->raw = decoded;
-                    trace->output = adjusted;
-                    trace->source = source;
-                }
-                if (positionSource != nullptr) {
-                    *positionSource = native::CharacterPositionSource::Decoded;
-                }
-            };
-            const auto readStableHistory = [&]() {
-                if (!IsValidPointer(coordinateIdentity)) return false;
-                const auto found = decodedPositionCache_.find(actor);
-                if (found == decodedPositionCache_.end()) return false;
-                const auto identityState =
-                    native::ClassifyDecodedPositionCacheIdentity(
-                        found->second.identity,
-                        currentCacheIdentity);
-                if (!native::CanUseDecodedPositionHistory(
-                        identityState,
-                        found->second.updatedAt,
-                        now)) {
-                    decodedPositionCache_.erase(found);
-                    return false;
-                }
-                const Vec3 history = found->second.position;
-                now = std::chrono::steady_clock::now();
-                found->second.observedAt = now;
-                position = history;
-                if (trace != nullptr) {
-                    trace->history = history;
-                    trace->output = history;
-                    trace->source = CoordinateTraceSource::StabilityHistory;
-                }
-                if (positionSource != nullptr) {
-                    *positionSource = native::CharacterPositionSource::Decoded;
-                }
-                return true;
-            };
-            const auto readCached = [&]() {
-                if (!antiFlicker) return false;
-                const auto found = decodedPositionCache_.find(actor);
-                if (found == decodedPositionCache_.end()) return false;
-                const native::DecodedPositionCacheIdentityState identityState =
-                    native::ClassifyDecodedPositionCacheIdentity(
-                        found->second.identity,
-                        currentCacheIdentity);
-                if (native::IsDecodedPositionCacheOwnerMatch(
-                        found->second.identity,
-                        currentCacheIdentity) &&
-                    native::ShouldEscalateDecodedPositionFailure(
-                        found->second.updatedAt,
-                        now)) {
-                    algorithmFrameAgedDecodedFailure_ = true;
-                }
-                if (identityState ==
-                    native::DecodedPositionCacheIdentityState::Unknown) {
-                    return false;
-                }
-                if (native::ShouldDiscardDecodedPositionCache(
-                        identityState)) {
-                    decodedPositionCache_.erase(found);
-                    return false;
-                }
-                if (!native::CanRetainDecodedPosition(
-                        antiFlicker,
-                        found->second.identity,
-                        currentCacheIdentity,
-                        found->second.updatedAt,
-                        now)) {
-                    decodedPositionCache_.erase(found);
-                    return false;
-                }
-                position = found->second.position;
-                if (trace != nullptr) {
-                    trace->output = position;
-                    trace->source = CoordinateTraceSource::Cache;
-                }
-                if (positionSource != nullptr) {
-                    *positionSource = native::CharacterPositionSource::Decoded;
-                }
-                return true;
-            };
-            if (!algorithmReplayAllowedThisFrame_ &&
-                !UsesAnyCoordinatePoolRuntime()) {
-                return readStableHistory() || readCached();
-            }
-            if (UsesAnyCoordinatePoolRuntime()) {
-                ++algorithmAttemptCount_;
-                ++algorithmFrameAttemptCount_;
-                native::CoordinatePoolCandidateSet candidates{};
-                const bool canReadPosition = coordinatePoolReady_ &&
-                    memory_ != nullptr && IsValidPointer(coordinateIdentity);
-                const bool indexedDecrypt =
-                    UsesCoordinateDecrypt2Runtime();
-                const bool candidatesReady = canReadPosition &&
-                    (indexedDecrypt
-                         ? coordinateDecrypt2Runtime_.ReadCandidates(
-                               coordinateIdentity,
-                               coordinateDecrypt2Index_,
-                               candidates)
-                         : coordinatePoolRuntime_.ReadCandidates(
-                               coordinateIdentity,
-                               candidates));
-                if (candidatesReady) {
-                    ++algorithmSuccessCount_;
-
-                    std::uint32_t validMask = 0;
-                    Vec3 observedRaw{};
-                    bool observedValid = false;
-                    if (indexedDecrypt) {
-                        const auto& observed = candidates.resolvedPosition;
-                        observedRaw = {
-                            observed.x,
-                            observed.y,
-                            observed.z,
-                        };
-                        observedValid = candidates.resolvedValid &&
-                            IsFinite(observedRaw) && IsNonzero(observedRaw);
-                    } else {
-                        for (std::size_t slot = 0;
-                             slot < candidates.positions.size();
-                             ++slot) {
-                            const auto& candidate =
-                                candidates.positions[slot];
-                            const Vec3 decoded{
-                                candidate.x,
-                                candidate.y,
-                                candidate.z,
-                            };
-                            if (candidates.valid[slot] &&
-                                IsFinite(decoded) &&
-                                IsNonzero(decoded)) {
-                                validMask |= 1U << slot;
-                            }
-                        }
-                        const std::size_t observedSlot =
-                            candidates.selectedLogicalSlot;
-                        if (observedSlot < candidates.positions.size()) {
-                            const auto& observed =
-                                candidates.positions[observedSlot];
-                            observedRaw = {
-                                observed.x,
-                                observed.y,
-                                observed.z,
-                            };
-                            observedValid =
-                                candidates.valid[observedSlot] &&
-                                IsFinite(observedRaw) &&
-                                IsNonzero(observedRaw);
-                        }
-                    }
-                    const auto observeIndexedOutputStability =
-                        [&](bool flicker) {
-                            if (!indexedDecrypt) return;
-                            static_cast<void>(coordinateDecrypt2Runtime_
-                                .ObserveOutputStability(
-                                coordinateIdentity,
-                                candidates.decryptIndexOffset,
-                                candidates.poolBlockCount,
-                                flicker));
-                        };
-
-                    if (trace != nullptr) {
-                        trace->raw = observedRaw;
-                        trace->guestPc =
-                            ActiveCoordinatePoolProbe().guestEntry;
-                        trace->source = observedValid
-                            ? CoordinateTraceSource::Pool
-                            : CoordinateTraceSource::Pending;
-                    }
-                    if (IsCoordinateTraceEnabled()) {
-                        if (indexedDecrypt) {
-                            std::fprintf(
-                                stderr,
-                                "[coordinate-decrypt2-selected] "
-                                "frame=%llu world=%llx actor=%llx "
-                                "component=%llx ring=%llx index=%llx "
-                                "decoded=%u offset=%u blocks=%u slot=%u "
-                                "accepted=%d xyz=(%.3f,%.3f,%.3f)\n",
-                                static_cast<unsigned long long>(
-                                    coordinateTraceFrame_),
-                                static_cast<unsigned long long>(world_),
-                                static_cast<unsigned long long>(actor),
-                                static_cast<unsigned long long>(
-                                    coordinateIdentity),
-                                static_cast<unsigned long long>(
-                                    candidates.ring),
-                                static_cast<unsigned long long>(
-                                    candidates.index),
-                                static_cast<unsigned int>(
-                                    candidates.decodedPhysicalSlot),
-                                static_cast<unsigned int>(
-                                    candidates.decryptIndexOffset),
-                                static_cast<unsigned int>(
-                                    candidates.poolBlockCount),
-                                static_cast<unsigned int>(
-                                    candidates.resolvedPoolSlot),
-                                observedValid ? 1 : 0,
-                                observedRaw.x,
-                                observedRaw.y,
-                                observedRaw.z);
-                        } else {
-                            std::fprintf(
-                                stderr,
-                                "[coordinate-pool-selected] frame=%llu "
-                                "world=%llx actor=%llx component=%llx "
-                                "ring=%llx index=%llx decoded=%u "
-                                "physical=%u bank=%u selected=%u "
-                                "layout=%u/%u phase=%u valid_mask=%02x "
-                                "accepted=%d xyz=(%.3f,%.3f,%.3f)\n",
-                                static_cast<unsigned long long>(
-                                    coordinateTraceFrame_),
-                                static_cast<unsigned long long>(world_),
-                                static_cast<unsigned long long>(actor),
-                                static_cast<unsigned long long>(
-                                    coordinateIdentity),
-                                static_cast<unsigned long long>(
-                                    candidates.ring),
-                                static_cast<unsigned long long>(
-                                    candidates.index),
-                                static_cast<unsigned int>(
-                                    candidates.decodedPhysicalSlot),
-                                static_cast<unsigned int>(
-                                    candidates.selectedPhysicalSlot),
-                                static_cast<unsigned int>(
-                                    candidates.activeBank),
-                                static_cast<unsigned int>(
-                                    candidates.selectedLogicalSlot),
-                                static_cast<unsigned int>(
-                                    candidates.logicalSlotCount),
-                                static_cast<unsigned int>(
-                                    candidates.physicalSlotCount),
-                                static_cast<unsigned int>(
-                                    candidates.slotPhase),
-                                static_cast<unsigned int>(validMask),
-                                observedValid ? 1 : 0,
-                                observedRaw.x,
-                                observedRaw.y,
-                                observedRaw.z);
-                        }
-                    }
-                    if (!observedValid) {
-                        observeIndexedOutputStability(true);
-                        const bool historyRecovered = readStableHistory();
-                        const bool cacheRecovered =
-                            !historyRecovered && readCached();
-                        if (!native::ShouldReportCoordinateOutputError(
-                                historyRecovered, cacheRecovered)) {
-                            ++algorithmFrameSuccessCount_;
-                            return true;
-                        }
-                        algorithmFrameOutputError_ =
-                            CoordinateDecryptError::OutputZero;
-                        if (trace != nullptr) {
-                            trace->source = CoordinateTraceSource::Failure;
-                            trace->error = CoordinateDecryptError::OutputZero;
-                            trace->systemError = 0;
-                        }
-                        decodedPositionCache_.erase(actor);
-                        return false;
-                    }
-
-                    now = std::chrono::steady_clock::now();
-                    const Vec3 observedAdjusted =
-                        AdjustDecodedPosition(observedRaw);
-                    auto history = decodedPositionCache_.find(actor);
-                    if (history != decodedPositionCache_.end()) {
-                        const native::DecodedPositionCacheIdentityState
-                            identityState =
-                                native::ClassifyDecodedPositionCacheIdentity(
-                                    history->second.identity,
-                                    currentCacheIdentity);
-                        if (!native::CanUseDecodedPositionHistory(
-                                identityState,
-                                history->second.updatedAt,
-                                now)) {
-                            decodedPositionCache_.erase(history);
-                            decodedPositionPending_.erase(actor);
-                            history = decodedPositionCache_.end();
-                        }
-                    }
-                    if (history != decodedPositionCache_.end()) {
-                        const native::AlgorithmPosition historyPosition{
-                            history->second.position.x,
-                            history->second.position.y,
-                            history->second.position.z,
-                        };
-                        const native::AlgorithmPosition observedPosition{
-                            observedAdjusted.x,
-                            observedAdjusted.y,
-                            observedAdjusted.z,
-                        };
-                        DecodedPositionPendingEntry& pending =
-                            decodedPositionPending_[actor];
-                        if (native::ClassifyDecodedPositionCacheIdentity(
-                                pending.identity,
-                                currentCacheIdentity) !=
-                            native::DecodedPositionCacheIdentityState::Match) {
-                            pending = {};
-                            pending.identity = currentCacheIdentity;
-                        }
-                        const bool hadPending = pending.sample.count != 0;
-                        const native::AlgorithmPositionOutputObservation
-                            observation =
-                                native::ObserveAlgorithmPositionOutput(
-                                    historyPosition,
-                                    observedPosition,
-                                    pending.sample,
-                                    coordinateTraceFrame_,
-                                    now);
-                        observeIndexedOutputStability(
-                            observation.decision ==
-                            native::AlgorithmPositionOutputDecision::
-                                RetainHistory);
-                        if (trace != nullptr) {
-                            trace->history = history->second.position;
-                            trace->stabilityDelta = std::sqrt(
-                                std::max(observation.distanceSquared, 0.0));
-                            trace->pendingCount = observation.pendingCount;
-                            trace->secondAttempted = hadPending;
-                            switch (observation.decision) {
-                                case native::AlgorithmPositionOutputDecision::
-                                        AcceptImmediate:
-                                    trace->stabilityDecision =
-                                        CoordinateStabilityDecision::
-                                            FirstNearHistory;
-                                    break;
-                                case native::AlgorithmPositionOutputDecision::
-                                        RetainHistory:
-                                    trace->stabilityDecision =
-                                        CoordinateStabilityDecision::
-                                            SecondPending;
-                                    break;
-                                case native::AlgorithmPositionOutputDecision::
-                                        AcceptConfirmed:
-                                    trace->stabilityDecision =
-                                        CoordinateStabilityDecision::
-                                            SecondConfirmed;
-                                    break;
-                            }
-                        }
-                        if (observation.decision ==
-                            native::AlgorithmPositionOutputDecision::
-                                RetainHistory) {
-                            const bool retained = readStableHistory();
-                            if (retained) ++algorithmFrameSuccessCount_;
-                            return retained;
-                        }
-                    } else {
-                        observeIndexedOutputStability(false);
-                        if (trace != nullptr) {
-                            trace->stabilityDecision =
-                                CoordinateStabilityDecision::FirstNoHistory;
-                        }
-                    }
-                    storeDecoded(observedRaw, CoordinateTraceSource::Pool);
-                    ++algorithmFrameSuccessCount_;
-                    return true;
-                } else {
-                    const native::CoordinatePoolRuntimeProbe failedProbe =
-                        ActiveCoordinatePoolProbe();
-                    const CoordinateDecryptError failureError =
-                        CoordinatePoolError(
-                            failedProbe.error, failedProbe.read);
-                    if (readStableHistory() || readCached()) {
-                        ++algorithmFrameSuccessCount_;
-                        if (trace != nullptr) {
-                            trace->guestPc = failedProbe.guestEntry;
-                        }
-                        if (IsCoordinateTraceEnabled()) {
-                            std::fprintf(
-                                stderr,
-                                "[coordinate-pool-retain] frame=%llu "
-                                "actor=%llx component=%llx error=%u "
-                                "sys=%d read_stage=%u read_failure=%u "
-                                "read_path=%u read_at=%llx read_n=%zu\n",
-                                static_cast<unsigned long long>(
-                                    coordinateTraceFrame_),
-                                static_cast<unsigned long long>(actor),
-                                static_cast<unsigned long long>(
-                                    coordinateIdentity),
-                                static_cast<unsigned int>(failureError),
-                                failedProbe.systemError,
-                                static_cast<unsigned int>(
-                                    failedProbe.read.stage),
-                                static_cast<unsigned int>(
-                                    failedProbe.read.failure),
-                                static_cast<unsigned int>(
-                                    failedProbe.read.lastPath),
-                                static_cast<unsigned long long>(
-                                    failedProbe.read.address),
-                                failedProbe.read.size);
-                        }
-                        return true;
-                    }
-                    if (trace != nullptr) {
-                        trace->source = CoordinateTraceSource::Failure;
-                        trace->error = failureError;
-                        trace->systemError = failedProbe.systemError;
-                    }
-                    RecordCoordinateFrameFailure(CoordinateFailure{
-                        failureError != CoordinateDecryptError::None
-                            ? failureError
-                            : CoordinateDecryptError::PositionReadFailed,
-                        failedProbe.systemError,
-                        failedProbe.read,
-                    });
-                }
-                decodedPositionCache_.erase(actor);
-                return false;
-            }
-            if (!localActor && coordinateDecryptRequested &&
-                algorithmEntryReady_ && algorithmExecutionContextReady_) {
-                native::AlgorithmPosition candidate{};
-                const bool refreshCachedPages =
-                    algorithmReplayPagePolicy_.ConsumeRefresh(
-                        native::AlgorithmReplayPageKey{
-                            algorithmGuestPc_,
-                            algorithmExecutionContext_.tpidrEl0,
-                            algorithmExecutionContext_.threadId,
-                            algorithmExecutionContext_.threadStartTimeTicks,
-                            algorithmExecutionContext_.generation,
-                        });
-                ++algorithmAttemptCount_;
-                const native::AlgorithmPositionRuntimeResult replayResult =
-                    memory_ != nullptr
-                    ? algorithmPositionRuntime_.ExecuteAtGuestPcResult(
-                          *memory_,
-                          algorithmGuestPc_,
-                          coordinateIdentity,
-                          algorithmExecutionContext_,
-                          candidate,
-                          refreshCachedPages)
-                    : native::AlgorithmPositionRuntimeResult::Failed;
-                const native::AlgorithmPositionRuntimeProbe replayProbe =
-                    algorithmPositionRuntime_.Probe();
+            if (ReadHardwareBreakpointPosition(mesh, position)) {
                 if (IsCoordinateTraceEnabled()) {
-                    const char* replayState = replayResult ==
-                            native::AlgorithmPositionRuntimeResult::Pending
-                        ? "pending"
-                        : (replayResult ==
-                                   native::AlgorithmPositionRuntimeResult::Ready
-                               ? "ready"
-                               : "failed");
-                    const CoordinateDecryptError replayError =
-                        AlgorithmPositionError(replayProbe.error);
-                    std::fprintf(
-                        stderr,
-                        "[coordinate-replay-probe] frame=%llu actor=%llx "
-                        "component=%llx state=%s guest_pc=%llx request=%llu "
-                        "completed=%llu attempts=%llu successes=%llu "
-                        "generation=%llu stage=%u "
-                        "runtime_error=%u cd=%u sys=%d fault=%llx "
-                        "final_pc=%llx expected_pc=%llx fault_type=%d "
-                        "fault_size=%d fault_value=%lld sp=%llx x8=%llx "
-                        "x9=%llx x10=%llx x23=%llx x26=%llx x27=%llx "
-                        "pac_at=%llx pac_data=%llx pac_mod=%llx "
-                        "pac_result=%llx pac_count=%llu pac_source=%u "
-                        "tpidr=%llx ctr=%llx cntfrq=%llx "
-                        "counter_first=%llx counter_last=%llx "
-                        "mrs_ctr=%llu mrs_tpidr=%llu mrs_cntfrq=%llu "
-                        "mrs_counter=%llu "
-                        "read_stage=%u read_failure=%u read_path=%u "
-                        "read_at=%llx read_n=%zu\n",
-                        static_cast<unsigned long long>(coordinateTraceFrame_),
-                        static_cast<unsigned long long>(actor),
-                        static_cast<unsigned long long>(coordinateIdentity),
-                        replayState,
-                        static_cast<unsigned long long>(algorithmGuestPc_),
-                        static_cast<unsigned long long>(replayProbe.requestId),
-                        static_cast<unsigned long long>(
-                            replayProbe.completedRequestId),
-                        static_cast<unsigned long long>(replayProbe.attempts),
-                        static_cast<unsigned long long>(replayProbe.successes),
-                        static_cast<unsigned long long>(replayProbe.generation),
-                        static_cast<unsigned int>(replayProbe.stage),
-                        static_cast<unsigned int>(replayProbe.error),
-                        static_cast<unsigned int>(replayError),
-                        replayProbe.unicornError != 0
-                            ? replayProbe.unicornError
-                            : replayProbe.read.systemError,
-                        static_cast<unsigned long long>(replayProbe.faultAddress),
-                        static_cast<unsigned long long>(replayProbe.finalPc),
-                        static_cast<unsigned long long>(replayProbe.expectedPc),
-                        replayProbe.faultType,
-                        replayProbe.faultSize,
-                        static_cast<long long>(replayProbe.faultValue),
-                        static_cast<unsigned long long>(replayProbe.stackPointer),
-                        static_cast<unsigned long long>(replayProbe.x8),
-                        static_cast<unsigned long long>(replayProbe.x9),
-                        static_cast<unsigned long long>(replayProbe.x10),
-                        static_cast<unsigned long long>(replayProbe.x23),
-                        static_cast<unsigned long long>(replayProbe.x26),
-                        static_cast<unsigned long long>(replayProbe.x27),
-                        static_cast<unsigned long long>(replayProbe.pacgaAddress),
-                        static_cast<unsigned long long>(replayProbe.pacgaData),
-                        static_cast<unsigned long long>(replayProbe.pacgaModifier),
-                        static_cast<unsigned long long>(replayProbe.pacgaResult),
-                        static_cast<unsigned long long>(replayProbe.pacgaCount),
-                        static_cast<unsigned int>(replayProbe.pacgaSource),
-                        static_cast<unsigned long long>(replayProbe.tpidrEl0),
-                        static_cast<unsigned long long>(replayProbe.ctrEl0),
-                        static_cast<unsigned long long>(replayProbe.cntfrqEl0),
-                        static_cast<unsigned long long>(
-                            replayProbe.counterFirst),
-                        static_cast<unsigned long long>(
-                            replayProbe.counterLast),
-                        static_cast<unsigned long long>(
-                            replayProbe.ctrReadCount),
-                        static_cast<unsigned long long>(
-                            replayProbe.tpidrReadCount),
-                        static_cast<unsigned long long>(
-                            replayProbe.cntfrqReadCount),
-                        static_cast<unsigned long long>(
-                            replayProbe.counterReadCount),
-                        static_cast<unsigned int>(replayProbe.read.stage),
-                        static_cast<unsigned int>(replayProbe.read.failure),
-                        static_cast<unsigned int>(replayProbe.read.lastPath),
-                        static_cast<unsigned long long>(replayProbe.read.address),
-                        replayProbe.read.size);
-                    std::fflush(stderr);
-                    if (replayResult ==
-                            native::AlgorithmPositionRuntimeResult::Failed &&
-                        replayProbe.instructionTraceCount != 0 &&
-                        (replayProbe.finalPc !=
-                             algorithmLastInstructionTracePc_ ||
-                         replayProbe.faultAddress !=
-                             algorithmLastInstructionTraceFault_)) {
-                        algorithmLastInstructionTracePc_ =
-                            replayProbe.finalPc;
-                        algorithmLastInstructionTraceFault_ =
-                            replayProbe.faultAddress;
-                        std::fprintf(
-                            stderr,
-                            "[coordinate-replay-path] request=%llu "
-                            "count=%zu pcs=",
-                            static_cast<unsigned long long>(
-                                replayProbe.completedRequestId),
-                            replayProbe.instructionTraceCount);
-                        for (std::size_t index = 0;
-                             index < replayProbe.instructionTraceCount;
-                             ++index) {
-                            std::fprintf(
-                                stderr,
-                                "%s%llx",
-                                index == 0 ? "" : ",",
-                                static_cast<unsigned long long>(
-                                    replayProbe.instructionTrace[index]));
-                        }
-                        std::fputc('\n', stderr);
-                        std::fflush(stderr);
-                    }
+                    auto& traceRecord = coordinateTraceRecords_[actor];
+                    traceRecord = CoordinateTraceRecord{};
+                    traceRecord.root = ordinaryRoot;
+                    traceRecord.component = mesh;
+                    traceRecord.raw = position;
+                    traceRecord.output = position;
+                    traceRecord.source =
+                        CoordinateTraceSource::HardwareBreakpoint;
+                    traceRecord.attempted = true;
                 }
-                if (replayResult ==
-                    native::AlgorithmPositionRuntimeResult::Pending) {
-                    if (trace != nullptr) {
-                        trace->source = CoordinateTraceSource::Pending;
-                        trace->guestPc = algorithmGuestPc_;
-                        trace->error = CoordinateDecryptError::None;
-                        trace->systemError = 0;
-                    }
-                    return readStableHistory() || readCached();
+                if (positionSource != nullptr) {
+                    *positionSource =
+                        native::CharacterPositionSource::HardwareBreakpoint;
                 }
-                ++algorithmFrameAttemptCount_;
-                if (replayResult ==
-                    native::AlgorithmPositionRuntimeResult::Ready) {
-                    const Vec3 decoded{
-                        candidate.x,
-                        candidate.y,
-                        candidate.z,
-                    };
-                    if (IsFinite(decoded) && IsNonzero(decoded)) {
-                        ++algorithmSuccessCount_;
-                        ++algorithmFrameSuccessCount_;
-                        decodedPositionPending_.erase(actor);
-                        storeDecoded(decoded, CoordinateTraceSource::Replay);
-                        if (trace != nullptr) {
-                            trace->guestPc = algorithmGuestPc_;
-                            trace->error = CoordinateDecryptError::None;
-                            trace->systemError = 0;
-                        }
-                        return true;
-                    }
-                    if (trace != nullptr) {
-                        trace->raw = decoded;
-                        trace->source = CoordinateTraceSource::Failure;
-                    }
-                    const bool historyRecovered = readStableHistory();
-                    const bool cacheRecovered =
-                        !historyRecovered && readCached();
-                    if (!native::ShouldReportCoordinateOutputError(
-                            historyRecovered, cacheRecovered)) {
-                        return true;
-                    }
-                    const CoordinateDecryptError outputError = IsFinite(decoded)
-                        ? CoordinateDecryptError::OutputZero
-                        : CoordinateDecryptError::OutputNotFinite;
-                    algorithmFrameOutputError_ = outputError;
-                    if (trace != nullptr) {
-                        trace->source = CoordinateTraceSource::Failure;
-                        trace->error = outputError;
-                        trace->systemError = 0;
-                    }
-                    return false;
-                } else {
-                    if (trace != nullptr) {
-                        trace->source = CoordinateTraceSource::Failure;
-                        trace->guestPc = algorithmGuestPc_;
-                        trace->error = AlgorithmPositionError(
-                            replayProbe.error);
-                        trace->systemError = replayProbe.unicornError != 0
-                            ? replayProbe.unicornError
-                            : replayProbe.read.systemError;
-                    }
-                    RecordCoordinateFrameFailure(CoordinateFailure{
-                        AlgorithmPositionError(replayProbe.error) ==
-                                CoordinateDecryptError::None
-                            ? CoordinateDecryptError::ReplayExecutionFailed
-                            : AlgorithmPositionError(replayProbe.error),
-                        replayProbe.unicornError != 0
-                            ? replayProbe.unicornError
-                            : replayProbe.read.systemError,
-                        replayProbe.read,
-                    });
-                }
+                return true;
             }
-            return readStableHistory() || readCached();
         }
 
         auto readBytes = [this](std::uintptr_t address,
@@ -6036,33 +4277,43 @@ private:
         native::CharacterPositionResolver::Coordinate coordinate{};
         const bool resolved = localActor
             ? characterPositions_.ReadLocalWithRoot(
-                actor,
-                decodedRoot,
-                className,
-                mode,
-                antiFlicker,
-                coordinate,
-                readBytes)
+                  actor,
+                  ordinaryRoot,
+                  className,
+                  native::PositionReadMode::Standard,
+                  antiFlicker,
+                  coordinate,
+                  readBytes)
             : characterPositions_.ReadWithRoot(
-                actor,
-                decodedRoot,
-                className,
-                mode,
-                antiFlicker,
-                coordinate,
-                readBytes);
+                  actor,
+                  ordinaryRoot,
+                  className,
+                  native::PositionReadMode::Standard,
+                  antiFlicker,
+                  coordinate,
+                  readBytes);
         if (!resolved) {
+            if (IsCoordinateTraceEnabled()) {
+                auto& traceRecord = coordinateTraceRecords_[actor];
+                traceRecord = CoordinateTraceRecord{};
+                traceRecord.root = ordinaryRoot;
+                traceRecord.source = CoordinateTraceSource::Failure;
+                traceRecord.attempted = true;
+                traceRecord.error =
+                    CoordinateDecryptError::PositionReadFailed;
+            }
             return false;
         }
+
         position = Vec3{coordinate[0], coordinate[1], coordinate[2]};
         if (!IsFinite(position) || !IsNonzero(position)) return false;
         if (IsCoordinateTraceEnabled()) {
-            auto& trace = coordinateTraceRecords_[actor];
-            trace = CoordinateTraceRecord{};
-            trace.root = decodedRoot;
-            trace.output = position;
-            trace.source = CoordinateTraceSource::Standard;
-            trace.attempted = true;
+            auto& traceRecord = coordinateTraceRecords_[actor];
+            traceRecord = CoordinateTraceRecord{};
+            traceRecord.root = ordinaryRoot;
+            traceRecord.output = position;
+            traceRecord.source = CoordinateTraceSource::Standard;
+            traceRecord.attempted = true;
         }
         if (positionSource != nullptr) {
             *positionSource = native::CharacterPositionSource::Standard;
@@ -6070,534 +4321,27 @@ private:
         return true;
     }
 
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-    void RefreshAlgorithmCoordinateSources() {
-        algorithmCoordinateSnapshot_.clear();
-        algorithmCoordinateTableReady_ = false;
-        algorithmCoordinateTableDiagnostic_ = {};
-        algorithmCoordinateRuntimeReady_ = false;
-        algorithmCoordinateRuntimeDiagnostic_ = {};
-        if (!native::ShouldReadAlgorithmCoordinate(
-                algorithmPositionRequested_,
-                algorithmDecryptRequested_) ||
-            memory_ == nullptr || !IsValidPointer(moduleBase_)) {
-            runtimeCoordinateCodec_.Reset();
-            return;
-        }
-
-        ++algorithmCoordinateRefreshCount_;
-        auto readBytes = [this](std::uintptr_t address,
-                                void* destination,
-                                std::size_t size) {
-            return memory_ != nullptr && IsValidReadAddress(address) &&
-                size != 0 && size <= kMaximumRemoteAddress - address &&
-                memory_->Read(address, destination, size);
-        };
-        ++algorithmCoordinateResolveAttemptCount_;
-        algorithmCoordinateRuntimeReady_ = runtimeCoordinateCodec_.Refresh(
-            moduleBase_,
-            readBytes,
-            [this](std::uintptr_t address) {
-                return IsMappedExecutableAddress(processId_, address);
-            },
-            [this](std::uintptr_t address) {
-                return IsMappedNamedExecutableAddress(
-                    processId_, address, "[anon:objects_external_alloc]");
-            });
-        algorithmCoordinateRuntimeDiagnostic_ =
-            runtimeCoordinateCodec_.Diagnostic();
-        if (algorithmCoordinateRuntimeReady_) {
-            ++algorithmCoordinateResolveSuccessCount_;
-        } else {
-            algorithmCoordinateFrameRuntimeFailure_ =
-                algorithmCoordinateRuntimeDiagnostic_;
-        }
-        algorithmCoordinateTableReady_ = algorithmCoordinateReader_.ReadTable(
-            moduleBase_,
-            algorithmCoordinateSnapshot_,
-            algorithmCoordinateTableDiagnostic_,
-            readBytes);
-    }
-
-    void RecordAlgorithmCoordinateFailure(
-        const native::AlgorithmCoordinateDiagnostic& diagnostic) {
-        if (algorithmCoordinateFrameFailure_.error ==
-            native::AlgorithmCoordinateReadError::None) {
-            algorithmCoordinateFrameFailure_ = diagnostic;
-        }
-    }
-
-    bool ReadAlgorithmTableCoordinate(std::uintptr_t actor,
-                                      Vec3& position) {
-        ++algorithmCoordinateTableAttemptCount_;
-        if (!algorithmCoordinateTableReady_) {
-            RecordAlgorithmCoordinateFailure(
-                algorithmCoordinateTableDiagnostic_);
-            return false;
-        }
-
-        for (std::uint32_t index = 0;
-             index < static_cast<std::uint32_t>(
-                 algorithmCoordinateSnapshot_.size());
-             ++index) {
-            const native::AlgorithmCoordinateRecord& record =
-                algorithmCoordinateSnapshot_[index];
-            if (record.actor != actor) continue;
-
-            native::AlgorithmCoordinateDiagnostic diagnostic =
-                algorithmCoordinateTableDiagnostic_;
-            diagnostic.actor = actor;
-            diagnostic.recordIndex = index;
-            diagnostic.x = record.coordinate.x;
-            diagnostic.y = record.coordinate.y;
-            diagnostic.z = record.coordinate.z;
-            if (!record.valid) {
-                diagnostic.error =
-                    native::AlgorithmCoordinateReadError::CoordinateInvalid;
-                RecordAlgorithmCoordinateFailure(diagnostic);
-                return false;
-            }
-
-            position = Vec3{
-                record.coordinate.x,
-                record.coordinate.y,
-                record.coordinate.z,
-            };
-            if (!IsFinite(position) || !IsNonzero(position)) {
-                diagnostic.error =
-                    native::AlgorithmCoordinateReadError::CoordinateInvalid;
-                RecordAlgorithmCoordinateFailure(diagnostic);
-                return false;
-            }
-            diagnostic.error = native::AlgorithmCoordinateReadError::None;
-            return true;
-        }
-
-        native::AlgorithmCoordinateDiagnostic diagnostic =
-            algorithmCoordinateTableDiagnostic_;
-        diagnostic.error =
-            native::AlgorithmCoordinateReadError::ActorNotFound;
-        diagnostic.actor = actor;
-        RecordAlgorithmCoordinateFailure(diagnostic);
-        return false;
-    }
-
-    bool ReadAlgorithmObjectCoordinate(std::uintptr_t actor,
-                                       std::uintptr_t component,
-                                       Vec3& rawPosition,
-                                       Vec3& position) {
-        rawPosition = Vec3{};
-        position = Vec3{};
-        if (!algorithmCoordinateRuntimeReady_) {
-            if (algorithmCoordinateFrameRuntimeFailure_.error ==
-                native::RuntimeCoordinateCodecError::None) {
-                algorithmCoordinateFrameRuntimeFailure_ =
-                    algorithmCoordinateRuntimeDiagnostic_;
-            }
-            return false;
-        }
-
-        const std::uintptr_t ordinaryRoot = ReadPointer(
-            actor + layout_.actorSubjectLayout.rootOffset);
-        if (!IsValidPointer(ordinaryRoot) ||
-            (IsValidPointer(component) && component != ordinaryRoot)) {
-            native::RuntimeCoordinateCodecDiagnostic diagnostic =
-                algorithmCoordinateRuntimeDiagnostic_;
-            diagnostic.stage =
-                native::RuntimeCoordinateCodecStage::Failed;
-            diagnostic.error =
-                native::RuntimeCoordinateCodecError::ObjectInvalid;
-            diagnostic.object = component;
-            algorithmCoordinateFrameRuntimeFailure_ = diagnostic;
-            return false;
-        }
-        component = ordinaryRoot;
-
-        const auto cached = algorithmCoordinateObjectCache_.find(component);
-        if (cached != algorithmCoordinateObjectCache_.end()) {
-            rawPosition = cached->second.raw;
-            if (cached->second.owner != actor) {
-                native::RuntimeCoordinateCodecDiagnostic diagnostic =
-                    cached->second.diagnostic;
-                diagnostic.stage =
-                    native::RuntimeCoordinateCodecStage::Failed;
-                diagnostic.error =
-                    native::RuntimeCoordinateCodecError::OwnerMismatch;
-                diagnostic.owner = actor;
-                algorithmCoordinateFrameRuntimeFailure_ = diagnostic;
-                return false;
-            }
-            if (!cached->second.valid) {
-                algorithmCoordinateFrameRuntimeFailure_ =
-                    cached->second.diagnostic;
-                return false;
-            }
-            position = cached->second.position;
-            algorithmCoordinateFrameRuntimeSuccess_ =
-                cached->second.diagnostic;
-            algorithmCoordinateFrameSource_ =
-                native::AlgorithmCoordinateSource::RuntimeObject;
-            return true;
-        }
-
-        ++algorithmCoordinateObjectAttemptCount_;
-        AlgorithmCoordinateObjectCacheEntry entry{};
-        entry.owner = actor;
-        entry.diagnostic = algorithmCoordinateRuntimeDiagnostic_;
-        if (component > kMaximumRemoteAddress - 0x5A0) {
-            entry.diagnostic.stage =
-                native::RuntimeCoordinateCodecStage::Failed;
-            entry.diagnostic.error =
-                native::RuntimeCoordinateCodecError::ObjectInvalid;
-            entry.diagnostic.object = component;
-            algorithmCoordinateObjectCache_.emplace(component, entry);
-            algorithmCoordinateFrameRuntimeFailure_ = entry.diagnostic;
-            return false;
-        }
-
-        const std::uintptr_t adjustmentAddress = component + 0x5A0;
-        constexpr unsigned kMaximumPresentationAttempts = 3;
-        for (unsigned attempt = 0;
-             attempt < kMaximumPresentationAttempts;
-             ++attempt) {
-            float firstAdjustment = 0.0f;
-            if (!ReadValue(adjustmentAddress, firstAdjustment)) {
-                entry.diagnostic.stage =
-                    native::RuntimeCoordinateCodecStage::Failed;
-                entry.diagnostic.error = native::RuntimeCoordinateCodecError::
-                    VerticalAdjustmentReadFailed;
-                entry.diagnostic.object = component;
-                continue;
-            }
-
-            native::RuntimeCoordinateCodec::Coordinate candidate{};
-            native::RuntimeCoordinateCodecDiagnostic diagnostic{};
-            const bool decoded = runtimeCoordinateCodec_.Decode(
-                component, actor, candidate, diagnostic,
-                [this](std::uintptr_t address,
-                       void* destination,
-                       std::size_t size) {
-                    return memory_ != nullptr &&
-                        IsValidReadAddress(address) && size != 0 &&
-                        size <= kMaximumRemoteAddress - address &&
-                        memory_->Read(address, destination, size);
-                });
-            entry.raw = Vec3{candidate.x, candidate.y, candidate.z};
-            diagnostic.verticalAdjustmentFirst = firstAdjustment;
-            if (!decoded || !IsFinite(entry.raw) ||
-                !IsNonzero(entry.raw)) {
-                entry.diagnostic = diagnostic;
-                break;
-            }
-
-            float secondAdjustment = 0.0f;
-            if (!ReadValue(adjustmentAddress, secondAdjustment)) {
-                diagnostic.stage =
-                    native::RuntimeCoordinateCodecStage::Failed;
-                diagnostic.error = native::RuntimeCoordinateCodecError::
-                    VerticalAdjustmentReadFailed;
-                entry.diagnostic = diagnostic;
-                continue;
-            }
-            diagnostic.verticalAdjustmentSecond = secondAdjustment;
-            if (ReadPointer(
-                    actor + layout_.actorSubjectLayout.rootOffset) !=
-                component) {
-                diagnostic.stage =
-                    native::RuntimeCoordinateCodecStage::Failed;
-                diagnostic.error =
-                    native::RuntimeCoordinateCodecError::ObjectUnstable;
-                entry.diagnostic = diagnostic;
-                continue;
-            }
-
-            const native::AlgorithmCoordinateFinalizeResult finalized =
-                native::FinalizeAlgorithmCharacterCoordinate(
-                    entry.raw.x,
-                    entry.raw.y,
-                    entry.raw.z,
-                    true,
-                    firstAdjustment,
-                    true,
-                    secondAdjustment);
-            if (!finalized.Accepted()) {
-                diagnostic.stage =
-                    native::RuntimeCoordinateCodecStage::Failed;
-                switch (finalized.error) {
-                    case native::AlgorithmCoordinateFinalizeError::
-                            VerticalAdjustmentReadFailed:
-                        diagnostic.error =
-                            native::RuntimeCoordinateCodecError::
-                                VerticalAdjustmentReadFailed;
-                        break;
-                    case native::AlgorithmCoordinateFinalizeError::
-                            VerticalAdjustmentInvalid:
-                        diagnostic.error =
-                            native::RuntimeCoordinateCodecError::
-                                VerticalAdjustmentInvalid;
-                        break;
-                    case native::AlgorithmCoordinateFinalizeError::
-                            VerticalAdjustmentUnstable:
-                        diagnostic.error =
-                            native::RuntimeCoordinateCodecError::
-                                VerticalAdjustmentUnstable;
-                        break;
-                    case native::AlgorithmCoordinateFinalizeError::None:
-                    case native::AlgorithmCoordinateFinalizeError::
-                            RawInvalid:
-                    case native::AlgorithmCoordinateFinalizeError::
-                            OutputInvalid:
-                        diagnostic.error =
-                            native::RuntimeCoordinateCodecError::OutputInvalid;
-                        break;
-                }
-                entry.diagnostic = diagnostic;
-                continue;
-            }
-
-            entry.position = Vec3{finalized.x, finalized.y, finalized.z};
-            diagnostic.presentedZ = finalized.z;
-            entry.valid = true;
-            entry.diagnostic = diagnostic;
-            break;
-        }
-
-        algorithmCoordinateObjectCache_.emplace(component, entry);
-        rawPosition = entry.raw;
-        if (!entry.valid) {
-            algorithmCoordinateFrameRuntimeFailure_ = entry.diagnostic;
-            return false;
-        }
-
-        position = entry.position;
-        algorithmCoordinateFrameRuntimeSuccess_ = entry.diagnostic;
-        algorithmCoordinateFrameSource_ =
-            native::AlgorithmCoordinateSource::RuntimeObject;
-        ++algorithmCoordinateObjectSuccessCount_;
-        ++algorithmCoordinateSuccessCount_;
-        ++algorithmCoordinateFrameSuccessCount_;
-        return true;
-    }
-
-    bool ReadAlgorithmCoordinate(std::uintptr_t actor,
-                                 std::uintptr_t component,
-                                 Vec3& position,
-                                 bool diagnosticOverride = false,
-                                 Vec3* rawPosition = nullptr) {
-        position = Vec3{};
-        if (rawPosition != nullptr) *rawPosition = Vec3{};
-        if (!native::kAlgorithmCoordinateEnabled) return false;
-        if (diagnosticOverride) {
-            if (memory_ == nullptr || !IsValidPointer(moduleBase_) ||
-                !IsValidPointer(actor)) {
-                return false;
-            }
-            auto readBytes = [this](std::uintptr_t address,
-                                    void* destination,
-                                    std::size_t size) {
-                return memory_ != nullptr && IsValidReadAddress(address) &&
-                    size != 0 && size <= kMaximumRemoteAddress - address &&
-                    memory_->Read(address, destination, size);
-            };
-            native::AlgorithmCoordinate candidate{};
-            native::AlgorithmCoordinateDiagnostic diagnostic{};
-            if (!algorithmCoordinateReader_.Read(
-                    moduleBase_,
-                    actor,
-                    candidate,
-                    diagnostic,
-                    readBytes)) {
-                return false;
-            }
-            position = Vec3{candidate.x, candidate.y, candidate.z};
-            if (rawPosition != nullptr) *rawPosition = position;
-            return IsFinite(position) && IsNonzero(position);
-        }
-
-        if (!native::ShouldReadAlgorithmCoordinate(
-                algorithmPositionRequested_,
-                algorithmDecryptRequested_) ||
-            memory_ == nullptr ||
-            !IsValidPointer(moduleBase_) || !IsValidPointer(actor)) {
-            return false;
-        }
-        ++algorithmCoordinateAttemptCount_;
-        ++algorithmCoordinateFrameAttemptCount_;
-        Vec3 decodedRaw{};
-        if (ReadAlgorithmObjectCoordinate(
-                actor, component, decodedRaw, position)) {
-            if (rawPosition != nullptr) *rawPosition = decodedRaw;
-            return true;
-        }
-        if (rawPosition != nullptr) *rawPosition = decodedRaw;
-        return false;
-    }
-#endif
-
     bool ReadCharacterPosition(
         const RuntimeActorRecord& record,
         std::string_view className,
-        native::PositionReadMode preferredMode,
+        native::PositionReadMode,
         bool antiFlicker,
         Vec3& position,
         native::CharacterPositionSource* positionSource = nullptr) {
-        position = Vec3{};
-        if (positionSource != nullptr) {
-            *positionSource = native::CharacterPositionSource::None;
+        std::uintptr_t ordinaryRoot = record.ordinaryRoot;
+        if (!IsValidPointer(ordinaryRoot)) {
+            ordinaryRoot = ReadPointer(
+                record.actor + layout_.actorSubjectLayout.rootOffset);
         }
-#if 0
-        if (hardwareBreakpointRequested_) {
-            std::uintptr_t mesh = record.ordinaryMesh;
-            if (!IsValidPointer(mesh)) {
-                mesh = ReadPointer(
-                    record.actor + layout_.actorSubjectLayout.meshOffset);
-            }
-            if (!IsValidPointer(mesh) && IsValidPointer(record.mesh)) {
-                mesh = record.mesh;
-            }
-            const bool available =
-                ReadHardwareBreakpointPosition(mesh, position);
-            if (IsCoordinateTraceEnabled()) {
-                auto& traceRecord =
-                    coordinateTraceRecords_[record.actor];
-                traceRecord = CoordinateTraceRecord{};
-                traceRecord.root = record.root;
-                traceRecord.component = mesh;
-                traceRecord.raw = position;
-                traceRecord.output = position;
-                traceRecord.source = available
-                    ? CoordinateTraceSource::HardwareBreakpoint
-                    : CoordinateTraceSource::Failure;
-                traceRecord.attempted = true;
-                if (!available) {
-                    traceRecord.error =
-                        CoordinateDecryptError::PositionReadFailed;
-                }
-            }
-            if (available && positionSource != nullptr) {
-                *positionSource =
-                    native::CharacterPositionSource::HardwareBreakpoint;
-            }
-            return available;
-        }
-#endif
-        if (UsesCoordinateExecutionRuntime()) {
-            const std::uintptr_t subject =
-                native::ResolveActorCoordinateSubject(
-                    record,
-                    layout_.actorSubjectLayout,
-                    [this](std::uintptr_t address) {
-                        return ReadPointer(address);
-                    },
-                    [](std::uintptr_t pointer) {
-                        return native::IsActorCoordinateSubjectPointer(pointer);
-                    });
-            if (subject == 0) return false;
-            return ReadCharacterPosition(
-                record.actor,
-                subject,
-                className,
-                native::PositionReadMode::Direct,
-                antiFlicker,
-                position,
-                false,
-                positionSource);
-        }
-        if (UsesCoordinateDecrypt2Runtime()) {
-            if (!record.resolverRecord ||
-                !IsValidPointer(record.root)) {
-                return false;
-            }
-            return ReadCharacterPosition(
-                record.actor,
-                record.root,
-                className,
-                native::PositionReadMode::Direct,
-                antiFlicker,
-                position,
-                false,
-                positionSource);
-        }
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-        if (native::ShouldReadAlgorithmCoordinate(
-                algorithmPositionRequested_,
-                algorithmDecryptRequested_)) {
-            std::uintptr_t ordinaryRoot = record.ordinaryRoot;
-            if (!IsValidPointer(ordinaryRoot)) {
-                ordinaryRoot = ReadPointer(
-                    record.actor + layout_.actorSubjectLayout.rootOffset);
-            }
-            return ReadCharacterPosition(
-                record.actor,
-                ordinaryRoot,
-                className,
-                native::PositionReadMode::Standard,
-                antiFlicker,
-                position,
-                false,
-                positionSource);
-        }
-#endif
-        if (native::ShouldKeepDecodedPositionSource(
-                algorithmPositionRequested_,
-                preferredMode == native::PositionReadMode::Direct)) {
-            // 解密模式只允许解析器提供的根对象进入解密读取链。
-            if (!record.resolverRecord || !IsValidPointer(record.root)) {
-                return false;
-            }
-            const std::uintptr_t decodedRoot = record.root;
-            return ReadCharacterPosition(
-                record.actor,
-                decodedRoot,
-                className,
-                native::PositionReadMode::Direct,
-                antiFlicker,
-                position,
-                false,
-                positionSource);
-        }
-        return native::ReadActorRecordSourceWithFallback(
-            record,
-            [&] {
-                Vec3 candidate{};
-                native::CharacterPositionSource candidateSource =
-                    native::CharacterPositionSource::None;
-                if (!ReadCharacterPosition(
-                        record.actor,
-                        record.root,
-                        className,
-                        preferredMode,
-                        antiFlicker,
-                        candidate,
-                        false,
-                        &candidateSource) ||
-                    !IsFinite(candidate) || !IsNonzero(candidate)) {
-                    return false;
-                }
-                position = candidate;
-                if (positionSource != nullptr) {
-                    *positionSource = candidateSource;
-                }
-                return true;
-            },
-            [&] {
-                Vec3 candidate{};
-                if (!ReadCharacterPosition(
-                        record.actor,
-                        record.ordinaryRoot,
-                        className,
-                        native::PositionReadMode::Standard,
-                        antiFlicker,
-                        candidate) ||
-                    !IsFinite(candidate) || !IsNonzero(candidate)) {
-                    return false;
-                }
-                position = candidate;
-                if (positionSource != nullptr) {
-                    *positionSource = native::CharacterPositionSource::Standard;
-                }
-                return true;
-            });
+        return ReadCharacterPosition(
+            record.actor,
+            ordinaryRoot,
+            className,
+            native::PositionReadMode::Standard,
+            antiFlicker,
+            position,
+            false,
+            positionSource);
     }
 
     bool ReadActorFacingFromMesh(std::uintptr_t mesh,
@@ -7142,7 +4886,6 @@ private:
         };
         const bool resolvedBoneTransformEnabled =
             native::IsResolvedBoneTransformEnabled(
-                algorithmPositionRequested_,
                 hardwareBreakpointRequested_);
         const native::BoneFrameSourceSelection preferredSource =
             native::SelectPreferredBoneFrameSource(
@@ -8375,7 +6118,7 @@ private:
         if (!ReadCharacterPosition(
                 record,
                 std::string_view{},
-                native::PositionReadMode::Direct,
+                native::PositionReadMode::ResolvedRecord,
                 antiFlicker,
                 position,
                 &positionSource)) {
@@ -9030,35 +6773,11 @@ private:
             }
         };
         prune(positionCache_, kRetention);
-        for (auto iterator = decodedPositionCache_.begin();
-             iterator != decodedPositionCache_.end();) {
-            const auto observedAt = iterator->second.observedAt;
-            if (observedAt.time_since_epoch().count() == 0 ||
-                now < observedAt || now - observedAt >
-                    native::kDecodedPositionRetention) {
-                iterator = decodedPositionCache_.erase(iterator);
-            } else {
-                ++iterator;
-            }
-        }
-        for (auto iterator = decodedPositionPending_.begin();
-             iterator != decodedPositionPending_.end();) {
-            const auto& sample = iterator->second.sample;
-            if (sample.count == 0 || sample.lastAt.time_since_epoch().count() == 0 ||
-                now < sample.lastAt || now - sample.lastAt >
-                    native::kAlgorithmPositionPendingMaximumAge) {
-                iterator = decodedPositionPending_.erase(iterator);
-            } else {
-                ++iterator;
-            }
-        }
     }
 
     void ResetWorldState() {
         world_ = 0;
         positionCache_.clear();
-        decodedPositionCache_.clear();
-        decodedPositionPending_.clear();
         boneCache_.clear();
         nameCache_.clear();
         classTraitsCache_.clear();
@@ -9072,9 +6791,6 @@ private:
         aimWarningStates_.clear();
         hudMapCache_.Clear();
         characterPositions_.Clear();
-        algorithmPositionRuntime_.Invalidate();
-        algorithmReplayPagePolicy_.Invalidate();
-        algorithmExecutionContextRefreshPolicy_.Invalidate();
         positionReadMode_ = native::PositionReadMode::Standard;
         projectileSpeedReader_.Invalidate();
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
@@ -9094,933 +6810,6 @@ private:
         viewFovState_ = native::ProjectionFovStabilityState{};
     }
 
-    void RefreshCoordinateExecutionDiscovery() {
-        const bool hadDiscovery =
-            coordinateExecutionDiscoveryInput_.rawEntry != 0 ||
-            coordinateExecutionCodeBase_ != 0 ||
-            coordinateExecutionCodeSize_ != 0;
-        const std::uintptr_t previousCodeBase =
-            coordinateExecutionCodeBase_;
-        const std::size_t previousCodeSize = coordinateExecutionCodeSize_;
-        native::CoordinateExecutionDiscoveryInput input{};
-        const native::CoordinateExecutionReadCallback read =
-            [this](std::uint64_t address,
-                   void* output,
-                   std::size_t size) {
-                if (memory_ == nullptr ||
-                    address > std::numeric_limits<std::uintptr_t>::max()) {
-                    return false;
-                }
-                const auto remoteAddress =
-                    static_cast<std::uintptr_t>(address);
-                CoordinateReadDiagnostic diagnostic{};
-                return memory_->Read(remoteAddress, output, size) ||
-                    memory_->ReadCoordinateMemory(
-                        remoteAddress, output, size, diagnostic);
-            };
-        if (!native::ResolveCoordinateExecutionDiscoveryInput(
-                read,
-                moduleBase_,
-                coordinateExecutionLayout_,
-                &input)) {
-            if (hadDiscovery) {
-                coordinateExecutionDecoder_.Reset();
-            }
-            coordinateExecutionDiscoveryInput_ = {};
-            coordinateExecutionCodeBase_ = 0;
-            coordinateExecutionCodeSize_ = 0;
-            return;
-        }
-
-        const bool discoveryChanged =
-            coordinateExecutionDiscoveryInput_.rawEntry != 0 &&
-            (coordinateExecutionDiscoveryInput_.scanAnchor !=
-                 input.scanAnchor ||
-             coordinateExecutionDiscoveryInput_.root != input.root ||
-             coordinateExecutionDiscoveryInput_.rawEntry != input.rawEntry);
-        const std::uint64_t cachedRangeEnd =
-            coordinateExecutionCodeSize_ <=
-                    std::numeric_limits<std::uint64_t>::max() -
-                        coordinateExecutionCodeBase_
-            ? coordinateExecutionCodeBase_ + coordinateExecutionCodeSize_
-            : 0;
-        const native::CoordinateExecutionCodeRange cachedRange{
-            coordinateExecutionCodeBase_, cachedRangeEnd};
-        const bool cachedRangeCompatible =
-            native::IsCoordinateExecutionCodeRangeCompatible(
-                cachedRange, input.root, input.rawEntry);
-
-        if (discoveryChanged || !cachedRangeCompatible) {
-            native::CoordinateExecutionCodeRange codeRange{};
-            if (!FindCoordinateExecutionCodeRange(
-                    processId_, input.root, input.rawEntry, codeRange)) {
-                coordinateExecutionDecoder_.Reset();
-                coordinateExecutionDiscoveryInput_ = input;
-                coordinateExecutionCodeBase_ = 0;
-                coordinateExecutionCodeSize_ = 0;
-                return;
-            }
-            if (codeRange.begin >
-                    std::numeric_limits<std::uintptr_t>::max() ||
-                codeRange.Size() >
-                    std::numeric_limits<std::size_t>::max()) {
-                coordinateExecutionDecoder_.Reset();
-                coordinateExecutionDiscoveryInput_ = input;
-                coordinateExecutionCodeBase_ = 0;
-                coordinateExecutionCodeSize_ = 0;
-                return;
-            }
-            coordinateExecutionCodeBase_ =
-                static_cast<std::uintptr_t>(codeRange.begin);
-            coordinateExecutionCodeSize_ =
-                static_cast<std::size_t>(codeRange.Size());
-        }
-        coordinateExecutionDiscoveryInput_ = input;
-        const bool codeRangeChanged =
-            previousCodeBase != coordinateExecutionCodeBase_ ||
-            previousCodeSize != coordinateExecutionCodeSize_;
-        if (discoveryChanged || codeRangeChanged) {
-            coordinateExecutionDecoder_.Reset();
-        }
-    }
-
-    native::AlgorithmExecutionContextRefreshKey
-    CurrentAlgorithmExecutionContextRefreshKey(
-        bool coordinatePoolSelected) const noexcept {
-        if (UsesCoordinateExecutionRuntime()) {
-            const native::ProcessExecutionCodeTarget codeTarget =
-                CurrentCoordinateExecutionCodeTarget();
-            return native::AlgorithmExecutionContextRefreshKey{
-                static_cast<std::int32_t>(processId_),
-                moduleBase_,
-                codeTarget.IsValid()
-                    ? codeTarget.entry
-                    : coordinateExecutionCodeBase_,
-                static_cast<std::uint32_t>(coordinateExecutionMode_),
-                false,
-            };
-        }
-        const native::CoordinatePoolRuntimeProbe poolProbe =
-            coordinatePoolSelected
-            ? ActiveCoordinatePoolProbe()
-            : native::CoordinatePoolRuntimeProbe{};
-        return native::AlgorithmExecutionContextRefreshKey{
-            static_cast<std::int32_t>(processId_),
-            moduleBase_,
-            coordinatePoolSelected ? poolProbe.guestEntry : algorithmGuestPc_,
-            coordinatePoolSelected ? 0U : algorithmEntryInstruction_,
-            coordinatePoolSelected,
-        };
-    }
-
-    native::ProcessExecutionCodeTarget
-    CurrentCoordinateExecutionCodeTarget() const noexcept {
-        if (!UsesCoordinateExecutionRuntime()) return {};
-        if (coordinateExecutionCodeBase_ == 0 ||
-            coordinateExecutionCodeSize_ == 0 ||
-            coordinateExecutionCodeSize_ >
-                std::numeric_limits<std::uintptr_t>::max() -
-                    coordinateExecutionCodeBase_) {
-            return native::ProcessExecutionCodeTarget{0, 0, 0, true};
-        }
-        const native::CoordinateExecutionCodeRange range{
-            coordinateExecutionCodeBase_,
-            coordinateExecutionCodeBase_ + coordinateExecutionCodeSize_,
-        };
-        std::uint64_t entry = 0;
-        if (!native::ResolveCoordinateExecutionCodeAddress(
-                range,
-                coordinateExecutionDiscoveryInput_.rawEntry,
-                &entry) ||
-            entry > std::numeric_limits<std::uintptr_t>::max()) {
-            return native::ProcessExecutionCodeTarget{0, 0, 0, true};
-        }
-        return native::ProcessExecutionCodeTarget{
-            static_cast<std::uintptr_t>(entry),
-            coordinateExecutionCodeBase_,
-            coordinateExecutionCodeBase_ + coordinateExecutionCodeSize_,
-            true,
-        };
-    }
-
-    void RefreshAlgorithmExecutionContext() {
-        const bool coordinatePoolSelected =
-            UsesAnyCoordinatePoolRuntime();
-        const bool coordinateExecutionSelected =
-            UsesCoordinateExecutionRuntime();
-        const bool coordinateContextSelected =
-            coordinatePoolSelected || coordinateExecutionSelected;
-        if (!coordinateContextSelected || memory_ == nullptr) {
-            if (!coordinateContextSelected) {
-                algorithmExecutionContext_ = {};
-                algorithmExecutionContextReady_ = false;
-                coordinateExecutionContextHadSuccess_ = false;
-                algorithmExecutionContextRefreshPolicy_.Invalidate();
-            }
-            coordinatePoolReady_ = false;
-            return;
-        }
-
-        if (coordinateExecutionSelected) {
-            RefreshCoordinateExecutionDiscovery();
-        }
-
-        const auto now = std::chrono::steady_clock::now();
-        const native::AlgorithmExecutionContextRefreshKey refreshKey =
-            CurrentAlgorithmExecutionContextRefreshKey(
-                coordinatePoolSelected);
-        bool executionContextRefreshed = false;
-        if (!algorithmExecutionContext_.HasThreadContext() ||
-            algorithmExecutionContextRefreshPolicy_.ShouldRefresh(
-                refreshKey, now)) {
-            executionContextRefreshed = true;
-            native::ProcessExecutionContext refreshed{};
-            if (!memory_->ReadProcessExecutionContext(
-                    moduleBase_,
-                    CurrentCoordinateExecutionCodeTarget(),
-                    refreshed)) {
-                if (algorithmExecutionContextReady_) {
-                    algorithmPositionRuntime_.Invalidate();
-                    algorithmReplayPagePolicy_.Invalidate();
-                }
-                algorithmExecutionContext_ = {};
-                algorithmExecutionContextReady_ = false;
-                coordinateExecutionContextHadSuccess_ = false;
-                algorithmExecutionContextRefreshPolicy_.MarkFailed();
-            } else {
-                const bool executionContextChanged =
-                    !algorithmExecutionContextReady_ ||
-                    algorithmExecutionContext_.generation !=
-                        refreshed.generation ||
-                    algorithmExecutionContext_.threadId !=
-                        refreshed.threadId ||
-                    algorithmExecutionContext_.threadStartTimeTicks !=
-                        refreshed.threadStartTimeTicks ||
-                    algorithmExecutionContext_.tpidrEl0 !=
-                        refreshed.tpidrEl0 ||
-                    algorithmExecutionContext_.pacgaLow !=
-                        refreshed.pacgaLow ||
-                    algorithmExecutionContext_.pacgaHigh !=
-                        refreshed.pacgaHigh ||
-                    algorithmExecutionContext_.pacgaOracle.data !=
-                        refreshed.pacgaOracle.data ||
-                    algorithmExecutionContext_.pacgaOracle.modifier !=
-                        refreshed.pacgaOracle.modifier ||
-                    algorithmExecutionContext_.pacgaOracle.result !=
-                        refreshed.pacgaOracle.result ||
-                    algorithmExecutionContext_.pacgaOracle.available !=
-                        refreshed.pacgaOracle.available;
-                if (executionContextChanged) {
-                    coordinateExecutionContextHadSuccess_ = false;
-                    algorithmPositionRuntime_.Invalidate();
-                    algorithmReplayPagePolicy_.Invalidate();
-                }
-                algorithmExecutionContext_ = refreshed;
-                algorithmExecutionContextReady_ = refreshed.IsUsable();
-                algorithmExecutionContextRefreshPolicy_.MarkSucceeded(
-                    CurrentAlgorithmExecutionContextRefreshKey(
-                        coordinatePoolSelected),
-                    now);
-            }
-        }
-        if (coordinatePoolSelected && algorithmExecutionContextReady_) {
-            coordinatePoolFrame_ =
-                coordinatePoolFrame_ ==
-                        std::numeric_limits<std::uint64_t>::max()
-                    ? 1
-                    : coordinatePoolFrame_ + 1;
-            coordinatePoolReady_ = UsesCoordinateDecrypt2Runtime()
-                ? coordinateDecrypt2Runtime_.Refresh(
-                      *memory_,
-                      processId_,
-                      moduleBase_,
-                      algorithmExecutionContext_,
-                      coordinatePoolFrame_)
-                : coordinatePoolRuntime_.Refresh(
-                      *memory_,
-                      processId_,
-                      moduleBase_,
-                      algorithmExecutionContext_,
-                      coordinatePoolFrame_);
-            const native::CoordinatePoolRuntimeProbe poolProbe =
-                ActiveCoordinatePoolProbe();
-            const bool hasIdentity = poolProbe.bridge != 0 &&
-                poolProbe.context != 0 && poolProbe.guestEntry != 0;
-            const bool identityChanged = hasIdentity &&
-                coordinatePoolEntry_ != 0 &&
-                (coordinatePoolBridge_ != poolProbe.bridge ||
-                 coordinatePoolContext_ != poolProbe.context ||
-                 coordinatePoolEntry_ != poolProbe.guestEntry);
-            if (identityChanged) {
-                decodedPositionCache_.clear();
-                decodedPositionPending_.clear();
-                characterPositions_.Clear();
-            }
-            if (hasIdentity) {
-                coordinatePoolBridge_ = poolProbe.bridge;
-                coordinatePoolContext_ = poolProbe.context;
-                coordinatePoolEntry_ = poolProbe.guestEntry;
-            }
-        } else if (coordinateExecutionSelected) {
-            coordinatePoolReady_ = false;
-            const bool decoderRefreshed =
-                coordinateExecutionDecoder_.Refresh(
-                *memory_,
-                static_cast<std::int32_t>(processId_),
-                moduleBase_,
-                coordinateExecutionModuleSize_,
-                coordinateExecutionCodeBase_,
-                coordinateExecutionCodeSize_,
-                algorithmExecutionContext_);
-            if (IsCoordinateTraceEnabled() &&
-                (executionContextRefreshed || !decoderRefreshed ||
-                 ShouldWriteCoordinateFrameTrace(coordinateTraceFrame_))) {
-                const native::CoordinateExecutionDecoderProbe executionProbe =
-                    coordinateExecutionDecoder_.Probe();
-                const native::ProcessExecutionContextDiagnostic diagnostic =
-                    memory_->ExecutionContextDiagnostic();
-                const native::CoordinateExecutionEvidence& evidence =
-                    executionProbe.runtime.evidence;
-                std::fprintf(
-                    stderr,
-                    "[coordinate-execution-trace] frame=%llu mode=%u "
-                    "refreshed=%d scan_anchor=%llx root=%llx "
-                    "raw_entry=%llx module_base=%llx module_size=%llx "
-                    "code_base=%llx code_size=%llx context_ready=%d "
-                    "context_source=%u context_error=%u context_sys=%d "
-                    "tid=%d generation=%llu tpidr=%llx key=%d oracle=%d "
-                    "candidate_count=%llu cursor=%llu known=%d "
-                    "decoder_stage=%u decoder_error=%u decoder_status=%u "
-                    "runtime_stage=%u runtime_error=%u runtime_status=%u "
-                    "runtime_fault=%llx runtime_uc=%d evidence_stop=%d "
-                    "evidence_return=%d evidence_hook=%d evidence_magic=%d "
-                    "evidence_capture=%d capture_count=%llu "
-                    "captured_pc=%llx captured_slot=%llx "
-                    "captured_object=%llx final_pc=%llx write_size=%llu\n",
-                    static_cast<unsigned long long>(coordinateTraceFrame_),
-                    static_cast<unsigned int>(coordinateExecutionMode_),
-                    decoderRefreshed ? 1 : 0,
-                    static_cast<unsigned long long>(
-                        coordinateExecutionDiscoveryInput_.scanAnchor),
-                    static_cast<unsigned long long>(
-                        coordinateExecutionDiscoveryInput_.root),
-                    static_cast<unsigned long long>(
-                        coordinateExecutionDiscoveryInput_.rawEntry),
-                    static_cast<unsigned long long>(moduleBase_),
-                    static_cast<unsigned long long>(
-                        coordinateExecutionModuleSize_),
-                    static_cast<unsigned long long>(
-                        coordinateExecutionCodeBase_),
-                    static_cast<unsigned long long>(
-                        coordinateExecutionCodeSize_),
-                    algorithmExecutionContextReady_ ? 1 : 0,
-                    static_cast<unsigned int>(diagnostic.source),
-                    static_cast<unsigned int>(diagnostic.error),
-                    diagnostic.systemError,
-                    algorithmExecutionContext_.threadId,
-                    static_cast<unsigned long long>(
-                        algorithmExecutionContext_.generation),
-                    static_cast<unsigned long long>(
-                        algorithmExecutionContext_.tpidrEl0),
-                    algorithmExecutionContext_.HasPacgaKey() ? 1 : 0,
-                    algorithmExecutionContext_.pacgaOracle.available ? 1 : 0,
-                    static_cast<unsigned long long>(
-                        executionProbe.candidateCount),
-                    static_cast<unsigned long long>(executionProbe.cursor),
-                    executionProbe.knownCandidate ? 1 : 0,
-                    static_cast<unsigned int>(executionProbe.stage),
-                    static_cast<unsigned int>(executionProbe.error),
-                    static_cast<unsigned int>(executionProbe.status),
-                    static_cast<unsigned int>(executionProbe.runtime.stage),
-                    static_cast<unsigned int>(executionProbe.runtime.error),
-                    static_cast<unsigned int>(executionProbe.runtime.status),
-                    static_cast<unsigned long long>(
-                        executionProbe.runtime.faultAddress),
-                    executionProbe.runtime.unicornError,
-                    evidence.hitStopPc ? 1 : 0,
-                    evidence.hitReturnStub ? 1 : 0,
-                    evidence.hitHookPc ? 1 : 0,
-                    evidence.returnStubMagicVerifiedBeforeRun ? 1 : 0,
-                    evidence.captureValid ? 1 : 0,
-                    static_cast<unsigned long long>(evidence.captureCount),
-                    static_cast<unsigned long long>(evidence.capturedPc),
-                    static_cast<unsigned long long>(evidence.capturedSlot),
-                    static_cast<unsigned long long>(evidence.capturedObject),
-                    static_cast<unsigned long long>(evidence.finalPc),
-                    static_cast<unsigned long long>(
-                        evidence.capturedWriteSize));
-            }
-        } else {
-            coordinatePoolReady_ = false;
-        }
-        if (IsCoordinateTraceEnabled() &&
-            !coordinateExecutionSelected &&
-            (executionContextRefreshed ||
-             ShouldWriteCoordinateFrameTrace(coordinateTraceFrame_))) {
-            const native::ProcessExecutionContextDiagnostic diagnostic =
-                memory_->ExecutionContextDiagnostic();
-            const native::CoordinatePoolRuntimeProbe poolProbe =
-                ActiveCoordinatePoolProbe();
-            if (!UsesCoordinateDecrypt2Runtime()) {
-                std::fprintf(
-                    stderr,
-                    "[coordinate-context-trace] frame=%llu refreshed=%d "
-                    "ready=%d source=%u cd=%u sys=%d device_sys=%d "
-                    "ptrace_sys=%d device_requests=%zu operands=%d "
-                    "tid=%d thread_start=%llu generation=%llu tpidr=%llx "
-                    "key_available=%d oracle_available=%d pool_ready=%d "
-                    "pool_stage=%u pool_error=%u pool_sys=%d "
-                    "analysis_find=%u analysis_detail=%u "
-                    "analysis_madds=%u analysis_ring_madds=%u "
-                    "analysis_candidates=%u analysis_insn=%u "
-                    "decode_limit=%u analysis_mode=%u analysis_passes=%u "
-                    "primary_error=%u primary_find=%u primary_detail=%u "
-                    "method_load=%u failed_method=%llx "
-                    "read_stage=%u read_failure=%u read_path=%u "
-                    "bridge=%llx context=%llx raw_entry=%llx "
-                    "resolved_entry=%llx branch_status=%u branch_hops=%u "
-                    "branch_insn=%08x branch_terminal=%08x pool=%llx "
-                    "remote_state=%u remote_used=%d remote_req=%llu "
-                    "remote_ok=%llu remote_fail=%llu "
-                    "attempts=%llu successes=%llu\n",
-                    static_cast<unsigned long long>(coordinateTraceFrame_),
-                    executionContextRefreshed ? 1 : 0,
-                    algorithmExecutionContextReady_ ? 1 : 0,
-                    static_cast<unsigned int>(diagnostic.source),
-                    static_cast<unsigned int>(diagnostic.error),
-                    diagnostic.systemError,
-                    diagnostic.deviceStatus,
-                    diagnostic.ptraceStatus,
-                    diagnostic.deviceRequestCount,
-                    diagnostic.pacgaOperandsResolved ? 1 : 0,
-                    algorithmExecutionContext_.threadId,
-                    static_cast<unsigned long long>(
-                        algorithmExecutionContext_.threadStartTimeTicks),
-                    static_cast<unsigned long long>(
-                        algorithmExecutionContext_.generation),
-                    static_cast<unsigned long long>(
-                        algorithmExecutionContext_.tpidrEl0),
-                    algorithmExecutionContext_.HasPacgaKey() ? 1 : 0,
-                    algorithmExecutionContext_.pacgaOracle.available ? 1 : 0,
-                    coordinatePoolReady_ ? 1 : 0,
-                    static_cast<unsigned int>(poolProbe.stage),
-                    static_cast<unsigned int>(poolProbe.error),
-                    poolProbe.systemError,
-                    static_cast<unsigned int>(poolProbe.analysisFindStage),
-                    static_cast<unsigned int>(poolProbe.analysisFindDetail),
-                    static_cast<unsigned int>(poolProbe.analysisMaddCount),
-                    static_cast<unsigned int>(
-                        poolProbe.analysisRingMaddCount),
-                    static_cast<unsigned int>(
-                        poolProbe.analysisCandidateCount),
-                    static_cast<unsigned int>(
-                        poolProbe.analysisFailureInstruction),
-                    static_cast<unsigned int>(
-                        poolProbe.analysisDecodeInstructionLimit),
-                    static_cast<unsigned int>(poolProbe.analysisMode),
-                    static_cast<unsigned int>(poolProbe.analysisPasses),
-                    static_cast<unsigned int>(
-                        poolProbe.primaryAnalysisError),
-                    static_cast<unsigned int>(
-                        poolProbe.primaryAnalysisFindStage),
-                    static_cast<unsigned int>(
-                        poolProbe.primaryAnalysisFindDetail),
-                    static_cast<unsigned int>(
-                        poolProbe.analysisMethodLoadResult),
-                    static_cast<unsigned long long>(poolProbe.failedMethod),
-                    static_cast<unsigned int>(poolProbe.read.stage),
-                    static_cast<unsigned int>(poolProbe.read.failure),
-                    static_cast<unsigned int>(poolProbe.read.lastPath),
-                    static_cast<unsigned long long>(poolProbe.bridge),
-                    static_cast<unsigned long long>(poolProbe.context),
-                    static_cast<unsigned long long>(poolProbe.guestEntry),
-                    static_cast<unsigned long long>(poolProbe.resolvedEntry),
-                    static_cast<unsigned int>(poolProbe.entryBranchStatus),
-                    static_cast<unsigned int>(poolProbe.entryBranchHops),
-                    static_cast<unsigned int>(poolProbe.entryInstruction),
-                    static_cast<unsigned int>(
-                        poolProbe.entryTerminalInstruction),
-                    static_cast<unsigned long long>(
-                        poolProbe.poolPointer.normalizedValue),
-                    static_cast<unsigned int>(poolProbe.remotePlanState),
-                    poolProbe.remotePlanUsed ? 1 : 0,
-                    static_cast<unsigned long long>(
-                        poolProbe.remotePlanAttempts),
-                    static_cast<unsigned long long>(
-                        poolProbe.remotePlanSuccesses),
-                    static_cast<unsigned long long>(
-                        poolProbe.remotePlanFailures),
-                    static_cast<unsigned long long>(poolProbe.attempts),
-                    static_cast<unsigned long long>(poolProbe.successes));
-                std::fflush(stderr);
-                return;
-            }
-            std::fprintf(
-                stderr,
-                "[coordinate-context-trace] frame=%llu refreshed=%d "
-                "ready=%d source=%u cd=%u sys=%d device_sys=%d "
-                "ptrace_sys=%d device_requests=%zu operands=%d "
-                "tid=%d thread_start=%llu generation=%llu tpidr=%llx "
-                "key_available=%d oracle_available=%d pool_ready=%d "
-                "pool_stage=%u pool_error=%u pool_sys=%d "
-                "analysis_find=%u analysis_detail=%u "
-                "analysis_madds=%u analysis_ring_madds=%u "
-                "analysis_candidates=%u analysis_insn=%u decode_limit=%u "
-                "read_stage=%u read_failure=%u read_path=%u "
-                "bridge=%llx context=%llx raw_entry=%llx "
-                "resolved_entry=%llx branch_status=%u branch_hops=%u "
-                "branch_insn=%08x branch_terminal=%08x pool=%llx "
-                "remote_state=%u remote_used=%d remote_req=%llu "
-                "remote_ok=%llu remote_fail=%llu "
-                "attempts=%llu successes=%llu\n",
-                static_cast<unsigned long long>(coordinateTraceFrame_),
-                executionContextRefreshed ? 1 : 0,
-                algorithmExecutionContextReady_ ? 1 : 0,
-                static_cast<unsigned int>(diagnostic.source),
-                static_cast<unsigned int>(diagnostic.error),
-                diagnostic.systemError,
-                diagnostic.deviceStatus,
-                diagnostic.ptraceStatus,
-                diagnostic.deviceRequestCount,
-                diagnostic.pacgaOperandsResolved ? 1 : 0,
-                algorithmExecutionContext_.threadId,
-                static_cast<unsigned long long>(
-                    algorithmExecutionContext_.threadStartTimeTicks),
-                static_cast<unsigned long long>(
-                    algorithmExecutionContext_.generation),
-                static_cast<unsigned long long>(
-                    algorithmExecutionContext_.tpidrEl0),
-                algorithmExecutionContext_.HasPacgaKey() ? 1 : 0,
-                algorithmExecutionContext_.pacgaOracle.available ? 1 : 0,
-                coordinatePoolReady_ ? 1 : 0,
-                static_cast<unsigned int>(poolProbe.stage),
-                static_cast<unsigned int>(poolProbe.error),
-                poolProbe.systemError,
-                static_cast<unsigned int>(poolProbe.analysisFindStage),
-                static_cast<unsigned int>(poolProbe.analysisFindDetail),
-                static_cast<unsigned int>(poolProbe.analysisMaddCount),
-                static_cast<unsigned int>(
-                    poolProbe.analysisRingMaddCount),
-                static_cast<unsigned int>(
-                    poolProbe.analysisCandidateCount),
-                static_cast<unsigned int>(
-                    poolProbe.analysisFailureInstruction),
-                static_cast<unsigned int>(
-                    poolProbe.analysisDecodeInstructionLimit),
-                static_cast<unsigned int>(poolProbe.read.stage),
-                static_cast<unsigned int>(poolProbe.read.failure),
-                static_cast<unsigned int>(poolProbe.read.lastPath),
-                static_cast<unsigned long long>(poolProbe.bridge),
-                static_cast<unsigned long long>(poolProbe.context),
-                static_cast<unsigned long long>(poolProbe.guestEntry),
-                static_cast<unsigned long long>(poolProbe.resolvedEntry),
-                static_cast<unsigned int>(poolProbe.entryBranchStatus),
-                static_cast<unsigned int>(poolProbe.entryBranchHops),
-                static_cast<unsigned int>(poolProbe.entryInstruction),
-                static_cast<unsigned int>(
-                    poolProbe.entryTerminalInstruction),
-                static_cast<unsigned long long>(
-                    poolProbe.poolPointer.normalizedValue),
-                static_cast<unsigned int>(poolProbe.remotePlanState),
-                poolProbe.remotePlanUsed ? 1 : 0,
-                static_cast<unsigned long long>(
-                    poolProbe.remotePlanAttempts),
-                static_cast<unsigned long long>(
-                    poolProbe.remotePlanSuccesses),
-                static_cast<unsigned long long>(
-                    poolProbe.remotePlanFailures),
-                static_cast<unsigned long long>(poolProbe.attempts),
-                static_cast<unsigned long long>(poolProbe.successes));
-            std::fflush(stderr);
-        }
-    }
-
-    void RunForcedCoordinateProbe() {
-        const std::uintptr_t component =
-            ForcedCoordinateProbeComponent();
-        if (component == 0 || memory_ == nullptr ||
-            !algorithmEntryReady_ || !algorithmExecutionContextReady_) {
-            return;
-        }
-        native::AlgorithmPosition position{};
-        const native::AlgorithmPositionRuntimeResult result =
-            algorithmPositionRuntime_.ExecuteAtGuestPcResult(
-                *memory_,
-                algorithmGuestPc_,
-                component,
-                algorithmExecutionContext_,
-                position,
-                false);
-        const native::AlgorithmPositionRuntimeProbe replayProbe =
-            algorithmPositionRuntime_.Probe();
-        const char* state = result ==
-                native::AlgorithmPositionRuntimeResult::Pending
-            ? "pending"
-            : (result == native::AlgorithmPositionRuntimeResult::Ready
-                   ? "ready"
-                   : "failed");
-        std::fprintf(
-            stderr,
-            "[coordinate-forced-probe] component=%llx state=%s "
-            "request=%llu completed=%llu runtime_error=%u fault=%llx "
-            "final_pc=%llx tpidr=%llx ctr=%llx cntfrq=%llx "
-            "counter_first=%llx counter_last=%llx "
-            "mrs_ctr=%llu mrs_tpidr=%llu mrs_cntfrq=%llu "
-            "mrs_counter=%llu pac_count=%llu xyz=(%.3f,%.3f,%.3f)\n",
-            static_cast<unsigned long long>(component),
-            state,
-            static_cast<unsigned long long>(replayProbe.requestId),
-            static_cast<unsigned long long>(
-                replayProbe.completedRequestId),
-            static_cast<unsigned int>(replayProbe.error),
-            static_cast<unsigned long long>(replayProbe.faultAddress),
-            static_cast<unsigned long long>(replayProbe.finalPc),
-            static_cast<unsigned long long>(replayProbe.tpidrEl0),
-            static_cast<unsigned long long>(replayProbe.ctrEl0),
-            static_cast<unsigned long long>(replayProbe.cntfrqEl0),
-            static_cast<unsigned long long>(replayProbe.counterFirst),
-            static_cast<unsigned long long>(replayProbe.counterLast),
-            static_cast<unsigned long long>(replayProbe.ctrReadCount),
-            static_cast<unsigned long long>(replayProbe.tpidrReadCount),
-            static_cast<unsigned long long>(replayProbe.cntfrqReadCount),
-            static_cast<unsigned long long>(replayProbe.counterReadCount),
-            static_cast<unsigned long long>(replayProbe.pacgaCount),
-            position.x,
-            position.y,
-            position.z);
-        if (result == native::AlgorithmPositionRuntimeResult::Failed &&
-            replayProbe.instructionTraceCount != 0 &&
-            replayProbe.completedRequestId !=
-                algorithmLastForcedTraceRequest_) {
-            algorithmLastForcedTraceRequest_ =
-                replayProbe.completedRequestId;
-            std::fprintf(
-                stderr,
-                "[coordinate-forced-path] request=%llu count=%zu pcs=",
-                static_cast<unsigned long long>(
-                    replayProbe.completedRequestId),
-                replayProbe.instructionTraceCount);
-            for (std::size_t index = 0;
-                 index < replayProbe.instructionTraceCount;
-                 ++index) {
-                std::fprintf(
-                    stderr,
-                    "%s%llx",
-                    index == 0 ? "" : ",",
-                    static_cast<unsigned long long>(
-                        replayProbe.instructionTrace[index]));
-            }
-            std::fputc('\n', stderr);
-        }
-        std::fflush(stderr);
-    }
-
-    void RefreshAlgorithmEntry(bool force) {
-        const auto now = std::chrono::steady_clock::now();
-        if (!force &&
-            algorithmEntryValidationAt_.time_since_epoch().count() != 0 &&
-            now - algorithmEntryValidationAt_ < std::chrono::seconds(1)) {
-            return;
-        }
-        algorithmEntryValidationAt_ = now;
-
-        native::CoordinateReplayEntrySnapshot snapshot{};
-        native::CoordinateReplayEntryDiagnostic diagnostic{};
-        const bool candidateReady = memory_ != nullptr &&
-            memory_->ResolveCoordinateReplayEntry(
-                moduleBase_, snapshot, diagnostic);
-        const std::uintptr_t candidatePc = candidateReady
-            ? snapshot.entry
-            : 0;
-        const std::uint32_t candidateInstruction = candidateReady
-            ? snapshot.instruction
-            : 0;
-        const bool changed = candidateReady != algorithmEntryReady_ ||
-            candidatePc != algorithmGuestPc_ ||
-            (candidateReady &&
-             candidateInstruction != algorithmEntryInstruction_);
-        if (changed) {
-            algorithmPositionRuntime_.Invalidate();
-            algorithmReplayPagePolicy_.Invalidate();
-            if (!UsesAnyCoordinatePoolRuntime()) {
-                algorithmExecutionContextRefreshPolicy_.Invalidate();
-                algorithmExecutionContext_ = {};
-                algorithmExecutionContextReady_ = false;
-                coordinateExecutionContextHadSuccess_ = false;
-            }
-        }
-        algorithmGuestPc_ = candidatePc;
-        algorithmEntryInstruction_ = candidateReady
-            ? candidateInstruction
-            : 0;
-        algorithmEntryReady_ = candidateReady;
-        coordinateReplayEntrySnapshot_ = snapshot;
-        coordinateReplayEntryDiagnostic_ = diagnostic;
-        if (IsCoordinateTraceEnabled()) {
-            std::fprintf(
-                stderr,
-                "[coordinate-entry-trace] frame=%llu ready=%d bridge=%llx "
-                "entry=%llx map_start=%llx map_end=%llx instruction=%08x "
-                "cd=%u sys=%d read_stage=%u read_failure=%u read_path=%u "
-                "read_at=%llx read_n=%zu\n",
-                static_cast<unsigned long long>(coordinateTraceFrame_),
-                candidateReady ? 1 : 0,
-                static_cast<unsigned long long>(snapshot.bridge),
-                static_cast<unsigned long long>(snapshot.entry),
-                static_cast<unsigned long long>(snapshot.mappingStart),
-                static_cast<unsigned long long>(snapshot.mappingEnd),
-                static_cast<unsigned int>(snapshot.instruction),
-                static_cast<unsigned int>(diagnostic.error),
-                diagnostic.systemError,
-                static_cast<unsigned int>(diagnostic.read.stage),
-                static_cast<unsigned int>(diagnostic.read.failure),
-                static_cast<unsigned int>(diagnostic.read.lastPath),
-                static_cast<unsigned long long>(diagnostic.read.address),
-                diagnostic.read.size);
-            std::fflush(stderr);
-        }
-    }
-
-    void RecordCoordinateFrameFailure(const CoordinateFailure& failure) {
-        if (failure.error == CoordinateDecryptError::None) return;
-        if (algorithmFrameFailure_.error == CoordinateDecryptError::None ||
-            failure.read.HasFailure() ||
-            !algorithmFrameFailure_.read.HasFailure()) {
-            algorithmFrameFailure_ = failure;
-        }
-    }
-
-    void FinalizeCoordinateExecutionHealth(
-        bool infrastructureProbeFailed) {
-        EvaluateAlgorithmExecutionHealth();
-        if (infrastructureProbeFailed) return;
-        const native::CoordinateExecutionHealthSample health =
-            native::ResolveCoordinateExecutionHealthSample(
-                UsesCoordinateExecutionRuntime(),
-                static_cast<std::size_t>(algorithmFrameAttemptCount_),
-                static_cast<std::size_t>(algorithmFrameSuccessCount_),
-                static_cast<std::size_t>(
-                    coordinateExecutionFrameAttemptCount_),
-                static_cast<std::size_t>(
-                    coordinateExecutionFrameSuccessCount_));
-        algorithmReplayBackoffPolicy_.ObserveFrame(
-            health.attempts,
-            health.successes,
-            std::chrono::steady_clock::now());
-    }
-
-    void EvaluateAlgorithmExecutionHealth() {
-        const bool coordinateExecution = UsesCoordinateExecutionRuntime();
-        const native::CoordinateExecutionHealthSample health =
-            native::ResolveCoordinateExecutionHealthSample(
-                coordinateExecution,
-                static_cast<std::size_t>(algorithmFrameAttemptCount_),
-                static_cast<std::size_t>(algorithmFrameSuccessCount_),
-                static_cast<std::size_t>(
-                    coordinateExecutionFrameAttemptCount_),
-                static_cast<std::size_t>(
-                    coordinateExecutionFrameSuccessCount_));
-        if (!UsesAnyCoordinateDecryptRuntime() || !CoordinateEntryReady() ||
-            !algorithmExecutionContextReady_) {
-            if (!UsesAnyCoordinateDecryptRuntime() ||
-                !algorithmExecutionContextReady_) {
-                algorithmFailureSince_ = {};
-            }
-            return;
-        }
-        if (!health.HasAttempt()) {
-            return;
-        }
-        if (health.IsHealthy()) {
-            algorithmFailureSince_ = {};
-            return;
-        }
-
-        const auto now = std::chrono::steady_clock::now();
-        if (algorithmFailureSince_.time_since_epoch().count() == 0) {
-            algorithmFailureSince_ = now;
-            return;
-        }
-        const bool acceleratedRecovery =
-            native::ShouldAccelerateCoordinateExecutionRecovery(
-                coordinateExecution,
-                coordinateExecutionContextHadSuccess_,
-                algorithmFrameAgedDecodedFailure_);
-        if (!native::HasCoordinateFailureRecoveryElapsed(
-                algorithmFailureSince_,
-                now,
-                acceleratedRecovery) ||
-            memory_ == nullptr) {
-            return;
-        }
-        if (!memory_->RejectProcessExecutionContext()) {
-            return;
-        }
-        algorithmFailureSince_ = {};
-        algorithmExecutionContext_ = {};
-        algorithmExecutionContextReady_ = false;
-        coordinateExecutionContextHadSuccess_ = false;
-        algorithmExecutionContextRefreshPolicy_.Invalidate();
-        coordinatePoolReady_ = false;
-        coordinateExecutionDecoder_.Reset();
-        algorithmEntryValidationAt_ = {};
-        algorithmPositionRuntime_.Invalidate();
-        algorithmReplayPagePolicy_.Invalidate();
-    }
-
-    bool UsesCoordinatePoolRuntime() const noexcept {
-        return algorithmPositionRequested_;
-    }
-
-    bool UsesCoordinateDecrypt2Runtime() const noexcept {
-        return hardwareBreakpointRequested_ || algorithmPositionRequested_;
-    }
-
-    bool UsesAnyCoordinatePoolRuntime() const noexcept {
-        return UsesCoordinatePoolRuntime() ||
-            UsesCoordinateDecrypt2Runtime();
-    }
-
-    bool UsesCoordinateExecutionRuntime() const noexcept {
-        return coordinateExecutionMode_ != 0;
-    }
-
-    bool UsesAnyCoordinateDecryptRuntime() const noexcept {
-        return UsesAnyCoordinatePoolRuntime() ||
-            UsesCoordinateExecutionRuntime();
-    }
-
-    native::CoordinatePoolRuntimeProbe
-    ActiveCoordinatePoolProbe() const noexcept {
-        if (UsesCoordinateDecrypt2Runtime()) {
-            return coordinateDecrypt2Runtime_.Probe();
-        }
-        return UsesCoordinatePoolRuntime()
-            ? coordinatePoolRuntime_.Probe()
-            : native::CoordinatePoolRuntimeProbe{};
-    }
-
-    bool CoordinateEntryReady() const {
-        if (UsesCoordinateExecutionRuntime()) {
-            const native::CoordinateExecutionDecoderProbe executionProbe =
-                coordinateExecutionDecoder_.Probe();
-            return executionProbe.refreshed &&
-                executionProbe.candidateCount != 0;
-        }
-        if (UsesAnyCoordinatePoolRuntime()) {
-            const native::CoordinatePoolRuntimeProbe poolProbe =
-                ActiveCoordinatePoolProbe();
-            return poolProbe.guestEntry != 0 && poolProbe.codeBase != 0 &&
-                poolProbe.codeSize != 0;
-        }
-        return algorithmEntryReady_;
-    }
-
-    CoordinateFailure CurrentCoordinateFailure() const {
-        if (UsesCoordinateExecutionRuntime()) {
-            if (native::IsCoordinateFrameHealthy(
-                    static_cast<std::size_t>(algorithmFrameAttemptCount_),
-                    static_cast<std::size_t>(algorithmFrameSuccessCount_),
-                    algorithmFrameAgedDecodedFailure_)) {
-                return {};
-            }
-            const native::CoordinateExecutionDecoderProbe executionProbe =
-                coordinateExecutionDecoder_.Probe();
-            const CoordinateDecryptError executionError =
-                CoordinateExecutionError(executionProbe);
-            return {
-                executionError != CoordinateDecryptError::None
-                    ? executionError
-                    : (CoordinateEntryReady()
-                           ? CoordinateDecryptError::None
-                           : CoordinateDecryptError::EntryResolveFailed),
-                executionProbe.runtime.read.systemError,
-                executionProbe.runtime.read,
-            };
-        }
-        if (!UsesAnyCoordinatePoolRuntime()) return {};
-
-        const bool coordinatePoolSelected =
-            UsesAnyCoordinatePoolRuntime();
-        const native::CoordinatePoolRuntimeProbe poolProbe =
-            coordinatePoolSelected
-            ? ActiveCoordinatePoolProbe()
-            : native::CoordinatePoolRuntimeProbe{};
-        const CoordinateDecryptError poolError = coordinatePoolSelected
-            ? CoordinatePoolError(poolProbe.error, poolProbe.read)
-            : CoordinateDecryptError::None;
-        const native::ProcessExecutionContextDiagnostic contextDiagnostic =
-            memory_ != nullptr
-            ? memory_->ExecutionContextDiagnostic()
-            : native::ProcessExecutionContextDiagnostic{};
-
-        if (!CoordinateEntryReady()) {
-            if (coordinatePoolSelected) {
-                return {
-                    poolError != CoordinateDecryptError::None
-                        ? poolError
-                        : CoordinateDecryptError::EntryResolveFailed,
-                    poolProbe.systemError,
-                    poolProbe.read,
-                };
-            }
-            return {
-                coordinateReplayEntryDiagnostic_.error !=
-                        CoordinateDecryptError::None
-                    ? coordinateReplayEntryDiagnostic_.error
-                    : CoordinateDecryptError::EntryResolveFailed,
-                coordinateReplayEntryDiagnostic_.systemError,
-                coordinateReplayEntryDiagnostic_.read,
-            };
-        }
-        if (!algorithmExecutionContextReady_) {
-            return {
-                contextDiagnostic.error != CoordinateDecryptError::None
-                    ? contextDiagnostic.error
-                    : CoordinateDecryptError::ContextDataInvalid,
-                contextDiagnostic.systemError,
-            };
-        }
-        if (native::ShouldReportCoordinateFrameOutputError(
-                static_cast<std::size_t>(algorithmFrameAttemptCount_),
-                static_cast<std::size_t>(algorithmFrameSuccessCount_),
-                algorithmFrameOutputError_ != CoordinateDecryptError::None)) {
-            return {algorithmFrameOutputError_, 0};
-        }
-        if (native::IsCoordinateFrameHealthy(
-                static_cast<std::size_t>(algorithmFrameAttemptCount_),
-                static_cast<std::size_t>(algorithmFrameSuccessCount_),
-                algorithmFrameAgedDecodedFailure_)) {
-            return {};
-        }
-        if (algorithmFrameFailure_.error != CoordinateDecryptError::None) {
-            return algorithmFrameFailure_;
-        }
-        if (coordinatePoolSelected && poolError != CoordinateDecryptError::None) {
-            return {poolError, poolProbe.systemError, poolProbe.read};
-        }
-
-        if (algorithmFrameAttemptCount_ != 0) {
-            if (coordinatePoolSelected) {
-                return {CoordinateDecryptError::PositionReadFailed, 0};
-            }
-            const native::AlgorithmPositionRuntimeProbe replayProbe =
-                algorithmPositionRuntime_.Probe();
-            const CoordinateDecryptError replayError =
-                AlgorithmPositionError(replayProbe.error);
-            return {
-                replayError != CoordinateDecryptError::None
-                    ? replayError
-                    : CoordinateDecryptError::ReplayExecutionFailed,
-                replayProbe.unicornError != 0
-                    ? replayProbe.unicornError
-                    : replayProbe.read.systemError,
-                replayProbe.read,
-            };
-        }
-        return {};
-    }
-
     void ApplyCoordinateDiagnostic(
         std::string& diagnostic,
         const RuntimeProbe& probe) const {
@@ -10030,139 +6819,39 @@ private:
         }
         diagnostic = FormatCoordinateDecryptDiagnostic(
             probe.coordinateError,
-            probe.coordinateSystemError,
-            probe.coordinateRead,
-            probe.coordinatePoolPointer,
-            probe.coordinateEntry);
+            probe.coordinateSystemError);
     }
 
     void UpdateCoordinateProbe(RuntimeProbe& probe) const {
-        const bool coordinatePoolSelected =
-            UsesAnyCoordinatePoolRuntime();
-        const bool coordinateExecutionSelected =
-            UsesCoordinateExecutionRuntime();
-        const native::CoordinatePoolRuntimeProbe poolProbe =
-            coordinatePoolSelected
-            ? ActiveCoordinatePoolProbe()
-            : native::CoordinatePoolRuntimeProbe{};
-        {
-            const CoordinateFailure failure = CurrentCoordinateFailure();
-            probe.coordinateRequested =
-                UsesAnyCoordinateDecryptRuntime();
-            probe.coordinateEntryReady = CoordinateEntryReady();
-            probe.coordinateContextReady = algorithmExecutionContextReady_;
-            probe.coordinateThreadId = algorithmExecutionContext_.threadId;
-            const native::CoordinateExecutionDecoderProbe executionProbe =
-                coordinateExecutionSelected
-                ? coordinateExecutionDecoder_.Probe()
-                : native::CoordinateExecutionDecoderProbe{};
-            probe.coordinateGuestPc = coordinateExecutionSelected
-                ? executionProbe.runtime.plan.entryPc
-                : (coordinatePoolSelected
-                       ? poolProbe.guestEntry
-                       : algorithmGuestPc_);
-            probe.coordinateContextGeneration =
-                algorithmExecutionContext_.generation;
-            probe.coordinateAttempts = coordinateExecutionSelected
-                ? algorithmAttemptCount_
-                : (coordinatePoolSelected
-                       ? poolProbe.attempts
-                       : algorithmAttemptCount_);
-            probe.coordinateSuccesses = coordinateExecutionSelected
-                ? algorithmSuccessCount_
-                : (coordinatePoolSelected
-                       ? poolProbe.successes
-                       : algorithmSuccessCount_);
-            probe.coordinateError = failure.error;
-            probe.coordinateSystemError = failure.systemError;
-            probe.coordinateRead = failure.read;
-            probe.coordinatePoolPointer = coordinateExecutionSelected
-                ? CoordinatePoolPointerDiagnostic{}
-                : poolProbe.poolPointer;
-            const std::uintptr_t executionMappingEnd =
-                coordinateExecutionCodeSize_ <=
-                        std::numeric_limits<std::uintptr_t>::max() -
-                            coordinateExecutionCodeBase_
-                ? coordinateExecutionCodeBase_ +
-                      coordinateExecutionCodeSize_
-                : 0;
-            probe.coordinateEntry = coordinateExecutionSelected
-                ? CoordinateEntryDiagnostic{
-                      executionProbe.runtime.plan.entryPc,
-                      coordinateExecutionCodeBase_,
-                      executionMappingEnd,
-                      executionProbe.runtime.faultAddress,
-                      0,
-                  }
-                : (coordinatePoolSelected
-                ? CoordinateEntryDiagnostic{
-                      poolProbe.guestEntry,
-                      poolProbe.executableMappingStart,
-                      poolProbe.executableMappingEnd,
-                      poolProbe.failedMethod,
-                      poolProbe.executableMappingFragments,
-                  }
-                : CoordinateEntryDiagnostic{
-                      coordinateReplayEntrySnapshot_.entry,
-                      coordinateReplayEntrySnapshot_.mappingStart,
-                      coordinateReplayEntrySnapshot_.mappingEnd,
-                      0,
-                      0,
-                  });
+        if (hardwareBreakpointRequested_) {
+            probe.coordinateRequested = true;
+            probe.coordinateEntryReady =
+                hardwareBreakpointRuntime_.IsActive();
+            probe.coordinateContextReady =
+                hardwareBreakpointRuntime_.IsActive();
+            probe.coordinateThreadId = 0;
+            probe.coordinateGuestPc =
+                hardwareBreakpointRuntime_.BreakpointAddress();
+            probe.coordinateContextGeneration = 0;
+            probe.coordinateAttempts =
+                hardwareBreakpointRuntime_.PollCount();
+            probe.coordinateSuccesses =
+                hardwareBreakpointRuntime_.PublishedCoordinateCount();
+            probe.coordinateError = hardwareBreakpointFailure_.error;
+            probe.coordinateSystemError =
+                hardwareBreakpointFailure_.systemError;
+            return;
         }
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-        probe.algorithmCoordinateRequested = algorithmDecryptRequested_;
-        probe.algorithmCoordinateActive =
-            native::ShouldReadAlgorithmCoordinate(
-                algorithmPositionRequested_,
-                algorithmDecryptRequested_);
-        probe.algorithmCoordinateTableReady =
-            algorithmCoordinateTableReady_;
-        probe.algorithmCoordinateRuntimeReady =
-            algorithmCoordinateRuntimeReady_;
-        probe.algorithmCoordinateRefreshes =
-            algorithmCoordinateRefreshCount_;
-        probe.algorithmCoordinateResolveAttempts =
-            algorithmCoordinateResolveAttemptCount_;
-        probe.algorithmCoordinateResolveSuccesses =
-            algorithmCoordinateResolveSuccessCount_;
-        probe.algorithmCoordinateAttempts =
-            algorithmCoordinateAttemptCount_;
-        probe.algorithmCoordinateSuccesses =
-            algorithmCoordinateSuccessCount_;
-        probe.algorithmCoordinateObjectAttempts =
-            algorithmCoordinateObjectAttemptCount_;
-        probe.algorithmCoordinateObjectSuccesses =
-            algorithmCoordinateObjectSuccessCount_;
-        probe.algorithmCoordinateTableAttempts =
-            algorithmCoordinateTableAttemptCount_;
-        probe.algorithmCoordinateTableSuccesses =
-            algorithmCoordinateTableSuccessCount_;
-        probe.algorithmCoordinateFallbacks =
-            algorithmCoordinateFallbackCount_;
-        probe.algorithmCoordinateSource = algorithmCoordinateFrameSource_;
-        if (algorithmCoordinateFrameSource_ ==
-            native::AlgorithmCoordinateSource::RecordTable) {
-            probe.algorithmCoordinate = algorithmCoordinateFrameSuccess_;
-        } else if (algorithmCoordinateFrameFailure_.error !=
-                   native::AlgorithmCoordinateReadError::None) {
-            probe.algorithmCoordinate = algorithmCoordinateFrameFailure_;
-        } else {
-            probe.algorithmCoordinate = algorithmCoordinateTableDiagnostic_;
-        }
-        if (algorithmCoordinateFrameSource_ ==
-            native::AlgorithmCoordinateSource::RuntimeObject) {
-            probe.algorithmCoordinateRuntime =
-                algorithmCoordinateFrameRuntimeSuccess_;
-        } else if (algorithmCoordinateFrameRuntimeFailure_.error !=
-                   native::RuntimeCoordinateCodecError::None) {
-            probe.algorithmCoordinateRuntime =
-                algorithmCoordinateFrameRuntimeFailure_;
-        } else {
-            probe.algorithmCoordinateRuntime =
-                algorithmCoordinateRuntimeDiagnostic_;
-        }
-#endif
+        probe.coordinateRequested = false;
+        probe.coordinateEntryReady = false;
+        probe.coordinateContextReady = false;
+        probe.coordinateThreadId = 0;
+        probe.coordinateGuestPc = 0;
+        probe.coordinateContextGeneration = 0;
+        probe.coordinateAttempts = 0;
+        probe.coordinateSuccesses = 0;
+        probe.coordinateError = CoordinateDecryptError::None;
+        probe.coordinateSystemError = 0;
     }
 
     bool CloseLocked() noexcept {
@@ -10186,90 +6875,18 @@ private:
             return false;
         }
 #endif
-#if 0
         if (!StopHardwareBreakpointRuntime()) {
             aimEnabled_.store(false, std::memory_order_release);
             return false;
         }
-#endif
-        algorithmPositionRuntime_.Reset();
-        coordinatePoolRuntime_.Reset();
-        coordinateDecrypt2Runtime_.Reset();
-        coordinateExecutionDecoder_.Reset();
         if (memory_ != nullptr) memory_->Close();
         memory_.reset();
-        algorithmExecutionContext_ = {};
-        algorithmExecutionContextReady_ = false;
-        coordinateExecutionContextHadSuccess_ = false;
-        coordinateReplayEntrySnapshot_ = {};
-        coordinateReplayEntryDiagnostic_ = {};
-        algorithmGuestPc_ = 0;
-        algorithmEntryInstruction_ = 0;
-        algorithmEntryReady_ = false;
-        algorithmEntryValidationAt_ = {};
-        algorithmFailureSince_ = {};
-        algorithmReplayBackoffPolicy_.Reset();
-        algorithmReplayPagePolicy_.Invalidate();
-        algorithmExecutionContextRefreshPolicy_.Invalidate();
-        algorithmAttemptCount_ = 0;
-        algorithmSuccessCount_ = 0;
-        algorithmFrameAttemptCount_ = 0;
-        algorithmFrameSuccessCount_ = 0;
-        coordinateExecutionFrameAttemptCount_ = 0;
-        coordinateExecutionFrameSuccessCount_ = 0;
-        algorithmFrameOutputError_ = CoordinateDecryptError::None;
-        algorithmFrameFailure_ = {};
-        algorithmFrameAgedDecodedFailure_ = false;
-        decodedPositionPending_.clear();
-        algorithmPositionRequested_ = false;
-        coordinateDecrypt2Index_ = 0;
-        coordinateExecutionMode_ = 0;
-        coordinateExecutionLayout_ = {};
-        coordinateExecutionDiscoveryInput_ = {};
-        coordinateExecutionCodeBase_ = 0;
-        coordinateExecutionCodeSize_ = 0;
         hardwareBreakpointRequested_ = false;
-#if 0
         hardwareBreakpointRetryAfter_ = {};
         hardwareBreakpointFailure_ = {};
-#endif
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-        algorithmDecryptRequested_ = false;
-        algorithmCoordinateSnapshot_.clear();
-        algorithmCoordinateTableReady_ = false;
-        algorithmCoordinateTableDiagnostic_ = {};
-        algorithmCoordinateFrameFailure_ = {};
-        algorithmCoordinateFrameSuccess_ = {};
-        runtimeCoordinateCodec_.Reset();
-        algorithmCoordinateRuntimeReady_ = false;
-        algorithmCoordinateRuntimeDiagnostic_ = {};
-        algorithmCoordinateFrameRuntimeFailure_ = {};
-        algorithmCoordinateFrameRuntimeSuccess_ = {};
-        algorithmCoordinateFrameSource_ =
-            native::AlgorithmCoordinateSource::None;
-        algorithmCoordinateObjectCache_.clear();
-        algorithmCoordinateRefreshCount_ = 0;
-        algorithmCoordinateResolveAttemptCount_ = 0;
-        algorithmCoordinateResolveSuccessCount_ = 0;
-        algorithmCoordinateAttemptCount_ = 0;
-        algorithmCoordinateSuccessCount_ = 0;
-        algorithmCoordinateObjectAttemptCount_ = 0;
-        algorithmCoordinateObjectSuccessCount_ = 0;
-        algorithmCoordinateTableAttemptCount_ = 0;
-        algorithmCoordinateTableSuccessCount_ = 0;
-        algorithmCoordinateFallbackCount_ = 0;
-        algorithmCoordinateFrameAttemptCount_ = 0;
-        algorithmCoordinateFrameSuccessCount_ = 0;
-#endif
-        coordinatePoolFallback_ = false;
-        coordinatePoolReady_ = false;
-        coordinatePoolFrame_ = 0;
-        coordinatePoolBridge_ = 0;
-        coordinatePoolContext_ = 0;
-        coordinatePoolEntry_ = 0;
         processId_ = -1;
         moduleBase_ = 0;
-        coordinateExecutionModuleSize_ = 0;
+        firstVeneerRva_ = 0;
         moduleName_.clear();
         moduleBuildId_.clear();
         layout_ = VersionLayout{};
@@ -10282,16 +6899,6 @@ private:
         return true;
     }
 
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-    struct AlgorithmCoordinateObjectCacheEntry {
-        std::uintptr_t owner = 0;
-        Vec3 raw{};
-        Vec3 position{};
-        native::RuntimeCoordinateCodecDiagnostic diagnostic{};
-        bool valid = false;
-    };
-#endif
-
     std::mutex mutex_;
     RuntimeOptions options_{};
     VersionLayout layout_{};
@@ -10299,100 +6906,20 @@ private:
     std::unique_ptr<native::MemoryTransport> geometryMemory_;
     std::shared_ptr<GeometryReadRoute> geometryReadRoute_;
     bool geometryTransportDedicated_ = false;
-    native::AlgorithmPositionRuntime algorithmPositionRuntime_{};
-    native::CoordinatePoolRuntime coordinatePoolRuntime_{};
-    native::CoordinateDecrypt2Runtime coordinateDecrypt2Runtime_{};
-    native::CoordinateExecutionDecoder coordinateExecutionDecoder_{};
-#if 0
     native::HardwareBreakpointCoordinateRuntime
         hardwareBreakpointRuntime_{};
-#endif
-    native::AlgorithmExecutionContextRefreshPolicy
-        algorithmExecutionContextRefreshPolicy_{};
-    native::AlgorithmReplayBackoffPolicy algorithmReplayBackoffPolicy_{};
-    native::AlgorithmReplayPagePolicy algorithmReplayPagePolicy_{};
-    native::ProcessExecutionContext algorithmExecutionContext_{};
-    std::uintptr_t algorithmLastInstructionTracePc_ = 0;
-    std::uintptr_t algorithmLastInstructionTraceFault_ = 0;
-    std::uint64_t algorithmLastForcedTraceRequest_ = 0;
-    native::CoordinateReplayEntrySnapshot coordinateReplayEntrySnapshot_{};
-    native::CoordinateReplayEntryDiagnostic coordinateReplayEntryDiagnostic_{};
-    std::uintptr_t algorithmGuestPc_ = 0;
-    std::uint32_t algorithmEntryInstruction_ = 0;
-    bool algorithmExecutionContextReady_ = false;
-    bool coordinateExecutionContextHadSuccess_ = false;
-    bool algorithmEntryReady_ = false;
-    bool algorithmReplayAllowedThisFrame_ = true;
-    bool algorithmPositionRequested_ = false;
-    std::uint32_t coordinateDecrypt2Index_ = 0;
-    std::uint8_t coordinateExecutionMode_ = 0;
-    native::CoordinateExecutionLayout coordinateExecutionLayout_{};
-    native::CoordinateExecutionDiscoveryInput
-        coordinateExecutionDiscoveryInput_{};
     bool hardwareBreakpointRequested_ = false;
-#if 0
     std::chrono::steady_clock::time_point
         hardwareBreakpointRetryAfter_{};
     CoordinateFailure hardwareBreakpointFailure_{};
-#endif
     std::string moduleBuildId_;
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-    bool algorithmDecryptRequested_ = false;
-    bool algorithmCoordinateTableReady_ = false;
-    bool algorithmCoordinateRuntimeReady_ = false;
-#endif
-    bool coordinatePoolReady_ = false;
-    bool coordinatePoolFallback_ = false;
-    std::uintptr_t coordinatePoolBridge_ = 0;
-    std::uintptr_t coordinatePoolContext_ = 0;
-    std::uintptr_t coordinatePoolEntry_ = 0;
-    std::uint64_t algorithmAttemptCount_ = 0;
-    std::uint64_t algorithmSuccessCount_ = 0;
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-    std::uint64_t algorithmCoordinateRefreshCount_ = 0;
-    std::uint64_t algorithmCoordinateResolveAttemptCount_ = 0;
-    std::uint64_t algorithmCoordinateResolveSuccessCount_ = 0;
-    std::uint64_t algorithmCoordinateAttemptCount_ = 0;
-    std::uint64_t algorithmCoordinateSuccessCount_ = 0;
-    std::uint64_t algorithmCoordinateObjectAttemptCount_ = 0;
-    std::uint64_t algorithmCoordinateObjectSuccessCount_ = 0;
-    std::uint64_t algorithmCoordinateTableAttemptCount_ = 0;
-    std::uint64_t algorithmCoordinateTableSuccessCount_ = 0;
-    std::uint64_t algorithmCoordinateFallbackCount_ = 0;
-    std::uint64_t algorithmCoordinateFrameAttemptCount_ = 0;
-    std::uint64_t algorithmCoordinateFrameSuccessCount_ = 0;
-    native::AlgorithmCoordinateDiagnostic algorithmCoordinateTableDiagnostic_{};
-    native::AlgorithmCoordinateDiagnostic algorithmCoordinateFrameFailure_{};
-    native::AlgorithmCoordinateDiagnostic algorithmCoordinateFrameSuccess_{};
-    native::RuntimeCoordinateCodecDiagnostic
-        algorithmCoordinateRuntimeDiagnostic_{};
-    native::RuntimeCoordinateCodecDiagnostic
-        algorithmCoordinateFrameRuntimeFailure_{};
-    native::RuntimeCoordinateCodecDiagnostic
-        algorithmCoordinateFrameRuntimeSuccess_{};
-    native::AlgorithmCoordinateSource algorithmCoordinateFrameSource_ =
-        native::AlgorithmCoordinateSource::None;
-#endif
-    std::uint64_t algorithmFrameAttemptCount_ = 0;
-    std::uint64_t algorithmFrameSuccessCount_ = 0;
-    std::uint64_t coordinateExecutionFrameAttemptCount_ = 0;
-    std::uint64_t coordinateExecutionFrameSuccessCount_ = 0;
-    CoordinateDecryptError algorithmFrameOutputError_ =
-        CoordinateDecryptError::None;
-    CoordinateFailure algorithmFrameFailure_{};
-    bool algorithmFrameAgedDecodedFailure_ = false;
-    std::uint64_t coordinatePoolFrame_ = 0;
-    std::chrono::steady_clock::time_point algorithmEntryValidationAt_{};
-    std::chrono::steady_clock::time_point algorithmFailureSince_{};
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
     native::TrajectoryHook trajectoryHook_{};
 #endif
     pid_t processId_ = -1;
     std::uintptr_t moduleBase_ = 0;
-    std::size_t coordinateExecutionModuleSize_ = 0;
+    std::uintptr_t firstVeneerRva_ = 0;
     std::string moduleName_;
-    std::uintptr_t coordinateExecutionCodeBase_ = 0;
-    std::size_t coordinateExecutionCodeSize_ = 0;
     std::uintptr_t world_ = 0;
     CameraView lastView_{};
     std::uintptr_t lastViewWorld_ = 0;
@@ -10405,14 +6932,9 @@ private:
     native::ActorRecordRefreshPolicy actorRecordRefreshPolicy_{
         std::chrono::milliseconds(100)};
     std::unordered_map<std::uintptr_t, PositionCacheEntry> positionCache_;
-    std::unordered_map<std::uintptr_t, DecodedPositionCacheEntry>
-        decodedPositionCache_;
-    std::unordered_map<std::uintptr_t, DecodedPositionPendingEntry>
-        decodedPositionPending_;
     std::unordered_map<std::uintptr_t, CoordinateTraceRecord>
         coordinateTraceRecords_;
     std::uint64_t coordinateTraceFrame_ = 0;
-    std::size_t coordinateExecutionDecodeTraceCount_ = 0;
     std::unordered_map<std::uintptr_t, BoneCacheEntry> boneCache_;
     std::chrono::steady_clock::time_point lastBoneAuditLogAt_{};
     std::unordered_map<std::int32_t, std::string> nameCache_;
@@ -10430,14 +6952,6 @@ private:
         std::chrono::steady_clock::time_point> threatFirstSeen_;
     std::unordered_map<std::uintptr_t, AimWarningState> aimWarningStates_;
     native::HudMapCache hudMapCache_{};
-#if LENGJING_ENABLE_ALGORITHM_COORDINATE
-    native::AlgorithmCoordinateReader algorithmCoordinateReader_{};
-    native::RuntimeCoordinateCodec runtimeCoordinateCodec_{};
-    std::vector<native::AlgorithmCoordinateRecord>
-        algorithmCoordinateSnapshot_;
-    std::unordered_map<std::uintptr_t, AlgorithmCoordinateObjectCacheEntry>
-        algorithmCoordinateObjectCache_;
-#endif
     native::CharacterPositionResolver characterPositions_{};
     native::PositionReadMode positionReadMode_ = native::PositionReadMode::Standard;
     native::ProjectileSpeedReader projectileSpeedReader_{};

@@ -3,7 +3,6 @@
 #include "game/native/CharacterPositionResolver.h"
 #include "game/native/PositionReadModePolicy.h"
 
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -38,85 +37,25 @@ private:
 }  // namespace
 
 void RunPositionResolverTests() {
-    using lengjing::game::native::AlgorithmCoordinateFinalizeError;
     using lengjing::game::native::CharacterPositionResolver;
     using lengjing::game::native::CharacterPositionLayout;
     using lengjing::game::native::CharacterPositionSource;
     using lengjing::game::native::PositionReadMode;
-    using lengjing::game::native::FinalizeAlgorithmCharacterCoordinate;
-    using lengjing::game::native::ResolveDecodedCharacterZ;
-    using lengjing::game::native::ResolvePositionReadMode;
     using lengjing::game::native::ShouldAlignBoneFrameToCharacterPosition;
-    using lengjing::game::native::ShouldRequireDecodedActorRecords;
+    using lengjing::game::native::ShouldRequireResolvedActorRecords;
     using Coordinate = CharacterPositionResolver::Coordinate;
 
-    REQUIRE(ResolvePositionReadMode(false) == PositionReadMode::Standard);
-    REQUIRE(ResolvePositionReadMode(true) == PositionReadMode::Direct);
-    REQUIRE(ResolvePositionReadMode(false, false) ==
-            PositionReadMode::Standard);
-    REQUIRE(ResolvePositionReadMode(true, false) ==
-            PositionReadMode::Direct);
-    REQUIRE(ResolvePositionReadMode(false, true) ==
-            PositionReadMode::Direct);
-    REQUIRE(!ShouldRequireDecodedActorRecords(
-        PositionReadMode::Standard, false, false));
-    REQUIRE(ShouldRequireDecodedActorRecords(
-        PositionReadMode::Direct, false, false));
-    REQUIRE(ShouldRequireDecodedActorRecords(
-        PositionReadMode::Standard, true, false));
-    REQUIRE(ShouldRequireDecodedActorRecords(
-        PositionReadMode::Standard, false, true));
-    REQUIRE(!ShouldRequireDecodedActorRecords(
-        PositionReadMode::Direct, false, false, true));
-    REQUIRE(!ShouldRequireDecodedActorRecords(
-        PositionReadMode::Standard, false, false, true));
-    REQUIRE(ShouldRequireDecodedActorRecords(
-        PositionReadMode::Standard, false, true, true));
-    REQUIRE(ResolveDecodedCharacterZ(1000.0f) == 910.0f);
-    REQUIRE(ResolveDecodedCharacterZ(90.0f) == 0.0f);
-    REQUIRE(ResolveDecodedCharacterZ(-10.0f) == -100.0f);
+    REQUIRE(!ShouldRequireResolvedActorRecords(
+        PositionReadMode::Standard, false));
+    REQUIRE(ShouldRequireResolvedActorRecords(
+        PositionReadMode::ResolvedRecord, false));
+    REQUIRE(ShouldRequireResolvedActorRecords(
+        PositionReadMode::Standard, true));
 
-    const auto standing = FinalizeAlgorithmCharacterCoordinate(
-        1200.0f, -3400.0f, 3160.09f, true, 85.99f, true, 85.99f);
-    const auto crouching = FinalizeAlgorithmCharacterCoordinate(
-        1200.0f, -3400.0f, 3134.09f, true, 59.99f, true, 59.99f);
-    REQUIRE(standing.Accepted());
-    REQUIRE(crouching.Accepted());
-    REQUIRE(std::fabs(standing.z - 3074.10f) < 0.01f);
-    REQUIRE(std::fabs(crouching.z - 3074.10f) < 0.01f);
-    REQUIRE(std::fabs(standing.z - crouching.z) < 0.01f);
-
-    const auto missingAdjustment = FinalizeAlgorithmCharacterCoordinate(
-        1.0f, 2.0f, 3.0f, false, 0.0f, true, 90.0f);
-    REQUIRE(!missingAdjustment.Accepted());
-    REQUIRE(missingAdjustment.error ==
-        AlgorithmCoordinateFinalizeError::VerticalAdjustmentReadFailed);
-    const auto invalidAdjustment = FinalizeAlgorithmCharacterCoordinate(
-        1.0f, 2.0f, 3.0f, true, 0.0f, true, 0.0f);
-    REQUIRE(!invalidAdjustment.Accepted());
-    REQUIRE(invalidAdjustment.error ==
-        AlgorithmCoordinateFinalizeError::VerticalAdjustmentInvalid);
-    const auto unstableAdjustment = FinalizeAlgorithmCharacterCoordinate(
-        1.0f, 2.0f, 200.0f, true, 90.0f, true, 59.99f);
-    REQUIRE(!unstableAdjustment.Accepted());
-    REQUIRE(unstableAdjustment.error ==
-        AlgorithmCoordinateFinalizeError::VerticalAdjustmentUnstable);
-    const auto invalidRaw = FinalizeAlgorithmCharacterCoordinate(
-        0.0f, 0.0f, 0.0f, true, 90.0f, true, 90.0f);
-    REQUIRE(!invalidRaw.Accepted());
-    REQUIRE(invalidRaw.error ==
-        AlgorithmCoordinateFinalizeError::RawInvalid);
-    const auto invalidOutput = FinalizeAlgorithmCharacterCoordinate(
-        0.0f, 0.0f, 90.0f, true, 90.0f, true, 90.0f);
-    REQUIRE(!invalidOutput.Accepted());
-    REQUIRE(invalidOutput.error ==
-        AlgorithmCoordinateFinalizeError::OutputInvalid);
     REQUIRE(ShouldAlignBoneFrameToCharacterPosition(
-        CharacterPositionSource::Decoded));
+        CharacterPositionSource::Resolved));
     REQUIRE(ShouldAlignBoneFrameToCharacterPosition(
-        CharacterPositionSource::AlgorithmObject));
-    REQUIRE(ShouldAlignBoneFrameToCharacterPosition(
-        CharacterPositionSource::AlgorithmTable));
+        CharacterPositionSource::HardwareBreakpoint));
     REQUIRE(!ShouldAlignBoneFrameToCharacterPosition(
         CharacterPositionSource::Standard));
     REQUIRE(!ShouldAlignBoneFrameToCharacterPosition(
@@ -129,7 +68,7 @@ void RunPositionResolverTests() {
         "BP_RangeTargeCharacter_C"));
     REQUIRE(CharacterPositionResolver::IsPrimaryCharacter(
         "BP_DFMRangeTargetCharacter_C"));
-    REQUIRE(CharacterPositionResolver::IsDirectAiCharacter(
+    REQUIRE(CharacterPositionResolver::IsAiCharacter(
         "NC_BP_DFMAICharacter_Soldier_C"));
     REQUIRE(CharacterPositionResolver::IsTargetCharacter(
         "NC_BP_DFMCharacter_AI_DT_C"));
@@ -260,7 +199,7 @@ void RunPositionResolverTests() {
     memory.Put(component + 0x220, Coordinate{40.0f, 50.0f, 60.0f});
 
     REQUIRE(!resolver.Read(
-        actor, "NC_BP_DFMCharacter_C", PositionReadMode::Direct,
+        actor, "NC_BP_DFMCharacter_C", PositionReadMode::ResolvedRecord,
         false, coordinate, read));
     REQUIRE(coordinate == Coordinate{});
 
@@ -268,72 +207,72 @@ void RunPositionResolverTests() {
         actor,
         component,
         "NC_BP_DFMCharacter_C",
-        PositionReadMode::Direct,
+        PositionReadMode::ResolvedRecord,
         false,
         coordinate,
         read));
     REQUIRE(coordinate == Coordinate({10.0f, 20.0f, 30.0f}));
 
-    constexpr std::uintptr_t decodedRoot = 0x300000;
-    memory.Put(decodedRoot + preferredPositionOffset, Coordinate{});
-    memory.Put(decodedRoot + 0x148, Coordinate{});
-    memory.Put(decodedRoot + 0x220, Coordinate{0.0f, 0.0f, -90.0f});
-    memory.Put(decodedRoot + 0x240, Coordinate{70.0f, 80.0f, 90.0f});
+    constexpr std::uintptr_t resolvedRoot = 0x300000;
+    memory.Put(resolvedRoot + preferredPositionOffset, Coordinate{});
+    memory.Put(resolvedRoot + 0x148, Coordinate{});
+    memory.Put(resolvedRoot + 0x220, Coordinate{0.0f, 0.0f, -90.0f});
+    memory.Put(resolvedRoot + 0x240, Coordinate{70.0f, 80.0f, 90.0f});
     REQUIRE(resolver.ReadWithRoot(
         actor,
-        decodedRoot,
+        resolvedRoot,
         "NC_BP_DFMCharacter_C",
-        PositionReadMode::Direct,
+        PositionReadMode::ResolvedRecord,
         false,
         coordinate,
         read));
     REQUIRE(coordinate == Coordinate({0.0f, 0.0f, -90.0f}));
 
-    memory.Put(decodedRoot + 0x220, Coordinate{});
+    memory.Put(resolvedRoot + 0x220, Coordinate{});
     REQUIRE(resolver.ReadWithRoot(
         actor,
-        decodedRoot,
+        resolvedRoot,
         "NC_BP_DFMCharacter_C",
-        PositionReadMode::Direct,
+        PositionReadMode::ResolvedRecord,
         false,
         coordinate,
         read));
     REQUIRE(coordinate == Coordinate({70.0f, 80.0f, 90.0f}));
 
-    memory.Put(decodedRoot + 0x240, Coordinate{});
+    memory.Put(resolvedRoot + 0x240, Coordinate{});
     REQUIRE(!resolver.ReadWithRoot(
         actor,
-        decodedRoot,
+        resolvedRoot,
         "NC_BP_DFMCharacter_C",
-        PositionReadMode::Direct,
+        PositionReadMode::ResolvedRecord,
         false,
         coordinate,
         read));
     REQUIRE(coordinate == Coordinate{});
 
-    memory.Erase(decodedRoot + 0x240);
-    memory.Erase(decodedRoot + 0x220);
+    memory.Erase(resolvedRoot + 0x240);
+    memory.Erase(resolvedRoot + 0x220);
     REQUIRE(!resolver.ReadWithRoot(
         actor,
-        decodedRoot,
+        resolvedRoot,
         "NC_BP_DFMCharacter_C",
-        PositionReadMode::Direct,
+        PositionReadMode::ResolvedRecord,
         false,
         coordinate,
         read));
     REQUIRE(coordinate == Coordinate{});
 
     memory.Put(
-        decodedRoot + preferredPositionOffset,
+        resolvedRoot + preferredPositionOffset,
         Coordinate{1.0f, 2.0f, 3.0f});
-    memory.Put(decodedRoot + 0x148, Coordinate{4.0f, 5.0f, 6.0f});
-    memory.Put(decodedRoot + 0x220, Coordinate{7.0f, 8.0f, 9.0f});
-    memory.Put(decodedRoot + 0x240, Coordinate{10.0f, 11.0f, 12.0f});
+    memory.Put(resolvedRoot + 0x148, Coordinate{4.0f, 5.0f, 6.0f});
+    memory.Put(resolvedRoot + 0x220, Coordinate{7.0f, 8.0f, 9.0f});
+    memory.Put(resolvedRoot + 0x240, Coordinate{10.0f, 11.0f, 12.0f});
     REQUIRE(resolver.ReadWithRoot(
         actor,
-        decodedRoot,
+        resolvedRoot,
         "NC_BP_DFMCharacter_C",
-        PositionReadMode::Direct,
+        PositionReadMode::ResolvedRecord,
         false,
         coordinate,
         read));
@@ -341,20 +280,20 @@ void RunPositionResolverTests() {
 
     REQUIRE(resolver.ReadLocalWithRoot(
         actor,
-        decodedRoot,
+        resolvedRoot,
         "NC_BP_DFMCharacter_C",
-        PositionReadMode::Direct,
+        PositionReadMode::ResolvedRecord,
         false,
         coordinate,
         read));
     REQUIRE(coordinate == Coordinate({1.0f, 2.0f, 3.0f}));
 
-    memory.Put(decodedRoot + preferredPositionOffset, Coordinate{});
+    memory.Put(resolvedRoot + preferredPositionOffset, Coordinate{});
     REQUIRE(resolver.ReadWithRoot(
         actor,
-        decodedRoot,
+        resolvedRoot,
         "NC_BP_DFMCharacter_C",
-        PositionReadMode::Direct,
+        PositionReadMode::ResolvedRecord,
         false,
         coordinate,
         read));
@@ -362,42 +301,42 @@ void RunPositionResolverTests() {
 
     REQUIRE(!resolver.ReadLocalWithRoot(
         actor,
-        decodedRoot,
+        resolvedRoot,
         "NC_BP_DFMCharacter_C",
-        PositionReadMode::Direct,
+        PositionReadMode::ResolvedRecord,
         false,
         coordinate,
         read));
     REQUIRE(coordinate == Coordinate{});
 
-    memory.Put(decodedRoot + 0x148, Coordinate{});
-    memory.Erase(decodedRoot + 0x240);
-    memory.Put(decodedRoot + 0x220, Coordinate{
+    memory.Put(resolvedRoot + 0x148, Coordinate{});
+    memory.Erase(resolvedRoot + 0x240);
+    memory.Put(resolvedRoot + 0x220, Coordinate{
         std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f});
     REQUIRE(!resolver.ReadWithRoot(
         actor,
-        decodedRoot,
+        resolvedRoot,
         "NC_BP_DFMCharacter_C",
-        PositionReadMode::Direct,
+        PositionReadMode::ResolvedRecord,
         false,
         coordinate,
         read));
     REQUIRE(coordinate == Coordinate{});
 
-    memory.Put(decodedRoot + 0x220, Coordinate{
+    memory.Put(resolvedRoot + 0x220, Coordinate{
         std::numeric_limits<float>::infinity(), 0.0f, 0.0f});
     REQUIRE(!resolver.ReadWithRoot(
         actor,
-        decodedRoot,
+        resolvedRoot,
         "NC_BP_DFMCharacter_C",
-        PositionReadMode::Direct,
+        PositionReadMode::ResolvedRecord,
         false,
         coordinate,
         read));
     REQUIRE(coordinate == Coordinate{});
 
     REQUIRE(!resolver.Read(
-        actor, "Pickup_C", PositionReadMode::Direct,
+        actor, "Pickup_C", PositionReadMode::ResolvedRecord,
         true, coordinate, read));
     REQUIRE(coordinate == Coordinate{});
 

@@ -36,7 +36,6 @@ enum class PerformancePhase : std::uint8_t {
     DrawGameFrame,
     GraphicsSubmit,
     RemoteRead,
-    CoordinateRemoteRead,
     BatchRemoteRead,
     GeometryRemoteRead,
     Count,
@@ -54,11 +53,6 @@ enum class PerformanceCounter : std::uint8_t {
     RemoteReadCalls,
     RemoteReadBytes,
     RemoteReadFailures,
-    CoordinateReadCalls,
-    CoordinateReadBytes,
-    CoordinateReadFailures,
-    CoordinatePathAttempts,
-    CoordinateFallbacks,
     BatchReadCalls,
     BatchReadItems,
     BatchReadBytes,
@@ -98,7 +92,6 @@ enum class PerformanceCounter : std::uint8_t {
 
 enum class PerformanceReadKind : std::uint8_t {
     Standard,
-    Coordinate,
     Batch,
     Geometry,
 };

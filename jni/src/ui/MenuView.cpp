@@ -7,10 +7,6 @@
 #include <array>
 #include <string>
 
-#ifndef LENGJING_ENABLE_ALGORITHM_COORDINATE
-#define LENGJING_ENABLE_ALGORITHM_COORDINATE 0
-#endif
-
 namespace lengjing::ui {
 namespace {
 
@@ -782,41 +778,10 @@ void RenderRuntime(UiModel& model, UiActions& actions) {
         ImGui::EndTable();
     }
     ImGui::Dummy(ImVec2(0.0f, 8.0f));
-    if (ImGui::BeginTable(
-            "##coordinate_decrypt_modes", 2,
-            ImGuiTableFlags_SizingStretchSame |
-                ImGuiTableFlags_NoSavedSettings)) {
-        const auto coordinateMode = [&](
-            const char* label,
-            bool& enabled,
-            CoordinateDecryptSelection selection) {
-            ImGui::TableNextColumn();
-            if (!Toggle(label, enabled)) return;
-            if (enabled) {
-                SelectCoordinateDecrypt(visual, selection);
-            }
-            actions.SettingsChanged(SettingsDomain::Visual);
-        };
-        coordinateMode(
-            "解密1", visual.coordinateDecrypt,
-            CoordinateDecryptSelection::Decrypt1);
-        coordinateMode(
-            "解密2", visual.hardwareBreakpointDecrypt,
-            CoordinateDecryptSelection::Decrypt2);
-        coordinateMode(
-            "解密3", visual.coordinateDecrypt3,
-            CoordinateDecryptSelection::Decrypt3);
-        coordinateMode(
-            "解密4", visual.coordinateDecrypt4,
-            CoordinateDecryptSelection::Decrypt4);
-        coordinateMode(
-            "解密5", visual.coordinateDecrypt5,
-            CoordinateDecryptSelection::Decrypt5);
-        coordinateMode(
-            "解密6", visual.coordinateDecrypt6,
-            CoordinateDecryptSelection::Decrypt6);
-        ImGui::EndTable();
-    }
+    Mark(
+        actions,
+        SettingsDomain::Visual,
+        Toggle("解密", visual.coordinateDecrypt));
     ImGui::Dummy(ImVec2(0.0f, 4.0f));
     int renderBackend = std::clamp(
         static_cast<int>(system.renderBackend),

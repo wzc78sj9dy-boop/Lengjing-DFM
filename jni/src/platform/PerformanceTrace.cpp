@@ -64,7 +64,6 @@ constexpr std::array<const char*,
         "draw_game_frame",
         "graphics_submit",
         "remote_read",
-        "coordinate_remote_read",
         "batch_remote_read",
         "geometry_remote_read",
     };
@@ -226,13 +225,6 @@ void RecordPerformanceRead(PerformanceReadKind kind,
                 add(PerformanceCounter::RemoteReadFailures, 1);
             }
             break;
-        case PerformanceReadKind::Coordinate:
-            add(PerformanceCounter::CoordinateReadCalls, 1);
-            add(PerformanceCounter::CoordinateReadBytes, bytes);
-            if (!succeeded) {
-                add(PerformanceCounter::CoordinateReadFailures, 1);
-            }
-            break;
         case PerformanceReadKind::Batch:
             add(PerformanceCounter::BatchReadCalls, 1);
             add(PerformanceCounter::BatchReadItems, items);
@@ -335,9 +327,7 @@ void PublishPerformanceTrace() noexcept {
         "coordinate_frames=%llu actor_records=%llu characters=%llu "
         "players=%llu coordinate_attempts=%llu coordinate_successes=%llu "
         "reads=%llu read_bytes=%llu read_failures=%llu "
-        "coordinate_reads=%llu coordinate_bytes=%llu "
-        "coordinate_failures=%llu coordinate_path_attempts=%llu "
-        "coordinate_fallbacks=%llu batches=%llu batch_items=%llu "
+        "batches=%llu batch_items=%llu "
         "batch_bytes=%llu batch_failures=%llu batch_fallback_items=%llu "
          "batch_process_vm=%llu batch_kernel_driver=%llu "
          "geometry_reads=%llu geometry_bytes=%llu geometry_failures=%llu "
@@ -367,11 +357,6 @@ void PublishPerformanceTrace() noexcept {
         static_cast<unsigned long long>(value(PerformanceCounter::RemoteReadCalls)),
         static_cast<unsigned long long>(value(PerformanceCounter::RemoteReadBytes)),
         static_cast<unsigned long long>(value(PerformanceCounter::RemoteReadFailures)),
-        static_cast<unsigned long long>(value(PerformanceCounter::CoordinateReadCalls)),
-        static_cast<unsigned long long>(value(PerformanceCounter::CoordinateReadBytes)),
-        static_cast<unsigned long long>(value(PerformanceCounter::CoordinateReadFailures)),
-        static_cast<unsigned long long>(value(PerformanceCounter::CoordinatePathAttempts)),
-        static_cast<unsigned long long>(value(PerformanceCounter::CoordinateFallbacks)),
         static_cast<unsigned long long>(value(PerformanceCounter::BatchReadCalls)),
         static_cast<unsigned long long>(value(PerformanceCounter::BatchReadItems)),
         static_cast<unsigned long long>(value(PerformanceCounter::BatchReadBytes)),

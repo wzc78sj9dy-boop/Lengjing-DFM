@@ -207,10 +207,8 @@ void RunPlayerBoundsTests() {
         1920.0f, 1080.0f, selected));
 
     const BoneFrameRecordSource ordinaryRecord{0x1000, 0x2000, false};
-    REQUIRE(!IsResolvedBoneTransformEnabled(false, false));
-    REQUIRE(IsResolvedBoneTransformEnabled(true, false));
-    REQUIRE(IsResolvedBoneTransformEnabled(false, true));
-    REQUIRE(IsResolvedBoneTransformEnabled(true, true));
+    REQUIRE(!IsResolvedBoneTransformEnabled(false));
+    REQUIRE(IsResolvedBoneTransformEnabled(true));
     REQUIRE(SelectBoneFrameMesh(ordinaryRecord, 0x3000, false) == 0x3000);
     REQUIRE(SelectBoneFrameMesh(ordinaryRecord, 0, false) == 0x2000);
     const BoneFrameRecordSource encryptedRecord{
@@ -218,20 +216,13 @@ void RunPlayerBoundsTests() {
     REQUIRE(SelectBoneFrameMesh(encryptedRecord, 0x6000, false) == 0x6000);
     REQUIRE(SelectBoneFrameMesh(encryptedRecord, 0x6000, true) == 0x5000);
     REQUIRE(SelectBoneFrameMesh(encryptedRecord, 0, false) == 0);
-    const auto firstDecryptPreferred = SelectPreferredBoneFrameSource(
+    const auto decryptPreferred = SelectPreferredBoneFrameSource(
         encryptedRecord,
         0,
         0,
-        IsResolvedBoneTransformEnabled(true, false));
-    REQUIRE(firstDecryptPreferred.mesh == 0x5000);
-    REQUIRE(firstDecryptPreferred.rebuildResolvedTransform);
-    const auto secondDecryptPreferred = SelectPreferredBoneFrameSource(
-        encryptedRecord,
-        0,
-        0,
-        IsResolvedBoneTransformEnabled(false, true));
-    REQUIRE(secondDecryptPreferred.mesh == 0x5000);
-    REQUIRE(secondDecryptPreferred.rebuildResolvedTransform);
+        IsResolvedBoneTransformEnabled(true));
+    REQUIRE(decryptPreferred.mesh == 0x5000);
+    REQUIRE(decryptPreferred.rebuildResolvedTransform);
 
     const auto ordinaryPreferred = SelectPreferredBoneFrameSource(
         encryptedRecord, 0x7000, 0x6000, false);

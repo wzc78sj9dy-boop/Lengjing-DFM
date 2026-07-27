@@ -56,27 +56,6 @@ struct RuntimeModel {
     std::uint64_t coordinateSuccesses = 0;
     std::uint16_t coordinateErrorCode = 0;
     int coordinateSystemError = 0;
-    bool algorithmCoordinateRequested = false;
-    bool algorithmCoordinateActive = false;
-    bool algorithmCoordinateTableReady = false;
-    bool algorithmCoordinateRuntimeReady = false;
-    std::uint64_t algorithmCoordinateRefreshes = 0;
-    std::uint64_t algorithmCoordinateResolveAttempts = 0;
-    std::uint64_t algorithmCoordinateResolveSuccesses = 0;
-    std::uint64_t algorithmCoordinateAttempts = 0;
-    std::uint64_t algorithmCoordinateSuccesses = 0;
-    std::uint64_t algorithmCoordinateObjectAttempts = 0;
-    std::uint64_t algorithmCoordinateObjectSuccesses = 0;
-    std::uint64_t algorithmCoordinateTableAttempts = 0;
-    std::uint64_t algorithmCoordinateTableSuccesses = 0;
-    std::uint64_t algorithmCoordinateFallbacks = 0;
-    std::uint8_t algorithmCoordinateSource = 0;
-    std::uint16_t algorithmCoordinateErrorCode = 0;
-    std::uint16_t algorithmCoordinateRuntimeErrorCode = 0;
-    std::uintptr_t algorithmCoordinateTable = 0;
-    std::uintptr_t algorithmCoordinateRecords = 0;
-    std::uint32_t algorithmCoordinateCount = 0;
-    std::uint32_t algorithmCoordinateValidCount = 0;
     std::uint16_t runtimeErrorCode = 0;
     int runtimeSystemError = 0;
     float framesPerSecond = 0.0f;
@@ -90,16 +69,6 @@ struct RuntimeModel {
     std::string buildVersion;
 };
 
-enum class CoordinateDecryptSelection : std::uint8_t {
-    None = 0,
-    Decrypt1,
-    Decrypt2,
-    Decrypt3,
-    Decrypt4,
-    Decrypt5,
-    Decrypt6,
-};
-
 struct VisualSettings {
     bool enabled = true;
     bool playerCount = true;
@@ -107,13 +76,6 @@ struct VisualSettings {
     bool modelGeometry = false;
     bool visibilityColor = false;
     bool coordinateDecrypt = false;
-    int coordinateDecrypt2Index = 0;
-    bool hardwareBreakpointDecrypt = false;
-    bool coordinateDecrypt3 = false;
-    bool coordinateDecrypt4 = false;
-    bool coordinateDecrypt5 = false;
-    bool coordinateDecrypt6 = false;
-    bool algorithmDecrypt = false;
 
     bool box = true;
     bool snapline = true;
@@ -149,51 +111,6 @@ struct VisualSettings {
     float lineThickness = 1.0f;
     float fontScale = 1.0f;
 };
-
-constexpr CoordinateDecryptSelection ResolveCoordinateDecryptSelection(
-    const VisualSettings& visual) noexcept {
-    if (visual.coordinateDecrypt6) {
-        return CoordinateDecryptSelection::Decrypt6;
-    }
-    if (visual.coordinateDecrypt5) {
-        return CoordinateDecryptSelection::Decrypt5;
-    }
-    if (visual.coordinateDecrypt4) {
-        return CoordinateDecryptSelection::Decrypt4;
-    }
-    if (visual.coordinateDecrypt3) {
-        return CoordinateDecryptSelection::Decrypt3;
-    }
-    if (visual.hardwareBreakpointDecrypt) {
-        return CoordinateDecryptSelection::Decrypt2;
-    }
-    return visual.coordinateDecrypt
-        ? CoordinateDecryptSelection::Decrypt1
-        : CoordinateDecryptSelection::None;
-}
-
-constexpr bool AnyCoordinateDecrypt(
-    const VisualSettings& visual) noexcept {
-    return ResolveCoordinateDecryptSelection(visual) !=
-        CoordinateDecryptSelection::None;
-}
-
-constexpr void SelectCoordinateDecrypt(
-    VisualSettings& visual,
-    CoordinateDecryptSelection selection) noexcept {
-    visual.coordinateDecrypt =
-        selection == CoordinateDecryptSelection::Decrypt1;
-    visual.hardwareBreakpointDecrypt =
-        selection == CoordinateDecryptSelection::Decrypt2;
-    visual.coordinateDecrypt3 =
-        selection == CoordinateDecryptSelection::Decrypt3;
-    visual.coordinateDecrypt4 =
-        selection == CoordinateDecryptSelection::Decrypt4;
-    visual.coordinateDecrypt5 =
-        selection == CoordinateDecryptSelection::Decrypt5;
-    visual.coordinateDecrypt6 =
-        selection == CoordinateDecryptSelection::Decrypt6;
-}
 
 enum class ContainerKind : std::uint8_t {
     ComputerCase,

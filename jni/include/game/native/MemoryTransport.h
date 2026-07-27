@@ -1,6 +1,5 @@
 #pragma once
 
-#include "game/CoordinateDecryptDiagnostics.h"
 #include "game/ProjectileTrackingFeature.h"
 #include "game/RuntimeDiagnostics.h"
 
@@ -32,140 +31,12 @@ constexpr bool IsKernelMemoryTransportMode(
     return mode == MemoryTransportMode::KernelDriver;
 }
 
-struct CoordinateReplayTransportLayout {
-    std::uintptr_t rootRva = 0;
-    std::uintptr_t bridgeOffset = 0;
-    std::uintptr_t entryOffset = 0;
-    std::uint64_t pacgaData = 0;
-    std::uint64_t pacgaModifier = 0;
-
-    constexpr bool IsValid() const noexcept {
-        return rootRva >= 4 && rootRva <= 0xffffffffULL &&
-            (rootRva & 3U) == 0 &&
-            bridgeOffset <= 0x10000 && (bridgeOffset & 3U) == 0 &&
-            bridgeOffset <= 0xffffffffULL - rootRva &&
-            entryOffset >= 8 && entryOffset <= 0x10000 &&
-            (entryOffset & 7U) == 0 &&
-            (pacgaData != 0 || pacgaModifier != 0);
-    }
-};
-
-struct CoordinateExecutionContextLayout {
-    std::string threadName;
-    std::uint32_t oracleOpcode = 0;
-
-    bool IsValid() const noexcept {
-        if (threadName.empty() || threadName.size() > 15 ||
-            (oracleOpcode & UINT32_C(0xFFE0FC00)) !=
-                UINT32_C(0x9AC03000)) {
-            return false;
-        }
-        for (const char character : threadName) {
-            if (character < 0x21 || character > 0x7e) return false;
-        }
-        const std::uint32_t destination = oracleOpcode & 0x1fU;
-        const std::uint32_t data = (oracleOpcode >> 5U) & 0x1fU;
-        const std::uint32_t modifier = (oracleOpcode >> 16U) & 0x1fU;
-        return destination != 31U && data != 31U && modifier != 31U;
-    }
-
-    friend bool operator==(
-        const CoordinateExecutionContextLayout& left,
-        const CoordinateExecutionContextLayout& right) noexcept {
-        return left.threadName == right.threadName &&
-            left.oracleOpcode == right.oracleOpcode;
-    }
-};
-
-struct CoordinateReplayEntrySnapshot {
-    std::uintptr_t bridge = 0;
-    std::uintptr_t entry = 0;
-    std::uintptr_t mappingStart = 0;
-    std::uintptr_t mappingEnd = 0;
-    std::uint32_t instruction = 0;
-};
-
-struct CoordinateReplayEntryDiagnostic {
-    CoordinateDecryptError error = CoordinateDecryptError::None;
-    int systemError = 0;
-    CoordinateReadDiagnostic read{};
-    CoordinateReplayEntrySnapshot snapshot{};
-};
-
-struct ProcessExecutionContext {
-    struct PacgaOracle {
-        std::uint64_t data = 0;
-        std::uint64_t modifier = 0;
-        std::uint64_t result = 0;
-        bool available = false;
-
-        constexpr bool Matches(std::uint64_t candidateData,
-                               std::uint64_t candidateModifier) const
-            noexcept {
-            return available && data == candidateData &&
-                modifier == candidateModifier;
-        }
-    };
-
-    std::uint64_t tpidrEl0 = 0;
-    std::uint64_t pacgaLow = 0;
-    std::uint64_t pacgaHigh = 0;
-    std::int32_t threadId = 0;
-    std::uint64_t threadStartTimeTicks = 0;
-    std::uint64_t generation = 0;
-    PacgaOracle pacgaOracle{};
-
-    constexpr bool HasPacgaKey() const noexcept {
-        return pacgaLow != 0 || pacgaHigh != 0;
-    }
-
-    constexpr bool HasThreadContext() const noexcept {
-        return threadId > 0 && tpidrEl0 != 0;
-    }
-
-    constexpr bool IsUsable() const noexcept {
-        return HasThreadContext() &&
-            (HasPacgaKey() || pacgaOracle.available);
-    }
-};
-
-enum class ProcessExecutionContextSource : std::uint8_t {
-    None,
-    Device,
-    PtraceOracle,
-};
-
-struct ProcessExecutionContextDiagnostic {
-    ProcessExecutionContextSource source =
-        ProcessExecutionContextSource::None;
-    CoordinateDecryptError error = CoordinateDecryptError::None;
-    int systemError = 0;
-    int deviceStatus = 0;
-    int ptraceStatus = 0;
-    std::size_t deviceRequestCount = 0;
-    bool pacgaOperandsResolved = false;
-};
-
-struct ProcessExecutionCodeTarget {
-    std::uintptr_t entry = 0;
-    std::uintptr_t mappingStart = 0;
-    std::uintptr_t mappingEnd = 0;
-    bool directOnly = false;
-
-    constexpr bool IsValid() const noexcept {
-        return mappingStart != 0 && mappingEnd > mappingStart &&
-            entry >= mappingStart && entry < mappingEnd && (entry & 3U) == 0;
-    }
-};
-
 struct MemoryReadRequest {
     std::uintptr_t remoteAddress = 0;
     void* localBuffer = nullptr;
     std::size_t size = 0;
 };
 
-inline constexpr std::size_t kCoordinateMemoryBatchRequestLimit = 4;
-#if 0
 inline constexpr std::size_t kExecutionBreakpointRecordLimit = 0x100;
 
 struct ExecutionBreakpointRecord {
@@ -178,7 +49,6 @@ struct ExecutionBreakpointRecord {
     std::uintptr_t x21 = 0;
     std::uintptr_t x23 = 0;
 };
-#endif
 
 class MemoryTransport final {
 public:
@@ -204,16 +74,6 @@ public:
     bool ReadGeometry(std::uintptr_t address,
                       void* destination,
                       std::size_t size);
-    bool ReadCoordinateMemory(
-        std::uintptr_t address,
-        void* destination,
-        std::size_t size,
-        CoordinateReadDiagnostic& diagnostic);
-    bool ReadCoordinateMemoryBatch(
-        const MemoryReadRequest* requests,
-        std::size_t count,
-        CoordinateReadDiagnostic& diagnostic,
-        std::size_t& failedIndex);
     std::size_t ReadBatch(const MemoryReadRequest* requests,
                           std::size_t count,
                           std::uint8_t* itemStatus = nullptr);
@@ -222,7 +82,6 @@ public:
 #endif
     std::uintptr_t ModuleBase(std::string_view moduleName);
     bool IsOpen() const noexcept;
-#if 0
     bool SupportsExecutionBreakpoints() const noexcept;
     bool ConfigureExecutionBreakpoint(std::uintptr_t address) noexcept;
     bool ReadExecutionBreakpointRecords(
@@ -232,39 +91,10 @@ public:
         std::uintptr_t& hitAddress,
         std::size_t& totalRecords) noexcept;
     bool RemoveExecutionBreakpoints() noexcept;
-#endif
-#if 0
-    bool SupportsPageExecutionBreakpoints() const noexcept;
-    bool ConfigurePageExecutionBreakpoint(
-        std::uintptr_t address) noexcept;
-    bool ReadPageExecutionBreakpointRecords(
-        ExecutionBreakpointRecord* records,
-        std::size_t capacity,
-        std::size_t& recordsRead,
-        std::uintptr_t& hitAddress,
-        std::size_t& totalRecords) noexcept;
-    bool RemovePageExecutionBreakpoints() noexcept;
-#endif
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
     bool CanWrite() const noexcept;
     bool UsesKernelBackend() const noexcept;
 #endif
-    bool ConfigureCoordinateReplay(
-        const CoordinateReplayTransportLayout& layout) noexcept;
-    bool ConfigureCoordinateExecutionContext(
-        const CoordinateExecutionContextLayout& layout) noexcept;
-    bool ResolveCoordinateReplayEntry(
-        std::uintptr_t moduleBase,
-        CoordinateReplayEntrySnapshot& snapshot,
-        CoordinateReplayEntryDiagnostic& diagnostic);
-    bool ReadProcessExecutionContext(
-        std::uintptr_t moduleBase,
-        const ProcessExecutionCodeTarget& codeTarget,
-        ProcessExecutionContext& context);
-    ProcessExecutionContextDiagnostic ExecutionContextDiagnostic()
-        const noexcept;
-    bool RejectProcessExecutionContext() noexcept;
-
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

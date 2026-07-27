@@ -55,11 +55,6 @@ if not exist "%BUILD_DIR%\CMakeCache.txt" (
     echo [ERROR] CMake cache not found. Run 1_build.bat first.
     exit /b 1
 )
-findstr /B /C:"LENGJING_ENABLE_ALGORITHM_COORDINATE:BOOL=OFF" "%BUILD_DIR%\CMakeCache.txt" >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] Algorithm coordinate code is not disabled in this build.
-    exit /b 1
-)
 findstr /B /C:"LENGJING_ENABLE_COORDINATE_DEBUG_LOG:BOOL=ON" "%BUILD_DIR%\CMakeCache.txt" >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Coordinate diagnostic logging is not enabled in this build.
@@ -67,11 +62,6 @@ if errorlevel 1 (
 )
 if not exist "%BUILD_DIR%\compile_commands.json" (
     echo [ERROR] Compile command database not found. Run 1_build.bat first.
-    exit /b 1
-)
-findstr /C:"LENGJING_ENABLE_ALGORITHM_COORDINATE=1" "%BUILD_DIR%\compile_commands.json" >nul 2>&1
-if not errorlevel 1 (
-    echo [ERROR] Algorithm coordinate code is enabled in the compile commands.
     exit /b 1
 )
 findstr /C:"LENGJING_ENABLE_COORDINATE_DEBUG_LOG=1" "%BUILD_DIR%\compile_commands.json" >nul 2>&1
@@ -118,14 +108,13 @@ for %%I in (llvm-readelf.exe) do set "READELF=%%~$PATH:I"
         echo [ERROR] Unable to inspect the build product symbols.
         exit /b 1
     )
-    findstr /I /C:"AlgorithmCoordinate" /C:"RuntimeCoordinateCodec" /C:"ReadAlgorithmCoordinate" "!SYMBOL_REPORT!" >nul 2>&1
-    if not errorlevel 1 (
+    call :CheckLegacyDecryptSymbols "!SYMBOL_REPORT!" "build product"
+    if errorlevel 1 (
         del /q "!SYMBOL_REPORT!" >nul 2>&1
-        echo [ERROR] Algorithm coordinate symbols are present in the build product.
         exit /b 1
     )
     del /q "!SYMBOL_REPORT!" >nul 2>&1
-echo [SYMBOLS] ELF symbol table verified.
+echo [SYMBOLS] Build ELF symbol table and legacy decrypt audit verified.
 
 set "UPX_EXE="
 if "!USE_UPX!"=="1" (
@@ -207,14 +196,13 @@ if errorlevel 1 (
     echo [ERROR] Unable to inspect the release product symbols.
     exit /b 1
 )
-findstr /I /C:"AlgorithmCoordinate" /C:"RuntimeCoordinateCodec" /C:"ReadAlgorithmCoordinate" "!RELEASE_REPORT!" >nul 2>&1
-if not errorlevel 1 (
+call :CheckLegacyDecryptSymbols "!RELEASE_REPORT!" "release product"
+if errorlevel 1 (
     del /q "!RELEASE_REPORT!" "!ROOT_BIN!" >nul 2>&1
-    echo [ERROR] Algorithm coordinate symbols are present in the release product.
     exit /b 1
 )
 del /q "!RELEASE_REPORT!" >nul 2>&1
-echo [SYMBOLS] Release ELF symbol table preserved.
+echo [SYMBOLS] Release ELF symbol table and legacy decrypt audit verified.
 
 for /f "usebackq delims=" %%H in (`powershell.exe -NoProfile -NonInteractive -Command "(Get-FileHash -LiteralPath $env:BIN -Algorithm SHA256).Hash.ToLowerInvariant()"`) do set "BUILD_SHA_AFTER=%%H"
 for /f "usebackq delims=" %%H in (`powershell.exe -NoProfile -NonInteractive -Command "(Get-FileHash -LiteralPath $env:ROOT_BIN -Algorithm SHA256).Hash.ToLowerInvariant()"`) do set "ROOT_SHA=%%H"
@@ -237,3 +225,31 @@ if "!USE_UPX!"=="0" if /i not "!BUILD_SHA_BEFORE!"=="!ROOT_SHA!" (
 echo [DONE] !ROOT_BIN!
 echo [SHA256] !ROOT_SHA!
 exit /b 0
+
+:CheckLegacyDecryptSymbols
+findstr /I ^
+    /C:"AlgorithmCoordinate" ^
+    /C:"AlgorithmPosition" ^
+    /C:"AlgorithmReplay" ^
+    /C:"CoordinateDecrypt2" ^
+    /C:"CoordinateDecrypt3" ^
+    /C:"CoordinateDecryptBackendRoute" ^
+    /C:"CoordinateEntryBranch" ^
+    /C:"CoordinateExecution" ^
+    /C:"CoordinateOutput" ^
+    /C:"CoordinatePool" ^
+    /C:"Decrypt2" ^
+    /C:"Decrypt3" ^
+    /C:"Pacga" ^
+    /C:"PtraceExecutionContext" ^
+    /C:"RuntimeCoordinateCodec" ^
+    /C:"ThreadContextDeviceTransport" ^
+    /C:"ThreadExecutionContext" ^
+    /C:"Unicorn" ^
+    /C:"Capstone" ^
+    /C:" uc_" ^
+    /C:" cs_" ^
+    "%~1" >nul 2>&1
+if errorlevel 1 exit /b 0
+echo [ERROR] Legacy coordinate decrypt symbols are present in the %~2.
+exit /b 1
