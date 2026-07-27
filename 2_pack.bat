@@ -231,6 +231,8 @@ findstr /I ^
     /C:"AlgorithmCoordinate" ^
     /C:"AlgorithmPosition" ^
     /C:"AlgorithmReplay" ^
+    /C:"ActorRecordResolver" ^
+    /C:"CharacterComponentTransform" ^
     /C:"CoordinateDecrypt2" ^
     /C:"CoordinateDecrypt3" ^
     /C:"CoordinateDecryptBackendRoute" ^
@@ -240,9 +242,12 @@ findstr /I ^
     /C:"CoordinatePool" ^
     /C:"Decrypt2" ^
     /C:"Decrypt3" ^
+    /C:"DecodedActor" ^
+    /C:"encryptedRecord" ^
     /C:"Pacga" ^
     /C:"PtraceExecutionContext" ^
     /C:"RuntimeCoordinateCodec" ^
+    /C:"ResolvedRecord" ^
     /C:"ThreadContextDeviceTransport" ^
     /C:"ThreadExecutionContext" ^
     /C:"Unicorn" ^

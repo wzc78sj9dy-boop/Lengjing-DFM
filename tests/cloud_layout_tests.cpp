@@ -15,16 +15,16 @@ constexpr const char* kCoordinateBuildId =
 
 std::string LayoutJson(std::uint64_t revision,
                        std::string buildId = kBuildId,
-                       std::string veneer = "0xe7f5514") {
+                       std::string veneer = "0xe7f5514",
+                       std::uint64_t maximumActorCount = 12288) {
     std::ostringstream stream;
     stream << R"({"v":5,"b":")" << buildId
            << R"(","r":)" << revision
            << R"(,"d":[["0x21001000","0x22002000",)"
            << R"(["0x23003000","0x24004000"],)"
-           << R"(["0x25005000","0x26006000","0x284","0x414",)"
-           << R"(1536,40,12288,3072],)"
+           << maximumActorCount << ','
            << R"(["0x1a0","0x410","0x420"],)"
-           << R"("0x27007000","0x28008003"],[")"
+           << R"("0x27007000"],[")"
            << veneer << R"("]]})";
     return stream.str();
 }
@@ -56,6 +56,7 @@ void RunCloudLayoutTests() {
     REQUIRE(first.snapshot != nullptr);
     REQUIRE(first.snapshot->schemaVersion == kCloudLayoutSchemaVersion);
     REQUIRE(first.snapshot->decrypt.firstVeneerRva == 0xe7f5514);
+    REQUIRE(first.snapshot->layout.maximumActorCount == 12288);
     REQUIRE(first.snapshot->layout.actorSubject.meshOffset == 0x410);
 
     const auto unchanged = store.ValidateAndPublish(LayoutJson(1));
@@ -77,6 +78,12 @@ void RunCloudLayoutTests() {
             CloudLayoutStatus::RangeError);
     REQUIRE(store.ValidateAndPublish(LayoutJson(3, kBuildId, "0xe7f5512"))
                 .status == CloudLayoutStatus::RangeError);
+    REQUIRE(store.ValidateAndPublish(
+                LayoutJson(3, kBuildId, "0xe7f5514", 0))
+                .status == CloudLayoutStatus::RangeError);
+    REQUIRE(store.ValidateAndPublish(
+                LayoutJson(3, kBuildId, "0xe7f5514", 65537))
+                .status == CloudLayoutStatus::RangeError);
 
     CloudLayoutStore upgradedStore(
         {"com.tencent.tmgp.dfm", "libUE4.so"});
@@ -86,6 +93,7 @@ void RunCloudLayoutTests() {
     REQUIRE(upgraded.snapshot != nullptr);
     REQUIRE(upgraded.snapshot->schemaVersion == kCloudLayoutSchemaVersion);
     REQUIRE(upgraded.snapshot->identity.buildId == kCoordinateBuildId);
+    REQUIRE(upgraded.snapshot->layout.maximumActorCount == 12288);
     REQUIRE(upgraded.snapshot->decrypt.firstVeneerRva == 0xe7f5514);
 
     CloudLayoutStore wrongTarget(RuntimeTarget());

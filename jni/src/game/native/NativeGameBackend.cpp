@@ -11,10 +11,8 @@
 #include "game/data/ItemCatalog.h"
 #include "game/data/ThreatCatalog.h"
 #include "game/native/ActorRecordRefreshPolicy.h"
-#include "game/native/ActorRecordResolver.h"
 #include "game/native/ActorRecordSource.h"
 #include "game/native/BoneFrameSource.h"
-#include "game/native/CharacterComponentTransform.h"
 #include "game/native/CharacterPositionResolver.h"
 #include "game/native/ExecutionVeneerLocator.h"
 #include "game/native/FrameProjection.h"
@@ -196,12 +194,11 @@ struct VersionLayout {
     std::uintptr_t namePoolOffset = 0;
     std::uintptr_t worldOffset = 0;
     std::array<std::uintptr_t, 2> geometryInstancePointerOffsets{};
-    native::ActorRecordLayout actorRecordLayout{};
+    std::int32_t maximumActorCount = 0;
     native::ActorSubjectLayout actorSubjectLayout{};
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
     std::uintptr_t trackingMatrixRootOffset = 0;
 #endif
-    std::uintptr_t componentPositionFlagOffset = 0;
 };
 
 constexpr std::array<VersionLayout, 3> kVersionLayouts{{
@@ -990,14 +987,12 @@ public:
         layout_.worldOffset = cloudLayout->worldOffset;
         layout_.geometryInstancePointerOffsets =
             cloudLayout->geometryInstancePointerOffsets;
-        layout_.actorRecordLayout = cloudLayout->actorRecords;
+        layout_.maximumActorCount = cloudLayout->maximumActorCount;
         layout_.actorSubjectLayout = cloudLayout->actorSubject;
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
         layout_.trackingMatrixRootOffset =
             cloudLayout->trackingMatrixRootOffset;
 #endif
-        layout_.componentPositionFlagOffset =
-            cloudLayout->componentPositionFlagOffset;
         firstVeneerRva_ = cloudLayout->firstVeneerRva;
         if (!aimController_.Start(options.inputMode)) {
             SetRuntimeFailure(
@@ -1372,8 +1367,6 @@ public:
         float boneFailureDistance = 0.0f;
         float boneFailureHealth = 0.0f;
         bool boneFailureBot = false;
-        bool boneFailureResolver = false;
-        bool boneFailureEncrypted = false;
         const auto recordBoneStatus =
             [&botBoneStatusCounts, &playerBoneStatusCounts](
                 bool bot, BoneFrameReadStatus status) {
@@ -1392,7 +1385,6 @@ public:
             std::uintptr_t actorClass = 0;
             std::uintptr_t trackingClassOffset = 0;
             const bool trackingClassReadable = recoveredTrackingActive &&
-                actorRecord.resolverRecord &&
                 ReadValue(actor, actorClass) && actorClass >= moduleBase_;
             if (trackingClassReadable) {
                 trackingClassOffset = actorClass - moduleBase_;
@@ -1508,19 +1500,12 @@ public:
             const bool enemyEligible = native::IsEnemyEligible(
                 context.localTeam, targetTeam, bot);
 
-            native::FillOrdinaryActorPointers(
+            native::FillActorPointers(
                 actorRecord,
                 layout_.actorSubjectLayout,
                 [&](std::uintptr_t address) { return ReadPointer(address); });
             Vec3 position{};
-#if LENGJING_ENABLE_PROJECTILE_TRACKING
-            const native::PositionReadMode actorPositionMode =
-                trackingPlayerClass && actorRecord.resolverRecord
-                ? native::PositionReadMode::ResolvedRecord
-                : positionMode;
-#else
             const native::PositionReadMode actorPositionMode = positionMode;
-#endif
             native::CharacterPositionSource positionSource =
                 native::CharacterPositionSource::None;
             const bool coordinateAvailable = ReadCharacterPosition(
@@ -1532,11 +1517,7 @@ public:
                 &positionSource);
             if (IsCoordinateTraceEnabled()) {
                 auto& trace = coordinateTraceRecords_[actor];
-                trace.recordRoot = actorRecord.root;
-                trace.ordinaryRoot = actorRecord.ordinaryRoot;
-                trace.resolverRecord = actorRecord.resolverRecord;
-                trace.encryptedRecord = actorRecord.encryptedRecord;
-                trace.ordinarySource = actorRecord.ordinarySource;
+                trace.root = actorRecord.root;
                 trace.output = position;
             }
             if (!coordinateAvailable) {
@@ -1592,7 +1573,7 @@ public:
             const bool aimEligible = selfAimActorEligible;
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
             bool trackingActorEligible = recoveredTrackingActive &&
-                trackingPlayerClass && actorRecord.resolverRecord &&
+                trackingPlayerClass &&
                 (rangeTargetClass || enemyEligible);
             std::uint8_t trackingTargetState = rangeTargetClass ? 1 : 0;
             if (trackingActorEligible) {
@@ -1793,8 +1774,6 @@ public:
                     boneFailureDistance = distanceMeters;
                     boneFailureHealth = health.health;
                     boneFailureBot = bot;
-                    boneFailureResolver = actorRecord.resolverRecord;
-                    boneFailureEncrypted = actorRecord.encryptedRecord;
                 }
                 boneBoundsReady = boneFrameReady &&
                     TryBuildBoneBounds(boneFrame, boneBounds);
@@ -1833,20 +1812,13 @@ public:
                     std::fprintf(
                         stderr,
                         "[coordinate-trace] frame=%llu actor=%llx "
-                        "resolver=%d encrypted=%d ordinary=%d "
-                        "record_root=%llx root=%llx ordinary_root=%llx "
-                        "component=%llx available=%d source=%s "
+                        "root=%llx component=%llx available=%d source=%s "
                         "error=%u sys=%d raw=(%.3f,%.3f,%.3f) "
                         "xyz=(%.3f,%.3f,%.3f) bottom=(%.2f,%.2f) "
                         "top=(%.2f,%.2f) projected=%d/%d on_screen=%d\n",
                         static_cast<unsigned long long>(coordinateTraceFrame_),
                         static_cast<unsigned long long>(actor),
-                        trace->second.resolverRecord ? 1 : 0,
-                        trace->second.encryptedRecord ? 1 : 0,
-                        trace->second.ordinarySource ? 1 : 0,
-                        static_cast<unsigned long long>(trace->second.recordRoot),
                         static_cast<unsigned long long>(trace->second.root),
-                        static_cast<unsigned long long>(trace->second.ordinaryRoot),
                         static_cast<unsigned long long>(trace->second.component),
                         coordinateAvailable ? 1 : 0,
                         CoordinateTraceSourceName(trace->second.source),
@@ -2053,7 +2025,6 @@ public:
                             distanceMeters,
                             screenDistance,
                             aimBone,
-                            actorRecord.encryptedRecord,
                             false,
                             rangeTargetClass,
                             selfAimActorEligible,
@@ -2373,8 +2344,7 @@ public:
                 "player_no_array=%zu player_no_transforms=%zu "
                 "player_inactive=%zu player_invalid=%zu "
                 "failure_class=%s failure_bot=%d "
-                "failure_distance=%.1f failure_health=%.1f "
-                "failure_resolver=%d failure_encrypted=%d\n",
+                "failure_distance=%.1f failure_health=%.1f\n",
                 actorRecords.size(),
                 validActorCount,
                 characterActorCount,
@@ -2419,9 +2389,7 @@ public:
                 boneFailureClass.empty() ? "-" : boneFailureClass.c_str(),
                 boneFailureBot ? 1 : 0,
                 boneFailureDistance,
-                boneFailureHealth,
-                boneFailureResolver ? 1 : 0,
-                boneFailureEncrypted ? 1 : 0);
+                boneFailureHealth);
             std::fflush(stderr);
             lastBoneAuditLogAt_ = boneAuditNow;
         }
@@ -2480,8 +2448,6 @@ private:
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
         bool firingOriginValid = false;
 #endif
-        bool decodedRecordsEncrypted = false;
-        bool decodedRecordSourceReady = false;
         std::uint64_t weaponId = 0;
         std::uintptr_t weaponRoot = 0;
     };
@@ -2489,12 +2455,6 @@ private:
     struct ActorRecordSnapshot {
         native::ActorRecordSnapshotKey key{};
         std::vector<RuntimeActorRecord> records;
-        std::vector<RuntimeActorRecord> decodedRecords;
-        std::chrono::steady_clock::time_point decodedUpdatedAt{};
-        bool decodedRecordsEncrypted = false;
-        bool decodedRecordArrayLocated = false;
-        bool decodedRecordSourceReady = false;
-        bool decodedRecordSourceRetained = false;
         bool hasKey = false;
     };
 
@@ -2570,8 +2530,6 @@ private:
     struct CoordinateTraceRecord {
         std::uintptr_t root = 0;
         std::uintptr_t component = 0;
-        std::uintptr_t recordRoot = 0;
-        std::uintptr_t ordinaryRoot = 0;
         Vec3 raw{};
         Vec3 output{};
         Vec2 projectedBottom{};
@@ -2580,9 +2538,6 @@ private:
         CoordinateDecryptError error = CoordinateDecryptError::None;
         int systemError = 0;
         bool attempted = false;
-        bool resolverRecord = false;
-        bool encryptedRecord = false;
-        bool ordinarySource = false;
         bool bottomProjected = false;
         bool topProjected = false;
         bool onScreen = false;
@@ -2592,7 +2547,6 @@ private:
         std::uintptr_t root = 0;
         std::uintptr_t mesh = 0;
         std::uintptr_t boneArray = 0;
-        bool encryptedRecord = false;
         bool resolvedTranslation = false;
         std::array<Vec3, kBoneIndices.size()> world{};
         std::array<bool, kBoneIndices.size()> valid{};
@@ -2614,7 +2568,6 @@ private:
         float worldDistanceMeters = 0.0f;
         float selectionDistancePixels = 0.0f;
         int boneIndex = -1;
-        bool encryptedRecord = false;
         bool alignBones = false;
         bool rangeTarget = false;
         bool selfAimEligible = false;
@@ -2894,69 +2847,7 @@ private:
         return ReadValue(address, value) && IsValidPointer(value) ? value : 0;
     }
 
-    std::vector<RuntimeActorRecord> CollectDecodedActorRecords(
-        bool& sourceReady,
-        bool& encrypted) {
-        std::vector<RuntimeActorRecord> result;
-        sourceReady = false;
-        encrypted = false;
-        if (!native::HasConfiguredActorRecordSource(
-                layout_.actorRecordLayout) ||
-            memory_ == nullptr) {
-            return result;
-        }
-
-        auto readBytes = [this](std::uintptr_t address,
-                                void* destination,
-                                std::size_t size) {
-            return memory_ != nullptr && IsValidReadAddress(address) &&
-                size != 0 && size <= kMaximumRemoteAddress - address &&
-                memory_->Read(address, destination, size);
-        };
-        const auto validatePointer = [](std::uintptr_t address) {
-            return IsValidPointer(address);
-        };
-        const native::ActorRecordResolver resolver(
-            layout_.actorRecordLayout);
-        const std::optional<native::ActorArrayDescriptor> array =
-            resolver.Locate(moduleBase_, readBytes, validatePointer);
-        if (!array.has_value()) return result;
-        sourceReady = true;
-        encrypted = array->encrypted;
-
-        const std::size_t maximumRecords = static_cast<std::size_t>(
-            layout_.actorRecordLayout.maximumPlainCount);
-        if (maximumRecords == 0) return result;
-        result.reserve(std::min<std::size_t>(
-            array->count, maximumRecords));
-        for (std::uint32_t index = 0;
-             index < array->count && result.size() < maximumRecords;
-             ++index) {
-            const std::optional<native::ActorAddressRecord> record =
-                resolver.ReadRecord(*array, index, readBytes);
-            if (!record.has_value() ||
-                !IsValidPointer(record->actor) ||
-                !IsValidPointer(record->root)) {
-                continue;
-            }
-            result.push_back(native::MakeResolvedActorRecord(
-                record->actor,
-                record->root,
-                record->mesh,
-                array->encrypted));
-        }
-        return result;
-    }
-
-    std::vector<RuntimeActorRecord> CollectActorRecords(
-        const FrameContext& context,
-        const std::vector<RuntimeActorRecord>& decodedActors) {
-        return native::MergeCurrentLevelActorRecordSources(
-            CollectActorAddresses(context), decodedActors);
-    }
-
-    void RefreshActorRecordSnapshot(FrameContext& context,
-                                    bool resolvedRecordsRequired) {
+    void RefreshActorRecordSnapshot(FrameContext& context) {
         platform::PerformanceTraceScope trace(
             platform::PerformancePhase::ActorSnapshot);
         const native::ActorRecordSnapshotKey key{
@@ -2966,7 +2857,6 @@ private:
             context.actorArray,
             context.actorCount,
             context.localPawn,
-            resolvedRecordsRequired,
         };
         const auto now = std::chrono::steady_clock::now();
         const bool metadataRefreshed =
@@ -2975,73 +2865,25 @@ private:
             ActorRecordSnapshot candidate{};
             candidate.key = key;
             candidate.hasKey = true;
-            if (resolvedRecordsRequired) {
-                candidate.decodedRecords = CollectDecodedActorRecords(
-                    candidate.decodedRecordSourceReady,
-                    candidate.decodedRecordsEncrypted);
-                candidate.decodedRecordArrayLocated =
-                    candidate.decodedRecordSourceReady;
-                if (!candidate.decodedRecords.empty()) {
-                    candidate.decodedUpdatedAt = now;
-                } else if (actorRecordSnapshot_.hasKey &&
-                           native::CanRetainDecodedActorSnapshot(
-                               native::ActorRecordIdentity(
-                                   actorRecordSnapshot_.key),
-                               native::ActorRecordIdentity(key),
-                               actorRecordSnapshot_.decodedRecordSourceReady,
-                               false,
-                               actorRecordSnapshot_.decodedUpdatedAt,
-                               now)) {
-                    candidate.decodedRecords =
-                        actorRecordSnapshot_.decodedRecords;
-                    candidate.decodedRecordSourceReady =
-                        !candidate.decodedRecords.empty();
-                    candidate.decodedRecordsEncrypted =
-                        actorRecordSnapshot_.decodedRecordsEncrypted;
-                    candidate.decodedUpdatedAt =
-                        actorRecordSnapshot_.decodedUpdatedAt;
-                    candidate.decodedRecordSourceRetained =
-                        candidate.decodedRecordSourceReady;
-                }
-            }
+            candidate.records = native::BuildActorRecords(
+                CollectActorAddresses(context));
             actorRecordSnapshot_ = std::move(candidate);
         }
-
-        actorRecordSnapshot_.records = CollectActorRecords(
-            context, actorRecordSnapshot_.decodedRecords);
-        const bool currentDecodedRecordsReady = std::any_of(
-            actorRecordSnapshot_.records.begin(),
-            actorRecordSnapshot_.records.end(),
-            [](const RuntimeActorRecord& record) {
-                return record.resolverRecord;
-            });
-        context.decodedRecordsEncrypted =
-            actorRecordSnapshot_.decodedRecordsEncrypted;
-        context.decodedRecordSourceReady =
-            actorRecordSnapshot_.decodedRecordSourceReady &&
-            (!resolvedRecordsRequired || currentDecodedRecordsReady);
 
         if (IsCoordinateTraceEnabled() &&
             ShouldWriteCoordinateFrameTrace(coordinateTraceFrame_)) {
             std::fprintf(
                 stderr,
-                "[coordinate-trace-snapshot] frame=%llu resolved_required=%d "
-                "resolved_ready=%d encrypted=%d retained=%d records=%zu "
-                "ordinary_array=%llx "
-                "ordinary_count=%d\n",
+                "[coordinate-trace-snapshot] frame=%llu records=%zu "
+                "actor_array=%llx actor_count=%d\n",
                 static_cast<unsigned long long>(coordinateTraceFrame_),
-                resolvedRecordsRequired ? 1 : 0,
-                context.decodedRecordSourceReady ? 1 : 0,
-                actorRecordSnapshot_.decodedRecordsEncrypted ? 1 : 0,
-                actorRecordSnapshot_.decodedRecordSourceRetained ? 1 : 0,
                 actorRecordSnapshot_.records.size(),
                 static_cast<unsigned long long>(context.actorArray),
                 context.actorCount);
             std::fflush(stderr);
         }
 
-        const bool cacheable = !actorRecordSnapshot_.records.empty() &&
-            (!resolvedRecordsRequired || context.decodedRecordSourceReady);
+        const bool cacheable = !actorRecordSnapshot_.records.empty();
         if (cacheable && metadataRefreshed) {
             actorRecordRefreshPolicy_.MarkRefreshed(key, now);
         } else if (!cacheable) {
@@ -3104,7 +2946,7 @@ private:
                 context.actorCount,
                 context.actorCount,
             },
-            layout_.actorRecordLayout.maximumPlainCount);
+            layout_.maximumActorCount);
         if (result.size() >= kMaximumCollectedActors) {
             return result;
         }
@@ -3154,7 +2996,7 @@ private:
                 context.actorCount,
                 context.actorCount,
             },
-            layout_.actorRecordLayout.maximumPlainCount);
+            layout_.maximumActorCount);
         ActorArrayHeader persistentObjects{};
         if (ReadValue(context.level + 0x98, persistentObjects)) {
             appendArray(persistentObjects, kMaximumWorldObjectCount);
@@ -3920,7 +3762,7 @@ private:
             ReadValue(context.level + 0x1F0, actors) &&
             IsValidPointer(actors.data) && actors.count > 0 &&
             actors.count <=
-                layout_.actorRecordLayout.maximumPlainCount &&
+                layout_.maximumActorCount &&
             actors.capacity >= actors.count;
         if (!ordinaryActorsAvailable) {
             failure.error = RuntimeError::ActorSourceUnavailable;
@@ -3935,21 +3777,7 @@ private:
         context.localController = ReadPointer(localPlayer + 0x30);
         context.localPawn = ReadPointer(context.localController + 0x3F0);
         context.cameraManager = ReadPointer(context.localController + 0x408);
-        const bool resolvedRecordsRequired =
-            native::ShouldRequireResolvedActorRecords(
-                positionMode,
-#if LENGJING_ENABLE_PROJECTILE_TRACKING
-                trajectoryTracking
-#else
-                false
-#endif
-            );
-        RefreshActorRecordSnapshot(context, resolvedRecordsRequired);
-        if (resolvedRecordsRequired && !context.decodedRecordSourceReady) {
-            failure.error = RuntimeError::ActorSourceUnavailable;
-            diagnostic = "数据链等待：人物列表暂不可读";
-            return false;
-        }
+        RefreshActorRecordSnapshot(context);
         if (actorRecordSnapshot_.records.empty()) {
             failure.error = RuntimeError::ActorSourceUnavailable;
             diagnostic = "数据链等待：人物数组暂不可读";
@@ -4018,23 +3846,12 @@ private:
             ResolveTrackingOrigin(context, context.firingOrigin);
 #endif
 
-        const auto localRecord = std::find_if(
-            actorRecordSnapshot_.records.begin(),
-            actorRecordSnapshot_.records.end(),
-            [&context](const RuntimeActorRecord& record) {
-                return record.actor == context.localPawn &&
-                    record.resolverRecord;
-            });
-
         std::int32_t localNameIndex = -1;
         ReadValue(context.localPawn + 0x1C, localNameIndex);
         const std::string localClassName =
             DecodeName(localNameIndex, context.namePool);
-        std::uintptr_t localRoot = 0;
-        if (positionMode == native::PositionReadMode::ResolvedRecord &&
-            localRecord != actorRecordSnapshot_.records.end()) {
-            localRoot = localRecord->root;
-        }
+        const std::uintptr_t localRoot = ReadPointer(
+            context.localPawn + layout_.actorSubjectLayout.rootOffset);
         if (!ReadCharacterPosition(
                 context.localPawn,
                 localRoot,
@@ -4230,7 +4047,7 @@ private:
 
     bool ReadCharacterPosition(
         std::uintptr_t actor,
-        std::uintptr_t ordinaryRoot,
+        std::uintptr_t root,
         std::string_view className,
         native::PositionReadMode,
         bool antiFlicker,
@@ -4251,7 +4068,7 @@ private:
                 if (IsCoordinateTraceEnabled()) {
                     auto& traceRecord = coordinateTraceRecords_[actor];
                     traceRecord = CoordinateTraceRecord{};
-                    traceRecord.root = ordinaryRoot;
+                    traceRecord.root = root;
                     traceRecord.component = mesh;
                     traceRecord.raw = position;
                     traceRecord.output = position;
@@ -4278,7 +4095,7 @@ private:
         const bool resolved = localActor
             ? characterPositions_.ReadLocalWithRoot(
                   actor,
-                  ordinaryRoot,
+                  root,
                   className,
                   native::PositionReadMode::Standard,
                   antiFlicker,
@@ -4286,7 +4103,7 @@ private:
                   readBytes)
             : characterPositions_.ReadWithRoot(
                   actor,
-                  ordinaryRoot,
+                  root,
                   className,
                   native::PositionReadMode::Standard,
                   antiFlicker,
@@ -4296,7 +4113,7 @@ private:
             if (IsCoordinateTraceEnabled()) {
                 auto& traceRecord = coordinateTraceRecords_[actor];
                 traceRecord = CoordinateTraceRecord{};
-                traceRecord.root = ordinaryRoot;
+                traceRecord.root = root;
                 traceRecord.source = CoordinateTraceSource::Failure;
                 traceRecord.attempted = true;
                 traceRecord.error =
@@ -4310,7 +4127,7 @@ private:
         if (IsCoordinateTraceEnabled()) {
             auto& traceRecord = coordinateTraceRecords_[actor];
             traceRecord = CoordinateTraceRecord{};
-            traceRecord.root = ordinaryRoot;
+            traceRecord.root = root;
             traceRecord.output = position;
             traceRecord.source = CoordinateTraceSource::Standard;
             traceRecord.attempted = true;
@@ -4328,14 +4145,14 @@ private:
         bool antiFlicker,
         Vec3& position,
         native::CharacterPositionSource* positionSource = nullptr) {
-        std::uintptr_t ordinaryRoot = record.ordinaryRoot;
-        if (!IsValidPointer(ordinaryRoot)) {
-            ordinaryRoot = ReadPointer(
+        std::uintptr_t root = record.root;
+        if (!IsValidPointer(root)) {
+            root = ReadPointer(
                 record.actor + layout_.actorSubjectLayout.rootOffset);
         }
         return ReadCharacterPosition(
             record.actor,
-            ordinaryRoot,
+            root,
             className,
             native::PositionReadMode::Standard,
             antiFlicker,
@@ -4378,22 +4195,12 @@ private:
     bool ReadActorFacing(const RuntimeActorRecord& record,
                          Vec3& forward,
                          float& headingRadians) {
-        return native::ReadActorRecordSourceWithFallback(
-            record,
-            [&] {
-                return ReadActorFacingFromMesh(
-                    record.mesh, forward, headingRadians);
-            },
-            [&] {
-                return ReadActorFacingFromMesh(
-                    record.ordinaryMesh, forward, headingRadians);
-            });
+        return ReadActorFacingFromMesh(
+            record.mesh, forward, headingRadians);
     }
 
     bool HasReadableMesh(const RuntimeActorRecord& record) const {
-        return (record.resolverRecord && IsValidPointer(record.mesh)) ||
-            (record.ordinarySource &&
-             IsValidPointer(record.ordinaryMesh));
+        return IsValidPointer(record.mesh);
     }
 
     bool HasReadableBoneArray(const RuntimeActorRecord& record) {
@@ -4402,10 +4209,7 @@ private:
             return IsValidPointer(ReadPointer(mesh + 0x730)) ||
                 IsValidPointer(ReadPointer(mesh + 0x740));
         };
-        if (record.ordinarySource && hasBoneArray(record.ordinaryMesh)) {
-            return true;
-        }
-        return record.resolverRecord && hasBoneArray(record.mesh);
+        return hasBoneArray(record.mesh);
     }
 
     bool ObserveAimWarning(
@@ -4798,63 +4602,6 @@ private:
         return native::GeometryVisibility::Unavailable;
     }
 
-    bool RebuildResolvedComponentTransform(
-        std::uintptr_t root,
-        Transform& transform) {
-        transform = Transform{};
-        if (!IsValidPointer(root)) return false;
-
-        Vec3 position{};
-        native::ComponentEulerAngles euler{};
-        Vec3 scale{};
-        native::ComponentPositionFlag positionFlag = 0;
-        if (layout_.componentPositionFlagOffset != 0) {
-            if (!ReadValue(
-                moduleBase_ + layout_.componentPositionFlagOffset,
-                positionFlag)) {
-                return false;
-            }
-        }
-        const native::ResolvedComponentFieldAddresses addresses =
-            native::ResolveComponentFieldAddresses(root, positionFlag);
-        if (!ReadValue(addresses.position, position) ||
-            !ReadValue(addresses.euler, euler) ||
-            !ReadValue(addresses.scale, scale)) {
-            return false;
-        }
-
-        const native::ResolvedComponentTransform rebuilt =
-            native::BuildResolvedComponentTransform(
-                native::ComponentVector3{
-                    position.x,
-                    position.y,
-                    position.z,
-                },
-                euler,
-                native::ComponentVector3{
-                    scale.x,
-                    scale.y,
-                    scale.z,
-                });
-        transform.rotation = Quaternion{
-            rebuilt.rotation.x,
-            rebuilt.rotation.y,
-            rebuilt.rotation.z,
-            rebuilt.rotation.w,
-        };
-        transform.translation = Vec3{
-            rebuilt.translation.x,
-            rebuilt.translation.y,
-            rebuilt.translation.z,
-        };
-        transform.scale = Vec3{
-            rebuilt.scale.x,
-            rebuilt.scale.y,
-            rebuilt.scale.z,
-        };
-        return IsValidTransform(transform);
-    }
-
     bool ReadBoneFrame(const RuntimeActorRecord& actorRecord,
                        const native::PreparedProjection& prepared,
                        bool antiFlicker,
@@ -4873,33 +4620,11 @@ private:
         const auto now = std::chrono::steady_clock::now();
         const bool useCache = antiFlicker;
         auto cached = boneCache_.find(actor);
-        std::uintptr_t ordinaryMesh = actorRecord.ordinaryMesh;
-        if (!IsValidPointer(ordinaryMesh) && actorRecord.resolverRecord) {
-            ordinaryMesh = ReadPointer(
-                actor + layout_.actorSubjectLayout.meshOffset);
-        }
-        const native::BoneFrameRecordSource boneRecord{
+        const native::BoneFrameSourceSelection source =
+            native::SelectBoneFrameSource(
             actorRecord.root,
-            actorRecord.mesh,
-            actorRecord.encryptedRecord,
-            actorRecord.resolverRecord,
-        };
-        const bool resolvedBoneTransformEnabled =
-            native::IsResolvedBoneTransformEnabled(
-                hardwareBreakpointRequested_);
-        const native::BoneFrameSourceSelection preferredSource =
-            native::SelectPreferredBoneFrameSource(
-                boneRecord,
-                actorRecord.ordinaryRoot,
-                ordinaryMesh,
-                resolvedBoneTransformEnabled);
-        const native::BoneFrameSourceSelection fallbackSource =
-            native::SelectFallbackBoneFrameSource(
-                boneRecord,
-                actorRecord.ordinaryRoot,
-                ordinaryMesh,
-                resolvedBoneTransformEnabled);
-        if (!preferredSource && !fallbackSource) {
+            actorRecord.mesh);
+        if (!source) {
             if (readStatus != nullptr) {
                 *readStatus = BoneFrameReadStatus::NoSource;
             }
@@ -4908,14 +4633,10 @@ private:
         bool cacheFresh = useCache && cached != boneCache_.end() &&
             now - cached->second.lastUpdatedAt <= kCacheLifetime &&
             native::IsBoneFrameCacheSourceCompatible(
-                boneRecord,
-                actorRecord.ordinaryRoot,
-                ordinaryMesh,
-                resolvedBoneTransformEnabled,
+                source,
                 native::BoneFrameCacheSource{
                     cached->second.root,
                     cached->second.mesh,
-                    cached->second.encryptedRecord,
                 });
 
         struct BoneSourceFrame {
@@ -4944,7 +4665,6 @@ private:
             [this, &hasUsableLink](
                 std::uintptr_t candidateBoneArray,
                 const Matrix4& componentMatrix,
-                const native::ResolvedComponentTransform* resolvedComponent,
                 const Vec3& alignment,
                 bool alignmentReady) {
                 BoneSourceFrame result{};
@@ -4981,9 +4701,7 @@ private:
                     Transform transform{};
                     bool transformReady = bulkReady &&
                         boneIndex < transforms.size() &&
-                        (resolvedComponent != nullptr
-                            ? IsFinite(transforms[boneIndex].translation)
-                            : IsValidTransform(transforms[boneIndex]));
+                        IsValidTransform(transforms[boneIndex]);
                     if (transformReady) {
                         transform = transforms[boneIndex];
                     } else {
@@ -4991,31 +4709,12 @@ private:
                             static_cast<std::uintptr_t>(boneIndex) *
                                 kBoneTransformStride;
                         transformReady = ReadValue(address, transform) &&
-                            (resolvedComponent != nullptr
-                                ? IsFinite(transform.translation)
-                                : IsValidTransform(transform));
+                            IsValidTransform(transform);
                     }
                     if (!transformReady) continue;
 
-                    Vec3 world{};
-                    if (resolvedComponent != nullptr) {
-                        const native::ComponentVector3 resolvedWorld =
-                            native::TransformResolvedBoneTranslation(
-                                native::ComponentVector3{
-                                    transform.translation.x,
-                                    transform.translation.y,
-                                    transform.translation.z,
-                                },
-                                *resolvedComponent);
-                        world = Vec3{
-                            resolvedWorld.x,
-                            resolvedWorld.y,
-                            resolvedWorld.z,
-                        };
-                    } else {
-                        world = MatrixTranslation(Multiply(
-                            TransformToMatrix(transform), componentMatrix));
-                    }
+                    Vec3 world = MatrixTranslation(Multiply(
+                        TransformToMatrix(transform), componentMatrix));
                     if (alignmentReady) {
                         world.x += alignment.x;
                         world.y += alignment.y;
@@ -5045,64 +4744,21 @@ private:
 
                 Transform componentTransform{};
                 const Vec3* standardizedPosition = resolvedPosition;
-                const bool componentReady = source.rebuildResolvedTransform
-                    ? RebuildResolvedComponentTransform(
-                          source.root,
-                          componentTransform)
-                    : ReadValue(source.mesh + 0x210, componentTransform);
-                if (!componentReady) return result;
+                if (!ReadValue(source.mesh + 0x210, componentTransform)) {
+                    return result;
+                }
 
                 result.failureStatus = BoneFrameReadStatus::NoBoneArray;
 
                 const Matrix4 componentMatrix =
                     TransformToMatrix(componentTransform);
-                const native::ResolvedComponentTransform resolvedComponent{
-                    native::ComponentQuaternion{
-                        componentTransform.rotation.x,
-                        componentTransform.rotation.y,
-                        componentTransform.rotation.z,
-                        componentTransform.rotation.w,
-                    },
-                    native::ComponentVector3{
-                        componentTransform.translation.x,
-                        componentTransform.translation.y,
-                        componentTransform.translation.z,
-                    },
-                    native::ComponentVector3{
-                        componentTransform.scale.x,
-                        componentTransform.scale.y,
-                        componentTransform.scale.z,
-                    },
-                };
-                const native::ResolvedComponentTransform*
-                    resolvedComponentPointer =
-                        source.rebuildResolvedTransform
-                        ? &resolvedComponent
-                        : nullptr;
                 Vec3 alignment{};
                 bool alignmentReady = false;
                 if (standardizedPosition != nullptr &&
                     IsFinite(*standardizedPosition)) {
-                    if (source.rebuildResolvedTransform) {
-                        const native::ComponentVector3
-                            resolvedAlignment =
-                                native::BuildResolvedBoneAlignment(
-                                    native::ComponentVector3{
-                                        standardizedPosition->x,
-                                        standardizedPosition->y,
-                                        standardizedPosition->z,
-                                    },
-                                    resolvedComponent.translation);
-                        alignment = Vec3{
-                            resolvedAlignment.x,
-                            resolvedAlignment.y,
-                            resolvedAlignment.z,
-                        };
-                    } else {
-                        alignment = Subtract(
-                            *standardizedPosition,
-                            MatrixTranslation(componentMatrix));
-                    }
+                    alignment = Subtract(
+                        *standardizedPosition,
+                        MatrixTranslation(componentMatrix));
                     alignmentReady = IsFinite(alignment);
                 }
 
@@ -5111,16 +4767,12 @@ private:
                 result = readBoneArray(
                     primaryBoneArray,
                     componentMatrix,
-                    resolvedComponentPointer,
                     alignment,
                     alignmentReady);
                 result.source = source;
-                result.resolvedTranslation =
-                    source.rebuildResolvedTransform || alignmentReady;
+                result.resolvedTranslation = alignmentReady;
 
                 if (native::ShouldReadSecondaryBoneArray(
-                        source.rebuildResolvedTransform,
-                        IsValidPointer(primaryBoneArray),
                         result.validCount,
                         kBoneIndices.size())) {
                     const std::uintptr_t secondaryBoneArray =
@@ -5130,12 +4782,10 @@ private:
                         BoneSourceFrame secondary = readBoneArray(
                             secondaryBoneArray,
                             componentMatrix,
-                            resolvedComponentPointer,
                             alignment,
                             alignmentReady);
                         secondary.source = source;
-                        secondary.resolvedTranslation =
-                            source.rebuildResolvedTransform || alignmentReady;
+                        secondary.resolvedTranslation = alignmentReady;
                         if (native::PreferBoneFrameCandidate(
                                 result.validCount,
                                 result.usable,
@@ -5148,24 +4798,13 @@ private:
                 return result;
             };
 
-        BoneSourceFrame current = readBoneSource(preferredSource);
-        if (current.validCount < kBoneIndices.size() && fallbackSource) {
-            BoneSourceFrame fallback = readBoneSource(fallbackSource);
-            if (native::PreferBoneFrameCandidate(
-                    current.validCount,
-                    current.usable,
-                    fallback.validCount,
-                    fallback.usable)) {
-                current = std::move(fallback);
-            }
-        }
+        BoneSourceFrame current = readBoneSource(source);
 
         if (useCache && current.validCount != 0) {
             BoneCacheEntry& entry = boneCache_[actor];
             const native::BoneFrameCacheSource entrySource{
                 entry.root,
                 entry.mesh,
-                entry.encryptedRecord,
             };
             if (native::ShouldResetBoneFrameCache(
                     current.source,
@@ -5179,8 +4818,6 @@ private:
             entry.root = current.source.root;
             entry.mesh = current.source.mesh;
             entry.boneArray = current.boneArray;
-            entry.encryptedRecord =
-                current.source.rebuildResolvedTransform;
             entry.resolvedTranslation = current.resolvedTranslation;
             for (std::size_t index = 0;
                  index < current.valid.size();
@@ -5872,16 +5509,7 @@ private:
     bool ReadTrackingMeshType(
         const RuntimeActorRecord& record,
         std::int32_t& meshType) {
-        return native::ReadActorRecordSourceWithFallback(
-            record,
-            [&] {
-                return ReadTrackingMeshTypeFromMesh(
-                    record.mesh, meshType);
-            },
-            [&] {
-                return ReadTrackingMeshTypeFromMesh(
-                    record.ordinaryMesh, meshType);
-            });
+        return ReadTrackingMeshTypeFromMesh(record.mesh, meshType);
     }
 
     bool PassTrackingAcquisitionHealth(
@@ -6006,7 +5634,6 @@ private:
             distanceMeters,
             selectionDistance,
             selectedBone,
-            record.encryptedRecord,
             false,
             rangeTargetClass,
             false,
@@ -6025,17 +5652,13 @@ private:
         std::unordered_set<std::uintptr_t>& seenActors,
         std::vector<AimCandidate>& candidates) {
         RuntimeActorRecord record = sourceRecord;
-        native::FillOrdinaryActorPointers(
+        native::FillActorPointers(
             record,
             layout_.actorSubjectLayout,
             [&](std::uintptr_t address) { return ReadPointer(address); });
-        if (!record.resolverRecord ||
-            !IsValidPointer(record.actor) ||
-            ((!IsValidPointer(record.root) ||
-              !IsValidPointer(record.mesh)) &&
-             (!record.ordinarySource ||
-              !IsValidPointer(record.ordinaryRoot) ||
-              !IsValidPointer(record.ordinaryMesh)))) {
+        if (!IsValidPointer(record.actor) ||
+            !IsValidPointer(record.root) ||
+            !IsValidPointer(record.mesh)) {
             return;
         }
 
@@ -6118,7 +5741,7 @@ private:
         if (!ReadCharacterPosition(
                 record,
                 std::string_view{},
-                native::PositionReadMode::ResolvedRecord,
+                native::PositionReadMode::Standard,
                 antiFlicker,
                 position,
                 &positionSource)) {
@@ -6228,7 +5851,6 @@ private:
             distanceMeters,
             selectionDistance,
             selectedBone,
-            record.encryptedRecord,
             false,
             rangeTargetClass,
             false,

@@ -10,7 +10,6 @@ int main() {
         RunActorFrameVisitSetTests();
         RunActorRecordRefreshPolicyTests();
         RunActorRecordSourceTests();
-        RunActorRecordResolverTests();
         RunAimGuidePolicyTests();
         RunAimModePolicyTests();
         RunAimPredictionTests();
@@ -18,7 +17,6 @@ int main() {
         RunAuthSessionTests();
         RunAuthTransportTests();
         RunCardInputPolicyTests();
-        RunCharacterComponentTransformTests();
         RunCloudLayoutStartupPolicyTests();
         RunCloudLayoutTests();
         RunConfigTests();

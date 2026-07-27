@@ -13,7 +13,6 @@ namespace lengjing::game::native {
 
 enum class PositionReadMode : std::uint8_t {
     Standard,
-    ResolvedRecord,
 };
 
 struct CharacterPositionLayout {
@@ -65,7 +64,7 @@ public:
 
     template <typename ReadBytes>
     bool ReadWithRoot(std::uintptr_t actor,
-                      std::uintptr_t resolvedRoot,
+                      std::uintptr_t root,
                       std::string_view className,
                       PositionReadMode mode,
                       bool antiFlicker,
@@ -73,18 +72,17 @@ public:
                       ReadBytes&& readBytes) {
         return ReadWithPolicy(
             actor,
-            resolvedRoot,
+            root,
             className,
             mode,
             antiFlicker,
-            false,
             coordinate,
             readBytes);
     }
 
     template <typename ReadBytes>
     bool ReadLocalWithRoot(std::uintptr_t actor,
-                           std::uintptr_t resolvedRoot,
+                           std::uintptr_t root,
                            std::string_view className,
                            PositionReadMode mode,
                            bool antiFlicker,
@@ -92,11 +90,10 @@ public:
                            ReadBytes&& readBytes) {
         return ReadWithPolicy(
             actor,
-            resolvedRoot,
+            root,
             className,
             mode,
             antiFlicker,
-            true,
             coordinate,
             readBytes);
     }
@@ -134,11 +131,10 @@ public:
 private:
     template <typename ReadBytes>
     bool ReadWithPolicy(std::uintptr_t actor,
-                        std::uintptr_t resolvedRoot,
+                        std::uintptr_t root,
                         std::string_view className,
-                        PositionReadMode mode,
+                        PositionReadMode,
                         bool antiFlicker,
-                        bool localActor,
                         Coordinate& coordinate,
                         ReadBytes&& readBytes) {
         coordinate = Coordinate{};
@@ -147,33 +143,26 @@ private:
         PruneIfDue(now);
         const bool rangeTarget = IsRangeTargetCharacter(className);
 
-        if (mode == PositionReadMode::ResolvedRecord) {
-            if (resolvedRoot == 0) return false;
-            return localActor
-                ? ReadResolvedLocalRoot(resolvedRoot, coordinate, readBytes)
-                : ReadResolvedRoot(resolvedRoot, coordinate, readBytes);
-        }
-
-        bool resolved = false;
+        bool read = false;
         if (rangeTarget) {
-            resolved = resolvedRoot != 0 &&
-                ReadResolvedStandardRoot(
-                    resolvedRoot, coordinate, readBytes) &&
+            read = root != 0 &&
+                ReadRootPosition(
+                    root, coordinate, readBytes) &&
                 IsValid(coordinate);
-            if (!resolved) {
-                resolved = ReadStandard(
+            if (!read) {
+                read = ReadStandard(
                     actor,
                     coordinate,
                     readBytes);
             }
         } else {
-            resolved = ReadStandard(
+            read = ReadStandard(
                 actor,
                 coordinate,
                 readBytes);
         }
 
-        if (resolved) {
+        if (read) {
             if (antiFlicker) {
                 positionHistory_[actor] = HistoryEntry{coordinate, now};
             }
@@ -215,52 +204,9 @@ private:
     }
 
     template <typename ReadBytes>
-    bool ReadResolvedRoot(std::uintptr_t root,
-                          Coordinate& coordinate,
-                          ReadBytes& readBytes) const {
-        const std::array<std::uintptr_t, 3> offsets{
-            layout_.preferredPositionOffset, 0x148, 0x220};
-        for (const std::uintptr_t offset : offsets) {
-            coordinate = Coordinate{};
-            bool read = false;
-            if (root <=
-                std::numeric_limits<std::uintptr_t>::max() - offset) {
-                read = ReadValue(readBytes, root + offset, coordinate);
-            }
-            if (read && IsValid(coordinate)) return true;
-        }
-        coordinate = Coordinate{};
-        bool read = false;
-        if (root <=
-            std::numeric_limits<std::uintptr_t>::max() - 0x240) {
-            read = ReadValue(readBytes, root + 0x240, coordinate);
-        }
-        if (read && IsValid(coordinate)) return true;
-        coordinate = Coordinate{};
-        return false;
-    }
-
-    template <typename ReadBytes>
-    bool ReadResolvedLocalRoot(std::uintptr_t root,
-                               Coordinate& coordinate,
-                               ReadBytes& readBytes) const {
-        coordinate = Coordinate{};
-        const bool read = root <=
-                std::numeric_limits<std::uintptr_t>::max() -
-                    layout_.preferredPositionOffset &&
-            ReadValue(
-                readBytes,
-                root + layout_.preferredPositionOffset,
-                coordinate);
-        if (read && IsValid(coordinate)) return true;
-        coordinate = Coordinate{};
-        return false;
-    }
-
-    template <typename ReadBytes>
-    static bool ReadResolvedStandardRoot(std::uintptr_t root,
-                                         Coordinate& coordinate,
-                                         ReadBytes& readBytes) {
+    static bool ReadRootPosition(std::uintptr_t root,
+                                 Coordinate& coordinate,
+                                 ReadBytes& readBytes) {
         return root <=
                 std::numeric_limits<std::uintptr_t>::max() - 0x220 &&
             ReadValue(readBytes, root + 0x220, coordinate);

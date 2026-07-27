@@ -5,33 +5,19 @@
 
 namespace lengjing::game::native {
 
-struct BoneFrameRecordSource {
-    std::uintptr_t root = 0;
-    std::uintptr_t mesh = 0;
-    bool encryptedRecord = false;
-    bool resolverRecord = false;
-};
-
 struct BoneFrameCacheSource {
     std::uintptr_t root = 0;
     std::uintptr_t mesh = 0;
-    bool encryptedRecord = false;
 };
 
 struct BoneFrameSourceSelection {
     std::uintptr_t root = 0;
     std::uintptr_t mesh = 0;
-    bool rebuildResolvedTransform = false;
 
     constexpr explicit operator bool() const noexcept {
         return mesh != 0;
     }
 };
-
-constexpr bool IsResolvedBoneTransformEnabled(
-    bool coordinateDecryptEnabled) noexcept {
-    return coordinateDecryptEnabled;
-}
 
 constexpr bool PreferBoneFrameCandidate(
     std::size_t currentValidCount,
@@ -43,96 +29,21 @@ constexpr bool PreferBoneFrameCandidate(
 }
 
 constexpr bool ShouldReadSecondaryBoneArray(
-    bool rebuildResolvedTransform,
-    bool primaryBoneArrayAvailable,
     std::size_t primaryValidCount,
     std::size_t expectedCount) noexcept {
-    return rebuildResolvedTransform
-        ? !primaryBoneArrayAvailable
-        : primaryValidCount < expectedCount;
+    return primaryValidCount < expectedCount;
 }
 
-inline BoneFrameSourceSelection SelectPreferredBoneFrameSource(
-    const BoneFrameRecordSource& record,
-    std::uintptr_t ordinaryRoot,
-    std::uintptr_t ordinaryMesh,
-    bool resolvedBoneTransformEnabled) noexcept {
-    if (resolvedBoneTransformEnabled &&
-        (record.resolverRecord || record.encryptedRecord)) {
-        return BoneFrameSourceSelection{
-            record.root,
-            record.mesh,
-            true,
-        };
-    }
-    if (ordinaryMesh != 0) {
-        return BoneFrameSourceSelection{
-            ordinaryRoot,
-            ordinaryMesh,
-            false,
-        };
-    }
-    if (record.encryptedRecord && !resolvedBoneTransformEnabled) {
-        return {};
-    }
-    return BoneFrameSourceSelection{
-        record.root,
-        record.mesh,
-        record.encryptedRecord,
-    };
-}
-
-inline BoneFrameSourceSelection SelectFallbackBoneFrameSource(
-    const BoneFrameRecordSource& record,
-    std::uintptr_t ordinaryRoot,
-    std::uintptr_t ordinaryMesh,
-    bool resolvedBoneTransformEnabled) noexcept {
-    if (record.encryptedRecord ||
-        (record.resolverRecord && resolvedBoneTransformEnabled)) {
-        return {};
-    }
-    if (ordinaryMesh == 0 || record.mesh == 0 ||
-        !record.resolverRecord) {
-        return {};
-    }
-    const BoneFrameSourceSelection preferred =
-        SelectPreferredBoneFrameSource(
-            record,
-            ordinaryRoot,
-            ordinaryMesh,
-            resolvedBoneTransformEnabled);
-    if (preferred.root == record.root && preferred.mesh == record.mesh &&
-        preferred.rebuildResolvedTransform == record.encryptedRecord) {
-        return {};
-    }
-    return BoneFrameSourceSelection{
-        record.root,
-        record.mesh,
-        record.encryptedRecord,
-    };
-}
-
-inline std::uintptr_t SelectBoneFrameMesh(
-    const BoneFrameRecordSource& record,
-    std::uintptr_t ordinaryMesh,
-    bool resolvedBoneTransformEnabled) noexcept {
-    return SelectPreferredBoneFrameSource(
-               record,
-               0,
-               ordinaryMesh,
-               resolvedBoneTransformEnabled)
-        .mesh;
+inline BoneFrameSourceSelection SelectBoneFrameSource(
+    std::uintptr_t root,
+    std::uintptr_t mesh) noexcept {
+    return BoneFrameSourceSelection{root, mesh};
 }
 
 inline bool MatchesBoneFrameCacheSource(
     const BoneFrameSourceSelection& source,
     const BoneFrameCacheSource& cache) noexcept {
-    if (!source || cache.mesh != source.mesh ||
-        cache.encryptedRecord != source.rebuildResolvedTransform) {
-        return false;
-    }
-    return !source.rebuildResolvedTransform ||
-        (source.root != 0 && cache.root == source.root);
+    return source && cache.root == source.root && cache.mesh == source.mesh;
 }
 
 inline bool ShouldResetBoneFrameCache(
@@ -150,25 +61,9 @@ inline bool ShouldResetBoneFrameCache(
 }
 
 inline bool IsBoneFrameCacheSourceCompatible(
-    const BoneFrameRecordSource& record,
-    std::uintptr_t ordinaryRoot,
-    std::uintptr_t ordinaryMesh,
-    bool resolvedBoneTransformEnabled,
+    const BoneFrameSourceSelection& source,
     const BoneFrameCacheSource& cache) noexcept {
-    return MatchesBoneFrameCacheSource(
-               SelectPreferredBoneFrameSource(
-                   record,
-                   ordinaryRoot,
-                   ordinaryMesh,
-                   resolvedBoneTransformEnabled),
-               cache) ||
-        MatchesBoneFrameCacheSource(
-            SelectFallbackBoneFrameSource(
-                record,
-                ordinaryRoot,
-                ordinaryMesh,
-                resolvedBoneTransformEnabled),
-            cache);
+    return MatchesBoneFrameCacheSource(source, cache);
 }
 
 }  // namespace lengjing::game::native

@@ -67,10 +67,4 @@ void RunRuntimePresentationPolicyTests() {
             -5);
     REQUIRE(runtimeDiagnostic == "RUNTIME RT-1302 SYS=-5");
     REQUIRE(runtimeDiagnostic.find('\n') == std::string::npos);
-    REQUIRE(lengjing::game::RuntimeErrorCode(
-                lengjing::game::RuntimeError::
-                    DecodedActorSourceUnavailable) == 2203);
-    REQUIRE(lengjing::game::RuntimeErrorCode(
-                lengjing::game::RuntimeError::
-                    DecodedActorRecordsUnavailable) == 2204);
 }

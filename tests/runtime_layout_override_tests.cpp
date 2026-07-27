@@ -15,12 +15,9 @@ lengjing::auth::CloudLayoutDocument ValidDocument() {
     document.layout.worldOffset = 0x22002000;
     document.layout.geometryInstancePointerOffsets = {
         0x23003000, 0x24004000};
-    document.layout.actorRecords = {
-        0x25005000, 0x26006000, 0x284, 0x414,
-        1536, 40, 12288, 3072};
+    document.layout.maximumActorCount = 12288;
     document.layout.actorSubject = {0x1a0, 0x410, 0x420};
     document.layout.trackingMatrixRootOffset = 0x27007000;
-    document.layout.componentPositionFlagOffset = 0x28008003;
     document.decrypt.firstVeneerRva = 0xe7f5514;
     return document;
 }
@@ -37,7 +34,7 @@ void RunRuntimeLayoutOverrideTests() {
     REQUIRE(applied.has_value());
     REQUIRE(applied->namePoolOffset == 0x21001000);
     REQUIRE(applied->worldOffset == 0x22002000);
-    REQUIRE(applied->actorRecords.plainMeshOffset == 0x414);
+    REQUIRE(applied->maximumActorCount == 12288);
     REQUIRE(applied->actorSubject.rootOffset == 0x1a0);
     REQUIRE(applied->firstVeneerRva == 0xe7f5514);
 
@@ -65,6 +62,11 @@ void RunRuntimeLayoutOverrideTests() {
         document.identity.buildId).has_value());
     invalid = document;
     invalid.layout.actorSubject.rootOffset = 0;
+    REQUIRE(!BuildRuntimeLayoutOverride(
+        &invalid, "com.example.runtime", "libUE4.so",
+        document.identity.buildId).has_value());
+    invalid = document;
+    invalid.layout.maximumActorCount = 0;
     REQUIRE(!BuildRuntimeLayoutOverride(
         &invalid, "com.example.runtime", "libUE4.so",
         document.identity.buildId).has_value());

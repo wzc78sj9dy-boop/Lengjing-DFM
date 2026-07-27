@@ -28,17 +28,6 @@ struct CloudRuntimeIdentity {
     bool IsValid() const noexcept;
 };
 
-struct CloudActorRecordLayout {
-    std::uintptr_t taggedContainerOffset = 0;
-    std::uintptr_t plainArrayOffset = 0;
-    std::uintptr_t plainRootOffset = 0;
-    std::uintptr_t plainMeshOffset = 0;
-    std::uint32_t encryptedRecordCount = 0;
-    std::uint32_t plainRecordStride = 0;
-    std::int32_t maximumPlainCount = 0;
-    std::int32_t fallbackPlainCount = 0;
-};
-
 struct CloudActorSubjectLayout {
     std::uintptr_t rootOffset = 0;
     std::uintptr_t meshOffset = 0;
@@ -49,10 +38,9 @@ struct CloudOffsetLayout {
     std::uintptr_t namePoolOffset = 0;
     std::uintptr_t worldOffset = 0;
     std::array<std::uintptr_t, 2> geometryInstancePointerOffsets{};
-    CloudActorRecordLayout actorRecords{};
+    std::int32_t maximumActorCount = 0;
     CloudActorSubjectLayout actorSubject{};
     std::uintptr_t trackingMatrixRootOffset = 0;
-    std::uintptr_t componentPositionFlagOffset = 0;
 };
 
 struct CloudDecryptLayout {

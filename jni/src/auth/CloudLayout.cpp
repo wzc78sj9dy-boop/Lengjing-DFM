@@ -191,60 +191,15 @@ bool ParseOffset(const Json& value,
     return true;
 }
 
-bool ParseActorRecords(const Json& values,
-                       CloudActorRecordLayout& layout,
-                       ParseFailure& failure) {
-    if (!HasExactArraySize(values, 8)) {
-        failure.detail = "d[0][3] must contain exactly 8 values";
+bool ParseMaximumActorCount(const Json& value,
+                            std::int32_t& output,
+                            ParseFailure& failure) {
+    std::uint64_t count = 0;
+    if (!ParseUnsigned(
+            value, 1, 65536, count, "d[0][3]", failure)) {
         return false;
     }
-    if (!ParseOffset(values.at(0), 4, kMaximumModuleOffset, 4, true,
-                     layout.taggedContainerOffset, "d[0][3][0]", failure) ||
-        !ParseOffset(values.at(1), 4, kMaximumModuleOffset, 4, true,
-                     layout.plainArrayOffset, "d[0][3][1]", failure) ||
-        !ParseOffset(values.at(2), 4, kMaximumObjectOffset, 4, true,
-                     layout.plainRootOffset, "d[0][3][2]", failure) ||
-        !ParseOffset(values.at(3), 4, kMaximumObjectOffset, 4, true,
-                     layout.plainMeshOffset, "d[0][3][3]", failure)) {
-        return false;
-    }
-
-    std::uint64_t encryptedCount = 0;
-    std::uint64_t stride = 0;
-    std::uint64_t maximumCount = 0;
-    std::uint64_t fallbackCount = 0;
-    if (!ParseUnsigned(values.at(4), 0, 65536, encryptedCount,
-                       "d[0][3][4]", failure) ||
-        !ParseUnsigned(values.at(5), 0, 256, stride, "d[0][3][5]",
-                       failure) ||
-        !ParseUnsigned(values.at(6), 0, 65536, maximumCount,
-                       "d[0][3][6]", failure) ||
-        !ParseUnsigned(values.at(7), 0, 65536, fallbackCount,
-                       "d[0][3][7]", failure)) {
-        return false;
-    }
-
-    const bool taggedEnabled = layout.taggedContainerOffset != 0;
-    const bool plainEnabled = layout.plainArrayOffset != 0;
-    const bool plainComplete = layout.plainRootOffset != 0 &&
-        layout.plainMeshOffset != 0 && stride >= 8 && stride % 8 == 0 &&
-        maximumCount != 0 && fallbackCount != 0 &&
-        fallbackCount <= maximumCount;
-    const bool plainEmpty = layout.plainRootOffset == 0 &&
-        layout.plainMeshOffset == 0 && stride == 0 && maximumCount == 0 &&
-        fallbackCount == 0;
-    if (taggedEnabled != (encryptedCount != 0) ||
-        (!plainEnabled && !plainEmpty) || (plainEnabled && !plainComplete) ||
-        (!taggedEnabled && !plainEnabled)) {
-        failure.status = CloudLayoutStatus::RangeError;
-        failure.detail = "actor record values are incomplete or inconsistent";
-        return false;
-    }
-
-    layout.encryptedRecordCount = static_cast<std::uint32_t>(encryptedCount);
-    layout.plainRecordStride = static_cast<std::uint32_t>(stride);
-    layout.maximumPlainCount = static_cast<std::int32_t>(maximumCount);
-    layout.fallbackPlainCount = static_cast<std::int32_t>(fallbackCount);
+    output = static_cast<std::int32_t>(count);
     return true;
 }
 
@@ -276,8 +231,8 @@ bool ParseActorSubject(const Json& values,
 bool ParseLayout(const Json& values,
                  CloudOffsetLayout& layout,
                  ParseFailure& failure) {
-    if (!HasExactArraySize(values, 7)) {
-        failure.detail = "d[0] must contain exactly 7 values";
+    if (!HasExactArraySize(values, 6)) {
+        failure.detail = "d[0] must contain exactly 6 values";
         return false;
     }
     if (!ParseOffset(values.at(0), 4, kMaximumModuleOffset, 4, false,
@@ -314,12 +269,11 @@ bool ParseLayout(const Json& values,
         return false;
     }
 
-    return ParseActorRecords(values.at(3), layout.actorRecords, failure) &&
+    return ParseMaximumActorCount(
+               values.at(3), layout.maximumActorCount, failure) &&
         ParseActorSubject(values.at(4), layout.actorSubject, failure) &&
         ParseOffset(values.at(5), 4, kMaximumModuleOffset, 4, false,
-                    layout.trackingMatrixRootOffset, "d[0][5]", failure) &&
-        ParseOffset(values.at(6), 1, kMaximumModuleOffset, 1, false,
-                    layout.componentPositionFlagOffset, "d[0][6]", failure);
+                    layout.trackingMatrixRootOffset, "d[0][5]", failure);
 }
 
 bool ParseDecrypt(const Json& values,
@@ -354,10 +308,21 @@ bool UpgradeRemoteLayout(Json& root,
         target.moduleName != kCoordinateModule ||
         buildId != kCoordinateBuildId ||
         !HasExactArraySize(root.at("d"), 2) ||
-        !root.at("d").at(0).is_array() ||
+        !HasExactArraySize(root.at("d").at(0), 7) ||
+        !HasExactArraySize(root.at("d").at(0).at(3), 8) ||
+        !root.at("d").at(0).at(3).at(6).is_number_unsigned() ||
         !root.at("d").at(1).is_array()) {
         return false;
     }
+    const Json maximumActorCount = root.at("d").at(0).at(3).at(6);
+    root["d"][0] = Json::array({
+        root.at("d").at(0).at(0),
+        root.at("d").at(0).at(1),
+        root.at("d").at(0).at(2),
+        maximumActorCount,
+        root.at("d").at(0).at(4),
+        root.at("d").at(0).at(5),
+    });
     root["v"] = kCloudLayoutSchemaVersion;
     root["d"][1] = Json::array({kCoordinateFirstVeneerRva});
     schemaVersion = kCloudLayoutSchemaVersion;
@@ -370,20 +335,6 @@ bool SameIdentity(const CloudRuntimeIdentity& left,
         std::tie(right.packageName, right.moduleName, right.buildId);
 }
 
-bool SameActorRecords(const CloudActorRecordLayout& left,
-                      const CloudActorRecordLayout& right) noexcept {
-    return std::tie(
-               left.taggedContainerOffset, left.plainArrayOffset,
-               left.plainRootOffset, left.plainMeshOffset,
-               left.encryptedRecordCount, left.plainRecordStride,
-               left.maximumPlainCount, left.fallbackPlainCount) ==
-        std::tie(
-               right.taggedContainerOffset, right.plainArrayOffset,
-               right.plainRootOffset, right.plainMeshOffset,
-               right.encryptedRecordCount, right.plainRecordStride,
-               right.maximumPlainCount, right.fallbackPlainCount);
-}
-
 bool Equivalent(const CloudLayoutDocument& left,
                 const CloudLayoutDocument& right) noexcept {
     return left.schemaVersion == right.schemaVersion &&
@@ -392,21 +343,19 @@ bool Equivalent(const CloudLayoutDocument& left,
         std::tie(
             left.layout.namePoolOffset, left.layout.worldOffset,
             left.layout.geometryInstancePointerOffsets,
+            left.layout.maximumActorCount,
             left.layout.actorSubject.rootOffset,
             left.layout.actorSubject.meshOffset,
             left.layout.actorSubject.alternateRootOffset,
-            left.layout.trackingMatrixRootOffset,
-            left.layout.componentPositionFlagOffset) ==
+            left.layout.trackingMatrixRootOffset) ==
         std::tie(
             right.layout.namePoolOffset, right.layout.worldOffset,
             right.layout.geometryInstancePointerOffsets,
+            right.layout.maximumActorCount,
             right.layout.actorSubject.rootOffset,
             right.layout.actorSubject.meshOffset,
             right.layout.actorSubject.alternateRootOffset,
-            right.layout.trackingMatrixRootOffset,
-            right.layout.componentPositionFlagOffset) &&
-        SameActorRecords(left.layout.actorRecords,
-                         right.layout.actorRecords) &&
+            right.layout.trackingMatrixRootOffset) &&
         left.decrypt.firstVeneerRva ==
             right.decrypt.firstVeneerRva;
 }
