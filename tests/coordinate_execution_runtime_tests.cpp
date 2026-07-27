@@ -19,6 +19,7 @@ namespace {
 using lengjing::game::native::BuildCoordinateExecutionPlan;
 using lengjing::game::native::BuildCoordinateExecutionIoctlFallback;
 using lengjing::game::native::CoordinateExecutionMode;
+using lengjing::game::native::CoordinateExecutionLibcIncrementBase;
 using lengjing::game::native::CoordinateExecutionMemoryBaseRegister;
 using lengjing::game::native::
     CoordinateExecutionExclusiveMonitorInvalidAfterInstruction;
@@ -39,10 +40,12 @@ using lengjing::game::native::IsCoordinateExecutionLoadExclusiveInstruction;
 using lengjing::game::native::IsCoordinateExecutionIoctlPayload;
 using lengjing::game::native::IsCoordinateExecutionIoctlRequest;
 using lengjing::game::native::IsCoordinateExecutionLibcIncrementAddress;
+using lengjing::game::native::IsCoordinateExecutionAbsoluteEntryAddress;
 using lengjing::game::native::IsCoordinateExecutionStackBase;
 using lengjing::game::native::IsCoordinateExecutionStoreExclusiveInstruction;
 using lengjing::game::native::IsCoordinateExecutionTaggedMemoryInstruction;
 using lengjing::game::native::NormalizeCoordinateExecutionPointer;
+using lengjing::game::native::CoordinateExecutionUnknownExternalResult;
 using lengjing::game::native::
     ResolveCoordinateExecutionImmediateBranchTarget;
 using lengjing::game::native::ShouldInitializeCoordinateExecutionHook;
@@ -225,6 +228,64 @@ void TestLibcIncrementAddressContract() {
         UINT64_C(0xAB00007012340000),
         UINT64_C(0xCD00007012340000),
         true));
+    REQUIRE(CoordinateExecutionLibcIncrementBase(
+                UINT64_C(0xAB00007012340000)) == base);
+}
+
+void TestAbsoluteEntryExternalResultContract() {
+    constexpr std::uint64_t entry = UINT64_C(0x0000007012340560);
+    constexpr std::uint64_t page = UINT64_C(0x0000007012340000);
+    constexpr std::uint64_t candidateAbsolute = entry;
+    constexpr std::uint64_t sharedAbsolute = entry;
+    constexpr std::uint64_t fakeDescriptor = UINT64_C(0x3F000123);
+    for (const CoordinateExecutionMode mode : {
+             CoordinateExecutionMode::Emulate,
+             CoordinateExecutionMode::Interpret,
+             CoordinateExecutionMode::Predecode,
+             CoordinateExecutionMode::Jit,
+         }) {
+        const std::uint64_t candidate =
+            mode == CoordinateExecutionMode::Emulate
+            ? candidateAbsolute
+            : 0;
+        const std::uint64_t shared =
+            mode == CoordinateExecutionMode::Emulate ? 0 : sharedAbsolute;
+        REQUIRE(IsCoordinateExecutionAbsoluteEntryAddress(
+            mode, candidate, shared, entry, page));
+        REQUIRE(IsCoordinateExecutionAbsoluteEntryAddress(
+            mode,
+            candidate,
+            shared,
+            entry,
+            page +
+                lengjing::game::native::
+                    kCoordinateExecutionAbsoluteEntryWindowSize -
+                4));
+        REQUIRE(!IsCoordinateExecutionAbsoluteEntryAddress(
+            mode,
+            candidate,
+            shared,
+            entry,
+            page +
+                lengjing::game::native::
+                    kCoordinateExecutionAbsoluteEntryWindowSize));
+        REQUIRE(CoordinateExecutionUnknownExternalResult(
+                    true, true, fakeDescriptor) == 0);
+        REQUIRE(CoordinateExecutionUnknownExternalResult(
+                    false, true, fakeDescriptor) == 0);
+        REQUIRE(CoordinateExecutionUnknownExternalResult(
+                    true, false, fakeDescriptor) == fakeDescriptor);
+        REQUIRE(CoordinateExecutionUnknownExternalResult(
+                    false, false, fakeDescriptor) == 1);
+    }
+    REQUIRE(!IsCoordinateExecutionAbsoluteEntryAddress(
+        CoordinateExecutionMode::Emulate, 0, sharedAbsolute, entry, page));
+    REQUIRE(!IsCoordinateExecutionAbsoluteEntryAddress(
+        CoordinateExecutionMode::Interpret,
+        candidateAbsolute,
+        0,
+        entry,
+        page));
 }
 
 void TestFakeDescriptorSeekContract() {
@@ -574,6 +635,7 @@ int main() {
     TestSvcContract();
     TestExternalBranchContract();
     TestLibcIncrementAddressContract();
+    TestAbsoluteEntryExternalResultContract();
     TestFakeDescriptorSeekContract();
     TestIoctlContract();
     TestTaggedMemoryInstructionContract();

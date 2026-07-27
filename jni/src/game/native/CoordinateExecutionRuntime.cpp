@@ -33,7 +33,6 @@ constexpr std::size_t kMaximumMappedPages = 4096;
 constexpr std::uint32_t kCoordinateExecutionTcgBufferSize =
     UINT32_C(32) * 1024U * 1024U;
 constexpr std::uint32_t kFirstFakeDescriptor = UINT32_C(0x3F000000);
-constexpr std::uint64_t kAbsoluteEntryWindowSize = UINT64_C(0x4000);
 constexpr std::uint64_t kIoctlPayloadFieldOffset = UINT64_C(0xD88);
 constexpr std::uint64_t kIoctlStackSearchPrefix = UINT64_C(0x100);
 constexpr std::uint64_t kIoctlStackSearchSuffix = UINT64_C(0x800);
@@ -1311,7 +1310,8 @@ private:
         const bool absoluteEntryCodePage =
             plan.entryPc != plan.hookPc &&
             remotePage >= absoluteEntryPage &&
-            remotePage - absoluteEntryPage < kAbsoluteEntryWindowSize;
+            remotePage - absoluteEntryPage <
+                kCoordinateExecutionAbsoluteEntryWindowSize;
         const bool scanBranches = mainCodePage || absoluteEntryCodePage;
         for (std::size_t offset = 0; offset <= bytes.size() - 4; offset += 4) {
             std::uint32_t instruction = 0;
@@ -2007,16 +2007,12 @@ private:
     }
 
     bool IsAbsoluteEntryAddress(std::uint64_t address) const noexcept {
-        const bool hasAbsoluteEntry =
-            request.mode == CoordinateExecutionMode::Emulate
-            ? request.candidate.q2 != 0
-            : request.shared.absoluteEntry != 0;
-        if (!hasAbsoluteEntry) return false;
-        const std::uint64_t begin =
-            NormalizeCoordinateExecutionPointer(plan.entryPc) & kPageMask;
-        address = NormalizeCoordinateExecutionPointer(address);
-        return address >= begin &&
-            address - begin < kAbsoluteEntryWindowSize;
+        return IsCoordinateExecutionAbsoluteEntryAddress(
+            request.mode,
+            request.candidate.q2,
+            request.shared.absoluteEntry,
+            plan.entryPc,
+            address);
     }
 
     bool ResolveBranchTarget(
@@ -2108,7 +2104,8 @@ private:
         if (!ReadXRegister(0, address)) return false;
         address = NormalizeCoordinateExecutionPointer(address);
 
-        const std::uint64_t configuredBase = codeBase;
+        const std::uint64_t configuredBase =
+            CoordinateExecutionLibcIncrementBase(codeBase);
         bool allowed = IsCoordinateExecutionLibcIncrementAddress(
             address, configuredBase);
         if (!allowed) {
@@ -2334,9 +2331,14 @@ private:
 
         if (branch.IsCall()) {
             ++evidence.unknownExternalCallCount;
-            const std::uint64_t result = IsAbsoluteEntryAddress(address)
+            const bool absoluteEntryAddress =
+                IsAbsoluteEntryAddress(address);
+            const std::uint64_t fallback = absoluteEntryAddress
                 ? 0
                 : AllocateFakeDescriptor();
+            const std::uint64_t result =
+                CoordinateExecutionUnknownExternalResult(
+                    true, absoluteEntryAddress, fallback);
             if (!CompleteExternalCall(returnPc, true, result)) {
                 FailHook(
                     address,
@@ -2347,7 +2349,8 @@ private:
 
         ++evidence.unknownExternalJumpCount;
         std::uint64_t link = 0;
-        const std::uint64_t result = IsAbsoluteEntryAddress(address) ? 0 : 1;
+        const std::uint64_t result = CoordinateExecutionUnknownExternalResult(
+            false, IsAbsoluteEntryAddress(address), 0);
         if (!ReadXRegister(30, link) || !WriteXRegister(0, result)) {
             FailHook(address, CoordinateExecutionRuntimeError::EmulationFailed);
             return;

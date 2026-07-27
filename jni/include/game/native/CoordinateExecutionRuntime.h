@@ -29,6 +29,8 @@ inline constexpr std::uint64_t kCoordinateExecutionDefaultFp =
     UINT64_C(0x00000001FFFF7F00);
 inline constexpr std::uint64_t kCoordinateExecutionReturnStubMax =
     UINT64_C(0x0000007FFFFFFFE0);
+inline constexpr std::uint64_t kCoordinateExecutionAbsoluteEntryWindowSize =
+    UINT64_C(0x4000);
 
 enum class CoordinateExecutionMode : std::uint8_t {
     Emulate = 1,
@@ -450,6 +452,37 @@ constexpr bool IsCoordinateExecutionLibcIncrementAddress(
     }
     return address - base < UINT64_C(0x10000) &&
         ((address - base) & 3U) == 0;
+}
+
+constexpr std::uint64_t CoordinateExecutionLibcIncrementBase(
+    std::uint64_t codeBase) noexcept {
+    return NormalizeCoordinateExecutionPointer(codeBase);
+}
+
+constexpr bool IsCoordinateExecutionAbsoluteEntryAddress(
+    CoordinateExecutionMode mode,
+    std::uint64_t candidateAbsoluteEntry,
+    std::uint64_t sharedAbsoluteEntry,
+    std::uint64_t entryPc,
+    std::uint64_t address) noexcept {
+    const bool hasAbsoluteEntry = mode == CoordinateExecutionMode::Emulate
+        ? candidateAbsoluteEntry != 0
+        : sharedAbsoluteEntry != 0;
+    if (!hasAbsoluteEntry) return false;
+    constexpr std::uint64_t kPageMask = ~UINT64_C(0xFFF);
+    const std::uint64_t begin =
+        NormalizeCoordinateExecutionPointer(entryPc) & kPageMask;
+    address = NormalizeCoordinateExecutionPointer(address);
+    return address >= begin &&
+        address - begin < kCoordinateExecutionAbsoluteEntryWindowSize;
+}
+
+constexpr std::uint64_t CoordinateExecutionUnknownExternalResult(
+    bool call,
+    bool absoluteEntryAddress,
+    std::uint64_t callFallback) noexcept {
+    if (absoluteEntryAddress) return 0;
+    return call ? callFallback : UINT64_C(1);
 }
 
 constexpr bool ShouldRedirectCoordinateExecutionReturn(
