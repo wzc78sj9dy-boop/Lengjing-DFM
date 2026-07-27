@@ -2108,10 +2108,7 @@ private:
         if (!ReadXRegister(0, address)) return false;
         address = NormalizeCoordinateExecutionPointer(address);
 
-        const std::uint64_t configuredBase =
-            request.mode == CoordinateExecutionMode::Emulate
-            ? request.candidate.q0
-            : request.shared.x0Override;
+        const std::uint64_t configuredBase = codeBase;
         bool allowed = IsCoordinateExecutionLibcIncrementAddress(
             address, configuredBase);
         if (!allowed) {
@@ -2337,10 +2334,7 @@ private:
 
         if (branch.IsCall()) {
             ++evidence.unknownExternalCallCount;
-            const bool mode1Absolute =
-                request.mode == CoordinateExecutionMode::Emulate &&
-                IsAbsoluteEntryAddress(address);
-            const std::uint64_t result = mode1Absolute
+            const std::uint64_t result = IsAbsoluteEntryAddress(address)
                 ? 0
                 : AllocateFakeDescriptor();
             if (!CompleteExternalCall(returnPc, true, result)) {
@@ -2353,11 +2347,7 @@ private:
 
         ++evidence.unknownExternalJumpCount;
         std::uint64_t link = 0;
-        const std::uint64_t result =
-            request.mode == CoordinateExecutionMode::Emulate &&
-                IsAbsoluteEntryAddress(address)
-            ? 0
-            : 1;
+        const std::uint64_t result = IsAbsoluteEntryAddress(address) ? 0 : 1;
         if (!ReadXRegister(30, link) || !WriteXRegister(0, result)) {
             FailHook(address, CoordinateExecutionRuntimeError::EmulationFailed);
             return;
