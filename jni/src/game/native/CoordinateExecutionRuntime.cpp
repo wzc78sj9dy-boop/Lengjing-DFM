@@ -2070,6 +2070,52 @@ private:
         return true;
     }
 
+    bool ApplyLibcArgumentSideEffect() {
+        std::uint64_t address = 0;
+        if (!ReadXRegister(0, address)) return false;
+        address = NormalizeCoordinateExecutionPointer(address);
+
+        const std::uint64_t configuredBase =
+            request.mode == CoordinateExecutionMode::Emulate
+            ? request.candidate.q0
+            : request.shared.x0Override;
+        bool allowed = IsCoordinateExecutionLibcIncrementAddress(
+            address, configuredBase);
+        if (!allowed) {
+            std::uint64_t stackPointer = 0;
+            if (uc_reg_read(engine, UC_ARM64_REG_SP, &stackPointer) !=
+                    UC_ERR_OK) {
+                return false;
+            }
+            stackPointer = NormalizeCoordinateExecutionPointer(stackPointer);
+            if (stackPointer < kCoordinateExecutionSyntheticStackBase ||
+                stackPointer >= kCoordinateExecutionSyntheticStackTop) {
+                return false;
+            }
+            const std::uint64_t end = std::min<std::uint64_t>(
+                stackPointer + UINT64_C(0x800),
+                kCoordinateExecutionSyntheticStackTop);
+            for (std::uint64_t cursor = stackPointer;
+                 cursor <= end - sizeof(std::uint64_t);
+                 cursor += sizeof(std::uint64_t)) {
+                std::uint64_t pageBase = 0;
+                if (ReadGuestMemory(
+                        cursor, &pageBase, sizeof(pageBase)) &&
+                    IsCoordinateExecutionLibcIncrementAddress(
+                        address, pageBase, true)) {
+                    allowed = true;
+                    break;
+                }
+            }
+        }
+        if (!allowed) return false;
+
+        std::uint32_t value = 0;
+        if (!ReadGuestMemory(address, &value, sizeof(value))) return false;
+        ++value;
+        return WriteGuestMemory(address, &value, sizeof(value));
+    }
+
     bool FindIoctlPayload(std::uint64_t stackPointer,
                           std::uint64_t& payload) {
         payload = 0;
@@ -2215,6 +2261,9 @@ private:
                 return;
             }
             if (TryHandleIoctl(target, returnPc)) return;
+            if (branch.IsCall()) {
+                static_cast<void>(ApplyLibcArgumentSideEffect());
+            }
             if (!CompleteExternalCall(returnPc, branch.IsCall(), 0)) {
                 FailHook(
                     address,
@@ -2225,9 +2274,7 @@ private:
 
         if (branch.IsCall()) {
             ++evidence.unknownExternalCallCount;
-            const std::uint64_t result = IsAbsoluteEntryAddress(address)
-                ? 0
-                : AllocateFakeDescriptor();
+            const std::uint64_t result = AllocateFakeDescriptor();
             if (!CompleteExternalCall(returnPc, true, result)) {
                 FailHook(
                     address,
@@ -2238,7 +2285,7 @@ private:
 
         ++evidence.unknownExternalJumpCount;
         std::uint64_t link = 0;
-        const std::uint64_t result = IsAbsoluteEntryAddress(address) ? 0 : 1;
+        const std::uint64_t result = 1;
         if (!ReadXRegister(30, link) || !WriteXRegister(0, result)) {
             FailHook(address, CoordinateExecutionRuntimeError::EmulationFailed);
             return;

@@ -37,6 +37,7 @@ using lengjing::game::native::IsCoordinateExecutionDescriptorEndQuery;
 using lengjing::game::native::IsCoordinateExecutionLoadExclusiveInstruction;
 using lengjing::game::native::IsCoordinateExecutionIoctlPayload;
 using lengjing::game::native::IsCoordinateExecutionIoctlRequest;
+using lengjing::game::native::IsCoordinateExecutionLibcIncrementAddress;
 using lengjing::game::native::IsCoordinateExecutionStackBase;
 using lengjing::game::native::IsCoordinateExecutionStoreExclusiveInstruction;
 using lengjing::game::native::IsCoordinateExecutionTaggedMemoryInstruction;
@@ -196,6 +197,26 @@ void TestExternalBranchContract() {
                  UINT32_C(0x14000000)).IsValid());
     REQUIRE(!DecodeCoordinateExecutionBranch(
                  UINT32_C(0xD65F03C0)).IsValid());
+}
+
+void TestLibcIncrementAddressContract() {
+    constexpr std::uint64_t base = UINT64_C(0x0000007012340000);
+    REQUIRE(IsCoordinateExecutionLibcIncrementAddress(base, base));
+    REQUIRE(IsCoordinateExecutionLibcIncrementAddress(
+        base + UINT64_C(0xFFFC), base));
+    REQUIRE(!IsCoordinateExecutionLibcIncrementAddress(
+        base + UINT64_C(0x10000), base));
+    REQUIRE(!IsCoordinateExecutionLibcIncrementAddress(base + 2, base));
+    REQUIRE(!IsCoordinateExecutionLibcIncrementAddress(base, 0));
+
+    REQUIRE(IsCoordinateExecutionLibcIncrementAddress(
+        base + UINT64_C(0x8000), base, true));
+    REQUIRE(!IsCoordinateExecutionLibcIncrementAddress(
+        base + UINT64_C(0x8000), base + 8, true));
+    REQUIRE(IsCoordinateExecutionLibcIncrementAddress(
+        UINT64_C(0xAB00007012340000),
+        UINT64_C(0xCD00007012340000),
+        true));
 }
 
 void TestFakeDescriptorSeekContract() {
@@ -544,6 +565,7 @@ int main() {
     TestHookInitializationGate();
     TestSvcContract();
     TestExternalBranchContract();
+    TestLibcIncrementAddressContract();
     TestFakeDescriptorSeekContract();
     TestIoctlContract();
     TestTaggedMemoryInstructionContract();

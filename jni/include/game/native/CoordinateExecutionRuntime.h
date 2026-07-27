@@ -425,6 +425,24 @@ constexpr bool IsCoordinateExecutionCanonicalFaultBase(
     return (value >> 37U) >= 3U && value < UINT64_C(0x8000000001);
 }
 
+constexpr bool IsCoordinateExecutionLibcIncrementAddress(
+    std::uint64_t address,
+    std::uint64_t base,
+    bool requirePageBase = false) noexcept {
+    address = NormalizeCoordinateExecutionPointer(address);
+    base = NormalizeCoordinateExecutionPointer(base);
+    if (!IsCoordinateExecutionCanonicalFaultBase(address) ||
+        (address & 3U) != 0 || base == 0 ||
+        (requirePageBase &&
+         (!IsCoordinateExecutionCanonicalFaultBase(base) ||
+          (base & UINT64_C(0xFFF)) != 0)) ||
+        address < base) {
+        return false;
+    }
+    return address - base < UINT64_C(0x10000) &&
+        ((address - base) & 3U) == 0;
+}
+
 constexpr bool ShouldRedirectCoordinateExecutionReturn(
     const CoordinateExecutionPlan& plan,
     std::uint64_t pc) noexcept {
