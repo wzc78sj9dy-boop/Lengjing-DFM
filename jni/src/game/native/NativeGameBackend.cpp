@@ -27,7 +27,6 @@
 #include "game/native/CharacterPositionResolver.h"
 #include "game/native/CoordinateDecryptBackendRoute.h"
 #include "game/native/CoordinateDecrypt2Runtime.h"
-#include "game/native/CoordinateExecutionCachePolicy.h"
 #include "game/native/CoordinateExecutionDecoder.h"
 #include "game/native/CoordinateOutputPolicy.h"
 #include "game/native/CoordinatePoolRuntime.h"
@@ -1470,7 +1469,7 @@ public:
             ui::ResolveCoordinateDecryptSelection(settings.visual);
         const native::CoordinateDecryptBackendRoute decryptRoute =
             native::ResolveCoordinateDecryptBackendRoute(
-                decryptSelection, false);
+                decryptSelection);
         const bool requestedHardwareBreakpoint =
             decryptRoute.coordinateDecrypt2;
         const bool requestedCoordinateReplay =
@@ -4948,6 +4947,12 @@ private:
                 "tagged_base_reg=%u tagged_base_before=%llx "
                 "tagged_base_after=%llx pacga_count=%llu "
                 "pacga_source=%llx pacga_modifier=%llx pacga_result=%llx "
+                "libc_begin=%llx libc_ioctl=%llx ioctl_count=%llu "
+                "ioctl_payload=%llx ioctl_destination=%llx "
+                "ioctl_stack_clear_count=%llu "
+                "backend_ready=%d backend_instruction_count=%llu "
+                "backend_fallback_count=%llu backend_block_count=%llu "
+                "backend_advance_count=%llu "
                 "seed_subject=%llx seed_slot=%llx capture_count=%llu "
                 "captured_pc=%llx captured_slot=%llx "
                 "captured_object=%llx capture_sp=%llx capture_x8=%llx "
@@ -5135,6 +5140,21 @@ private:
                 static_cast<unsigned long long>(evidence.lastPacgaSource),
                 static_cast<unsigned long long>(evidence.lastPacgaModifier),
                 static_cast<unsigned long long>(evidence.lastPacgaResult),
+                static_cast<unsigned long long>(evidence.libcBegin),
+                static_cast<unsigned long long>(evidence.libcIoctl),
+                static_cast<unsigned long long>(evidence.ioctlCallCount),
+                static_cast<unsigned long long>(evidence.ioctlPayload),
+                static_cast<unsigned long long>(
+                    evidence.ioctlPayloadDestination),
+                static_cast<unsigned long long>(
+                    evidence.ioctlStackClearCount),
+                evidence.backendReady ? 1 : 0,
+                static_cast<unsigned long long>(
+                    evidence.backendInstructionCount),
+                static_cast<unsigned long long>(
+                    evidence.backendFallbackCount),
+                static_cast<unsigned long long>(evidence.backendBlockCount),
+                static_cast<unsigned long long>(evidence.backendAdvanceCount),
                 static_cast<unsigned long long>(evidence.seedSubject),
                 static_cast<unsigned long long>(evidence.seedSlot),
                 static_cast<unsigned long long>(evidence.captureCount),

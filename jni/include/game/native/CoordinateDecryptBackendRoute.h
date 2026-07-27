@@ -19,33 +19,24 @@ struct CoordinateDecryptBackendRoute {
 };
 
 constexpr CoordinateDecryptBackendRoute ResolveCoordinateDecryptBackendRoute(
-    ui::CoordinateDecryptSelection selection,
-    bool fallbackExecutionToDecrypt2) noexcept {
+    ui::CoordinateDecryptSelection selection) noexcept {
     switch (selection) {
         case ui::CoordinateDecryptSelection::Decrypt1:
             return CoordinateDecryptBackendRoute{true, false, {}};
         case ui::CoordinateDecryptSelection::Decrypt2:
             return CoordinateDecryptBackendRoute{false, true, {}};
         case ui::CoordinateDecryptSelection::Decrypt3:
-            return fallbackExecutionToDecrypt2
-                ? CoordinateDecryptBackendRoute{false, true, {}}
-                : CoordinateDecryptBackendRoute{
-                      false, false, CoordinateExecutionMode::Emulate};
+            return CoordinateDecryptBackendRoute{
+                false, false, CoordinateExecutionMode::Emulate};
         case ui::CoordinateDecryptSelection::Decrypt4:
-            return fallbackExecutionToDecrypt2
-                ? CoordinateDecryptBackendRoute{false, true, {}}
-                : CoordinateDecryptBackendRoute{
-                      false, false, CoordinateExecutionMode::Interpret};
+            return CoordinateDecryptBackendRoute{
+                false, false, CoordinateExecutionMode::Interpret};
         case ui::CoordinateDecryptSelection::Decrypt5:
-            return fallbackExecutionToDecrypt2
-                ? CoordinateDecryptBackendRoute{false, true, {}}
-                : CoordinateDecryptBackendRoute{
-                      false, false, CoordinateExecutionMode::Predecode};
+            return CoordinateDecryptBackendRoute{
+                false, false, CoordinateExecutionMode::Predecode};
         case ui::CoordinateDecryptSelection::Decrypt6:
-            return fallbackExecutionToDecrypt2
-                ? CoordinateDecryptBackendRoute{false, true, {}}
-                : CoordinateDecryptBackendRoute{
-                      false, false, CoordinateExecutionMode::Jit};
+            return CoordinateDecryptBackendRoute{
+                false, false, CoordinateExecutionMode::Jit};
         case ui::CoordinateDecryptSelection::None:
             return {};
     }

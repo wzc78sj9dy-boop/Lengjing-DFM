@@ -340,6 +340,12 @@ add_coordinate_execution_test(
 )
 
 add_coordinate_execution_test(
+    coordinate_execution_backend_tests
+    coordinate_execution_backend_tests.cpp
+    ../jni/src/game/native/CoordinateExecutionBackend.cpp
+)
+
+add_coordinate_execution_test(
     coordinate_execution_decoder_tests
     coordinate_execution_decoder_tests.cpp
     ../jni/src/game/native/CoordinateExecutionDecoder.cpp

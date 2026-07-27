@@ -286,6 +286,11 @@ struct CoordinateExecutionEvidence {
     std::uint64_t lastExternalBranchResult = 0;
     std::uint64_t libcBegin = 0;
     std::uint64_t libcEnd = 0;
+    std::uint64_t libcIoctl = 0;
+    std::uint64_t ioctlCallCount = 0;
+    std::uint64_t ioctlPayload = 0;
+    std::uint64_t ioctlPayloadDestination = 0;
+    std::uint64_t ioctlStackClearCount = 0;
     std::uint64_t taggedBaseRewriteCount = 0;
     std::uint32_t taggedBaseRegister = 0;
     std::uint64_t taggedBaseBefore = 0;
@@ -294,6 +299,11 @@ struct CoordinateExecutionEvidence {
     std::uint64_t lastPacgaSource = 0;
     std::uint64_t lastPacgaModifier = 0;
     std::uint64_t lastPacgaResult = 0;
+    bool backendReady = false;
+    std::uint64_t backendInstructionCount = 0;
+    std::uint64_t backendFallbackCount = 0;
+    std::uint64_t backendBlockCount = 0;
+    std::uint64_t backendAdvanceCount = 0;
     std::uint64_t seedSubject = 0;
     std::uint64_t seedSlot = 0;
     std::uint64_t captureCount = 0;
@@ -545,6 +555,35 @@ EvaluateCoordinateExecutionDescriptorSeek(
     return output;
 }
 
+constexpr bool IsCoordinateExecutionIoctlRequest(
+    std::uint64_t request) noexcept {
+    return static_cast<std::uint32_t>(request) >> 30U == 3U &&
+        ((request >> 8U) & UINT64_C(0xFF)) == UINT64_C(9) &&
+        (request & UINT64_C(0xFF)) == UINT64_C(0x47) &&
+        ((request >> 16U) & UINT64_C(0x3FFF)) == UINT64_C(0x30);
+}
+
+constexpr std::uint64_t BuildCoordinateExecutionIoctlFallback(
+    std::uint64_t descriptor,
+    std::uint64_t request) noexcept {
+    std::uint64_t value =
+        ((request & UINT64_C(0xFFFF)) << 12U) |
+        ((descriptor & UINT64_C(0xFFF)) << 28U) |
+        UINT64_C(0x4000000000);
+    if (value >> 37U >= 3U) {
+        value = ((request & UINT64_C(0xFFFF)) << 12U) |
+            UINT64_C(0x4000000000);
+    }
+    return value;
+}
+
+constexpr bool IsCoordinateExecutionIoctlPayload(
+    std::uint64_t value) noexcept {
+    value = NormalizeCoordinateExecutionPointer(value);
+    return value < UINT64_C(0x6000000000) &&
+        (value >> 32U) != 0 && (value & UINT64_C(0xFFF)) == 0;
+}
+
 constexpr bool IsCoordinateExecutionMode(CoordinateExecutionMode mode) noexcept {
     const auto value = static_cast<std::uint8_t>(mode);
     return value >= static_cast<std::uint8_t>(
@@ -670,7 +709,10 @@ constexpr CoordinateExecutionPlan BuildCoordinateExecutionPlan(
         if ((plan.entryPc & 3U) != 0 || plan.entryPc == 0) {
             return CoordinateExecutionPlan{};
         }
-        plan.x0 = subject;
+        plan.x0 = request.shared.x0Override != 0
+            ? NormalizeCoordinateExecutionPointer(
+                  request.shared.x0Override)
+            : subject;
         plan.x1 = subject;
         plan.lr = returnStub;
         plan.returnStub = returnStub;

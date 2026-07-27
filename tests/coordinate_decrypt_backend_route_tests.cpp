@@ -8,30 +8,22 @@ void RunCoordinateDecryptBackendRouteTests() {
     using lengjing::ui::CoordinateDecryptSelection;
 
     const auto none = ResolveCoordinateDecryptBackendRoute(
-        CoordinateDecryptSelection::None, true);
+        CoordinateDecryptSelection::None);
     REQUIRE(!none.coordinateReplay);
     REQUIRE(!none.coordinateDecrypt2);
     REQUIRE(none.ExecutionModeValue() == 0);
 
     const auto decrypt1 = ResolveCoordinateDecryptBackendRoute(
-        CoordinateDecryptSelection::Decrypt1, true);
+        CoordinateDecryptSelection::Decrypt1);
     REQUIRE(decrypt1.coordinateReplay);
     REQUIRE(!decrypt1.coordinateDecrypt2);
     REQUIRE(decrypt1.ExecutionModeValue() == 0);
 
-    for (const CoordinateDecryptSelection selection : {
-             CoordinateDecryptSelection::Decrypt2,
-             CoordinateDecryptSelection::Decrypt3,
-             CoordinateDecryptSelection::Decrypt4,
-             CoordinateDecryptSelection::Decrypt5,
-             CoordinateDecryptSelection::Decrypt6,
-         }) {
-        const auto route = ResolveCoordinateDecryptBackendRoute(
-            selection, true);
-        REQUIRE(!route.coordinateReplay);
-        REQUIRE(route.coordinateDecrypt2);
-        REQUIRE(route.ExecutionModeValue() == 0);
-    }
+    const auto decrypt2 = ResolveCoordinateDecryptBackendRoute(
+        CoordinateDecryptSelection::Decrypt2);
+    REQUIRE(!decrypt2.coordinateReplay);
+    REQUIRE(decrypt2.coordinateDecrypt2);
+    REQUIRE(decrypt2.ExecutionModeValue() == 0);
 
     const struct {
         CoordinateDecryptSelection selection;
@@ -48,7 +40,7 @@ void RunCoordinateDecryptBackendRouteTests() {
     };
     for (const auto& expected : executionRoutes) {
         const auto route = ResolveCoordinateDecryptBackendRoute(
-            expected.selection, false);
+            expected.selection);
         REQUIRE(!route.coordinateReplay);
         REQUIRE(!route.coordinateDecrypt2);
         REQUIRE(route.executionMode == expected.mode);

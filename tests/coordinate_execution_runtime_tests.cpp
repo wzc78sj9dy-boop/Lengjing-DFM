@@ -17,6 +17,7 @@ namespace {
     } while (false)
 
 using lengjing::game::native::BuildCoordinateExecutionPlan;
+using lengjing::game::native::BuildCoordinateExecutionIoctlFallback;
 using lengjing::game::native::CoordinateExecutionMode;
 using lengjing::game::native::CoordinateExecutionMemoryBaseRegister;
 using lengjing::game::native::
@@ -34,6 +35,8 @@ using lengjing::game::native::IsCoordinateExecutionCanonicalFaultBase;
 using lengjing::game::native::IsCoordinateExecutionClearExclusiveInstruction;
 using lengjing::game::native::IsCoordinateExecutionDescriptorEndQuery;
 using lengjing::game::native::IsCoordinateExecutionLoadExclusiveInstruction;
+using lengjing::game::native::IsCoordinateExecutionIoctlPayload;
+using lengjing::game::native::IsCoordinateExecutionIoctlRequest;
 using lengjing::game::native::IsCoordinateExecutionStackBase;
 using lengjing::game::native::IsCoordinateExecutionStoreExclusiveInstruction;
 using lengjing::game::native::IsCoordinateExecutionTaggedMemoryInstruction;
@@ -233,6 +236,29 @@ void TestFakeDescriptorSeekContract() {
         1);
     REQUIRE(overflow.result == -22);
     REQUIRE(overflow.current == static_cast<std::uint64_t>(INT64_MAX));
+}
+
+void TestIoctlContract() {
+    constexpr std::uint64_t request =
+        (UINT64_C(3) << 30U) | (UINT64_C(0x30) << 16U) |
+        (UINT64_C(9) << 8U) | UINT64_C(0x47);
+    REQUIRE(IsCoordinateExecutionIoctlRequest(request));
+    REQUIRE(IsCoordinateExecutionIoctlRequest(
+        request | (UINT64_C(0xABCD) << 32U)));
+    REQUIRE(!IsCoordinateExecutionIoctlRequest(request ^ UINT64_C(1)));
+    REQUIRE(!IsCoordinateExecutionIoctlRequest(
+        request ^ (UINT64_C(1) << 8U)));
+    REQUIRE(!IsCoordinateExecutionIoctlRequest(
+        request ^ (UINT64_C(1) << 16U)));
+
+    const std::uint64_t fallback =
+        BuildCoordinateExecutionIoctlFallback(UINT64_C(0x3F000000), request);
+    REQUIRE(IsCoordinateExecutionIoctlPayload(fallback));
+    REQUIRE(IsCoordinateExecutionIoctlPayload(UINT64_C(0x100000000)));
+    REQUIRE(IsCoordinateExecutionIoctlPayload(UINT64_C(0x5FFFFFF000)));
+    REQUIRE(!IsCoordinateExecutionIoctlPayload(UINT64_C(0x6000000000)));
+    REQUIRE(!IsCoordinateExecutionIoctlPayload(UINT64_C(0xFFFFF000)));
+    REQUIRE(!IsCoordinateExecutionIoctlPayload(UINT64_C(0x100000001)));
 }
 
 void TestTaggedMemoryInstructionContract() {
@@ -438,7 +464,7 @@ void TestSharedAbsoluteEntry() {
     REQUIRE(plan.valid);
     REQUIRE(plan.entryPc == request.shared.absoluteEntry);
     REQUIRE(plan.hookPc == kCodeBase + 0x5000);
-    REQUIRE(plan.x0 == kNormalizedSubject);
+    REQUIRE(plan.x0 == request.shared.x0Override);
     REQUIRE(plan.x1 == kNormalizedSubject);
     REQUIRE(plan.lr == request.shared.returnStub);
     REQUIRE(plan.returnStub == request.shared.returnStub);
@@ -519,6 +545,7 @@ int main() {
     TestSvcContract();
     TestExternalBranchContract();
     TestFakeDescriptorSeekContract();
+    TestIoctlContract();
     TestTaggedMemoryInstructionContract();
     TestExclusiveMonitorContract();
     TestKnownRelativeCandidate();
