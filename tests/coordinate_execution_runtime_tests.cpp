@@ -21,23 +21,25 @@ using lengjing::game::native::CoordinateExecutionMode;
 using lengjing::game::native::CoordinateExecutionMemoryBaseRegister;
 using lengjing::game::native::
     CoordinateExecutionExclusiveMonitorInvalidAfterInstruction;
-using lengjing::game::native::CoordinateExecutionEvidence;
+using lengjing::game::native::CoordinateExecutionBranchKind;
 using lengjing::game::native::CoordinateExecutionStoreExclusiveStatusRegister;
 using lengjing::game::native::CoordinateExecutionRequest;
 using lengjing::game::native::CoordinateExecutionStatus;
 using lengjing::game::native::ContainsCoordinateExecutionCodeAddress;
 using lengjing::game::native::CoordinateExecutionSvcResult;
-using lengjing::game::native::HasRecordedCoordinateExecutionSvc;
+using lengjing::game::native::DecodeCoordinateExecutionBranch;
+using lengjing::game::native::EvaluateCoordinateExecutionDescriptorSeek;
 using lengjing::game::native::IsCoordinateExecutionPointer;
 using lengjing::game::native::IsCoordinateExecutionCanonicalFaultBase;
 using lengjing::game::native::IsCoordinateExecutionClearExclusiveInstruction;
 using lengjing::game::native::IsCoordinateExecutionDescriptorEndQuery;
-using lengjing::game::native::IsCoordinateExecutionDescriptorEndSvc;
 using lengjing::game::native::IsCoordinateExecutionLoadExclusiveInstruction;
 using lengjing::game::native::IsCoordinateExecutionStackBase;
 using lengjing::game::native::IsCoordinateExecutionStoreExclusiveInstruction;
 using lengjing::game::native::IsCoordinateExecutionTaggedMemoryInstruction;
 using lengjing::game::native::NormalizeCoordinateExecutionPointer;
+using lengjing::game::native::
+    ResolveCoordinateExecutionImmediateBranchTarget;
 using lengjing::game::native::ShouldInitializeCoordinateExecutionHook;
 using lengjing::game::native::ShouldRedirectCoordinateExecutionReturn;
 using lengjing::game::native::kCoordinateExecutionDefaultFrame;
@@ -143,33 +145,94 @@ void TestSvcContract() {
     REQUIRE(!IsCoordinateExecutionDescriptorEndQuery(62, 1, 2));
     REQUIRE(!IsCoordinateExecutionDescriptorEndQuery(62, 0, 1));
     REQUIRE(!IsCoordinateExecutionDescriptorEndQuery(178, 0, 2));
-    REQUIRE(IsCoordinateExecutionDescriptorEndSvc(62, 0, 2));
-    REQUIRE(!IsCoordinateExecutionDescriptorEndSvc(62, 1, 2));
-    REQUIRE(!IsCoordinateExecutionDescriptorEndSvc(62, 0, 1));
-    REQUIRE(!IsCoordinateExecutionDescriptorEndSvc(172, 0, 2));
 }
 
-void TestSvcEvidenceContract() {
-    CoordinateExecutionEvidence evidence{};
-    evidence.svcNumber0 = 62;
-    REQUIRE(!HasRecordedCoordinateExecutionSvc(evidence, 62));
+void TestExternalBranchContract() {
+    const auto blr = DecodeCoordinateExecutionBranch(
+        UINT32_C(0xD63F0100));
+    REQUIRE(blr.kind == CoordinateExecutionBranchKind::Call);
+    REQUIRE(!blr.immediate);
+    REQUIRE(blr.targetRegister == 8);
 
-    evidence.svcCount = 1;
-    REQUIRE(HasRecordedCoordinateExecutionSvc(evidence, 62));
-    REQUIRE(!HasRecordedCoordinateExecutionSvc(evidence, 172));
+    const auto br = DecodeCoordinateExecutionBranch(
+        UINT32_C(0xD61F0100));
+    REQUIRE(br.kind == CoordinateExecutionBranchKind::Jump);
+    REQUIRE(!br.immediate);
+    REQUIRE(br.targetRegister == 8);
 
-    evidence.svcNumber0 = 172;
-    evidence.svcNumber1 = 62;
-    REQUIRE(!HasRecordedCoordinateExecutionSvc(evidence, 62));
-    evidence.svcCount = 2;
-    REQUIRE(HasRecordedCoordinateExecutionSvc(evidence, 62));
+    const auto authenticatedCall = DecodeCoordinateExecutionBranch(
+        UINT32_C(0xD63F081F) | (8U << 5U));
+    REQUIRE(authenticatedCall.kind == CoordinateExecutionBranchKind::Call);
+    REQUIRE(authenticatedCall.targetRegister == 8);
+    const auto authenticatedJump = DecodeCoordinateExecutionBranch(
+        UINT32_C(0xD61F081F) | (9U << 5U));
+    REQUIRE(authenticatedJump.kind == CoordinateExecutionBranchKind::Jump);
+    REQUIRE(authenticatedJump.targetRegister == 9);
 
-    evidence.svcNumber1 = 178;
-    evidence.svcNumber3 = 62;
-    evidence.svcCount = 3;
-    REQUIRE(!HasRecordedCoordinateExecutionSvc(evidence, 62));
-    evidence.svcCount = 4;
-    REQUIRE(HasRecordedCoordinateExecutionSvc(evidence, 62));
+    const auto authenticatedZeroCall = DecodeCoordinateExecutionBranch(
+        (UINT32_C(0x1AE7E1) << 11U) | (10U << 5U));
+    REQUIRE(authenticatedZeroCall.kind ==
+            CoordinateExecutionBranchKind::Call);
+    REQUIRE(authenticatedZeroCall.targetRegister == 10);
+    const auto authenticatedZeroJump = DecodeCoordinateExecutionBranch(
+        (UINT32_C(0x1AE3E1) << 11U) | (11U << 5U));
+    REQUIRE(authenticatedZeroJump.kind ==
+            CoordinateExecutionBranchKind::Jump);
+    REQUIRE(authenticatedZeroJump.targetRegister == 11);
+
+    constexpr std::uint64_t pc = UINT64_C(0x7000001000);
+    const auto forward = DecodeCoordinateExecutionBranch(
+        UINT32_C(0x94000002));
+    REQUIRE(forward.kind == CoordinateExecutionBranchKind::Call);
+    REQUIRE(forward.immediate);
+    REQUIRE(ResolveCoordinateExecutionImmediateBranchTarget(
+                pc, UINT32_C(0x94000002)) == pc + 8);
+    REQUIRE(ResolveCoordinateExecutionImmediateBranchTarget(
+                pc, UINT32_C(0x97FFFFFF)) == pc - 4);
+    REQUIRE(!DecodeCoordinateExecutionBranch(
+                 UINT32_C(0x14000000)).IsValid());
+    REQUIRE(!DecodeCoordinateExecutionBranch(
+                 UINT32_C(0xD65F03C0)).IsValid());
+}
+
+void TestFakeDescriptorSeekContract() {
+    const auto empty = EvaluateCoordinateExecutionDescriptorSeek(
+        0, 0, 123, 2);
+    REQUIRE(empty.result == 0);
+    REQUIRE(empty.current == 0);
+    REQUIRE(empty.emptyFile);
+
+    const auto absolute = EvaluateCoordinateExecutionDescriptorSeek(
+        100, 25, 30, 0);
+    REQUIRE(absolute.result == 30);
+    REQUIRE(absolute.current == 30);
+    REQUIRE(!absolute.emptyFile);
+
+    const auto relative = EvaluateCoordinateExecutionDescriptorSeek(
+        100, 25, -10, 1);
+    REQUIRE(relative.result == 15);
+    REQUIRE(relative.current == 15);
+
+    const auto fromEnd = EvaluateCoordinateExecutionDescriptorSeek(
+        100, 25, -5, 2);
+    REQUIRE(fromEnd.result == 95);
+    REQUIRE(fromEnd.current == 95);
+
+    const auto beforeStart = EvaluateCoordinateExecutionDescriptorSeek(
+        100, 25, -26, 1);
+    REQUIRE(beforeStart.result == -22);
+    REQUIRE(beforeStart.current == 25);
+    const auto badWhence = EvaluateCoordinateExecutionDescriptorSeek(
+        100, 25, 0, 3);
+    REQUIRE(badWhence.result == -22);
+    REQUIRE(badWhence.current == 25);
+    const auto overflow = EvaluateCoordinateExecutionDescriptorSeek(
+        static_cast<std::uint64_t>(INT64_MAX),
+        static_cast<std::uint64_t>(INT64_MAX),
+        1,
+        1);
+    REQUIRE(overflow.result == -22);
+    REQUIRE(overflow.current == static_cast<std::uint64_t>(INT64_MAX));
 }
 
 void TestTaggedMemoryInstructionContract() {
@@ -454,7 +517,8 @@ int main() {
     TestSyntheticStackContract();
     TestHookInitializationGate();
     TestSvcContract();
-    TestSvcEvidenceContract();
+    TestExternalBranchContract();
+    TestFakeDescriptorSeekContract();
     TestTaggedMemoryInstructionContract();
     TestExclusiveMonitorContract();
     TestKnownRelativeCandidate();

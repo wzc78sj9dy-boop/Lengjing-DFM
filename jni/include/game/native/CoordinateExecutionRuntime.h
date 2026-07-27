@@ -75,6 +75,33 @@ enum class CoordinateExecutionRuntimeError : std::uint16_t {
     ResultInvalid,
 };
 
+enum class CoordinateExecutionBranchKind : std::uint8_t {
+    None = 0,
+    Call = 1,
+    Jump = 2,
+};
+
+struct CoordinateExecutionBranch {
+    CoordinateExecutionBranchKind kind =
+        CoordinateExecutionBranchKind::None;
+    std::uint32_t targetRegister = 31;
+    bool immediate = false;
+
+    constexpr bool IsValid() const noexcept {
+        return kind != CoordinateExecutionBranchKind::None;
+    }
+
+    constexpr bool IsCall() const noexcept {
+        return kind == CoordinateExecutionBranchKind::Call;
+    }
+};
+
+struct CoordinateExecutionDescriptorSeekResult {
+    std::int64_t result = -22;
+    std::uint64_t current = 0;
+    bool emptyFile = false;
+};
+
 #pragma pack(push, 1)
 struct CoordinateExecutionPosition {
     float x = 0.0F;
@@ -249,6 +276,16 @@ struct CoordinateExecutionEvidence {
     std::uint64_t descriptorEndQueryCount = 0;
     std::int32_t descriptorEndQueryFd = -1;
     std::int64_t descriptorEndQueryResult = -1;
+    std::uint64_t externalBranchCount = 0;
+    std::uint64_t libcBranchCount = 0;
+    std::uint64_t unknownExternalCallCount = 0;
+    std::uint64_t unknownExternalJumpCount = 0;
+    std::uint64_t fakeDescriptorCount = 0;
+    std::uint64_t lastExternalBranchTarget = 0;
+    std::uint64_t lastExternalBranchReturnPc = 0;
+    std::uint64_t lastExternalBranchResult = 0;
+    std::uint64_t libcBegin = 0;
+    std::uint64_t libcEnd = 0;
     std::uint64_t taggedBaseRewriteCount = 0;
     std::uint32_t taggedBaseRegister = 0;
     std::uint64_t taggedBaseBefore = 0;
@@ -294,15 +331,6 @@ struct CoordinateExecutionRuntimeProbe {
     CoordinateExecutionPlan plan{};
     CoordinateExecutionEvidence evidence{};
 };
-
-constexpr bool HasRecordedCoordinateExecutionSvc(
-    const CoordinateExecutionEvidence& evidence,
-    std::uint64_t number) noexcept {
-    return (evidence.svcCount >= 1 && evidence.svcNumber0 == number) ||
-        (evidence.svcCount >= 2 && evidence.svcNumber1 == number) ||
-        (evidence.svcCount >= 3 && evidence.svcNumber2 == number) ||
-        (evidence.svcCount >= 4 && evidence.svcNumber3 == number);
-}
 
 constexpr std::uint64_t NormalizeCoordinateExecutionPointer(
     std::uint64_t value) noexcept {
@@ -429,11 +457,92 @@ constexpr bool IsCoordinateExecutionDescriptorEndQuery(
     return number == 62 && offset == 0 && whence == 2;
 }
 
-constexpr bool IsCoordinateExecutionDescriptorEndSvc(
-    std::uint64_t number,
-    std::uint64_t offset,
-    std::uint64_t whence) noexcept {
-    return IsCoordinateExecutionDescriptorEndQuery(number, offset, whence);
+constexpr CoordinateExecutionBranch DecodeCoordinateExecutionBranch(
+    std::uint32_t instruction) noexcept {
+    if (instruction >> 26U == UINT32_C(0x25)) {
+        return {CoordinateExecutionBranchKind::Call, 31, true};
+    }
+
+    const std::uint32_t targetRegister =
+        (instruction >> 5U) & UINT32_C(0x1F);
+    if ((instruction & UINT32_C(0xFFFFFC1F)) ==
+            UINT32_C(0xD63F0000) ||
+        (instruction & UINT32_C(0xFFFFF81F)) ==
+            UINT32_C(0xD63F081F) ||
+        instruction >> 11U == UINT32_C(0x1AE7E1)) {
+        return {
+            CoordinateExecutionBranchKind::Call,
+            targetRegister,
+            false,
+        };
+    }
+    if ((instruction & UINT32_C(0xFFFFFC1F)) ==
+            UINT32_C(0xD61F0000) ||
+        (instruction & UINT32_C(0xFFFFF81F)) ==
+            UINT32_C(0xD61F081F) ||
+        instruction >> 11U == UINT32_C(0x1AE3E1)) {
+        return {
+            CoordinateExecutionBranchKind::Jump,
+            targetRegister,
+            false,
+        };
+    }
+    return {};
+}
+
+constexpr std::uint64_t ResolveCoordinateExecutionImmediateBranchTarget(
+    std::uint64_t address,
+    std::uint32_t instruction) noexcept {
+    std::uint64_t offset =
+        static_cast<std::uint64_t>(instruction & UINT32_C(0x03FFFFFF)) << 2U;
+    if ((instruction & UINT32_C(0x02000000)) != 0) {
+        offset |= ~((UINT64_C(1) << 28U) - 1U);
+    }
+    return NormalizeCoordinateExecutionPointer(address + offset);
+}
+
+constexpr CoordinateExecutionDescriptorSeekResult
+EvaluateCoordinateExecutionDescriptorSeek(
+    std::uint64_t end,
+    std::uint64_t current,
+    std::int64_t offset,
+    std::int32_t whence) noexcept {
+    CoordinateExecutionDescriptorSeekResult output{-22, current, false};
+    if (end == 0 && whence == 2) {
+        output.result = 0;
+        output.emptyFile = true;
+        return output;
+    }
+
+    std::uint64_t base = 0;
+    if (whence == 1) {
+        base = current;
+    } else if (whence == 2) {
+        base = end;
+    } else if (whence != 0) {
+        return output;
+    }
+
+    constexpr std::uint64_t maximum =
+        static_cast<std::uint64_t>(
+            std::numeric_limits<std::int64_t>::max());
+    if (base > maximum) return output;
+
+    std::uint64_t resolved = 0;
+    if (offset >= 0) {
+        const std::uint64_t positive =
+            static_cast<std::uint64_t>(offset);
+        if (positive > maximum - base) return output;
+        resolved = base + positive;
+    } else {
+        const std::uint64_t magnitude =
+            UINT64_C(0) - static_cast<std::uint64_t>(offset);
+        if (magnitude > base) return output;
+        resolved = base - magnitude;
+    }
+    output.result = static_cast<std::int64_t>(resolved);
+    output.current = resolved;
+    return output;
 }
 
 constexpr bool IsCoordinateExecutionMode(CoordinateExecutionMode mode) noexcept {

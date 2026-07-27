@@ -2,6 +2,7 @@
 
 #include "game/native/Arm64Pacga.h"
 #include "game/native/MemoryTransport.h"
+#include "game/native/PtraceExecutionContextProvider.h"
 
 #include <unicorn/unicorn.h>
 
@@ -13,13 +14,10 @@
 #include <limits>
 #include <memory>
 #include <mutex>
-#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
-
-#include <sys/stat.h>
 
 namespace lengjing::game::native {
 namespace {
@@ -32,10 +30,8 @@ constexpr std::uint64_t kSyntheticStackSize =
 constexpr std::size_t kMaximumMappedPages = 4096;
 constexpr std::uint32_t kCoordinateExecutionTcgBufferSize =
     UINT32_C(32) * 1024U * 1024U;
-constexpr std::size_t kMaximumEngineExecutions = 64;
-constexpr auto kPersistentCodeVerificationInterval =
-    std::chrono::seconds(1);
-constexpr std::size_t kPersistentCodeVerificationPagesPerRun = 1;
+constexpr std::uint32_t kFirstFakeDescriptor = UINT32_C(0x3F000000);
+constexpr std::uint64_t kAbsoluteEntryWindowSize = UINT64_C(0x4000);
 
 constexpr std::uint32_t kPacgaMask = 0xFFE0FC00U;
 constexpr std::uint32_t kPacgaOpcode = 0x9AC03000U;
@@ -107,27 +103,11 @@ CoordinateExecutionResult Success(
     return result;
 }
 
-bool ReadDescriptorEnd(std::int32_t threadId,
-                       std::int32_t descriptor,
-                       std::int64_t& result) {
-    result = -1;
-    if (threadId <= 0 || descriptor < 0) return false;
-    const std::string path = "/proc/" + std::to_string(threadId) +
-        "/fd/" + std::to_string(descriptor);
-    struct stat status {};
-    if (::stat(path.c_str(), &status) != 0 || status.st_size < 0) {
-        return false;
-    }
-    result = static_cast<std::int64_t>(status.st_size);
-    return true;
-}
-
 }  // namespace
 
 struct CoordinateExecutionRuntime::Impl {
     struct alignas(kPageSize) CachedPageBacking {
         std::array<std::uint8_t, kPageSize> bytes{};
-        std::array<std::uint8_t, kPageSize> snapshot{};
     };
 
     struct CachedPage {
@@ -136,6 +116,17 @@ struct CoordinateExecutionRuntime::Impl {
         std::shared_ptr<CachedPageBacking> backing;
         std::vector<uc_hook> instructionHooks;
         std::vector<std::uint64_t> instructionHookAddresses;
+    };
+
+    struct FakeFile {
+        std::uint64_t end = 0;
+        std::uint64_t current = 0;
+    };
+
+    struct CachedPacgaOracle {
+        std::uint64_t data = 0;
+        std::uint64_t modifier = 0;
+        std::uint64_t result = 0;
     };
 
     ~Impl() {
@@ -213,12 +204,16 @@ struct CoordinateExecutionRuntime::Impl {
             subject = NormalizeCoordinateExecutionPointer(subjectValue);
             evidence.inputSubject = subject;
             executionContext = executionContextValue;
-            descriptorThreadId = executionContext.threadId;
-            descriptorEnds.clear();
             exclusiveMonitorInvalid = true;
             request = requestValue;
             plan = executionPlan;
-            ctrEl0 = ReadHostCtrEl0();
+            RefreshLibcRange();
+            ResetExternalCallState();
+            SyncPacgaOracleCache();
+            if (!ctrEl0Initialized) {
+                ctrEl0 = ReadHostCtrEl0();
+                ctrEl0Initialized = true;
+            }
             counterFrequency = ReadHostCounterFrequency();
 
             if (plan.verifyReturnStubMagic && !VerifyHostReturnStubMagic()) {
@@ -276,7 +271,6 @@ struct CoordinateExecutionRuntime::Impl {
             probe.stage = CoordinateExecutionRuntimeStage::Executing;
             hookFailed = false;
             hookRuntimeError = CoordinateExecutionRuntimeError::None;
-            ++engineExecutionCount;
             const uc_err error = uc_emu_start(
                 engine,
                 plan.entryPc,
@@ -335,6 +329,8 @@ struct CoordinateExecutionRuntime::Impl {
     void Reset() noexcept {
         std::lock_guard<std::mutex> lock(mutex);
         CloseEngine();
+        ctrEl0 = 0;
+        ctrEl0Initialized = false;
         probe = {};
     }
 
@@ -463,7 +459,6 @@ private:
         const CoordinateExecutionPlan& executionPlan,
         const CoordinateExecutionLayout& layoutValue) const noexcept {
         return engine != nullptr && !enginePoisoned && engineIdentityValid &&
-            engineExecutionCount < kMaximumEngineExecutions &&
             engineMemory == &memoryValue &&
             engineModuleBase == moduleBaseValue &&
             engineModuleSize == moduleSizeValue &&
@@ -487,6 +482,81 @@ private:
             left.verifyReturnStubMagic == right.verifyReturnStubMagic;
     }
 
+    void RefreshLibcRange() {
+        if (libcThreadId != executionContext.threadId ||
+            libcThreadStartTimeTicks !=
+                executionContext.threadStartTimeTicks) {
+            libcThreadId = executionContext.threadId;
+            libcThreadStartTimeTicks =
+                executionContext.threadStartTimeTicks;
+            libcBegin = 0;
+            libcEnd = 0;
+            MappedModuleRange range{};
+            if (FindMappedModuleRange(
+                    executionContext.threadId, "libc.so", range) ||
+                FindMappedModuleRange(
+                    executionContext.threadId, "libc-", range)) {
+                libcBegin = NormalizeCoordinateExecutionPointer(range.begin);
+                libcEnd = NormalizeCoordinateExecutionPointer(range.end);
+                if (libcEnd <= libcBegin) {
+                    libcBegin = 0;
+                    libcEnd = 0;
+                }
+            }
+        }
+        evidence.libcBegin = libcBegin;
+        evidence.libcEnd = libcEnd;
+    }
+
+    void ResetExternalCallState() {
+        nextFakeDescriptor = kFirstFakeDescriptor;
+        fakeFiles.clear();
+        emptyFakeFileSeen = false;
+    }
+
+    void SyncPacgaOracleCache() {
+        if (pacgaThreadId != executionContext.threadId ||
+            pacgaThreadStartTimeTicks !=
+                executionContext.threadStartTimeTicks ||
+            pacgaTpidrEl0 != executionContext.tpidrEl0) {
+            pacgaThreadId = executionContext.threadId;
+            pacgaThreadStartTimeTicks =
+                executionContext.threadStartTimeTicks;
+            pacgaTpidrEl0 = executionContext.tpidrEl0;
+            pacgaOracles.clear();
+        }
+        if (executionContext.pacgaOracle.available) {
+            CachePacgaOracle(
+                executionContext.pacgaOracle.data,
+                executionContext.pacgaOracle.modifier,
+                executionContext.pacgaOracle.result);
+        }
+    }
+
+    bool FindPacgaOracle(std::uint64_t data,
+                         std::uint64_t modifier,
+                         std::uint64_t& result) const noexcept {
+        for (const CachedPacgaOracle& oracle : pacgaOracles) {
+            if (oracle.data == data && oracle.modifier == modifier) {
+                result = oracle.result;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void CachePacgaOracle(std::uint64_t data,
+                          std::uint64_t modifier,
+                          std::uint64_t result) {
+        for (CachedPacgaOracle& oracle : pacgaOracles) {
+            if (oracle.data == data && oracle.modifier == modifier) {
+                oracle.result = result;
+                return;
+            }
+        }
+        pacgaOracles.push_back({data, modifier, result});
+    }
+
     bool CaptureEngineIdentity(
         MemoryTransport& memoryValue,
         std::uintptr_t moduleBaseValue,
@@ -506,21 +576,7 @@ private:
         engineLayout = layoutValue;
         enginePlan = executionPlan;
         engineIdentityValid = true;
-        codeSnapshotVerifiedAt = std::chrono::steady_clock::now();
         return true;
-    }
-
-    bool IsPersistentPage(const CachedPage& page) const noexcept {
-        const auto contains = [&page](std::uint64_t address) {
-            const std::uint64_t normalized =
-                NormalizeCoordinateExecutionPointer(address);
-            return normalized >= page.guestAddress &&
-                normalized - page.guestAddress < kPageSize;
-        };
-        const bool codePage = page.remoteAddress >= engineCodeBase &&
-            page.remoteAddress - engineCodeBase < engineCodeSize;
-        return codePage || contains(enginePlan.entryPc) ||
-            contains(enginePlan.hookPc) || contains(enginePlan.returnStub);
     }
 
     bool RemoveInstructionHooks(CachedPage& page) noexcept {
@@ -541,94 +597,19 @@ private:
     bool ResetEngineForRun() {
         if (engine == nullptr || enginePoisoned) return false;
 
-        std::unordered_set<std::uint64_t> retainedBackings;
-        for (const auto& entry : pages) {
-            const CachedPage& page = entry.second;
-            if (IsPersistentPage(page)) {
-                retainedBackings.insert(page.remoteAddress);
-            }
-        }
-        const auto now = std::chrono::steady_clock::now();
-        const bool verifyPersistentCode =
-            codeSnapshotVerifiedAt.time_since_epoch().count() == 0 ||
-            now < codeSnapshotVerifiedAt ||
-            now - codeSnapshotVerifiedAt >=
-                kPersistentCodeVerificationInterval;
-        if (verifyPersistentCode) {
-            std::vector<std::uint64_t> verificationPages{
-                retainedBackings.begin(), retainedBackings.end()};
-            std::sort(verificationPages.begin(), verificationPages.end());
-            if (codeSnapshotVerificationPageCount !=
-                verificationPages.size()) {
-                codeSnapshotVerificationCursor = 0;
-                codeSnapshotVerificationPageCount =
-                    verificationPages.size();
-            }
-            std::size_t verifiedPages = 0;
-            while (codeSnapshotVerificationCursor <
-                       verificationPages.size() &&
-                   verifiedPages <
-                       kPersistentCodeVerificationPagesPerRun) {
-                const std::uint64_t remoteAddress =
-                    verificationPages[codeSnapshotVerificationCursor];
-                const auto backing = pageBackings.find(remoteAddress);
-                if (backing == pageBackings.end()) return false;
-                std::array<std::uint8_t, kPageSize> current{};
-                game::CoordinateReadDiagnostic diagnostic{};
-                if (!ReadRemoteMemory(
-                        remoteAddress,
-                        current.data(),
-                        current.size(),
-                        diagnostic)) {
-                    probe.read = diagnostic;
-                    probe.error =
-                        CoordinateExecutionRuntimeError::RemotePageReadFailed;
-                    return false;
-                }
-                if (current != backing->second->snapshot) return false;
-                ++codeSnapshotVerificationCursor;
-                ++verifiedPages;
-            }
-            if (codeSnapshotVerificationCursor >=
-                verificationPages.size()) {
-                codeSnapshotVerificationCursor = 0;
-                codeSnapshotVerifiedAt = now;
-            }
-        }
-
-        for (auto iterator = pages.begin(); iterator != pages.end();) {
-            CachedPage& page = iterator->second;
-            if (IsPersistentPage(page)) {
-                ++iterator;
-                continue;
-            }
+        for (auto& entry : pages) {
+            CachedPage& page = entry.second;
             const std::uint64_t guestAddress = page.guestAddress;
             if (!RemoveInstructionHooks(page) ||
                 uc_mem_unmap(engine, guestAddress, kPageSize) != UC_ERR_OK) {
                 return false;
             }
             mappedPages.erase(guestAddress);
-            iterator = pages.erase(iterator);
         }
-
-        bool restoredPersistentCode = false;
-        for (auto iterator = pageBackings.begin();
-             iterator != pageBackings.end();) {
-            if (retainedBackings.find(iterator->first) ==
-                retainedBackings.end()) {
-                iterator = pageBackings.erase(iterator);
-                continue;
-            }
-            if (iterator->second->bytes != iterator->second->snapshot) {
-                iterator->second->bytes = iterator->second->snapshot;
-                restoredPersistentCode = true;
-            }
-            ++iterator;
-        }
-        if (restoredPersistentCode &&
-            uc_ctl_flush_tb(engine) != UC_ERR_OK) {
-            return false;
-        }
+        pages.clear();
+        pageBackings.clear();
+        hookedAddresses.clear();
+        if (uc_ctl_flush_tb(engine) != UC_ERR_OK) return false;
 
         static const std::array<std::uint8_t, kPageSize> zeroPage{};
         for (const std::uint64_t page : dirtyStackPages) {
@@ -755,15 +736,11 @@ private:
         engineLayout = {};
         enginePlan = {};
         engineIdentityValid = false;
-        codeSnapshotVerifiedAt = {};
-        codeSnapshotVerificationCursor = 0;
-        codeSnapshotVerificationPageCount = 0;
-        engineExecutionCount = 0;
         enginePoisoned = false;
         hookFailed = false;
         hookRuntimeError = CoordinateExecutionRuntimeError::None;
-        descriptorThreadId = -1;
-        descriptorEnds.clear();
+        fakeFiles.clear();
+        nextFakeDescriptor = kFirstFakeDescriptor;
     }
 
     bool PrepareRegisters() {
@@ -925,7 +902,6 @@ private:
                     CoordinateExecutionRuntimeError::RemotePageReadFailed;
                 return false;
             }
-            backing->snapshot = backing->bytes;
             backingIterator =
                 pageBackings.emplace(remotePage, std::move(backing)).first;
         }
@@ -1026,7 +1002,7 @@ private:
         CachedPage& page,
         const std::array<std::uint8_t, kPageSize>& bytes) {
         std::vector<std::uint64_t> addresses;
-        addresses.reserve(16);
+        addresses.reserve(128);
         const auto appendIfInPage = [&](std::uint64_t address) {
             if (address >= page.guestAddress &&
                 address - page.guestAddress < kPageSize) {
@@ -1037,7 +1013,8 @@ private:
         if (plan.returnStub != 0) appendIfInPage(plan.returnStub);
         const auto appendHookOffset = [&](std::uint64_t offset) {
             std::uint64_t address = 0;
-            if (CoordinateExecutionAdd(plan.hookPc, offset, address)) {
+            if (offset != 0 &&
+                CoordinateExecutionAdd(plan.hookPc, offset, address)) {
                 appendIfInPage(address);
             }
         };
@@ -1046,7 +1023,7 @@ private:
         appendHookOffset(request.layout.hooks.callbackReturn);
         const auto appendCallbackOffset = [&](std::uint64_t offset) {
             std::uint64_t address = 0;
-            if (evidence.callbackTarget != 0 &&
+            if (offset != 0 && evidence.callbackTarget != 0 &&
                 CoordinateExecutionAdd(
                     NormalizeCoordinateExecutionPointer(
                         evidence.callbackTarget),
@@ -1060,7 +1037,8 @@ private:
         appendCallbackOffset(request.layout.hooks.callbackCopyAfter);
         const auto appendCodeOffset = [&](std::uint64_t offset) {
             std::uint64_t address = 0;
-            if (CoordinateExecutionAdd(codeBase, offset, address)) {
+            if (offset != 0 &&
+                CoordinateExecutionAdd(codeBase, offset, address)) {
                 appendIfInPage(address);
             }
         };
@@ -1084,6 +1062,17 @@ private:
         appendCodeOffset(request.layout.hooks.callbackDispatchReturnCode);
         appendCodeOffset(request.layout.hooks.callbackResultPrepareCode);
         appendCodeOffset(request.layout.hooks.callbackResultCode);
+        const std::uint64_t remotePage =
+            NormalizeCoordinateExecutionPointer(page.remoteAddress);
+        const bool mainCodePage = remotePage >= codeBase &&
+            remotePage - codeBase < codeSize;
+        const std::uint64_t absoluteEntryPage =
+            NormalizeCoordinateExecutionPointer(plan.entryPc) & kPageMask;
+        const bool absoluteEntryCodePage =
+            plan.entryPc != plan.hookPc &&
+            remotePage >= absoluteEntryPage &&
+            remotePage - absoluteEntryPage < kAbsoluteEntryWindowSize;
+        const bool scanBranches = mainCodePage || absoluteEntryCodePage;
         for (std::size_t offset = 0; offset <= bytes.size() - 4; offset += 4) {
             std::uint32_t instruction = 0;
             std::memcpy(&instruction, bytes.data() + offset, sizeof(instruction));
@@ -1091,7 +1080,9 @@ private:
                 (instruction & kSvcMask) == kSvcOpcode ||
                 IsCoordinateExecutionLoadExclusiveInstruction(instruction) ||
                 IsCoordinateExecutionStoreExclusiveInstruction(instruction) ||
-                IsCoordinateExecutionClearExclusiveInstruction(instruction)) {
+                IsCoordinateExecutionClearExclusiveInstruction(instruction) ||
+                (scanBranches &&
+                 DecodeCoordinateExecutionBranch(instruction).IsValid())) {
                 addresses.push_back(page.guestAddress + offset);
             }
         }
@@ -1192,11 +1183,24 @@ private:
             }
         }
         std::uint64_t probeAddress = 0;
-        if (CoordinateExecutionAdd(
+        const auto matchesProbe = [&](std::uint64_t base,
+                                      std::uint64_t offset) {
+            return offset != 0 &&
+                CoordinateExecutionAdd(base, offset, probeAddress) &&
+                address == probeAddress;
+        };
+        const auto readDiagnosticField = [&](std::uint64_t base,
+                                             std::uint64_t offset,
+                                             void* output,
+                                             std::size_t size) {
+            std::uint64_t fieldAddress = 0;
+            return offset != 0 &&
+                CoordinateExecutionAdd(base, offset, fieldAddress) &&
+                uc_mem_read(engine, fieldAddress, output, size) == UC_ERR_OK;
+        };
+        if (matchesProbe(
                 plan.hookPc,
-                request.layout.hooks.subjectLoadInstruction,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.subjectLoadInstruction)) {
             ++evidence.subjectLoadCount;
             static_cast<void>(ReadXRegister(11, evidence.subjectLoadX11));
             static_cast<void>(ReadXRegister(9, evidence.subjectLoadAddress));
@@ -1207,11 +1211,9 @@ private:
                 &evidence.subjectLoadValue,
                 sizeof(evidence.subjectLoadValue)));
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 plan.hookPc,
-                request.layout.hooks.callbackInstruction,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackInstruction)) {
             ++evidence.callbackCount;
             static_cast<void>(ReadXRegister(0, evidence.callbackX0));
             static_cast<void>(ReadXRegister(1, evidence.callbackX1));
@@ -1241,47 +1243,36 @@ private:
                 evidence.callbackX1SnapshotValid = true;
             }
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 plan.hookPc,
-                request.layout.hooks.callbackReturn,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackReturn)) {
             ++evidence.callbackReturnCount;
             static_cast<void>(ReadXRegister(0, evidence.callbackReturnX0));
         }
         const std::uint64_t callbackTarget =
             NormalizeCoordinateExecutionPointer(evidence.callbackTarget);
-        if (callbackTarget != 0 &&
-            CoordinateExecutionAdd(
+        if (callbackTarget != 0 && matchesProbe(
                 callbackTarget,
-                request.layout.hooks.callbackIndex,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackIndex)) {
             ++evidence.callbackIndexCount;
             static_cast<void>(ReadXRegister(0, evidence.callbackIndex));
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackTablePointerCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackTablePointerCode)) {
             ++evidence.callbackTableProbeCount;
             static_cast<void>(
                 ReadXRegister(8, evidence.callbackTablePointer));
             static_cast<void>(ReadXRegister(0, evidence.callbackTableIndex));
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackTableValueCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackTableValueCode)) {
             static_cast<void>(ReadXRegister(8, evidence.callbackTableValue));
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackLockCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackLockCode)) {
             static_cast<void>(
                 ReadXRegister(0, evidence.callbackMutexRecord));
             static_cast<void>(ReadXRegister(9, evidence.callbackLockTarget));
@@ -1295,11 +1286,9 @@ private:
                     sizeof(evidence.callbackMutexBeforeLock)));
             }
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackLockReturnCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackLockReturnCode)) {
             static_cast<void>(ReadXRegister(0, evidence.callbackLockReturn));
             const std::uint64_t record = NormalizeCoordinateExecutionPointer(
                 evidence.callbackMutexRecord);
@@ -1311,31 +1300,25 @@ private:
                 sizeof(evidence.callbackMutexAfterLock)));
             }
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackFirstCallCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackFirstCallCode)) {
             ++evidence.callbackFirstCallCount;
             static_cast<void>(
                 ReadXRegister(8, evidence.callbackFirstTarget));
             static_cast<void>(
                 ReadXRegister(0, evidence.callbackFirstArgument));
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackFirstReturnCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackFirstReturnCode)) {
             ++evidence.callbackFirstReturnCount;
             static_cast<void>(
                 ReadXRegister(0, evidence.callbackFirstReturn));
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackExternalCallCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackExternalCallCode)) {
             ++evidence.callbackExternalCallCount;
             static_cast<void>(
                 ReadXRegister(8, evidence.callbackExternalTarget));
@@ -1343,14 +1326,10 @@ private:
             static_cast<void>(ReadXRegister(1, evidence.callbackExternalX1));
             static_cast<void>(ReadXRegister(2, evidence.callbackExternalX2));
             static_cast<void>(ReadXRegister(3, evidence.callbackExternalX3));
-            if (TryHandleDescriptorEndQuery(address)) return;
-            if (hookFailed) return;
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackExternalReturnCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackExternalReturnCode)) {
             ++evidence.callbackExternalReturnCount;
             static_cast<void>(
                 ReadXRegister(0, evidence.callbackExternalReturn));
@@ -1358,27 +1337,25 @@ private:
             if (ReadXRegister(21, context)) {
                 context = NormalizeCoordinateExecutionPointer(context);
                 if (IsCoordinateExecutionPointer(context)) {
-                    static_cast<void>(uc_mem_read(
-                        engine,
-                        context + request.layout.fields.externalExpected,
+                    static_cast<void>(readDiagnosticField(
+                        context,
+                        request.layout.fields.externalExpected,
                         &evidence.callbackExternalExpected,
                         sizeof(evidence.callbackExternalExpected)));
                 }
             }
             std::uint64_t sp = 0;
             if (uc_reg_read(engine, UC_ARM64_REG_SP, &sp) == UC_ERR_OK) {
-                static_cast<void>(uc_mem_read(
-                    engine,
-                    sp + request.layout.fields.externalPriorGate,
+                static_cast<void>(readDiagnosticField(
+                    sp,
+                    request.layout.fields.externalPriorGate,
                     &evidence.callbackExternalPriorGate,
                     sizeof(evidence.callbackExternalPriorGate)));
             }
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackPrimaryGateWriteCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackPrimaryGateWriteCode)) {
             ++evidence.callbackPrimaryGateWriteCount;
             std::uint64_t value = 0;
             if (ReadXRegister(8, value)) {
@@ -1387,18 +1364,16 @@ private:
             }
             std::uint64_t sp = 0;
             if (uc_reg_read(engine, UC_ARM64_REG_SP, &sp) == UC_ERR_OK) {
-                static_cast<void>(uc_mem_read(
-                    engine,
-                    sp + request.layout.fields.primaryGateSource,
+                static_cast<void>(readDiagnosticField(
+                    sp,
+                    request.layout.fields.primaryGateSource,
                     &evidence.callbackPrimaryGateSource,
                     sizeof(evidence.callbackPrimaryGateSource)));
             }
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackAlternateGateWriteCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackAlternateGateWriteCode)) {
             ++evidence.callbackAlternateGateWriteCount;
             std::uint64_t value = 0;
             if (ReadXRegister(8, value)) {
@@ -1406,11 +1381,9 @@ private:
                     static_cast<std::uint32_t>(value);
             }
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackGateCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackGateCode)) {
             ++evidence.callbackGateProbeCount;
             std::uint64_t state = 0;
             if (ReadXRegister(9, state)) {
@@ -1419,55 +1392,47 @@ private:
             }
             std::uint64_t sp = 0;
             if (uc_reg_read(engine, UC_ARM64_REG_SP, &sp) == UC_ERR_OK) {
-                static_cast<void>(uc_mem_read(
-                    engine,
-                    sp + request.layout.fields.gateFlag,
+                static_cast<void>(readDiagnosticField(
+                    sp,
+                    request.layout.fields.gateFlag,
                     &evidence.callbackGateFlag,
                     sizeof(evidence.callbackGateFlag)));
-                static_cast<void>(uc_mem_read(
-                    engine,
-                    sp + request.layout.fields.gateSnapshotA,
+                static_cast<void>(readDiagnosticField(
+                    sp,
+                    request.layout.fields.gateSnapshotA,
                     &evidence.callbackGateSnapshotA,
                     sizeof(evidence.callbackGateSnapshotA)));
-                static_cast<void>(uc_mem_read(
-                    engine,
-                    sp + request.layout.fields.gateSnapshotB,
+                static_cast<void>(readDiagnosticField(
+                    sp,
+                    request.layout.fields.gateSnapshotB,
                     &evidence.callbackGateSnapshotB,
                     sizeof(evidence.callbackGateSnapshotB)));
             }
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackRecordCountCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackRecordCountCode)) {
             std::uint64_t count = 0;
             if (ReadXRegister(10, count)) {
                 evidence.callbackRecordCount =
                     static_cast<std::uint32_t>(count);
             }
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackTargetKeyCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackTargetKeyCode)) {
             static_cast<void>(ReadXRegister(8, evidence.callbackTargetKey));
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackRingSetupCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackRingSetupCode)) {
             static_cast<void>(ReadXRegister(10, evidence.callbackRingBase));
             static_cast<void>(
                 ReadXRegister(8, evidence.callbackRingIndexArray));
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackRingProbeCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackRingProbeCode)) {
             ++evidence.callbackRingProbeCount;
             static_cast<void>(ReadXRegister(9, evidence.callbackRingRowKey));
             std::uint64_t rowIndex = 0;
@@ -1477,26 +1442,22 @@ private:
             }
             std::uint64_t sp = 0;
             if (uc_reg_read(engine, UC_ARM64_REG_SP, &sp) == UC_ERR_OK) {
-                static_cast<void>(uc_mem_read(
-                    engine,
-                    sp + request.layout.fields.ringMid,
+                static_cast<void>(readDiagnosticField(
+                    sp,
+                    request.layout.fields.ringMid,
                     &evidence.callbackRingMid,
                     sizeof(evidence.callbackRingMid)));
             }
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackRingHitCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackRingHitCode)) {
             ++evidence.callbackRingHitCount;
             static_cast<void>(ReadXRegister(22, evidence.callbackRingHitRow));
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackDispatchCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackDispatchCode)) {
             ++evidence.callbackDispatchCount;
             static_cast<void>(
                 ReadXRegister(8, evidence.callbackDispatchTarget));
@@ -1514,11 +1475,9 @@ private:
                     sizeof(evidence.callbackMutexBeforeUnlock)));
             }
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackDispatchReturnCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackDispatchReturnCode)) {
             ++evidence.callbackDispatchReturnCount;
             static_cast<void>(
                 ReadXRegister(0, evidence.callbackDispatchReturn));
@@ -1534,22 +1493,18 @@ private:
                     sizeof(evidence.callbackMutexAfterUnlock)));
             }
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackResultPrepareCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackResultPrepareCode)) {
             ++evidence.callbackResultCount;
             static_cast<void>(
                 ReadXRegister(8, evidence.callbackResultIndex));
             static_cast<void>(
                 ReadXRegister(9, evidence.callbackResultBase));
         }
-        if (CoordinateExecutionAdd(
+        if (matchesProbe(
                 codeBase,
-                request.layout.hooks.callbackResultCode,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackResultCode)) {
             static_cast<void>(
                 ReadXRegister(8, evidence.callbackResultPointer));
             evidence.callbackResultPositionValid = CapturePositionBits(
@@ -1559,12 +1514,9 @@ private:
                 evidence.callbackResultPositionY,
                 evidence.callbackResultPositionZ);
         }
-        if (callbackTarget != 0 &&
-            CoordinateExecutionAdd(
+        if (callbackTarget != 0 && matchesProbe(
                 callbackTarget,
-                request.layout.hooks.callbackCopyPrepare,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackCopyPrepare)) {
             ++evidence.callbackCopyPrepareCount;
             static_cast<void>(
                 ReadXRegister(13, evidence.callbackCopySource));
@@ -1596,12 +1548,9 @@ private:
                     sizeof(evidence.callbackCopySourceValue18)));
             }
         }
-        if (callbackTarget != 0 &&
-            CoordinateExecutionAdd(
+        if (callbackTarget != 0 && matchesProbe(
                 callbackTarget,
-                request.layout.hooks.callbackCopyAfter,
-                probeAddress) &&
-            address == probeAddress) {
+                request.layout.hooks.callbackCopyAfter)) {
             ++evidence.callbackCopyAfterCount;
             const std::uint64_t destination =
                 NormalizeCoordinateExecutionPointer(
@@ -1691,11 +1640,17 @@ private:
             HandlePacga(address, instruction);
         } else if ((instruction & kSvcMask) == kSvcOpcode) {
             HandleSvc(address);
+        } else {
+            const CoordinateExecutionBranch branch =
+                DecodeCoordinateExecutionBranch(instruction);
+            if (branch.IsValid()) {
+                HandleBranch(address, instruction, branch);
+            }
         }
     }
 
     void HandlePacga(std::uint64_t address,
-                     std::uint32_t instruction) noexcept {
+                     std::uint32_t instruction) {
         const std::uint32_t destination = instruction & 0x1FU;
         const std::uint32_t source = (instruction >> 5U) & 0x1FU;
         const std::uint32_t modifier = (instruction >> 16U) & 0x1FU;
@@ -1708,10 +1663,8 @@ private:
         }
 
         std::uint64_t result = 0;
-        if (executionContext.pacgaOracle.Matches(
-                sourceValue, modifierValue)) {
-            result = executionContext.pacgaOracle.result;
-        } else if (executionContext.HasPacgaKey()) {
+        if (!FindPacgaOracle(sourceValue, modifierValue, result) &&
+            executionContext.HasPacgaKey()) {
             result = ComputeArm64Pacga(
                 sourceValue,
                 modifierValue,
@@ -1719,8 +1672,37 @@ private:
                     executionContext.pacgaLow,
                     executionContext.pacgaHigh,
                 });
-        } else {
-            FailHook(address, CoordinateExecutionRuntimeError::PacgaUnavailable);
+            CachePacgaOracle(sourceValue, modifierValue, result);
+        } else if (!FindPacgaOracle(
+                       sourceValue, modifierValue, result)) {
+            std::uint64_t tpidrEl0 = 0;
+            const PacgaOracleInstruction oracle{
+                static_cast<std::uintptr_t>(address),
+                sourceValue,
+                modifierValue,
+                instruction,
+                PacgaOracleCodeIdentity{
+                    static_cast<std::uintptr_t>(address),
+                    instruction,
+                },
+            };
+            if (pacgaOracleReader.Read(
+                    executionContext.threadId,
+                    oracle,
+                    tpidrEl0,
+                    result) != 0 ||
+                tpidrEl0 != executionContext.tpidrEl0) {
+                FailHook(
+                    address,
+                    CoordinateExecutionRuntimeError::PacgaUnavailable);
+                return;
+            }
+            CachePacgaOracle(sourceValue, modifierValue, result);
+        }
+        if ((result & UINT64_C(0xFFFFFFFF)) != 0) {
+            FailHook(
+                address,
+                CoordinateExecutionRuntimeError::PacgaUnavailable);
             return;
         }
         ++evidence.pacgaCount;
@@ -1749,62 +1731,64 @@ private:
         evidence.lastSvcNumber = number;
         ++evidence.exclusiveClearCount;
         exclusiveMonitorInvalid = true;
-        if (TryHandleDescriptorEndSvc(address, number)) return;
         if (!WriteXRegister(0, CoordinateExecutionSvcResult(number)) ||
             !SkipInstruction(address)) {
             FailHook(address, CoordinateExecutionRuntimeError::EmulationFailed);
         }
     }
 
-    bool ResolveDescriptorEnd(std::uint64_t descriptorValue,
-                              std::int32_t& descriptor,
-                              std::int64_t& result) {
-        descriptor = static_cast<std::int32_t>(descriptorValue);
-        result = -1;
-        const auto cached = descriptorEnds.find(descriptor);
-        if (cached != descriptorEnds.end()) {
-            result = cached->second;
+    bool IsMainCodeTarget(std::uint64_t target) const noexcept {
+        target = NormalizeCoordinateExecutionPointer(target);
+        return target >= codeBase && target - codeBase < codeSize;
+    }
+
+    bool IsLibcTarget(std::uint64_t target) const noexcept {
+        target = NormalizeCoordinateExecutionPointer(target);
+        return libcBegin != 0 && libcEnd > libcBegin &&
+            target >= libcBegin && target < libcEnd;
+    }
+
+    bool IsAbsoluteEntryAddress(std::uint64_t address) const noexcept {
+        if (plan.entryPc == plan.hookPc) return false;
+        const std::uint64_t begin =
+            NormalizeCoordinateExecutionPointer(plan.entryPc) & kPageMask;
+        address = NormalizeCoordinateExecutionPointer(address);
+        return address >= begin &&
+            address - begin < kAbsoluteEntryWindowSize;
+    }
+
+    bool ResolveBranchTarget(
+        std::uint64_t address,
+        std::uint32_t instruction,
+        const CoordinateExecutionBranch& branch,
+        std::uint64_t& target) const {
+        if (branch.immediate) {
+            target = ResolveCoordinateExecutionImmediateBranchTarget(
+                address, instruction);
             return true;
         }
-        if (!ReadDescriptorEnd(
-                executionContext.threadId, descriptor, result)) {
-            return false;
-        }
-        descriptorEnds.emplace(descriptor, result);
-        return true;
+        return ReadXRegister(branch.targetRegister, target) &&
+            (target = NormalizeCoordinateExecutionPointer(target), true);
     }
 
-    bool TryHandleDescriptorEndSvc(std::uint64_t address,
-                                   std::uint64_t number) {
-        std::uint64_t descriptorValue = 0;
-        std::uint64_t offset = 0;
-        std::uint64_t whence = 0;
-        if (!ReadXRegister(0, descriptorValue) ||
-            !ReadXRegister(1, offset) ||
-            !ReadXRegister(2, whence) ||
-            !IsCoordinateExecutionDescriptorEndSvc(
-                number, offset, whence)) {
-            return false;
-        }
-
-        std::int32_t descriptor = -1;
-        std::int64_t result = -1;
-        if (!ResolveDescriptorEnd(
-                descriptorValue, descriptor, result)) {
-            return false;
-        }
-
-        ++evidence.descriptorEndQueryCount;
-        evidence.descriptorEndQueryFd = descriptor;
-        evidence.descriptorEndQueryResult = result;
-        if (!WriteXRegister(0, static_cast<std::uint64_t>(result)) ||
-            !SkipInstruction(address)) {
-            FailHook(address, CoordinateExecutionRuntimeError::EmulationFailed);
-        }
-        return true;
+    bool CompleteExternalCall(std::uint64_t returnPc,
+                              bool call,
+                              std::uint64_t result) {
+        evidence.lastExternalBranchReturnPc = returnPc;
+        evidence.lastExternalBranchResult = result;
+        return WriteXRegister(0, result) &&
+            (!call || WriteXRegister(30, returnPc)) &&
+            uc_reg_write(engine, UC_ARM64_REG_PC, &returnPc) == UC_ERR_OK;
     }
 
-    bool TryHandleDescriptorEndQuery(std::uint64_t address) {
+    std::uint64_t AllocateFakeDescriptor() {
+        const std::uint32_t descriptor = nextFakeDescriptor++;
+        fakeFiles[static_cast<std::int32_t>(descriptor)] = {};
+        ++evidence.fakeDescriptorCount;
+        return descriptor;
+    }
+
+    bool TryHandleDescriptorEndQuery(std::uint64_t returnPc) {
         std::uint64_t number = 0;
         std::uint64_t descriptorValue = 0;
         std::uint64_t offset = 0;
@@ -1818,22 +1802,95 @@ private:
             return false;
         }
 
-        std::int32_t descriptor = -1;
-        std::int64_t result = -1;
-        if (!ResolveDescriptorEnd(
-                descriptorValue, descriptor, result)) {
-            return false;
-        }
-
-        const std::uint64_t returnPc = address + 4;
+        const std::int32_t descriptor =
+            static_cast<std::int32_t>(descriptorValue);
+        const auto file = fakeFiles.find(descriptor);
+        if (file == fakeFiles.end()) return false;
+        const CoordinateExecutionDescriptorSeekResult seek =
+            EvaluateCoordinateExecutionDescriptorSeek(
+                file->second.end,
+                file->second.current,
+                std::bit_cast<std::int64_t>(offset),
+                static_cast<std::int32_t>(whence));
+        file->second.current = seek.current;
+        emptyFakeFileSeen = emptyFakeFileSeen || seek.emptyFile;
         ++evidence.descriptorEndQueryCount;
         evidence.descriptorEndQueryFd = descriptor;
-        evidence.descriptorEndQueryResult = result;
-        if (!WriteXRegister(0, static_cast<std::uint64_t>(result)) ||
-            !WriteXRegister(30, returnPc) || !SkipInstruction(address)) {
+        evidence.descriptorEndQueryResult = seek.result;
+        return CompleteExternalCall(
+            returnPc, true, static_cast<std::uint64_t>(seek.result));
+    }
+
+    bool IsAllowedExternalJumpReturn(std::uint64_t target) const noexcept {
+        target = NormalizeCoordinateExecutionPointer(target);
+        return target == kCoordinateExecutionStopPc ||
+            ShouldRedirectCoordinateExecutionReturn(plan, target) ||
+            IsMainCodeTarget(target) || IsAbsoluteEntryAddress(target) ||
+            IsLibcTarget(target);
+    }
+
+    void HandleBranch(
+        std::uint64_t address,
+        std::uint32_t instruction,
+        const CoordinateExecutionBranch& branch) {
+        std::uint64_t target = 0;
+        if (address > std::numeric_limits<std::uint64_t>::max() - 4 ||
+            !ResolveBranchTarget(address, instruction, branch, target)) {
+            FailHook(address, CoordinateExecutionRuntimeError::EmulationFailed);
+            return;
+        }
+        const std::uint64_t returnPc = address + 4;
+        if (target == kCoordinateExecutionStopPc ||
+            ShouldRedirectCoordinateExecutionReturn(plan, target) ||
+            IsMainCodeTarget(target)) {
+            return;
+        }
+
+        ++evidence.externalBranchCount;
+        evidence.lastExternalBranchTarget = target;
+        if (IsLibcTarget(target)) {
+            ++evidence.libcBranchCount;
+            if (branch.IsCall() &&
+                TryHandleDescriptorEndQuery(returnPc)) {
+                return;
+            }
+            if (!CompleteExternalCall(returnPc, branch.IsCall(), 0)) {
+                FailHook(
+                    address,
+                    CoordinateExecutionRuntimeError::EmulationFailed);
+            }
+            return;
+        }
+
+        if (branch.IsCall()) {
+            ++evidence.unknownExternalCallCount;
+            const std::uint64_t result = IsAbsoluteEntryAddress(address)
+                ? 0
+                : AllocateFakeDescriptor();
+            if (!CompleteExternalCall(returnPc, true, result)) {
+                FailHook(
+                    address,
+                    CoordinateExecutionRuntimeError::EmulationFailed);
+            }
+            return;
+        }
+
+        ++evidence.unknownExternalJumpCount;
+        std::uint64_t link = 0;
+        const std::uint64_t result = IsAbsoluteEntryAddress(address) ? 0 : 1;
+        if (!ReadXRegister(30, link) || !WriteXRegister(0, result)) {
+            FailHook(address, CoordinateExecutionRuntimeError::EmulationFailed);
+            return;
+        }
+        link = NormalizeCoordinateExecutionPointer(link);
+        const std::uint64_t next = IsAllowedExternalJumpReturn(link)
+            ? link
+            : kCoordinateExecutionStopPc;
+        evidence.lastExternalBranchReturnPc = next;
+        evidence.lastExternalBranchResult = result;
+        if (uc_reg_write(engine, UC_ARM64_REG_PC, &next) != UC_ERR_OK) {
             FailHook(address, CoordinateExecutionRuntimeError::EmulationFailed);
         }
-        return true;
     }
 
     void CaptureWrite(std::uint64_t address,
@@ -1870,7 +1927,7 @@ private:
         const auto readLocal = [&](std::uint64_t offset,
                                    std::uint64_t& value) {
             std::uint64_t localAddress = 0;
-            return CoordinateExecutionAdd(
+            return offset != 0 && CoordinateExecutionAdd(
                        evidence.capturedSp, offset, localAddress) &&
                 uc_mem_read(engine, localAddress, &value, sizeof(value)) ==
                 UC_ERR_OK;
@@ -1888,7 +1945,8 @@ private:
             request.layout.fields.capturedLocal3,
             evidence.capturedLocal3));
         std::uint64_t fieldAddress = 0;
-        if (CoordinateExecutionAdd(
+        if (request.layout.fields.capturedLocalField != 0 &&
+            CoordinateExecutionAdd(
                 NormalizeCoordinateExecutionPointer(
                     evidence.capturedLocal3),
                 request.layout.fields.capturedLocalField,
@@ -1908,9 +1966,7 @@ private:
     }
 
     CoordinateExecutionResult ValidateResult() {
-        if ((HasRecordedCoordinateExecutionSvc(evidence, 62) &&
-             evidence.descriptorEndQueryCount == 0) ||
-            !evidence.hitStopPc || !evidence.captureValid ||
+        if (!evidence.hitStopPc || !evidence.captureValid ||
             evidence.captureCount == 0 ||
             evidence.capturedWriteSize != sizeof(std::uint64_t) ||
             (plan.requireReturnStub && !evidence.hitReturnStub) ||
@@ -1992,7 +2048,7 @@ private:
         base = NormalizeCoordinateExecutionPointer(base);
         std::uint64_t address = 0;
         CoordinateExecutionPosition position{};
-        if (!IsCoordinateExecutionPointer(base) ||
+        if (offset == 0 || !IsCoordinateExecutionPointer(base) ||
             !CoordinateExecutionAdd(base, offset, address) ||
             uc_mem_read(engine, address, &position, sizeof(position)) !=
                 UC_ERR_OK) {
@@ -2009,7 +2065,9 @@ private:
         std::uint64_t sp = 0;
         std::uint64_t context = 0;
         std::uint64_t selector = 0;
-        if (uc_reg_read(engine, UC_ARM64_REG_SP, &sp) != UC_ERR_OK ||
+        if (request.layout.fields.poolSelector == 0 ||
+            request.layout.fields.poolTable == 0 ||
+            uc_reg_read(engine, UC_ARM64_REG_SP, &sp) != UC_ERR_OK ||
             !ReadXRegister(21, context) ||
             uc_mem_read(
                 engine,
@@ -2074,6 +2132,7 @@ private:
     CoordinateExecutionEvidence evidence{};
     CoordinateExecutionRuntimeProbe probe{};
     std::uint64_t ctrEl0 = 0;
+    bool ctrEl0Initialized = false;
     std::uint64_t counterFrequency = 0;
     bool hookFailed = false;
     CoordinateExecutionRuntimeError hookRuntimeError =
@@ -2095,14 +2154,20 @@ private:
     CoordinateExecutionLayout engineLayout{};
     CoordinateExecutionPlan enginePlan{};
     bool engineIdentityValid = false;
-    std::chrono::steady_clock::time_point codeSnapshotVerifiedAt{};
-    std::size_t codeSnapshotVerificationCursor = 0;
-    std::size_t codeSnapshotVerificationPageCount = 0;
-    std::size_t engineExecutionCount = 0;
     bool exclusiveMonitorInvalid = true;
     bool enginePoisoned = false;
-    std::int32_t descriptorThreadId = -1;
-    std::unordered_map<std::int32_t, std::int64_t> descriptorEnds;
+    std::int32_t libcThreadId = -1;
+    std::uint64_t libcThreadStartTimeTicks = 0;
+    std::uint64_t libcBegin = 0;
+    std::uint64_t libcEnd = 0;
+    std::uint32_t nextFakeDescriptor = kFirstFakeDescriptor;
+    std::unordered_map<std::int32_t, FakeFile> fakeFiles;
+    bool emptyFakeFileSeen = false;
+    PtracePacgaOracleReader pacgaOracleReader;
+    std::int32_t pacgaThreadId = -1;
+    std::uint64_t pacgaThreadStartTimeTicks = 0;
+    std::uint64_t pacgaTpidrEl0 = 0;
+    std::vector<CachedPacgaOracle> pacgaOracles;
 };
 
 CoordinateExecutionRuntime::CoordinateExecutionRuntime()
