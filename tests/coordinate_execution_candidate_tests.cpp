@@ -262,6 +262,15 @@ void TestCodeRangeSelection() {
 void TestLayoutAndDiscovery() {
     constexpr game::CoordinateExecutionLayout kLayout = SyntheticLayout();
     static_assert(kLayout.IsValid());
+    static_assert(kLayout.HasCompleteDiagnostics());
+    constexpr game::CoordinateExecutionLayout kCoreLayout{
+        kLayout.discovery,
+        kLayout.result,
+        {},
+        {},
+    };
+    static_assert(kCoreLayout.IsValid());
+    static_assert(!kCoreLayout.HasCompleteDiagnostics());
     static_assert(!game::CoordinateExecutionLayout{}.IsValid());
     REQUIRE(kLayout == SyntheticLayout());
 
@@ -607,15 +616,14 @@ void TestBoundsAndStableMagic() {
         &candidate));
 }
 
-void TestCandidateLimit() {
+void TestCandidateCollectionHasNoFixedLimit() {
     SparseMemory memory;
     constexpr std::uint64_t kModuleBase = UINT64_C(0x7000000000);
     constexpr std::size_t kModuleSize = 0x200000;
     constexpr std::uint64_t kRelativeEntry = UINT64_C(0x4000);
     constexpr std::uint64_t kFirstStub = kModuleBase + 0x100;
-    for (std::size_t index = 0;
-         index <= game::kCoordinateExecutionCandidateLimit;
-         ++index) {
+    constexpr std::size_t kCandidateCount = 300;
+    for (std::size_t index = 0; index < kCandidateCount; ++index) {
         const std::uint64_t ldrPc =
             kFirstStub + index * UINT64_C(0x1000) + 4;
         const std::uint64_t thunk =
@@ -638,16 +646,13 @@ void TestCandidateLimit() {
             kFirstStub + 4,
             kRelativeEntry,
             SyntheticLayout());
-    REQUIRE(result.truncated);
-    REQUIRE(
-        result.candidates.size() ==
-        game::kCoordinateExecutionCandidateLimit);
+    REQUIRE(!result.truncated);
+    REQUIRE(result.candidates.size() == kCandidateCount);
     REQUIRE(result.candidates.front().q3 == kFirstStub);
     REQUIRE(
         result.candidates.back().q3 ==
         kFirstStub +
-            (game::kCoordinateExecutionCandidateLimit - 1) *
-                UINT64_C(0x1000));
+            (kCandidateCount - 1) * UINT64_C(0x1000));
 }
 
 }  // namespace
@@ -658,7 +663,7 @@ int main() {
     TestNegativeAarch64Immediates();
     TestPriorityOrderDedupAndChunkOverlap();
     TestBoundsAndStableMagic();
-    TestCandidateLimit();
+    TestCandidateCollectionHasNoFixedLimit();
     std::cout << "coordinate execution candidate tests passed\n";
     return 0;
 }

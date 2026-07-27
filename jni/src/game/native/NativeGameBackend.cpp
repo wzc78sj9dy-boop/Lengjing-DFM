@@ -1343,7 +1343,8 @@ public:
 
         const auto cloudLayout = native::BuildRuntimeLayoutOverride(
             options.cloudLayout.get(), layout_.processName,
-            moduleName_, moduleBuildId_);
+            moduleName_, moduleBuildId_,
+            static_cast<std::uint32_t>(options.gameVersionIndex));
         if (!cloudLayout.has_value() ||
             !memory_->ConfigureCoordinateReplay(
                 cloudLayout->coordinateTransport) ||
@@ -1529,7 +1530,6 @@ public:
         coordinateDecrypt2Index_ = requestedCoordinateDecrypt2Index;
         coordinateExecutionMode_ = requestedCoordinateExecutionMode;
         if (coordinateExecutionModeChanged) {
-            coordinateExecutionPositionCache_.clear();
             coordinateExecutionDecoder_.Reset();
             coordinateExecutionDiscoveryInput_ = {};
             coordinateExecutionCodeBase_ = 0;
@@ -1568,7 +1568,6 @@ public:
             positionCache_.clear();
             decodedPositionCache_.clear();
             decodedPositionPending_.clear();
-            coordinateExecutionPositionCache_.clear();
             boneCache_.clear();
 #if LENGJING_ENABLE_ALGORITHM_COORDINATE
             algorithmCoordinateSnapshot_.clear();
@@ -1651,7 +1650,6 @@ public:
             characterPositions_.Clear();
             decodedPositionCache_.clear();
             decodedPositionPending_.clear();
-            coordinateExecutionPositionCache_.clear();
             algorithmPositionRuntime_.Invalidate();
             algorithmReplayPagePolicy_.Invalidate();
             algorithmExecutionContextRefreshPolicy_.Invalidate();
@@ -3168,9 +3166,6 @@ private:
         std::chrono::steady_clock::time_point updatedAt{};
         std::chrono::steady_clock::time_point observedAt{};
         native::DecodedPositionCacheIdentity identity{};
-        std::uintptr_t component = 0;
-        std::chrono::steady_clock::time_point verifiedAt{};
-        std::chrono::steady_clock::time_point verificationAttemptedAt{};
     };
 
     struct DecodedPositionPendingEntry {
@@ -4863,102 +4858,16 @@ private:
     bool ReadCoordinateExecutionPosition(
         std::uintptr_t actor,
         std::uintptr_t subject,
-        bool antiFlicker,
+        bool,
         Vec3& position,
         native::CharacterPositionSource* positionSource) {
         if (!UsesCoordinateExecutionRuntime() ||
-            !IsValidPointer(actor) || !IsValidPointer(subject)) {
+            !IsValidPointer(actor) ||
+            !native::IsActorCoordinateSubjectPointer(subject)) {
             return false;
         }
 
-        const auto now = std::chrono::steady_clock::now();
-        const native::DecodedPositionCacheIdentity identity{
-            world_,
-            actor,
-            subject,
-        };
-        auto cached = coordinateExecutionPositionCache_.find(actor);
-        if (cached != coordinateExecutionPositionCache_.end() &&
-            native::ClassifyDecodedPositionCacheIdentity(
-                cached->second.identity,
-                identity) != native::DecodedPositionCacheIdentityState::Match) {
-            coordinateExecutionPositionCache_.erase(cached);
-            cached = coordinateExecutionPositionCache_.end();
-        }
-
         ++algorithmFrameAttemptCount_;
-        const bool verifyCachedObject =
-            cached == coordinateExecutionPositionCache_.end() ||
-            native::ShouldVerifyCoordinateExecutionCache(
-                actor,
-                cached->second.verifiedAt,
-                cached->second.verificationAttemptedAt,
-                now);
-        bool cachedObjectReadAttempted = false;
-        if (cached != coordinateExecutionPositionCache_.end() &&
-            !verifyCachedObject &&
-            IsValidPointer(cached->second.component)) {
-            cachedObjectReadAttempted = true;
-            Vec3 raw{};
-            if (ReadValue(
-                    cached->second.component +
-                        coordinateExecutionLayout_.result.positionOffset,
-                    raw) &&
-                IsFinite(raw)) {
-                const Vec3 adjusted = AdjustDecodedPosition(raw);
-                cached->second.position = adjusted;
-                cached->second.updatedAt = now;
-                cached->second.observedAt = now;
-                position = adjusted;
-                ++algorithmFrameSuccessCount_;
-                if (positionSource != nullptr) {
-                    *positionSource =
-                        native::CharacterPositionSource::Decoded;
-                }
-                if (IsCoordinateTraceEnabled()) {
-                    auto& record = coordinateTraceRecords_[actor];
-                    record = CoordinateTraceRecord{};
-                    record.root = subject;
-                    record.component = cached->second.component;
-                    record.raw = raw;
-                    record.output = adjusted;
-                    record.source = CoordinateTraceSource::Cache;
-                    record.attempted = true;
-                }
-                return true;
-            }
-            cached->second.component = 0;
-        }
-        if (cached != coordinateExecutionPositionCache_.end() &&
-            !verifyCachedObject && !cachedObjectReadAttempted &&
-            antiFlicker &&
-            native::CanRetainDecodedPosition(
-                true,
-                cached->second.identity,
-                identity,
-                cached->second.updatedAt,
-                now)) {
-            cached->second.observedAt = now;
-            position = cached->second.position;
-            ++algorithmFrameSuccessCount_;
-            if (positionSource != nullptr) {
-                *positionSource = native::CharacterPositionSource::Decoded;
-            }
-            if (IsCoordinateTraceEnabled()) {
-                auto& record = coordinateTraceRecords_[actor];
-                record = CoordinateTraceRecord{};
-                record.root = subject;
-                record.component = cached->second.component;
-                record.output = position;
-                record.source = CoordinateTraceSource::Cache;
-                record.attempted = true;
-            }
-            return true;
-        }
-
-        if (cached != coordinateExecutionPositionCache_.end()) {
-            cached->second.verificationAttemptedAt = now;
-        }
         ++algorithmAttemptCount_;
         ++coordinateExecutionFrameAttemptCount_;
         native::CoordinateExecutionPosition decoded{};
@@ -5252,16 +5161,6 @@ private:
         if (available && IsFinite(raw)) {
             coordinateExecutionContextHadSuccess_ = true;
             const Vec3 adjusted = AdjustDecodedPosition(raw);
-            coordinateExecutionPositionCache_[actor] =
-                DecodedPositionCacheEntry{
-                    adjusted,
-                    now,
-                    now,
-                    identity,
-                    executionProbe.lastObject,
-                    now,
-                    now,
-                };
             position = adjusted;
             ++algorithmSuccessCount_;
             ++coordinateExecutionFrameSuccessCount_;
@@ -5281,36 +5180,6 @@ private:
                 record.attempted = true;
             }
             return true;
-        }
-
-        if (cached != coordinateExecutionPositionCache_.end() &&
-            antiFlicker &&
-            native::CanRetainDecodedPosition(
-                true,
-                cached->second.identity,
-                identity,
-                cached->second.updatedAt,
-                now)) {
-            cached->second.observedAt = now;
-            position = cached->second.position;
-            ++algorithmFrameSuccessCount_;
-            if (positionSource != nullptr) {
-                *positionSource = native::CharacterPositionSource::Decoded;
-            }
-            if (IsCoordinateTraceEnabled()) {
-                auto& record = coordinateTraceRecords_[actor];
-                record = CoordinateTraceRecord{};
-                record.root = subject;
-                record.component = cached->second.component;
-                record.output = position;
-                record.guestPc = executionProbe.runtime.plan.entryPc;
-                record.source = CoordinateTraceSource::Cache;
-                record.attempted = true;
-            }
-            return true;
-        }
-        if (cached != coordinateExecutionPositionCache_.end()) {
-            coordinateExecutionPositionCache_.erase(cached);
         }
 
         const CoordinateDecryptError executionError =
@@ -6600,7 +6469,7 @@ private:
                         return ReadPointer(address);
                     },
                     [](std::uintptr_t pointer) {
-                        return IsValidPointer(pointer);
+                        return native::IsActorCoordinateSubjectPointer(pointer);
                     });
             if (subject == 0) return false;
             return ReadCharacterPosition(
@@ -9151,17 +9020,6 @@ private:
                 ++iterator;
             }
         }
-        for (auto iterator = coordinateExecutionPositionCache_.begin();
-             iterator != coordinateExecutionPositionCache_.end();) {
-            const auto observedAt = iterator->second.observedAt;
-            if (observedAt.time_since_epoch().count() == 0 ||
-                now < observedAt || now - observedAt >
-                    native::kDecodedPositionRetention) {
-                iterator = coordinateExecutionPositionCache_.erase(iterator);
-            } else {
-                ++iterator;
-            }
-        }
         for (auto iterator = decodedPositionPending_.begin();
              iterator != decodedPositionPending_.end();) {
             const auto& sample = iterator->second.sample;
@@ -9180,7 +9038,6 @@ private:
         positionCache_.clear();
         decodedPositionCache_.clear();
         decodedPositionPending_.clear();
-        coordinateExecutionPositionCache_.clear();
         boneCache_.clear();
         nameCache_.clear();
         classTraitsCache_.clear();
@@ -9245,8 +9102,7 @@ private:
                 moduleBase_,
                 coordinateExecutionLayout_,
                 &input)) {
-            if (hadDiscovery || !coordinateExecutionPositionCache_.empty()) {
-                coordinateExecutionPositionCache_.clear();
+            if (hadDiscovery) {
                 coordinateExecutionDecoder_.Reset();
             }
             coordinateExecutionDiscoveryInput_ = {};
@@ -9277,7 +9133,6 @@ private:
             native::CoordinateExecutionCodeRange codeRange{};
             if (!FindCoordinateExecutionCodeRange(
                     processId_, input.root, input.rawEntry, codeRange)) {
-                coordinateExecutionPositionCache_.clear();
                 coordinateExecutionDecoder_.Reset();
                 coordinateExecutionDiscoveryInput_ = input;
                 coordinateExecutionCodeBase_ = 0;
@@ -9288,7 +9143,6 @@ private:
                     std::numeric_limits<std::uintptr_t>::max() ||
                 codeRange.Size() >
                     std::numeric_limits<std::size_t>::max()) {
-                coordinateExecutionPositionCache_.clear();
                 coordinateExecutionDecoder_.Reset();
                 coordinateExecutionDiscoveryInput_ = input;
                 coordinateExecutionCodeBase_ = 0;
@@ -9305,7 +9159,6 @@ private:
             previousCodeBase != coordinateExecutionCodeBase_ ||
             previousCodeSize != coordinateExecutionCodeSize_;
         if (discoveryChanged || codeRangeChanged) {
-            coordinateExecutionPositionCache_.clear();
             coordinateExecutionDecoder_.Reset();
         }
     }
@@ -9406,9 +9259,6 @@ private:
                     CurrentCoordinateExecutionCodeTarget(),
                     refreshed)) {
                 if (algorithmExecutionContextReady_) {
-                    if (coordinateExecutionSelected) {
-                        coordinateExecutionPositionCache_.clear();
-                    }
                     algorithmPositionRuntime_.Invalidate();
                     algorithmReplayPagePolicy_.Invalidate();
                 }
@@ -9441,9 +9291,6 @@ private:
                         refreshed.pacgaOracle.available;
                 if (executionContextChanged) {
                     coordinateExecutionContextHadSuccess_ = false;
-                    if (coordinateExecutionSelected) {
-                        coordinateExecutionPositionCache_.clear();
-                    }
                     algorithmPositionRuntime_.Invalidate();
                     algorithmReplayPagePolicy_.Invalidate();
                 }
@@ -9994,7 +9841,6 @@ private:
         coordinateExecutionContextHadSuccess_ = false;
         algorithmExecutionContextRefreshPolicy_.Invalidate();
         coordinatePoolReady_ = false;
-        coordinateExecutionPositionCache_.clear();
         coordinateExecutionDecoder_.Reset();
         algorithmEntryValidationAt_ = {};
         algorithmPositionRuntime_.Invalidate();
@@ -10354,7 +10200,6 @@ private:
         algorithmFrameFailure_ = {};
         algorithmFrameAgedDecodedFailure_ = false;
         decodedPositionPending_.clear();
-        coordinateExecutionPositionCache_.clear();
         algorithmPositionRequested_ = false;
         coordinateDecrypt2Index_ = 0;
         coordinateExecutionMode_ = 0;
@@ -10541,8 +10386,6 @@ private:
     std::unordered_map<std::uintptr_t, PositionCacheEntry> positionCache_;
     std::unordered_map<std::uintptr_t, DecodedPositionCacheEntry>
         decodedPositionCache_;
-    std::unordered_map<std::uintptr_t, DecodedPositionCacheEntry>
-        coordinateExecutionPositionCache_;
     std::unordered_map<std::uintptr_t, DecodedPositionPendingEntry>
         decodedPositionPending_;
     std::unordered_map<std::uintptr_t, CoordinateTraceRecord>

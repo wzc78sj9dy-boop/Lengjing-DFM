@@ -446,22 +446,58 @@ bool ParseMode2(const Json& values,
 
 bool ParseDiscovery(const Json& values,
                     CloudExecutionDiscoveryLayout& layout,
+                    std::string_view prefix,
                     ParseFailure& failure) {
     if (!HasExactArraySize(values, 4)) {
-        failure.detail = "d[1][2][0] must contain exactly 4 values";
+        failure.detail = std::string(prefix) +
+            " must contain exactly 4 values";
         return false;
     }
+    const auto field = [prefix](std::size_t index) {
+        return std::string(prefix) + "[" + std::to_string(index) + "]";
+    };
     return ParseOffset(values.at(0), 4, kMaximumModuleOffset, 4, false,
-                       layout.rootOffset, "d[1][2][0][0]", failure) &&
+                       layout.rootOffset, field(0), failure) &&
         ParseOffset(values.at(1), 4, kMaximumExecutionFieldOffset, 4,
-                    false, layout.pointerOffset, "d[1][2][0][1]",
+                    false, layout.pointerOffset, field(1),
                     failure) &&
         ParseOffset(values.at(2), 8, kMaximumExecutionFieldOffset, 8,
-                    false, layout.entryOffset, "d[1][2][0][2]", failure) &&
+                    false, layout.entryOffset, field(2), failure) &&
         ParseHexUnsigned(values.at(3), 1,
                          std::numeric_limits<std::uint64_t>::max(),
-                         layout.returnStubMagic, "d[1][2][0][3]",
+                         layout.returnStubMagic, field(3),
                          failure);
+}
+
+bool ParseDiscoveryProfiles(const Json& values,
+                            CloudExecutionLayout& layout,
+                            ParseFailure& failure) {
+    layout.discovery = {};
+    layout.profile12Discovery = {};
+    layout.hasProfile12Discovery = false;
+    if (HasExactArraySize(values, 4)) {
+        return ParseDiscovery(
+            values, layout.discovery, "d[1][2][0]", failure);
+    }
+    if (!HasExactArraySize(values, 2)) {
+        failure.detail =
+            "d[1][2][0] must contain one or two discovery profiles";
+        return false;
+    }
+    if (!ParseDiscovery(
+            values.at(0),
+            layout.discovery,
+            "d[1][2][0][0]",
+            failure) ||
+        !ParseDiscovery(
+            values.at(1),
+            layout.profile12Discovery,
+            "d[1][2][0][1]",
+            failure)) {
+        return false;
+    }
+    layout.hasProfile12Discovery = true;
+    return true;
 }
 
 bool ParseResult(const Json& values,
@@ -520,7 +556,7 @@ bool ParseHookOffsets(const Json& values,
         const std::string field =
             "d[1][2][2][" + std::to_string(index) + "]";
         if (!ParseOffset(values.at(index), 4, kMaximumModuleOffset, 4,
-                         false, layout.*members[index], field, failure)) {
+                         true, layout.*members[index], field, failure)) {
             return false;
         }
     }
@@ -557,7 +593,7 @@ bool ParseFieldOffsets(const Json& values,
         const std::string field =
             "d[1][2][3][" + std::to_string(index) + "]";
         if (!ParseOffset(values.at(index), 4,
-                         kMaximumExecutionFieldOffset, 4, false,
+                         kMaximumExecutionFieldOffset, 4, true,
                          layout.*members[index], field, failure)) {
             return false;
         }
@@ -608,7 +644,7 @@ bool ParseExecution(const Json& values,
         failure.detail = "d[1][2] must contain exactly 5 values";
         return false;
     }
-    return ParseDiscovery(values.at(0), layout.discovery, failure) &&
+    return ParseDiscoveryProfiles(values.at(0), layout, failure) &&
         ParseResult(values.at(1), layout.result, failure) &&
         ParseHookOffsets(values.at(2), layout.hookOffsets, failure) &&
         ParseFieldOffsets(values.at(3), layout.fieldOffsets, failure) &&
@@ -748,11 +784,21 @@ bool Equivalent(const CloudLayoutDocument& left,
         std::tie(
             le.discovery.rootOffset, le.discovery.pointerOffset,
             le.discovery.entryOffset, le.discovery.returnStubMagic,
+            le.profile12Discovery.rootOffset,
+            le.profile12Discovery.pointerOffset,
+            le.profile12Discovery.entryOffset,
+            le.profile12Discovery.returnStubMagic,
+            le.hasProfile12Discovery,
             le.result.slotOffset, le.result.positionOffset,
             le.context.threadName, le.context.oracleOpcode) ==
         std::tie(
             re.discovery.rootOffset, re.discovery.pointerOffset,
             re.discovery.entryOffset, re.discovery.returnStubMagic,
+            re.profile12Discovery.rootOffset,
+            re.profile12Discovery.pointerOffset,
+            re.profile12Discovery.entryOffset,
+            re.profile12Discovery.returnStubMagic,
+            re.hasProfile12Discovery,
             re.result.slotOffset, re.result.positionOffset,
             re.context.threadName, re.context.oracleOpcode) &&
         SameHooks(le.hookOffsets, re.hookOffsets) &&

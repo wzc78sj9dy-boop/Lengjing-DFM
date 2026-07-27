@@ -142,6 +142,8 @@ struct CloudExecutionContextLayout {
 
 struct CloudExecutionLayout {
     CloudExecutionDiscoveryLayout discovery{};
+    CloudExecutionDiscoveryLayout profile12Discovery{};
+    bool hasProfile12Discovery = false;
     CloudExecutionResultLayout result{};
     CloudExecutionHookOffsetLayout hookOffsets{};
     CloudExecutionFieldOffsetLayout fieldOffsets{};

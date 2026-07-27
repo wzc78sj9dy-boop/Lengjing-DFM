@@ -31,6 +31,9 @@ lengjing::auth::CloudLayoutDocument ValidDocument() {
     auto& execution = document.decrypt.execution;
     execution.discovery = {
         0x2b00b000, 0x14, 0xd8, 0x13572468abcdef01};
+    execution.profile12Discovery = {
+        0x2c00c000, 0x18, 0xe0, 0x24681357abcdef01};
+    execution.hasProfile12Discovery = true;
     execution.result = {0x280, 0x184};
     execution.hookOffsets = {
         0x400, 0x404, 0x408, 0x40c, 0x410, 0x414, 0x418,
@@ -80,6 +83,45 @@ void RunRuntimeLayoutOverrideTests() {
     REQUIRE(applied->coordinateExecution.fields.poolTable == 0x338);
     REQUIRE(applied->coordinateExecutionContext.threadName == "WorkerAlpha");
     REQUIRE(applied->coordinateExecutionContext.oracleOpcode == 0x9ac33041);
+
+    const auto profile1 = BuildRuntimeLayoutOverride(
+        &document, "com.example.runtime", "libUE4.so",
+        document.identity.buildId, 1);
+    const auto profile2 = BuildRuntimeLayoutOverride(
+        &document, "com.example.runtime", "libUE4.so",
+        document.identity.buildId, 2);
+    const auto profile3 = BuildRuntimeLayoutOverride(
+        &document, "com.example.runtime", "libUE4.so",
+        document.identity.buildId, 3);
+    REQUIRE(profile1.has_value());
+    REQUIRE(profile2.has_value());
+    REQUIRE(profile3.has_value());
+    REQUIRE(profile1->coordinateExecution.discovery.rootOffset ==
+            0x2c00c000);
+    REQUIRE(profile2->coordinateExecution.discovery.rootOffset ==
+            0x2c00c000);
+    REQUIRE(profile3->coordinateExecution.discovery.rootOffset ==
+            0x2b00b000);
+
+    auto legacyProfile = document;
+    legacyProfile.decrypt.execution.profile12Discovery = {};
+    legacyProfile.decrypt.execution.hasProfile12Discovery = false;
+    const auto legacyProfile2 = BuildRuntimeLayoutOverride(
+        &legacyProfile, "com.example.runtime", "libUE4.so",
+        document.identity.buildId, 2);
+    REQUIRE(legacyProfile2.has_value());
+    REQUIRE(legacyProfile2->coordinateExecution.discovery.rootOffset ==
+            0x2b00b000);
+
+    auto coreOnly = document;
+    coreOnly.decrypt.execution.hookOffsets = {};
+    coreOnly.decrypt.execution.fieldOffsets = {};
+    const auto coreOnlyApplied = BuildRuntimeLayoutOverride(
+        &coreOnly, "com.example.runtime", "libUE4.so",
+        document.identity.buildId);
+    REQUIRE(coreOnlyApplied.has_value());
+    REQUIRE(coreOnlyApplied->coordinateExecution.IsValid());
+    REQUIRE(!coreOnlyApplied->coordinateExecution.HasCompleteDiagnostics());
 
     REQUIRE(!BuildRuntimeLayoutOverride(
         nullptr, "com.example.runtime", "libUE4.so",

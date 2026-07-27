@@ -1,6 +1,7 @@
 #include "test_support.h"
 
 #include "auth/CloudLayout.h"
+#include "vendor/json.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -55,6 +56,36 @@ std::string ReplaceFirst(std::string value,
     return value;
 }
 
+std::string DualProfileLayoutJson(std::uint64_t revision) {
+    using Json = nlohmann::json;
+    Json root = Json::parse(LayoutJson(revision));
+    Json primary = root.at("d").at(1).at(2).at(0);
+    Json profile12 = primary;
+    profile12.at(0) = "0x2c00c000";
+    profile12.at(1) = "0x18";
+    profile12.at(2) = "0xe0";
+    profile12.at(3) = "0x24681357abcdef01";
+    root.at("d").at(1).at(2).at(0) =
+        Json::array({primary, profile12});
+    return root.dump();
+}
+
+std::string CoreOnlyExecutionLayoutJson(std::uint64_t revision) {
+    using Json = nlohmann::json;
+    Json root = Json::parse(LayoutJson(revision));
+    Json hooks = Json::array();
+    Json fields = Json::array();
+    for (std::size_t index = 0; index < 26; ++index) {
+        hooks.push_back("0x0");
+    }
+    for (std::size_t index = 0; index < 15; ++index) {
+        fields.push_back("0x0");
+    }
+    root.at("d").at(1).at(2).at(2) = std::move(hooks);
+    root.at("d").at(1).at(2).at(3) = std::move(fields);
+    return root.dump();
+}
+
 lengjing::auth::CloudRuntimeTarget RuntimeTarget() {
     return {"com.example.runtime", "libSynthetic.so"};
 }
@@ -74,6 +105,8 @@ void RunCloudLayoutTests() {
     REQUIRE(empty.decrypt.mode1.pacgaData == 0);
     REQUIRE(empty.decrypt.mode2.pool.rootRva == 0);
     REQUIRE(empty.decrypt.execution.discovery.rootOffset == 0);
+    REQUIRE(empty.decrypt.execution.profile12Discovery.rootOffset == 0);
+    REQUIRE(!empty.decrypt.execution.hasProfile12Discovery);
     REQUIRE(empty.decrypt.execution.result.slotOffset == 0);
     REQUIRE(empty.decrypt.execution.hookOffsets.subjectLoad == 0);
     REQUIRE(empty.decrypt.execution.fieldOffsets.contextExpected == 0);
@@ -153,6 +186,7 @@ void RunCloudLayoutTests() {
     REQUIRE(execution.discovery.entryOffset == 0xd8);
     REQUIRE(execution.discovery.returnStubMagic ==
             0x13572468abcdef01ULL);
+    REQUIRE(!execution.hasProfile12Discovery);
     REQUIRE(execution.result.slotOffset == 0x280);
     REQUIRE(execution.result.positionOffset == 0x184);
     using HookMember =
@@ -216,6 +250,28 @@ void RunCloudLayoutTests() {
     }
     REQUIRE(execution.context.threadName == "WorkerAlpha");
     REQUIRE(execution.context.oracleOpcode == 0x9ac33041U);
+
+    CloudLayoutStore dualProfileStore(RuntimeTarget());
+    const CloudLayoutUpdateResult dualProfile =
+        dualProfileStore.ValidateAndPublish(DualProfileLayoutJson(18));
+    REQUIRE(dualProfile.status == CloudLayoutStatus::Published);
+    REQUIRE(dualProfile.snapshot != nullptr);
+    REQUIRE(dualProfile.snapshot->decrypt.execution.hasProfile12Discovery);
+    REQUIRE(dualProfile.snapshot->decrypt.execution.discovery.rootOffset ==
+            0x2b00b000ULL);
+    REQUIRE(dualProfile.snapshot->decrypt.execution.profile12Discovery
+                .rootOffset == 0x2c00c000ULL);
+    REQUIRE(dualProfile.snapshot->decrypt.execution.profile12Discovery
+                .pointerOffset == 0x18);
+
+    CloudLayoutStore coreOnlyStore(RuntimeTarget());
+    const CloudLayoutUpdateResult coreOnly =
+        coreOnlyStore.ValidateAndPublish(CoreOnlyExecutionLayoutJson(19));
+    REQUIRE(coreOnly.status == CloudLayoutStatus::Published);
+    REQUIRE(coreOnly.snapshot != nullptr);
+    REQUIRE(coreOnly.snapshot->decrypt.execution.hookOffsets.subjectLoad == 0);
+    REQUIRE(coreOnly.snapshot->decrypt.execution.fieldOffsets.contextExpected ==
+            0);
 
     const auto stable = store.Snapshot();
     const CloudLayoutUpdateResult unchanged =

@@ -179,8 +179,11 @@ struct CoordinateExecutionLayout {
     CoordinateExecutionFieldLayout fields{};
 
     constexpr bool IsValid() const noexcept {
-        return discovery.IsValid() && result.IsValid() && hooks.IsValid() &&
-            fields.IsValid();
+        return discovery.IsValid() && result.IsValid();
+    }
+
+    constexpr bool HasCompleteDiagnostics() const noexcept {
+        return hooks.IsValid() && fields.IsValid();
     }
 
     friend constexpr bool operator==(

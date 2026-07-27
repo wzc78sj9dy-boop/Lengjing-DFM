@@ -7,6 +7,7 @@ void RunActorRecordSourceTests() {
     using lengjing::game::native::ActorRecordSource;
     using lengjing::game::native::ActorSubjectLayout;
     using lengjing::game::native::FillOrdinaryActorPointers;
+    using lengjing::game::native::IsActorCoordinateSubjectPointer;
     using lengjing::game::native::MakeOrdinaryActorRecord;
     using lengjing::game::native::MakeResolvedActorRecord;
     using lengjing::game::native::MergeActorRecordSource;
@@ -15,6 +16,11 @@ void RunActorRecordSourceTests() {
     using lengjing::game::native::ResolveActorCoordinateSubject;
 
     constexpr ActorSubjectLayout subjectLayout{0x220, 0x428, 0x438};
+
+    static_assert(IsActorCoordinateSubjectPointer(0x10000));
+    static_assert(IsActorCoordinateSubjectPointer(0x10003));
+    static_assert(!IsActorCoordinateSubjectPointer(0xffff));
+    static_assert(!IsActorCoordinateSubjectPointer(0x10000000000));
 
     constexpr std::uintptr_t actor = 0x1000;
     const ActorRecordSource decoded =
@@ -104,12 +110,14 @@ void RunActorRecordSourceTests() {
     REQUIRE(ResolveActorCoordinateSubject(
                 pendingOrdinary,
                 subjectLayout,
-                [&](std::uintptr_t) {
+                [&](std::uintptr_t address) {
                     ++subjectReads;
-                    return std::uintptr_t{0};
+                    return address == actor + subjectLayout.rootOffset
+                        ? std::uintptr_t{0x5000}
+                        : std::uintptr_t{0};
                 },
-                validSubject) == 0x4000);
-    REQUIRE(subjectReads == 0);
+                validSubject) == 0x5000);
+    REQUIRE(subjectReads == 1);
 
     ActorRecordSource uncachedOrdinary = MakeOrdinaryActorRecord(actor);
     REQUIRE(ResolveActorCoordinateSubject(
@@ -122,7 +130,7 @@ void RunActorRecordSourceTests() {
                         : std::uintptr_t{0};
                 },
                 validSubject) == 0x5000);
-    REQUIRE(subjectReads == 1);
+    REQUIRE(subjectReads == 2);
 
     subjectReads = 0;
     REQUIRE(ResolveActorCoordinateSubject(

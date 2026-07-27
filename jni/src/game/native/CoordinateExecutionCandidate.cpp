@@ -587,11 +587,6 @@ CoordinateExecutionCandidateScanResult ScanCoordinateExecutionCandidates(
                 value) != result.candidates.end()) {
             return true;
         }
-        if (result.candidates.size() >=
-            kCoordinateExecutionCandidateLimit) {
-            result.truncated = true;
-            return false;
-        }
         result.candidates.push_back(value);
         return true;
     };

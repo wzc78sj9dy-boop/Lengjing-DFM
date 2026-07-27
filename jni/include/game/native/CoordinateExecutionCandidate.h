@@ -36,7 +36,6 @@ struct CoordinateExecutionCandidate {
 
 static_assert(sizeof(CoordinateExecutionCandidate) == 32);
 
-inline constexpr std::size_t kCoordinateExecutionCandidateLimit = 256;
 inline constexpr std::uint64_t kCoordinateExecutionMinimumCodeRangeSize =
     UINT64_C(0x80000);
 inline constexpr std::uint64_t kCoordinateExecutionPointerMask =

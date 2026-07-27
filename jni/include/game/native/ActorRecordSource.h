@@ -7,6 +7,17 @@
 
 namespace lengjing::game::native {
 
+inline constexpr std::uintptr_t kActorCoordinateSubjectMinimum =
+    UINT64_C(0x10000);
+inline constexpr std::uintptr_t kActorCoordinateSubjectMaximum =
+    UINT64_C(0x10000000000);
+
+constexpr bool IsActorCoordinateSubjectPointer(
+    std::uintptr_t pointer) noexcept {
+    return pointer >= kActorCoordinateSubjectMinimum &&
+        pointer < kActorCoordinateSubjectMaximum;
+}
+
 struct ActorRecordSource {
     std::uintptr_t actor = 0;
     std::uintptr_t root = 0;
@@ -150,12 +161,10 @@ std::uintptr_t ResolveActorCoordinateSubject(
     const ActorSubjectLayout& layout,
     ReadPointer&& readPointer,
     ValidatePointer&& validatePointer) {
-    if (!layout.IsValid()) return 0;
-    std::uintptr_t subject = source.ordinaryRoot;
-    if (!validatePointer(subject) && source.actor != 0) {
-        subject = readPointer(source.actor + layout.rootOffset);
-    }
-    if (!validatePointer(subject) && source.actor != 0) {
+    if (!layout.IsValid() || source.actor == 0) return 0;
+    std::uintptr_t subject =
+        readPointer(source.actor + layout.rootOffset);
+    if (!validatePointer(subject)) {
         subject = readPointer(
             source.actor + layout.alternateRootOffset);
     }

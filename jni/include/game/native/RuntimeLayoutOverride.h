@@ -109,17 +109,23 @@ constexpr CoordinatePoolRuntimeLayout MakeCoordinatePoolLayout(
 }
 
 constexpr CoordinateExecutionLayout MakeCoordinateExecutionLayout(
-    const auth::CloudExecutionLayout& execution) noexcept {
+    const auth::CloudExecutionLayout& execution,
+    std::uint32_t scanProfile) noexcept {
     const auth::CloudExecutionHookOffsetLayout& hooks =
         execution.hookOffsets;
     const auth::CloudExecutionFieldOffsetLayout& fields =
         execution.fieldOffsets;
+    const auth::CloudExecutionDiscoveryLayout& discovery =
+        execution.hasProfile12Discovery &&
+            (scanProfile == 1 || scanProfile == 2)
+        ? execution.profile12Discovery
+        : execution.discovery;
     return {
         {
-            execution.discovery.rootOffset,
-            execution.discovery.pointerOffset,
-            execution.discovery.entryOffset,
-            execution.discovery.returnStubMagic,
+            discovery.rootOffset,
+            discovery.pointerOffset,
+            discovery.entryOffset,
+            discovery.returnStubMagic,
         },
         {
             execution.result.slotOffset,
@@ -194,7 +200,8 @@ inline std::optional<RuntimeLayoutOverride> BuildRuntimeLayoutOverride(
     const auth::CloudLayoutDocument* document,
     std::string_view expectedPackage,
     std::string_view expectedModule,
-    std::string_view runtimeBuildId) noexcept {
+    std::string_view runtimeBuildId,
+    std::uint32_t scanProfile = 0) noexcept {
     if (document == nullptr || expectedPackage.empty() ||
         expectedModule.empty() || runtimeBuildId.empty() ||
         document->schemaVersion != auth::kCloudLayoutSchemaVersion ||
@@ -247,7 +254,8 @@ inline std::optional<RuntimeLayoutOverride> BuildRuntimeLayoutOverride(
         mode1.pacgaModifier,
     };
     result.coordinateExecution =
-        detail::MakeCoordinateExecutionLayout(document->decrypt.execution);
+        detail::MakeCoordinateExecutionLayout(
+            document->decrypt.execution, scanProfile);
     result.coordinateExecutionContext = {
         document->decrypt.execution.context.threadName,
         document->decrypt.execution.context.oracleOpcode,
