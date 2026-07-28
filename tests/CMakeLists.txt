@@ -45,7 +45,6 @@ add_executable(lengjing_tests
     runtime_presentation_policy_tests.cpp
     runtime_tests.cpp
     threat_catalog_tests.cpp
-    tersafe_patch_worker_tests.cpp
     tracking_calculator_tests.cpp
     tracking_page_binding_tests.cpp
     touch_transform_tests.cpp

@@ -47,7 +47,6 @@ void RunRuntimeLayoutOverrideTests();
 void RunRuntimeExitPolicyTests();
 void RunRuntimePresentationPolicyTests();
 void RunRuntimeTests();
-void RunTersafePatchWorkerTests();
 void RunThreatCatalogTests();
 void RunTrackingCalculatorTests();
 void RunTrackingPageBindingTests();

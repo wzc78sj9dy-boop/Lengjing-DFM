@@ -398,8 +398,6 @@ bool TrajectoryHook::EnsureInstalled(
     std::uintptr_t moduleBase) noexcept {
     if (installed_ && memory_ == &memory && processId_ == processId &&
         moduleBase_ == moduleBase) {
-        static_cast<void>(
-            tersafePatchWorker_.Start(memory, processId));
         return true;
     }
     const bool sameContext = memory_ == &memory &&
@@ -443,8 +441,6 @@ bool TrajectoryHook::EnsureInstalled(
     if (result == InstallResult::Installed) {
         installed_ = true;
         retryAfter_ = {};
-        static_cast<void>(
-            tersafePatchWorker_.Start(*memory_, processId_));
         return true;
     }
     if (result == InstallResult::PermanentFailure) {
@@ -683,7 +679,6 @@ bool TrajectoryHook::Disable() noexcept {
 }
 
 bool TrajectoryHook::Shutdown() noexcept {
-    tersafePatchWorker_.Stop();
     if (memory_ == nullptr) {
         ResetLocal();
         return true;
@@ -704,7 +699,6 @@ bool TrajectoryHook::Installed() const noexcept {
 }
 
 void TrajectoryHook::ResetLocal() noexcept {
-    tersafePatchWorker_.Stop();
     memory_ = nullptr;
     processId_ = -1;
     moduleBase_ = 0;

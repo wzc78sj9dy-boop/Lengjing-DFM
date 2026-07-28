@@ -16,7 +16,7 @@ endif()
 
 option(LENGJING_ENABLE_RUNTIME_AUTH "Enable runtime T3 authentication" OFF)
 option(LENGJING_ENABLE_PROJECTILE_TRACKING
-    "Enable projectile tracking runtime and UI" ON)
+    "Enable projectile tracking runtime and UI" OFF)
 option(LENGJING_ENABLE_COORDINATE_DEBUG_LOG
     "Enable automatic detailed coordinate log output" OFF)
 option(LENGJING_ENABLE_PERFORMANCE_TRACE
@@ -131,7 +131,7 @@ list(APPEND LENGJING_SOURCES
 list(FILTER LENGJING_SOURCES EXCLUDE REGEX "/imgui_demo\\.cpp$")
 if(NOT LENGJING_ENABLE_PROJECTILE_TRACKING)
     list(FILTER LENGJING_SOURCES EXCLUDE REGEX
-        "/game/native/(TersafePatchWorker|TrackingPageBinding|TrajectoryHook)\\.cpp$")
+        "/game/native/(TrackingPageBinding|TrajectoryHook)\\.cpp$")
 endif()
 
 set_source_files_properties(
