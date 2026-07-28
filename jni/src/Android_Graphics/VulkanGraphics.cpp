@@ -20,6 +20,20 @@ constexpr uint64_t kAcquireWaitTimeoutNs = 250ULL * 1000ULL * 1000ULL;
 constexpr useconds_t kFailedFrameBackoffUs = 16000;
 VkResult g_LastBackendError = VK_SUCCESS;
 
+constexpr lengjing::render::VulkanSwapchainStatus ClassifySwapchainStatus(
+    VkResult result) noexcept {
+    switch (result) {
+        case VK_SUCCESS:
+            return lengjing::render::VulkanSwapchainStatus::Ready;
+        case VK_SUBOPTIMAL_KHR:
+            return lengjing::render::VulkanSwapchainStatus::Suboptimal;
+        case VK_ERROR_OUT_OF_DATE_KHR:
+            return lengjing::render::VulkanSwapchainStatus::OutOfDate;
+        default:
+            return lengjing::render::VulkanSwapchainStatus::Failure;
+    }
+}
+
 constexpr VkPresentModeKHR ToVkPresentMode(
     lengjing::render::VulkanPresentPreference preference) noexcept {
     switch (preference) {
@@ -399,6 +413,15 @@ void VulkanGraphics::PrepareFrame(bool resize) {
         return;
     }
 
+    if (!m_SwapChainRebuild && !resize) {
+        g_LastBackendError = VK_SUCCESS;
+        ImGui_ImplVulkan_NewFrame();
+        const VkResult backendError = TakeBackendError();
+        if (backendError != VK_SUCCESS)
+            DisableRendering("ImGui_ImplVulkan_NewFrame", backendError);
+        return;
+    }
+
     const int width = ANativeWindow_getWidth(m_Window);
     const int height = ANativeWindow_getHeight(m_Window);
     if (width <= 0 || height <= 0) {
@@ -441,7 +464,6 @@ void VulkanGraphics::PrepareFrame(bool resize) {
         m_SwapChainRebuild = false;
     }
 
-    (void) resize;
     g_LastBackendError = VK_SUCCESS;
     ImGui_ImplVulkan_NewFrame();
     const VkResult backendError = TakeBackendError();
@@ -462,25 +484,22 @@ void VulkanGraphics::Render(ImDrawData *drawData) {
     }
 
     VkResult err;
-    bool rebuild_after_present = false;
-
     VkSemaphore image_acquired_semaphore = wd->FrameSemaphores[wd->SemaphoreIndex].ImageAcquiredSemaphore;
     VkSemaphore render_complete_semaphore = wd->FrameSemaphores[wd->SemaphoreIndex].RenderCompleteSemaphore;
     err = vkAcquireNextImageKHR(m_Device, wd->Swapchain, kAcquireWaitTimeoutNs,
                                 image_acquired_semaphore, VK_NULL_HANDLE,
                                 &wd->FrameIndex);
-    if (err == VK_ERROR_OUT_OF_DATE_KHR /*|| err == VK_SUBOPTIMAL_KHR*/) {
-        m_SwapChainRebuild = true;
-        return;
-    }
     if (err == VK_TIMEOUT || err == VK_NOT_READY) {
         m_SkipRender = true;
         usleep(kFailedFrameBackoffUs);
         return;
     }
-    if (err == VK_SUBOPTIMAL_KHR) {
-        rebuild_after_present = true;
-    } else if (err != VK_SUCCESS) {
+    const auto acquire_status = ClassifySwapchainStatus(err);
+    if (lengjing::render::RequiresVulkanSwapchainRebuild(acquire_status)) {
+        m_SwapChainRebuild = true;
+        return;
+    }
+    if (!lengjing::render::IsVulkanSwapchainUsable(acquire_status)) {
         DisableRendering("vkAcquireNextImageKHR", err);
         return;
     }
@@ -573,20 +592,17 @@ void VulkanGraphics::Render(ImDrawData *drawData) {
         info.pSwapchains = &wd->Swapchain;
         info.pImageIndices = &wd->FrameIndex;
         VkResult err = vkQueuePresentKHR(m_Queue, &info);
-        if (err == VK_ERROR_OUT_OF_DATE_KHR /*|| err == VK_SUBOPTIMAL_KHR*/) {
+        const auto present_status = ClassifySwapchainStatus(err);
+        if (lengjing::render::RequiresVulkanSwapchainRebuild(present_status)) {
             m_SwapChainRebuild = true;
             return;
         }
-        if (err == VK_SUBOPTIMAL_KHR) {
-            rebuild_after_present = true;
-        } else if (err != VK_SUCCESS) {
+        if (!lengjing::render::IsVulkanSwapchainUsable(present_status)) {
             DisableRendering("vkQueuePresentKHR", err);
             return;
         }
         RecordPresentedFrame();
         wd->SemaphoreIndex = (wd->SemaphoreIndex + 1) % wd->SemaphoreCount; // Now we can use the next set of semaphores
-        if (rebuild_after_present)
-            m_SwapChainRebuild = true;
     }
 }
 

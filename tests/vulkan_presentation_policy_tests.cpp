@@ -4,7 +4,10 @@
 
 void RunVulkanPresentationPolicyTests() {
     using lengjing::render::ResolveVulkanSwapchainImageCount;
+    using lengjing::render::RequiresVulkanSwapchainRebuild;
+    using lengjing::render::IsVulkanSwapchainUsable;
     using lengjing::render::VulkanPresentPreference;
+    using lengjing::render::VulkanSwapchainStatus;
     using lengjing::render::kVulkanPresentPreferences;
 
     REQUIRE(kVulkanPresentPreferences[0] ==
@@ -28,4 +31,17 @@ void RunVulkanPresentationPolicyTests() {
     REQUIRE(initial_count == 3);
     REQUIRE(constrained_count == 2);
     REQUIRE(restored_count == 3);
+
+    REQUIRE(IsVulkanSwapchainUsable(VulkanSwapchainStatus::Ready));
+    REQUIRE(IsVulkanSwapchainUsable(VulkanSwapchainStatus::Suboptimal));
+    REQUIRE(!IsVulkanSwapchainUsable(VulkanSwapchainStatus::OutOfDate));
+    REQUIRE(!IsVulkanSwapchainUsable(VulkanSwapchainStatus::Failure));
+    REQUIRE(!RequiresVulkanSwapchainRebuild(
+        VulkanSwapchainStatus::Ready));
+    REQUIRE(!RequiresVulkanSwapchainRebuild(
+        VulkanSwapchainStatus::Suboptimal));
+    REQUIRE(RequiresVulkanSwapchainRebuild(
+        VulkanSwapchainStatus::OutOfDate));
+    REQUIRE(!RequiresVulkanSwapchainRebuild(
+        VulkanSwapchainStatus::Failure));
 }

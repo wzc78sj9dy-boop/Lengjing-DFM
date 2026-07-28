@@ -11,6 +11,13 @@ enum class VulkanPresentPreference : std::uint8_t {
     Fifo,
 };
 
+enum class VulkanSwapchainStatus : std::uint8_t {
+    Ready,
+    Suboptimal,
+    OutOfDate,
+    Failure,
+};
+
 inline constexpr std::array<VulkanPresentPreference, 2>
     kVulkanPresentPreferences{
         VulkanPresentPreference::Mailbox,
@@ -26,6 +33,17 @@ constexpr std::uint32_t ResolveVulkanSwapchainImageCount(
         count = std::min(count, surfaceMaximum);
     }
     return count;
+}
+
+constexpr bool IsVulkanSwapchainUsable(
+    VulkanSwapchainStatus status) noexcept {
+    return status == VulkanSwapchainStatus::Ready ||
+        status == VulkanSwapchainStatus::Suboptimal;
+}
+
+constexpr bool RequiresVulkanSwapchainRebuild(
+    VulkanSwapchainStatus status) noexcept {
+    return status == VulkanSwapchainStatus::OutOfDate;
 }
 
 }  // namespace lengjing::render
