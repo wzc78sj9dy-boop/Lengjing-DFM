@@ -27,7 +27,6 @@ constexpr std::string_view kCoordinatePackage =
 constexpr std::string_view kCoordinateModule = "libUE4.so";
 constexpr std::string_view kCoordinateBuildId =
     "8187ddb9edbc9d5201201ffd7b008df3bfe533db";
-constexpr std::string_view kCoordinateFirstVeneerRva = "0xe7f5514";
 
 struct ParseFailure {
     CloudLayoutStatus status = CloudLayoutStatus::SchemaMismatch;
@@ -276,27 +275,16 @@ bool ParseLayout(const Json& values,
                     layout.trackingMatrixRootOffset, "d[0][5]", failure);
 }
 
-bool ParseDecrypt(const Json& values,
-                  CloudDecryptLayout& layout,
-                  ParseFailure& failure) {
-    if (!HasExactArraySize(values, 1)) {
-        failure.detail = "d[1] must contain exactly 1 value";
-        return false;
-    }
-    return ParseOffset(
-        values.at(0), 4, kMaximumModuleOffset, 4, false,
-        layout.firstVeneerRva, "d[1][0]", failure);
-}
-
 bool ParseData(const Json& values,
                CloudLayoutDocument& document,
                ParseFailure& failure) {
-    if (!HasExactArraySize(values, 2)) {
-        failure.detail = "d must contain exactly 2 values";
+    if (!values.is_array() ||
+        (values.size() != 1 && values.size() != 2) ||
+        (values.size() == 2 && !values.at(1).is_array())) {
+        failure.detail = "d must contain a layout and optional legacy tail";
         return false;
     }
-    return ParseLayout(values.at(0), document.layout, failure) &&
-        ParseDecrypt(values.at(1), document.decrypt, failure);
+    return ParseLayout(values.at(0), document.layout, failure);
 }
 
 bool UpgradeRemoteLayout(Json& root,
@@ -324,7 +312,6 @@ bool UpgradeRemoteLayout(Json& root,
         root.at("d").at(0).at(5),
     });
     root["v"] = kCloudLayoutSchemaVersion;
-    root["d"][1] = Json::array({kCoordinateFirstVeneerRva});
     schemaVersion = kCloudLayoutSchemaVersion;
     return true;
 }
@@ -355,9 +342,7 @@ bool Equivalent(const CloudLayoutDocument& left,
             right.layout.actorSubject.rootOffset,
             right.layout.actorSubject.meshOffset,
             right.layout.actorSubject.alternateRootOffset,
-            right.layout.trackingMatrixRootOffset) &&
-        left.decrypt.firstVeneerRva ==
-            right.decrypt.firstVeneerRva;
+            right.layout.trackingMatrixRootOffset);
 }
 
 CloudLayoutUpdateResult Failure(

@@ -195,7 +195,7 @@ std::string CloudPayload() {
         R"(["0x23003000","0x24004000"],)"
         R"(12288,)"
         R"(["0x1a0","0x410","0x420"],)"
-        R"("0x27007000"],["0xe7f5514"]]})";
+        R"("0x27007000"]]})";
 }
 
 std::string EncodeCloudPayloadQuotes(std::string_view quoteEntity) {

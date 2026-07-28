@@ -15,8 +15,8 @@ constexpr const char* kCoordinateBuildId =
 
 std::string LayoutJson(std::uint64_t revision,
                        std::string buildId = kBuildId,
-                       std::string veneer = "0xe7f5514",
-                       std::uint64_t maximumActorCount = 12288) {
+                       std::uint64_t maximumActorCount = 12288,
+                       bool includeLegacyTail = false) {
     std::ostringstream stream;
     stream << R"({"v":5,"b":")" << buildId
            << R"(","r":)" << revision
@@ -24,8 +24,11 @@ std::string LayoutJson(std::uint64_t revision,
            << R"(["0x23003000","0x24004000"],)"
            << maximumActorCount << ','
            << R"(["0x1a0","0x410","0x420"],)"
-           << R"("0x27007000"],[")"
-           << veneer << R"("]]})";
+           << R"("0x27007000"])";
+    if (includeLegacyTail) {
+        stream << R"(,["ignored"])";
+    }
+    stream << "]}";
     return stream.str();
 }
 
@@ -55,17 +58,17 @@ void RunCloudLayoutTests() {
     REQUIRE(first.status == CloudLayoutStatus::Published);
     REQUIRE(first.snapshot != nullptr);
     REQUIRE(first.snapshot->schemaVersion == kCloudLayoutSchemaVersion);
-    REQUIRE(first.snapshot->decrypt.firstVeneerRva == 0xe7f5514);
     REQUIRE(first.snapshot->layout.maximumActorCount == 12288);
     REQUIRE(first.snapshot->layout.actorSubject.meshOffset == 0x410);
 
     const auto unchanged = store.ValidateAndPublish(LayoutJson(1));
     REQUIRE(unchanged.status == CloudLayoutStatus::Unchanged);
 
-    const auto updated = store.ValidateAndPublish(
-        LayoutJson(2, kBuildId, "0xe7f6514"));
+    const auto updated = store.ValidateAndPublish(LayoutJson(2));
     REQUIRE(updated.status == CloudLayoutStatus::Published);
-    REQUIRE(updated.snapshot->decrypt.firstVeneerRva == 0xe7f6514);
+    REQUIRE(store.ValidateAndPublish(
+                LayoutJson(2, kBuildId, 12288, true))
+                .status == CloudLayoutStatus::Unchanged);
 
     REQUIRE(store.ValidateAndPublish(LayoutJson(1)).status ==
             CloudLayoutStatus::RollbackRejected);
@@ -74,15 +77,11 @@ void RunCloudLayoutTests() {
     REQUIRE(store.ValidateAndPublish(
         R"({"v":4,"b":"fedcba98765432100123456789abcdef","r":3,"d":[]})")
                 .status == CloudLayoutStatus::SchemaMismatch);
-    REQUIRE(store.ValidateAndPublish(LayoutJson(3, kBuildId, "0x0")).status ==
-            CloudLayoutStatus::RangeError);
-    REQUIRE(store.ValidateAndPublish(LayoutJson(3, kBuildId, "0xe7f5512"))
+    REQUIRE(store.ValidateAndPublish(
+                LayoutJson(3, kBuildId, 0))
                 .status == CloudLayoutStatus::RangeError);
     REQUIRE(store.ValidateAndPublish(
-                LayoutJson(3, kBuildId, "0xe7f5514", 0))
-                .status == CloudLayoutStatus::RangeError);
-    REQUIRE(store.ValidateAndPublish(
-                LayoutJson(3, kBuildId, "0xe7f5514", 65537))
+                LayoutJson(3, kBuildId, 65537))
                 .status == CloudLayoutStatus::RangeError);
 
     CloudLayoutStore upgradedStore(
@@ -94,7 +93,6 @@ void RunCloudLayoutTests() {
     REQUIRE(upgraded.snapshot->schemaVersion == kCloudLayoutSchemaVersion);
     REQUIRE(upgraded.snapshot->identity.buildId == kCoordinateBuildId);
     REQUIRE(upgraded.snapshot->layout.maximumActorCount == 12288);
-    REQUIRE(upgraded.snapshot->decrypt.firstVeneerRva == 0xe7f5514);
 
     CloudLayoutStore wrongTarget(RuntimeTarget());
     REQUIRE(wrongTarget.ValidateAndPublish(PreviousLayoutJson()).status ==

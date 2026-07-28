@@ -22,7 +22,6 @@ add_executable(lengjing_tests
     cloud_layout_tests.cpp
     config_tests.cpp
     cpu_mailbox_policy_tests.cpp
-    execution_veneer_locator_tests.cpp
     frame_projection_tests.cpp
     game_version_policy_tests.cpp
     geometry_scene_build_policy_tests.cpp
@@ -54,7 +53,6 @@ add_executable(lengjing_tests
     ../jni/src/auth/RemoteAuth.cpp
     ../jni/src/config/LocalConfig.cpp
     ../jni/src/game/GameRuntime.cpp
-    ../jni/src/game/native/ExecutionVeneerLocator.cpp
     ../jni/src/game/native/PerfExecutionBreakpoint.cpp
     ../jni/src/game/native/RemoteElfIdentity.cpp
     ../jni/src/game/native/TrackingPageBinding.cpp

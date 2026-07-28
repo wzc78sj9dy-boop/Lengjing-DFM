@@ -3,8 +3,6 @@
 #include <exception>
 #include <iostream>
 
-void RunExecutionVeneerLocatorTests();
-
 int main() {
     try {
         RunActorFrameVisitSetTests();
@@ -21,7 +19,6 @@ int main() {
         RunCloudLayoutTests();
         RunConfigTests();
         RunCpuMailboxPolicyTests();
-        RunExecutionVeneerLocatorTests();
         RunFrameProjectionTests();
         RunGameVersionPolicyTests();
         RunGeometrySceneBuildPolicyTests();

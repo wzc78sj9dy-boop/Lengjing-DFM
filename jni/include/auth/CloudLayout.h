@@ -43,16 +43,11 @@ struct CloudOffsetLayout {
     std::uintptr_t trackingMatrixRootOffset = 0;
 };
 
-struct CloudDecryptLayout {
-    std::uintptr_t firstVeneerRva = 0;
-};
-
 struct CloudLayoutDocument {
     std::uint32_t schemaVersion = 0;
     std::uint64_t revision = 0;
     CloudRuntimeIdentity identity{};
     CloudOffsetLayout layout{};
-    CloudDecryptLayout decrypt{};
 };
 
 enum class CloudLayoutStatus {

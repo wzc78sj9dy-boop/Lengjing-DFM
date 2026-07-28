@@ -18,7 +18,6 @@ lengjing::auth::CloudLayoutDocument ValidDocument() {
     document.layout.maximumActorCount = 12288;
     document.layout.actorSubject = {0x1a0, 0x410, 0x420};
     document.layout.trackingMatrixRootOffset = 0x27007000;
-    document.decrypt.firstVeneerRva = 0xe7f5514;
     return document;
 }
 
@@ -36,7 +35,6 @@ void RunRuntimeLayoutOverrideTests() {
     REQUIRE(applied->worldOffset == 0x22002000);
     REQUIRE(applied->maximumActorCount == 12288);
     REQUIRE(applied->actorSubject.rootOffset == 0x1a0);
-    REQUIRE(applied->firstVeneerRva == 0xe7f5514);
 
     REQUIRE(!BuildRuntimeLayoutOverride(
         nullptr, "com.example.runtime", "libUE4.so",
@@ -46,16 +44,6 @@ void RunRuntimeLayoutOverrideTests() {
         document.identity.buildId).has_value());
 
     auto invalid = document;
-    invalid.decrypt.firstVeneerRva = 0;
-    REQUIRE(!BuildRuntimeLayoutOverride(
-        &invalid, "com.example.runtime", "libUE4.so",
-        document.identity.buildId).has_value());
-    invalid = document;
-    invalid.decrypt.firstVeneerRva = 0xe7f5512;
-    REQUIRE(!BuildRuntimeLayoutOverride(
-        &invalid, "com.example.runtime", "libUE4.so",
-        document.identity.buildId).has_value());
-    invalid = document;
     invalid.layout.worldOffset = invalid.layout.namePoolOffset;
     REQUIRE(!BuildRuntimeLayoutOverride(
         &invalid, "com.example.runtime", "libUE4.so",

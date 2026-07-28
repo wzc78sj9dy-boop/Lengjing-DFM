@@ -60,7 +60,6 @@ struct RuntimeLayoutOverride {
     std::int32_t maximumActorCount = 0;
     ActorSubjectLayout actorSubject{};
     std::uintptr_t trackingMatrixRootOffset = 0;
-    std::uintptr_t firstVeneerRva = 0;
 };
 
 inline std::optional<RuntimeLayoutOverride> BuildRuntimeLayoutOverride(
@@ -94,13 +93,8 @@ inline std::optional<RuntimeLayoutOverride> BuildRuntimeLayoutOverride(
     };
     result.trackingMatrixRootOffset =
         document->layout.trackingMatrixRootOffset;
-    result.firstVeneerRva = document->decrypt.firstVeneerRva;
 
-    if (!result.actorSubject.IsValid() ||
-        !detail::IsOptionalOffsetValid(
-            result.firstVeneerRva, 4,
-            detail::kMaximumModuleOffset, 4) ||
-        result.firstVeneerRva == 0) {
+    if (!result.actorSubject.IsValid()) {
         return std::nullopt;
     }
     return result;
