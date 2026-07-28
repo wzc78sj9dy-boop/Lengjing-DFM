@@ -26,7 +26,6 @@ add_executable(lengjing_tests
     frame_projection_tests.cpp
     game_version_policy_tests.cpp
     geometry_scene_build_policy_tests.cpp
-    hardware_breakpoint_coordinate_runtime_tests.cpp
     hud_map_tests.cpp
     kernel_module_catalog_tests.cpp
     overlay_contrast_policy_tests.cpp
@@ -56,7 +55,6 @@ add_executable(lengjing_tests
     ../jni/src/config/LocalConfig.cpp
     ../jni/src/game/GameRuntime.cpp
     ../jni/src/game/native/ExecutionVeneerLocator.cpp
-    ../jni/src/game/native/HardwareBreakpointCoordinateRuntime.cpp
     ../jni/src/game/native/PerfExecutionBreakpoint.cpp
     ../jni/src/game/native/RemoteElfIdentity.cpp
     ../jni/src/game/native/TrackingPageBinding.cpp
@@ -80,3 +78,45 @@ else()
 endif()
 
 add_test(NAME lengjing_tests COMMAND lengjing_tests)
+
+add_executable(lengjing_coordinate_stability_tests
+    coordinate_stability_policy_tests.cpp
+)
+
+target_include_directories(lengjing_coordinate_stability_tests PRIVATE
+    ../jni/include
+)
+
+if(MSVC)
+    target_compile_options(
+        lengjing_coordinate_stability_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(
+        lengjing_coordinate_stability_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+add_test(
+    NAME lengjing_coordinate_stability_tests
+    COMMAND lengjing_coordinate_stability_tests)
+
+add_executable(lengjing_secure_kernel_command_abi_tests
+    secure_kernel_command_abi_tests.cpp
+)
+
+target_include_directories(
+    lengjing_secure_kernel_command_abi_tests PRIVATE
+    ../jni/include
+)
+
+if(MSVC)
+    target_compile_options(
+        lengjing_secure_kernel_command_abi_tests PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(
+        lengjing_secure_kernel_command_abi_tests PRIVATE
+        -Wall -Wextra -Wpedantic)
+endif()
+
+add_test(
+    NAME lengjing_secure_kernel_command_abi_tests
+    COMMAND lengjing_secure_kernel_command_abi_tests)

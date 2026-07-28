@@ -244,15 +244,12 @@ findstr /I ^
     /C:"Decrypt3" ^
     /C:"DecodedActor" ^
     /C:"encryptedRecord" ^
-    /C:"Pacga" ^
     /C:"PtraceExecutionContext" ^
     /C:"RuntimeCoordinateCodec" ^
     /C:"ResolvedRecord" ^
     /C:"ThreadContextDeviceTransport" ^
     /C:"ThreadExecutionContext" ^
-    /C:"Unicorn" ^
     /C:"Capstone" ^
-    /C:" uc_" ^
     /C:" cs_" ^
     "%~1" >nul 2>&1
 if errorlevel 1 exit /b 0

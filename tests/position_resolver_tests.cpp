@@ -45,7 +45,7 @@ void RunPositionResolverTests() {
     using Coordinate = CharacterPositionResolver::Coordinate;
 
     REQUIRE(ShouldAlignBoneFrameToCharacterPosition(
-        CharacterPositionSource::HardwareBreakpoint));
+        CharacterPositionSource::Decoded));
     REQUIRE(!ShouldAlignBoneFrameToCharacterPosition(
         CharacterPositionSource::Standard));
     REQUIRE(!ShouldAlignBoneFrameToCharacterPosition(

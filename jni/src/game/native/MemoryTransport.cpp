@@ -2,6 +2,7 @@
 
 #include "game/native/KernelModuleLoader.h"
 #include "game/native/PerfExecutionBreakpoint.h"
+#include "game/native/SecureKernelClient.h"
 #include "platform/PerformanceTrace.h"
 #include "paradise/paradise_api.h"
 
@@ -132,6 +133,7 @@ struct MemoryTransport::Impl {
     MemoryTransportMode mode = MemoryTransportMode::ProcessVm;
     pid_t processId = -1;
     paradise_driver* kernel = nullptr;
+    SecureKernelClient secureKernel;
     PerfExecutionBreakpoint perfExecutionBreakpoint;
     ExecutionBreakpointBackend executionBreakpointBackend =
         ExecutionBreakpointBackend::None;
@@ -153,6 +155,7 @@ struct MemoryTransport::Impl {
     void ResetUnlocked() noexcept {
         ++ioGeneration;
         static_cast<void>(RemoveExecutionBreakpointsUnlocked());
+        secureKernel.Close();
         delete kernel;
         kernel = nullptr;
         mode = MemoryTransportMode::ProcessVm;
@@ -595,6 +598,100 @@ struct MemoryTransport::Impl {
         return 0;
     }
 
+    bool ExecutePacga(std::uint64_t data,
+                      std::uint64_t modifier,
+                      std::uint64_t& result,
+                      int& status) noexcept {
+        result = 0;
+        status = -EINVAL;
+        std::lock_guard<std::mutex> lock(ioMutex);
+        if (!open || processId < 1) return false;
+        return secureKernel.ExecuteComputation(
+            processId,
+            data,
+            modifier,
+            result,
+            status);
+    }
+
+    bool ReadSecure(std::uintptr_t address,
+                    void* destination,
+                    std::size_t size,
+                    int& status) noexcept {
+        status = -EINVAL;
+        std::lock_guard<std::mutex> lock(ioMutex);
+        if (!open || processId < 1) return false;
+        return secureKernel.Read(
+            processId,
+            address,
+            destination,
+            size,
+            status);
+    }
+
+    std::uintptr_t ModuleBaseSecure(
+        std::string_view moduleName,
+        std::size_t& moduleSize,
+        int& status) noexcept {
+        moduleSize = 0;
+        status = -EINVAL;
+        std::lock_guard<std::mutex> lock(ioMutex);
+        if (!open || processId < 1) return 0;
+        return secureKernel.ModuleBase(
+            processId,
+            moduleName,
+            moduleSize,
+            status);
+    }
+
+    bool QueryNamedThreadTls(std::string_view name,
+                             pid_t& threadId,
+                             std::uintptr_t& tls,
+                             int& status) noexcept {
+        threadId = -1;
+        tls = 0;
+        status = -EINVAL;
+        std::lock_guard<std::mutex> lock(ioMutex);
+        if (!open || processId < 1) return false;
+        return secureKernel.QueryNamedThreadTls(
+            processId,
+            name,
+            threadId,
+            tls,
+            status);
+    }
+
+    bool QueryThreadStack(pid_t threadId,
+                          std::uintptr_t expectedTls,
+                          std::uintptr_t& low,
+                          std::uintptr_t& high,
+                          int& status) noexcept {
+        low = 0;
+        high = 0;
+        status = -EINVAL;
+        std::lock_guard<std::mutex> lock(ioMutex);
+        if (!open || processId < 1 || threadId < 1) return false;
+        return secureKernel.QueryThreadStack(
+            threadId,
+            expectedTls,
+            low,
+            high,
+            status);
+    }
+
+    bool CaptureExecutionState(
+        pid_t threadId,
+        const SecureExecutionCapturePlan& plan,
+        SecureExecutionCaptureResult& result,
+        int& status) noexcept {
+        result = {};
+        status = -EINVAL;
+        std::lock_guard<std::mutex> lock(ioMutex);
+        if (!open || processId < 1 || threadId < 1) return false;
+        return secureKernel.CaptureExecutionState(
+            threadId, plan, result, status);
+    }
+
     bool IsOpen() const noexcept {
         std::lock_guard<std::mutex> lock(ioMutex);
         return open;
@@ -679,6 +776,96 @@ std::size_t MemoryTransport::ReadBatch(
     return impl_ != nullptr
         ? impl_->ReadBatch(requests, count, itemStatus)
         : 0;
+}
+
+bool MemoryTransport::ReadSecure(
+    std::uintptr_t address,
+    void* destination,
+    std::size_t size,
+    int& status) noexcept {
+    if (impl_ == nullptr) {
+        status = -EINVAL;
+        return false;
+    }
+    return impl_->ReadSecure(address, destination, size, status);
+}
+
+std::uintptr_t MemoryTransport::ModuleBaseSecure(
+    std::string_view moduleName,
+    std::size_t& moduleSize,
+    int& status) noexcept {
+    if (impl_ == nullptr) {
+        moduleSize = 0;
+        status = -EINVAL;
+        return 0;
+    }
+    return impl_->ModuleBaseSecure(
+        moduleName, moduleSize, status);
+}
+
+bool MemoryTransport::ExecutePacga(std::uint64_t data,
+                                   std::uint64_t modifier,
+                                   std::uint64_t& result,
+                                   int& status) noexcept {
+    if (impl_ == nullptr) {
+        result = 0;
+        status = -EINVAL;
+        return false;
+    }
+    return impl_->ExecutePacga(
+        data,
+        modifier,
+        result,
+        status);
+}
+
+bool MemoryTransport::QueryThreadStack(
+    pid_t threadId,
+    std::uintptr_t expectedTls,
+    std::uintptr_t& low,
+    std::uintptr_t& high,
+    int& status) noexcept {
+    if (impl_ == nullptr) {
+        low = 0;
+        high = 0;
+        status = -EINVAL;
+        return false;
+    }
+    return impl_->QueryThreadStack(
+        threadId,
+        expectedTls,
+        low,
+        high,
+        status);
+}
+
+bool MemoryTransport::QueryNamedThreadTls(
+    std::string_view name,
+    pid_t& threadId,
+    std::uintptr_t& tls,
+    int& status) noexcept {
+    if (impl_ == nullptr) {
+        threadId = -1;
+        tls = 0;
+        status = -EINVAL;
+        return false;
+    }
+    return impl_->QueryNamedThreadTls(
+        name, threadId, tls, status);
+}
+
+bool MemoryTransport::CaptureExecutionState(
+    pid_t threadId,
+    const SecureExecutionCapturePlan& plan,
+    SecureExecutionCaptureResult& result,
+    int& status) noexcept {
+    if (impl_ == nullptr) {
+        result = {};
+        status = -EINVAL;
+        return false;
+    }
+    return impl_->CaptureExecutionState(
+        threadId, plan, result, status);
 }
 
 #if LENGJING_ENABLE_PROJECTILE_TRACKING

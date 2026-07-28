@@ -14,11 +14,9 @@
 #include "game/native/ActorRecordSource.h"
 #include "game/native/BoneFrameSource.h"
 #include "game/native/CharacterPositionResolver.h"
-#include "game/native/ExecutionVeneerLocator.h"
 #include "game/native/FrameProjection.h"
 #include "game/native/GeometryRuntime.h"
 #include "game/native/GeometrySceneBuildPolicy.h"
-#include "game/native/HardwareBreakpointCoordinateRuntime.h"
 #include "game/native/HudMapProjection.h"
 #include "game/native/MemoryTransport.h"
 #include "game/native/PlayerBounds.h"
@@ -28,6 +26,7 @@
 #include "game/native/ProjectileSpeedReader.h"
 #include "game/native/RemoteElfIdentity.h"
 #include "game/native/RuntimeLayoutOverride.h"
+#include "game/native/SceneTransformRuntime.h"
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
 #include "game/native/TrajectoryHook.h"
 #endif
@@ -72,7 +71,6 @@ constexpr std::uintptr_t kMinimumRemoteAddress = 0x10000000ULL;
 constexpr std::uintptr_t kMaximumRemoteAddress = 0x10000000000ULL;
 constexpr std::int32_t kMaximumWorldObjectCount = 65536;
 constexpr std::size_t kMaximumNameLength = 249;
-constexpr std::uintptr_t kCoordinateIdOffset = 0x2D8;
 constexpr std::uint64_t kCoordinateTraceIntervalFrames = 30;
 constexpr std::array<std::string_view, 2> kGameModuleNames{
     "libUE4.so",
@@ -84,7 +82,7 @@ constexpr bool ShouldWriteCoordinateFrameTrace(
     return frame < 5 || (frame % kCoordinateTraceIntervalFrames) == 0;
 }
 
-struct CoordinateFailure {
+struct CoordinateRuntimeFailure {
     CoordinateDecryptError error = CoordinateDecryptError::None;
     int systemError = 0;
 };
@@ -110,15 +108,15 @@ struct Vec3 {
 
 enum class CoordinateTraceSource : std::uint8_t {
     None,
-    HardwareBreakpoint,
+    Decoded,
     Standard,
     Failure,
 };
 
 const char* CoordinateTraceSourceName(CoordinateTraceSource source) noexcept {
     switch (source) {
-        case CoordinateTraceSource::HardwareBreakpoint:
-            return "hardware_breakpoint";
+        case CoordinateTraceSource::Decoded:
+            return "decoded";
         case CoordinateTraceSource::Standard:
             return "standard";
         case CoordinateTraceSource::Failure:
@@ -127,6 +125,41 @@ const char* CoordinateTraceSourceName(CoordinateTraceSource source) noexcept {
             break;
     }
     return "none";
+}
+
+CoordinateDecryptError MapSceneTransformError(
+    native::SceneTransformError error) noexcept {
+    switch (error) {
+        case native::SceneTransformError::None:
+            return CoordinateDecryptError::None;
+        case native::SceneTransformError::InvalidConfiguration:
+            return CoordinateDecryptError::InvalidConfiguration;
+        case native::SceneTransformError::InvocationUnavailable:
+        case native::SceneTransformError::EntryReadFailed:
+        case native::SceneTransformError::MetadataUnavailable:
+            return CoordinateDecryptError::EntryResolveFailed;
+        case native::SceneTransformError::ThreadContextUnavailable:
+        case native::SceneTransformError::RemoteReadFailed:
+        case native::SceneTransformError::PacgaUnavailable:
+            return CoordinateDecryptError::MemoryTransportUnavailable;
+        case native::SceneTransformError::EngineSetupFailed:
+        case native::SceneTransformError::RegisterSetupFailed:
+        case native::SceneTransformError::GuestMapFailed:
+        case native::SceneTransformError::UnsupportedInstruction:
+        case native::SceneTransformError::EmulationFailed:
+            return CoordinateDecryptError::EngineSetupFailed;
+        case native::SceneTransformError::StepLimit:
+        case native::SceneTransformError::FreshWriteMissing:
+        case native::SceneTransformError::StaleRequest:
+            return CoordinateDecryptError::SampleUnavailable;
+        case native::SceneTransformError::SelectedAddressInvalid:
+        case native::SceneTransformError::TransformReadFailed:
+        case native::SceneTransformError::CoordinateInvalid:
+        case native::SceneTransformError::ReferenceRejected:
+        case native::SceneTransformError::HistoryRejected:
+            return CoordinateDecryptError::PositionReadFailed;
+    }
+    return CoordinateDecryptError::InvalidConfiguration;
 }
 
 bool IsCoordinateTraceEnabled() noexcept {
@@ -993,7 +1026,6 @@ public:
         layout_.trackingMatrixRootOffset =
             cloudLayout->trackingMatrixRootOffset;
 #endif
-        firstVeneerRva_ = cloudLayout->firstVeneerRva;
         if (!aimController_.Start(options.inputMode)) {
             SetRuntimeFailure(
                 probe, RuntimeError::InputChannelStartFailed);
@@ -1055,35 +1087,37 @@ public:
             UpdateGeometryRuntime(settings);
         }
 
-        const bool requestedHardwareBreakpoint =
+        const bool requestedSceneTransform =
             settings.visual.coordinateDecrypt;
-        const bool hardwareBreakpointRequestChanged =
-            hardwareBreakpointRequested_ != requestedHardwareBreakpoint;
-        if (hardwareBreakpointRequestChanged) {
-            hardwareBreakpointRetryAfter_ = {};
-            hardwareBreakpointFailure_ = {};
+        const bool sceneTransformRequestChanged =
+            sceneTransformRequested_ != requestedSceneTransform;
+        if (sceneTransformRequestChanged) {
+            sceneTransformRetryAfter_ = {};
+            sceneTransformFailure_ = {};
         }
-        const auto hardwareBreakpointNow =
+        const auto sceneTransformNow =
             std::chrono::steady_clock::now();
-        if (requestedHardwareBreakpoint &&
-            !hardwareBreakpointRuntime_.IsActive() &&
-            (hardwareBreakpointRetryAfter_ ==
+        const native::SceneTransformProbe sceneTransformProbe =
+            sceneTransformRuntime_.Probe();
+        if (requestedSceneTransform &&
+            !sceneTransformProbe.active &&
+            (sceneTransformRetryAfter_ ==
                  std::chrono::steady_clock::time_point{} ||
-             hardwareBreakpointNow >= hardwareBreakpointRetryAfter_)) {
-            if (StartHardwareBreakpointRuntime()) {
-                hardwareBreakpointRetryAfter_ = {};
+             sceneTransformNow >= sceneTransformRetryAfter_)) {
+            if (StartSceneTransformRuntime()) {
+                sceneTransformRetryAfter_ = {};
             } else {
-                hardwareBreakpointRetryAfter_ =
-                    hardwareBreakpointNow +
+                sceneTransformRetryAfter_ =
+                    sceneTransformNow +
                     std::chrono::seconds(1);
             }
-        } else if (!requestedHardwareBreakpoint &&
-                   hardwareBreakpointRuntime_.IsActive()) {
-            static_cast<void>(StopHardwareBreakpointRuntime());
+        } else if (!requestedSceneTransform &&
+                   sceneTransformProbe.active) {
+            sceneTransformRuntime_.Stop();
         }
-        hardwareBreakpointRequested_ = requestedHardwareBreakpoint;
+        sceneTransformRequested_ = requestedSceneTransform;
 
-        if (hardwareBreakpointRequestChanged) {
+        if (sceneTransformRequestChanged) {
             characterPositions_.Clear();
             positionCache_.clear();
             boneCache_.clear();
@@ -1137,6 +1171,7 @@ public:
             ResetWorldState();
             world_ = context.world;
         }
+        sceneTransformRuntime_.SetWorld(context.world);
         if (geometryWorld_ != context.world) {
             const bool refreshExistingWorld =
                 native::ShouldRequestGeometryRefresh(
@@ -1152,25 +1187,6 @@ public:
                 geometrySnapshotReady_ = false;
                 geometryValidationEpoch_ =
                     geometryRuntime_.RequestValidation();
-            }
-        }
-        if (hardwareBreakpointRequested_ &&
-            hardwareBreakpointRuntime_.IsActive()) {
-            if (hardwareBreakpointRuntime_.Poll(context.world) &&
-                hardwareBreakpointRuntime_.PublishedCoordinateCount() !=
-                    0) {
-                hardwareBreakpointFailure_ = {};
-            } else if (
-                hardwareBreakpointRuntime_.AcceptedSampleCount() == 0) {
-                hardwareBreakpointFailure_.error =
-                    CoordinateDecryptError::SampleUnavailable;
-            } else if (
-                hardwareBreakpointRuntime_.RecordsBase() == 0) {
-                hardwareBreakpointFailure_.error =
-                    CoordinateDecryptError::RecordBaseUnavailable;
-            } else {
-                hardwareBreakpointFailure_.error =
-                    CoordinateDecryptError::PositionReadFailed;
             }
         }
         RefreshWorldObjectCache(context, settings);
@@ -1514,7 +1530,9 @@ public:
                 actorPositionMode,
                 settings.visual.antiFlicker,
                 position,
-                &positionSource);
+                &positionSource,
+                &context.localPosition,
+                frame.sequence);
             if (IsCoordinateTraceEnabled()) {
                 auto& trace = coordinateTraceRecords_[actor];
                 trace.root = actorRecord.root;
@@ -3872,146 +3890,19 @@ private:
         return true;
     }
 
-    bool StartHardwareBreakpointRuntime() {
-        hardwareBreakpointFailure_ = {};
-        if (memory_ == nullptr || !memory_->IsOpen() ||
-            !memory_->SupportsExecutionBreakpoints()) {
-            hardwareBreakpointFailure_.error =
+    bool StartSceneTransformRuntime() {
+        sceneTransformFailure_ = {};
+        if (memory_ == nullptr || !memory_->IsOpen()) {
+            sceneTransformFailure_.error =
                 CoordinateDecryptError::MemoryTransportUnavailable;
             return false;
         }
-
-        if (firstVeneerRva_ == 0 ||
-            (firstVeneerRva_ & 3U) != 0 ||
-            moduleBase_ >
-                std::numeric_limits<std::uintptr_t>::max() -
-                    firstVeneerRva_) {
-            hardwareBreakpointFailure_.error =
-                CoordinateDecryptError::InvalidConfiguration;
-            return false;
-        }
-
-        const std::uintptr_t firstVeneerAddress =
-            moduleBase_ + firstVeneerRva_;
-        if (!IsMappedNamedExecutableAddress(
-                processId_, firstVeneerAddress, moduleName_)) {
-            hardwareBreakpointFailure_.error =
-                CoordinateDecryptError::EntryMappingMissing;
-            return false;
-        }
-
-        const native::ExecutionVeneerReadMemory readMemory =
-            [this](std::uintptr_t address,
-                   void* destination,
-                   std::size_t size) {
-                return memory_ != nullptr && destination != nullptr &&
-                    size != 0 && IsValidReadAddress(address) &&
-                    size <= kMaximumRemoteAddress - address &&
-                    memory_->Read(address, destination, size);
-            };
-        std::uintptr_t breakpointAddress = 0;
-        if (!native::LocateSecondExecutionVeneer(
-                moduleBase_,
-                firstVeneerRva_,
-                readMemory,
-                breakpointAddress)) {
-            hardwareBreakpointFailure_.error =
-                CoordinateDecryptError::EntryResolveFailed;
-            return false;
-        }
-        if (!IsMappedExecutableAddress(
-                processId_, breakpointAddress)) {
-            hardwareBreakpointFailure_.error =
-                CoordinateDecryptError::EntryMappingMissing;
-            return false;
-        }
-
-        native::HardwareBreakpointCoordinateCallbacks callbacks{
-            [this](std::uintptr_t address) {
-                return memory_ != nullptr &&
-                    memory_->ConfigureExecutionBreakpoint(address);
-            },
-            [this](native::ExecutionBreakpointRecord* records,
-                   std::size_t capacity,
-                   std::size_t& recordsRead,
-                   std::uintptr_t& hitAddress,
-                   std::size_t& totalRecords) {
-                return memory_ != nullptr &&
-                    memory_->ReadExecutionBreakpointRecords(
-                        records, capacity, recordsRead, hitAddress,
-                        totalRecords);
-            },
-            [readMemory](std::uintptr_t address,
-                         void* destination,
-                         std::size_t size) {
-                return readMemory(address, destination, size);
-            },
-            [this] {
-                return memory_ != nullptr &&
-                    memory_->RemoveExecutionBreakpoints();
-            },
-        };
-        if (!hardwareBreakpointRuntime_.Start(
-                breakpointAddress, std::move(callbacks))) {
-            hardwareBreakpointFailure_.error =
+        if (!sceneTransformRuntime_.Start(
+                *memory_, processId_, moduleBase_)) {
+            sceneTransformFailure_.error =
                 CoordinateDecryptError::EngineSetupFailed;
             return false;
         }
-        hardwareBreakpointFailure_.error =
-            CoordinateDecryptError::SampleUnavailable;
-        return true;
-    }
-
-    bool StopHardwareBreakpointRuntime() noexcept {
-        for (int attempt = 0; attempt < 3; ++attempt) {
-            if (hardwareBreakpointRuntime_.Stop()) return true;
-        }
-        return false;
-    }
-
-    bool ReadHardwareBreakpointPosition(
-        std::uintptr_t mesh,
-        Vec3& position) {
-        if (!IsValidPointer(mesh)) return false;
-        std::uint32_t coordinateId = 0;
-        if (!ReadValue(
-                mesh + kCoordinateIdOffset, coordinateId) ||
-            coordinateId == 0) {
-            return false;
-        }
-        native::HardwareBreakpointCoordinate coordinate{};
-        const bool found =
-            hardwareBreakpointRequested_ &&
-            hardwareBreakpointRuntime_.Lookup(
-                coordinateId, mesh, world_, coordinate);
-        if (IsCoordinateTraceEnabled() &&
-            ShouldWriteCoordinateFrameTrace(coordinateTraceFrame_)) {
-            std::fprintf(
-                stderr,
-                "[hwbp-coordinate] frame=%llu mesh=%llx id=%u "
-                "found=%d base=%llx published=%zu xyz=(%.3f,%.3f,%.3f)\n",
-                static_cast<unsigned long long>(coordinateTraceFrame_),
-                static_cast<unsigned long long>(mesh),
-                static_cast<unsigned int>(coordinateId),
-                found ? 1 : 0,
-                static_cast<unsigned long long>(
-                    hardwareBreakpointRuntime_.RecordsBase()),
-                hardwareBreakpointRuntime_.PublishedCoordinateCount(),
-                coordinate.x,
-                coordinate.y,
-                coordinate.z);
-            std::fflush(stderr);
-        }
-        if (!found) {
-            return false;
-        }
-        const Vec3 candidate{
-            coordinate.x,
-            coordinate.y,
-            coordinate.z,
-        };
-        if (!IsFinite(candidate) || !IsNonzero(candidate)) return false;
-        position = candidate;
         return true;
     }
 
@@ -4059,29 +3950,6 @@ private:
         position = Vec3{};
         if (positionSource != nullptr) {
             *positionSource = native::CharacterPositionSource::None;
-        }
-
-        if (hardwareBreakpointRequested_) {
-            const std::uintptr_t mesh =
-                ReadPointer(actor + layout_.actorSubjectLayout.meshOffset);
-            if (ReadHardwareBreakpointPosition(mesh, position)) {
-                if (IsCoordinateTraceEnabled()) {
-                    auto& traceRecord = coordinateTraceRecords_[actor];
-                    traceRecord = CoordinateTraceRecord{};
-                    traceRecord.root = root;
-                    traceRecord.component = mesh;
-                    traceRecord.raw = position;
-                    traceRecord.output = position;
-                    traceRecord.source =
-                        CoordinateTraceSource::HardwareBreakpoint;
-                    traceRecord.attempted = true;
-                }
-                if (positionSource != nullptr) {
-                    *positionSource =
-                        native::CharacterPositionSource::HardwareBreakpoint;
-                }
-                return true;
-            }
         }
 
         auto readBytes = [this](std::uintptr_t address,
@@ -4144,11 +4012,75 @@ private:
         native::PositionReadMode,
         bool antiFlicker,
         Vec3& position,
-        native::CharacterPositionSource* positionSource = nullptr) {
+        native::CharacterPositionSource* positionSource = nullptr,
+        const Vec3* reference = nullptr,
+        std::uint64_t frameSequence = 0) {
         std::uintptr_t root = record.root;
         if (!IsValidPointer(root)) {
             root = ReadPointer(
                 record.actor + layout_.actorSubjectLayout.rootOffset);
+        }
+        if (sceneTransformRequested_) {
+            const std::uintptr_t component =
+                IsValidPointer(record.mesh) ? record.mesh : root;
+            if (!IsValidPointer(record.actor) ||
+                !IsValidPointer(component) ||
+                !IsValidPointer(world_)) {
+                return false;
+            }
+            native::SceneTransformSubject subject{};
+            subject.world = world_;
+            subject.actor = record.actor;
+            subject.component = component;
+            subject.frameSequence = frameSequence;
+            if (reference != nullptr && IsFinite(*reference)) {
+                subject.reference = {
+                    reference->x,
+                    reference->y,
+                    reference->z,
+                };
+            }
+
+            native::SceneTransformResult result{};
+            const bool found =
+                sceneTransformRuntime_.Lookup(subject, result);
+            sceneTransformRuntime_.Request(subject);
+            if (IsCoordinateTraceEnabled()) {
+                auto& traceRecord = coordinateTraceRecords_[record.actor];
+                traceRecord = CoordinateTraceRecord{};
+                traceRecord.root = root;
+                traceRecord.component = component;
+                traceRecord.attempted = true;
+                if (found) {
+                    traceRecord.raw = Vec3{
+                        result.position[0],
+                        result.position[1],
+                        result.position[2],
+                    };
+                    traceRecord.output = traceRecord.raw;
+                    traceRecord.source = CoordinateTraceSource::Decoded;
+                } else {
+                    const native::SceneTransformProbe runtimeProbe =
+                        sceneTransformRuntime_.Probe();
+                    traceRecord.source = CoordinateTraceSource::Failure;
+                    traceRecord.error =
+                        runtimeProbe.error == native::SceneTransformError::None
+                        ? CoordinateDecryptError::SampleUnavailable
+                        : MapSceneTransformError(runtimeProbe.error);
+                    traceRecord.systemError = runtimeProbe.systemError;
+                }
+            }
+            if (!found) return false;
+            position = Vec3{
+                result.position[0],
+                result.position[1],
+                result.position[2],
+            };
+            if (!IsFinite(position) || !IsNonzero(position)) return false;
+            if (positionSource != nullptr) {
+                *positionSource = native::CharacterPositionSource::Decoded;
+            }
+            return true;
         }
         return ReadCharacterPosition(
             record.actor,
@@ -5744,7 +5676,9 @@ private:
                 native::PositionReadMode::Standard,
                 antiFlicker,
                 position,
-                &positionSource)) {
+                &positionSource,
+                &context.localPosition,
+                sequence)) {
             return;
         }
         const bool playerClass = std::find(
@@ -6399,6 +6333,7 @@ private:
 
     void ResetWorldState() {
         world_ = 0;
+        sceneTransformRuntime_.SetWorld(0);
         positionCache_.clear();
         boneCache_.clear();
         nameCache_.clear();
@@ -6445,23 +6380,30 @@ private:
     }
 
     void UpdateCoordinateProbe(RuntimeProbe& probe) const {
-        if (hardwareBreakpointRequested_) {
+        if (sceneTransformRequested_) {
+            const native::SceneTransformProbe runtimeProbe =
+                sceneTransformRuntime_.Probe();
             probe.coordinateRequested = true;
             probe.coordinateEntryReady =
-                hardwareBreakpointRuntime_.IsActive();
+                runtimeProbe.invocation.IsValid();
             probe.coordinateContextReady =
-                hardwareBreakpointRuntime_.IsActive();
-            probe.coordinateThreadId = 0;
+                runtimeProbe.contextReady;
+            probe.coordinateThreadId =
+                static_cast<int>(runtimeProbe.threadId);
             probe.coordinateGuestPc =
-                hardwareBreakpointRuntime_.BreakpointAddress();
-            probe.coordinateContextGeneration = 0;
-            probe.coordinateAttempts =
-                hardwareBreakpointRuntime_.PollCount();
-            probe.coordinateSuccesses =
-                hardwareBreakpointRuntime_.PublishedCoordinateCount();
-            probe.coordinateError = hardwareBreakpointFailure_.error;
-            probe.coordinateSystemError =
-                hardwareBreakpointFailure_.systemError;
+                runtimeProbe.invocation.entryPc;
+            probe.coordinateContextGeneration = runtimeProbe.generation;
+            probe.coordinateAttempts = runtimeProbe.requested;
+            probe.coordinateSuccesses = runtimeProbe.accepted;
+            if (runtimeProbe.error != native::SceneTransformError::None) {
+                probe.coordinateError =
+                    MapSceneTransformError(runtimeProbe.error);
+                probe.coordinateSystemError = runtimeProbe.systemError;
+            } else {
+                probe.coordinateError = sceneTransformFailure_.error;
+                probe.coordinateSystemError =
+                    sceneTransformFailure_.systemError;
+            }
             return;
         }
         probe.coordinateRequested = false;
@@ -6497,18 +6439,14 @@ private:
             return false;
         }
 #endif
-        if (!StopHardwareBreakpointRuntime()) {
-            aimEnabled_.store(false, std::memory_order_release);
-            return false;
-        }
+        sceneTransformRuntime_.Stop();
         if (memory_ != nullptr) memory_->Close();
         memory_.reset();
-        hardwareBreakpointRequested_ = false;
-        hardwareBreakpointRetryAfter_ = {};
-        hardwareBreakpointFailure_ = {};
+        sceneTransformRequested_ = false;
+        sceneTransformRetryAfter_ = {};
+        sceneTransformFailure_ = {};
         processId_ = -1;
         moduleBase_ = 0;
-        firstVeneerRva_ = 0;
         moduleName_.clear();
         moduleBuildId_.clear();
         layout_ = VersionLayout{};
@@ -6528,19 +6466,17 @@ private:
     std::unique_ptr<native::MemoryTransport> geometryMemory_;
     std::shared_ptr<GeometryReadRoute> geometryReadRoute_;
     bool geometryTransportDedicated_ = false;
-    native::HardwareBreakpointCoordinateRuntime
-        hardwareBreakpointRuntime_{};
-    bool hardwareBreakpointRequested_ = false;
+    native::SceneTransformRuntime sceneTransformRuntime_{};
+    bool sceneTransformRequested_ = false;
     std::chrono::steady_clock::time_point
-        hardwareBreakpointRetryAfter_{};
-    CoordinateFailure hardwareBreakpointFailure_{};
+        sceneTransformRetryAfter_{};
+    CoordinateRuntimeFailure sceneTransformFailure_{};
     std::string moduleBuildId_;
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
     native::TrajectoryHook trajectoryHook_{};
 #endif
     pid_t processId_ = -1;
     std::uintptr_t moduleBase_ = 0;
-    std::uintptr_t firstVeneerRva_ = 0;
     std::string moduleName_;
     std::uintptr_t world_ = 0;
     CameraView lastView_{};

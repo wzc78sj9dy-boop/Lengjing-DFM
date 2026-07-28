@@ -9,12 +9,12 @@ namespace lengjing::game::native {
 enum class CharacterPositionSource : std::uint8_t {
     None,
     Standard,
-    HardwareBreakpoint,
+    Decoded,
 };
 
 constexpr bool ShouldAlignBoneFrameToCharacterPosition(
     CharacterPositionSource source) noexcept {
-    return source == CharacterPositionSource::HardwareBreakpoint;
+    return source == CharacterPositionSource::Decoded;
 }
 
 }  // namespace lengjing::game::native

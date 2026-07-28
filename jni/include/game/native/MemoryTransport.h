@@ -13,6 +13,9 @@
 
 namespace lengjing::game::native {
 
+struct SecureExecutionCapturePlan;
+struct SecureExecutionCaptureResult;
+
 enum class MemoryTransportMode : int {
     ProcessVm = 0,
     KernelDriver = 1,
@@ -77,6 +80,32 @@ public:
     std::size_t ReadBatch(const MemoryReadRequest* requests,
                           std::size_t count,
                           std::uint8_t* itemStatus = nullptr);
+    bool ReadSecure(std::uintptr_t address,
+                    void* destination,
+                    std::size_t size,
+                    int& status) noexcept;
+    std::uintptr_t ModuleBaseSecure(
+        std::string_view moduleName,
+        std::size_t& moduleSize,
+        int& status) noexcept;
+    bool ExecutePacga(std::uint64_t data,
+                      std::uint64_t modifier,
+                      std::uint64_t& result,
+                      int& status) noexcept;
+    bool QueryNamedThreadTls(std::string_view name,
+                             pid_t& threadId,
+                             std::uintptr_t& tls,
+                             int& status) noexcept;
+    bool QueryThreadStack(pid_t threadId,
+                          std::uintptr_t expectedTls,
+                          std::uintptr_t& low,
+                          std::uintptr_t& high,
+                          int& status) noexcept;
+    bool CaptureExecutionState(
+        pid_t threadId,
+        const SecureExecutionCapturePlan& plan,
+        SecureExecutionCaptureResult& result,
+        int& status) noexcept;
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
     bool Write(std::uintptr_t address, const void* source, std::size_t size);
 #endif

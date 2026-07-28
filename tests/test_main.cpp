@@ -25,7 +25,6 @@ int main() {
         RunFrameProjectionTests();
         RunGameVersionPolicyTests();
         RunGeometrySceneBuildPolicyTests();
-        RunHardwareBreakpointCoordinateRuntimeTests();
         RunHudMapTests();
         RunKernelModuleCatalogTests();
         RunOverlayContrastPolicyTests();

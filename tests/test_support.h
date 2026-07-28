@@ -29,7 +29,6 @@ void RunCpuMailboxPolicyTests();
 void RunFrameProjectionTests();
 void RunGameVersionPolicyTests();
 void RunGeometrySceneBuildPolicyTests();
-void RunHardwareBreakpointCoordinateRuntimeTests();
 void RunHudMapTests();
 void RunKernelModuleCatalogTests();
 void RunOverlayContrastPolicyTests();
