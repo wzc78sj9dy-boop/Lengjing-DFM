@@ -1583,6 +1583,20 @@ bool ImGui_ImplVulkan_SetImageCount(uint32_t image_count)
     return true;
 }
 
+bool ImGui_ImplVulkan_SetImageCounts(uint32_t min_image_count, uint32_t image_count)
+{
+    ImGui_ImplVulkan_Data* bd = ImGui_ImplVulkan_GetBackendData();
+    if (bd == nullptr || min_image_count < 2 || image_count < min_image_count)
+        return false;
+    ImGui_ImplVulkan_InitInfo* v = &bd->VulkanInitInfo;
+    if (v->MinImageCount == min_image_count && v->ImageCount == image_count)
+        return true;
+    ImGui_ImplVulkan_DestroyWindowRenderBuffers(v->Device, &bd->MainWindowRenderBuffers, v->Allocator);
+    v->MinImageCount = min_image_count;
+    v->ImageCount = image_count;
+    return true;
+}
+
 // Register a texture by creating a descriptor
 // FIXME: This is experimental in the sense that we are unsure how to best design/tackle this problem, please post to https://github.com/ocornut/imgui/pull/914 if you have suggestions.
 VkDescriptorSet ImGui_ImplVulkan_AddTexture(VkSampler sampler, VkImageView image_view, VkImageLayout image_layout)

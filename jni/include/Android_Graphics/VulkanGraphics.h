@@ -33,6 +33,9 @@ private:
     void RemoveTexture(BaseTexData* texture) override;
 
     VkPhysicalDevice SetupVulkan_SelectPhysicalDevice();
+    VkResult SelectSwapchainConfiguration(
+        VkPresentModeKHR* presentMode,
+        int* minImageCount);
     std::uint32_t findMemoryType(
         std::uint32_t typeFilter,
         VkMemoryPropertyFlags properties);

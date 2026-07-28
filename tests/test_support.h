@@ -51,4 +51,5 @@ void RunThreatCatalogTests();
 void RunTrackingCalculatorTests();
 void RunTrackingPageBindingTests();
 void RunTouchTransformTests();
+void RunVulkanPresentationPolicyTests();
 void RunWorldObjectRefreshPolicyTests();

@@ -11,12 +11,25 @@
 #include <new>
 #include <unistd.h>
 
+#include "render/VulkanPresentationPolicy.h"
+
 namespace {
 
 constexpr uint64_t kFenceWaitTimeoutNs = 2ULL * 1000ULL * 1000ULL * 1000ULL;
 constexpr uint64_t kAcquireWaitTimeoutNs = 250ULL * 1000ULL * 1000ULL;
 constexpr useconds_t kFailedFrameBackoffUs = 16000;
 VkResult g_LastBackendError = VK_SUCCESS;
+
+constexpr VkPresentModeKHR ToVkPresentMode(
+    lengjing::render::VulkanPresentPreference preference) noexcept {
+    switch (preference) {
+        case lengjing::render::VulkanPresentPreference::Mailbox:
+            return VK_PRESENT_MODE_MAILBOX_KHR;
+        case lengjing::render::VulkanPresentPreference::Fifo:
+            return VK_PRESENT_MODE_FIFO_KHR;
+    }
+    return VK_PRESENT_MODE_FIFO_KHR;
+}
 
 static void check_vk_result(VkResult err) {
     if (err == VK_SUCCESS)
@@ -63,6 +76,46 @@ VkPhysicalDevice VulkanGraphics::SetupVulkan_SelectPhysicalDevice() {
     if (gpu_count > 0)
         return gpus[0];
     return VK_NULL_HANDLE;
+}
+
+VkResult VulkanGraphics::SelectSwapchainConfiguration(
+    VkPresentModeKHR* presentMode,
+    int* minImageCount) {
+    if (presentMode == nullptr || minImageCount == nullptr || wd == nullptr ||
+        wd->Surface == VK_NULL_HANDLE) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    VkSurfaceCapabilitiesKHR capabilities{};
+    VkResult err = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+        m_PhysicalDevice, wd->Surface, &capabilities);
+    if (err != VK_SUCCESS) {
+        return err;
+    }
+
+    const std::uint32_t image_count =
+        lengjing::render::ResolveVulkanSwapchainImageCount(
+            capabilities.minImageCount, capabilities.maxImageCount);
+    if (image_count < 2) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    VkPresentModeKHR present_modes[2]{};
+    int present_mode_count = 0;
+    for (const auto preference :
+         lengjing::render::kVulkanPresentPreferences) {
+        present_modes[present_mode_count++] = ToVkPresentMode(preference);
+    }
+
+    const VkPresentModeKHR selected = ImGui_ImplVulkanH_SelectPresentMode(
+        m_PhysicalDevice, wd->Surface, present_modes, present_mode_count);
+    if (selected == VK_PRESENT_MODE_MAX_ENUM_KHR) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    *presentMode = selected;
+    *minImageCount = static_cast<int>(image_count);
+    return VK_SUCCESS;
 }
 
 bool VulkanGraphics::Create() {
@@ -252,14 +305,14 @@ bool VulkanGraphics::Create() {
         if (wd->SurfaceFormat.format == VK_FORMAT_UNDEFINED)
             return fail("select surface format", VK_ERROR_FORMAT_NOT_SUPPORTED);
 
-        // Select Present Mode
-        VkPresentModeKHR present_modes[] = {
-            VK_PRESENT_MODE_FIFO_KHR,
-        };
-        wd->PresentMode = ImGui_ImplVulkanH_SelectPresentMode(m_PhysicalDevice, wd->Surface, &present_modes[0],
-                                                              IM_ARRAYSIZE(present_modes));
-        if (wd->PresentMode == VK_PRESENT_MODE_MAX_ENUM_KHR)
-            return fail("select present mode", VK_ERROR_INITIALIZATION_FAILED);
+        VkPresentModeKHR present_mode = VK_PRESENT_MODE_MAX_ENUM_KHR;
+        int min_image_count = 0;
+        err = SelectSwapchainConfiguration(
+            &present_mode, &min_image_count);
+        if (err != VK_SUCCESS)
+            return fail("select swapchain configuration", err);
+        wd->PresentMode = present_mode;
+        m_MinImageCount = min_image_count;
 
         // Create SwapChain, RenderPass, Framebuffer, etc.
         if (!ImGui_ImplVulkanH_CreateOrResizeWindow(m_Instance, m_PhysicalDevice, m_Device, m_Queue,
@@ -357,18 +410,30 @@ void VulkanGraphics::PrepareFrame(bool resize) {
     const bool size_changed = width != m_LastWidth || height != m_LastHeight;
     if (m_SwapChainRebuild || size_changed) {
         g_LastBackendError = VK_SUCCESS;
+        VkPresentModeKHR present_mode = VK_PRESENT_MODE_MAX_ENUM_KHR;
+        int min_image_count = 0;
+        VkResult result = SelectSwapchainConfiguration(
+            &present_mode, &min_image_count);
+        if (result != VK_SUCCESS) {
+            DisableRendering("select swapchain configuration", result);
+            return;
+        }
+        wd->PresentMode = present_mode;
         if (!ImGui_ImplVulkanH_CreateOrResizeWindow(m_Instance, m_PhysicalDevice, m_Device, m_Queue,
                                                     wd.get(), m_QueueFamily, m_Allocator,
-                                                    width, height, m_MinImageCount,
+                                                    width, height, min_image_count,
                                                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
                                                     kFenceWaitTimeoutNs) ||
-            !ImGui_ImplVulkan_SetImageCount(wd->ImageCount)) {
-            VkResult result = TakeBackendError();
+            !ImGui_ImplVulkan_SetImageCounts(
+                static_cast<std::uint32_t>(min_image_count),
+                wd->ImageCount)) {
+            result = TakeBackendError();
             if (result == VK_SUCCESS)
                 result = VK_ERROR_INITIALIZATION_FAILED;
             DisableRendering("rebuild swapchain", result);
             return;
         }
+        m_MinImageCount = min_image_count;
         wd->FrameIndex = 0;
         wd->SemaphoreIndex = 0;
         m_LastWidth = width;

@@ -47,6 +47,7 @@ int main() {
         RunTrackingCalculatorTests();
         RunTrackingPageBindingTests();
         RunTouchTransformTests();
+        RunVulkanPresentationPolicyTests();
         RunWorldObjectRefreshPolicyTests();
         std::cout << "all tests passed\n";
         return 0;

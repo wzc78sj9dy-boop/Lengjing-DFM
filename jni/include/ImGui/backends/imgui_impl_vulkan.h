@@ -138,6 +138,7 @@ IMGUI_IMPL_API void             ImGui_ImplVulkan_NewFrame();
 IMGUI_IMPL_API void             ImGui_ImplVulkan_RenderDrawData(ImDrawData* draw_data, VkCommandBuffer command_buffer, VkPipeline pipeline = VK_NULL_HANDLE);
 IMGUI_IMPL_API void             ImGui_ImplVulkan_SetMinImageCount(uint32_t min_image_count); // To override MinImageCount after initialization (e.g. if swap chain is recreated)
 IMGUI_IMPL_API bool             ImGui_ImplVulkan_SetImageCount(uint32_t image_count); // Caller must synchronize the queue before changing this value.
+IMGUI_IMPL_API bool             ImGui_ImplVulkan_SetImageCounts(uint32_t min_image_count, uint32_t image_count); // Caller must synchronize the queue before changing these values.
 
 // (Advanced) Use e.g. if you need to recreate pipeline without reinitializing the backend (see #8110, #8111)
 // The main window pipeline will be created by ImGui_ImplVulkan_Init() if possible (== RenderPass xor (UseDynamicRendering && PipelineRenderingCreateInfo->sType == VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR))

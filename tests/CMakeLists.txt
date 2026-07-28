@@ -48,6 +48,7 @@ add_executable(lengjing_tests
     tracking_calculator_tests.cpp
     tracking_page_binding_tests.cpp
     touch_transform_tests.cpp
+    vulkan_presentation_policy_tests.cpp
     world_object_refresh_policy_tests.cpp
     test_main.cpp
     ../jni/lib/t3/t3sdk.cpp
