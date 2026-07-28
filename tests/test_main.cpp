@@ -43,6 +43,7 @@ int main() {
         RunRuntimeExitPolicyTests();
         RunRuntimePresentationPolicyTests();
         RunRuntimeTests();
+        RunTersafePatchWorkerTests();
         RunThreatCatalogTests();
         RunTrackingCalculatorTests();
         RunTrackingPageBindingTests();
