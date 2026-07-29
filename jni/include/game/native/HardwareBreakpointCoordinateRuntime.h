@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace lengjing::game::native {
 
@@ -98,8 +100,38 @@ private:
         bool valid = false;
     };
 
+    struct CandidateObservation {
+        std::uintptr_t value = 0;
+        std::uint64_t lastSeenPoll = 0;
+        std::uint64_t lastEvaluatedPoll = 0;
+        std::uint64_t occurrences = 0;
+        std::uint64_t distantOccurrences = 0;
+        std::uint8_t qualifiedStreak = 0;
+        std::uint8_t failureStreak = 0;
+    };
+
+    struct CoordinateTableSnapshot {
+        std::unordered_map<std::uint32_t, HardwareBreakpointCoordinate>
+            coordinates;
+        std::vector<std::uint32_t> ids;
+        std::uintptr_t rawIdArray = 0;
+        std::uintptr_t idArray = 0;
+        std::uint32_t rawCount = 0;
+        std::int64_t logicalCount = -1;
+        std::size_t nonzeroIdCount = 0;
+        std::size_t exactValidCount = 0;
+        std::size_t plausibleCount = 0;
+        std::size_t evidenceCount = 0;
+        std::size_t distinctCount = 0;
+        std::size_t requiredCount = 0;
+        bool qualified = false;
+    };
+
     bool SampleRecordsBase() noexcept;
     bool SampleCandidate() noexcept;
+    void ObserveCandidate(
+        std::uintptr_t candidate,
+        std::uintptr_t x20) noexcept;
     bool ReadObservedManager(
         std::uintptr_t targetRoot,
         std::uintptr_t& manager) noexcept;
@@ -107,6 +139,24 @@ private:
         std::uintptr_t world,
         std::uintptr_t targetRoot,
         std::uintptr_t manager) noexcept;
+    bool RefreshOrderedFallbackCoordinateTable(
+        std::uintptr_t world,
+        std::uintptr_t targetRoot,
+        std::uintptr_t manager) noexcept;
+    bool ReadCoordinateTable(
+        std::uintptr_t world,
+        std::uintptr_t targetRoot,
+        std::uintptr_t manager,
+        std::uintptr_t recordsBase,
+        bool requireFallbackConfidence,
+        CoordinateTableSnapshot& snapshot) noexcept;
+    bool PublishCoordinateTable(
+        std::uintptr_t world,
+        std::uintptr_t targetRoot,
+        std::uintptr_t manager,
+        std::uintptr_t recordsBase,
+        CoordinateTableSnapshot snapshot) noexcept;
+    void ClearPublishedState() noexcept;
     void ClearConfigurationState() noexcept;
     void ClearWorldState() noexcept;
     void ClearSamplingState() noexcept;
@@ -116,14 +166,26 @@ private:
         records_{};
     std::array<SeenRecord, kExecutionBreakpointRecordLimit> seenRecords_{};
     std::array<std::uintptr_t, 10> candidateRing_{};
+    std::array<CandidateObservation, 64> candidateObservations_{};
     std::unordered_map<std::uint32_t, HardwareBreakpointCoordinate>
         coordinates_;
+    std::unordered_map<std::uint32_t, std::uint8_t>
+        coordinateMissCounts_;
+    std::unordered_set<std::uint32_t> coordinateJumpBlocks_;
     std::uintptr_t breakpointAddress_ = 0;
     std::uintptr_t recordsBase_ = 0;
+    std::uintptr_t pendingRecordsBase_ = 0;
     std::uintptr_t publishedRecordsBase_ = 0;
+    std::uintptr_t publishedTargetRoot_ = 0;
+    std::uintptr_t publishedManager_ = 0;
+    std::uintptr_t publishedIdArray_ = 0;
+    std::uintptr_t samplingTargetRoot_ = 0;
+    std::uintptr_t samplingManager_ = 0;
+    std::uintptr_t samplingIdArray_ = 0;
     std::uintptr_t world_ = 0;
     std::size_t candidateWriteIndex_ = 0;
     std::size_t candidateCount_ = 0;
+    std::uint8_t orderedRefreshFailureCount_ = 0;
     std::size_t lastTotalRecords_ = 0;
     std::uintptr_t lastHitAddress_ = 0;
     std::uint64_t pollCount_ = 0;
