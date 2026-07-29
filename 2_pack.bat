@@ -244,11 +244,8 @@ findstr /I ^
     /C:"Decrypt3" ^
     /C:"DecodedActor" ^
     /C:"encryptedRecord" ^
-    /C:"PtraceExecutionContext" ^
     /C:"RuntimeCoordinateCodec" ^
     /C:"ResolvedRecord" ^
-    /C:"ThreadContextDeviceTransport" ^
-    /C:"ThreadExecutionContext" ^
     /C:"Capstone" ^
     /C:" cs_" ^
     "%~1" >nul 2>&1

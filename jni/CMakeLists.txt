@@ -141,59 +141,7 @@ set_source_files_properties(
             "-O3;-ffast-math;-ftree-vectorize;-fno-stack-protector"
 )
 
-if(NOT CMAKE_OBJCOPY)
-    message(FATAL_ERROR "CMAKE_OBJCOPY is required for embedded modules")
-endif()
-set(LENGJING_COMPUTE_ASSET_DIRECTORY
-    "${CMAKE_CURRENT_SOURCE_DIR}/lib/coordinate")
-set(LENGJING_COMPUTE_OBJECT_DIRECTORY
-    "${CMAKE_CURRENT_BINARY_DIR}/generated/coordinate")
-set(LENGJING_COMPUTE_ASSET_NAMES
-    compute_510.ko
-    compute_515.ko
-    compute_61.ko
-    compute_66.ko
-    compute_612.ko
-)
-set(LENGJING_COMPUTE_OBJECTS)
-foreach(LENGJING_COMPUTE_ASSET_NAME IN LISTS
-        LENGJING_COMPUTE_ASSET_NAMES)
-    set(LENGJING_COMPUTE_ASSET
-        "${LENGJING_COMPUTE_ASSET_DIRECTORY}/${LENGJING_COMPUTE_ASSET_NAME}")
-    string(REPLACE "." "_" LENGJING_COMPUTE_OBJECT_NAME
-        "${LENGJING_COMPUTE_ASSET_NAME}")
-    set(LENGJING_COMPUTE_OBJECT
-        "${LENGJING_COMPUTE_OBJECT_DIRECTORY}/${LENGJING_COMPUTE_OBJECT_NAME}.o")
-    if(NOT EXISTS "${LENGJING_COMPUTE_ASSET}")
-        message(FATAL_ERROR
-            "Required embedded module is missing: ${LENGJING_COMPUTE_ASSET}")
-    endif()
-    add_custom_command(
-        OUTPUT "${LENGJING_COMPUTE_OBJECT}"
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-            "${LENGJING_COMPUTE_OBJECT_DIRECTORY}"
-        COMMAND "${CMAKE_OBJCOPY}"
-            -I binary
-            -O elf64-littleaarch64
-            -B aarch64
-            --rename-section
-            .data=.rodata,alloc,load,readonly,data,contents
-            "${LENGJING_COMPUTE_ASSET_NAME}"
-            "${LENGJING_COMPUTE_OBJECT}"
-        WORKING_DIRECTORY "${LENGJING_COMPUTE_ASSET_DIRECTORY}"
-        DEPENDS "${LENGJING_COMPUTE_ASSET}"
-        VERBATIM
-    )
-    list(APPEND LENGJING_COMPUTE_OBJECTS
-        "${LENGJING_COMPUTE_OBJECT}")
-endforeach()
-set_source_files_properties(${LENGJING_COMPUTE_OBJECTS}
-    PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
-
-add_executable(lengjing
-    ${LENGJING_SOURCES}
-    ${LENGJING_COMPUTE_OBJECTS}
-)
+add_executable(lengjing ${LENGJING_SOURCES})
 set_target_properties(lengjing PROPERTIES
     OUTPUT_NAME lengjing
     POSITION_INDEPENDENT_CODE ON

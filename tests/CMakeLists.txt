@@ -97,24 +97,24 @@ add_test(
     NAME lengjing_coordinate_stability_tests
     COMMAND lengjing_coordinate_stability_tests)
 
-add_executable(lengjing_secure_kernel_command_abi_tests
-    secure_kernel_command_abi_tests.cpp
+add_executable(lengjing_arm64_pacga_tests
+    arm64_pacga_tests.cpp
+    ../jni/src/game/native/Arm64Pacga.cpp
 )
 
-target_include_directories(
-    lengjing_secure_kernel_command_abi_tests PRIVATE
+target_include_directories(lengjing_arm64_pacga_tests PRIVATE
     ../jni/include
 )
 
 if(MSVC)
     target_compile_options(
-        lengjing_secure_kernel_command_abi_tests PRIVATE /W4 /utf-8)
+        lengjing_arm64_pacga_tests PRIVATE /W4 /utf-8)
 else()
     target_compile_options(
-        lengjing_secure_kernel_command_abi_tests PRIVATE
+        lengjing_arm64_pacga_tests PRIVATE
         -Wall -Wextra -Wpedantic)
 endif()
 
 add_test(
-    NAME lengjing_secure_kernel_command_abi_tests
-    COMMAND lengjing_secure_kernel_command_abi_tests)
+    NAME lengjing_arm64_pacga_tests
+    COMMAND lengjing_arm64_pacga_tests)

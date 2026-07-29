@@ -1,8 +1,11 @@
 #include "game/native/MemoryTransport.h"
 
+#include "game/native/Arm64Pacga.h"
 #include "game/native/KernelModuleLoader.h"
 #include "game/native/PerfExecutionBreakpoint.h"
-#include "game/native/SecureKernelClient.h"
+#include "game/native/PtraceExecutionContextProvider.h"
+#include "game/native/ThreadContextDeviceTransport.h"
+#include "game/native/ThreadExecutionContextProvider.h"
 #include "platform/PerformanceTrace.h"
 #include "paradise/paradise_api.h"
 
@@ -12,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <dirent.h>
+#include <fcntl.h>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -36,6 +40,7 @@ static_assert(HWBP_MAX_RECORDS == kExecutionBreakpointRecordLimit,
 
 constexpr std::uintptr_t kMinimumRemoteAddress = 0x10000000ULL;
 constexpr std::uintptr_t kMaximumRemoteAddress = 0x10000000000ULL;
+constexpr char kDefaultThreadContextDevice[] = "/dev/fbe775";
 
 bool IsNumericName(const char* name) {
     if (name == nullptr || *name == '\0') return false;
@@ -121,6 +126,33 @@ std::string MutableName(std::string_view value) {
     return std::string(value.begin(), value.end());
 }
 
+std::size_t ThreadContextRequestCount() {
+    const char* value = std::getenv("LENGJING_THREAD_CONTEXT_REQUEST_COUNT");
+    if (value != nullptr && std::string_view(value) == "0x400") {
+        return thread_context_device_abi::kSmallRequestCount;
+    }
+    return thread_context_device_abi::kLargeRequestCount;
+}
+
+thread_context_device_abi::WriteSuccessPolicy
+ThreadContextWriteSuccessPolicy() {
+    using thread_context_device_abi::WriteSuccessPolicy;
+    const char* value = std::getenv("LENGJING_THREAD_CONTEXT_SUCCESS");
+    if (value == nullptr || std::string_view(value) == "zero") {
+        return WriteSuccessPolicy::ExactZero;
+    }
+    if (std::string_view(value) == "count") {
+        return WriteSuccessPolicy::ExactRequestCount;
+    }
+    if (std::string_view(value) == "zero-or-count") {
+        return WriteSuccessPolicy::ZeroOrRequestCount;
+    }
+    if (std::string_view(value) == "nonnegative") {
+        return WriteSuccessPolicy::AnyNonNegative;
+    }
+    return WriteSuccessPolicy::ExactZero;
+}
+
 }  // namespace
 
 struct MemoryTransport::Impl {
@@ -133,7 +165,16 @@ struct MemoryTransport::Impl {
     MemoryTransportMode mode = MemoryTransportMode::ProcessVm;
     pid_t processId = -1;
     paradise_driver* kernel = nullptr;
-    SecureKernelClient secureKernel;
+    int threadContextFd = -1;
+    std::unique_ptr<ThreadContextDeviceTransport> threadContextTransport;
+    std::unique_ptr<ThreadExecutionContextProvider> threadContextProvider;
+    PtracePacgaOracleReader ptraceOracleReader;
+    ProcTaskThreadLocator threadLocator;
+    pid_t contextThreadId = -1;
+    std::uintptr_t contextThreadPointer = 0;
+    Arm64PacgaKey contextPacgaKey{};
+    bool contextPacgaKeyAvailable = false;
+    std::string contextThreadName;
     PerfExecutionBreakpoint perfExecutionBreakpoint;
     ExecutionBreakpointBackend executionBreakpointBackend =
         ExecutionBreakpointBackend::None;
@@ -155,7 +196,17 @@ struct MemoryTransport::Impl {
     void ResetUnlocked() noexcept {
         ++ioGeneration;
         static_cast<void>(RemoveExecutionBreakpointsUnlocked());
-        secureKernel.Close();
+        threadContextProvider.reset();
+        threadContextTransport.reset();
+        if (threadContextFd >= 0) {
+            ::close(threadContextFd);
+            threadContextFd = -1;
+        }
+        contextThreadId = -1;
+        contextThreadPointer = 0;
+        contextPacgaKey = {};
+        contextPacgaKeyAvailable = false;
+        contextThreadName.clear();
         delete kernel;
         kernel = nullptr;
         mode = MemoryTransportMode::ProcessVm;
@@ -588,60 +639,133 @@ struct MemoryTransport::Impl {
 
     std::uintptr_t ModuleBase(std::string_view moduleName) {
         std::lock_guard<std::mutex> lock(ioMutex);
-        if (!open) return 0;
-        const std::string name = MutableName(moduleName);
-        if (mode == MemoryTransportMode::KernelDriver) {
-            return kernel != nullptr
-                ? kernel->get_module_base(name.c_str())
-                : 0;
+        if (!open || processId < 1 || moduleName.empty()) return 0;
+        if (mode == MemoryTransportMode::KernelDriver &&
+            kernel != nullptr) {
+            const std::string name = MutableName(moduleName);
+            try {
+                const std::uintptr_t base =
+                    kernel->get_module_base(name.c_str());
+                if (base != 0) return base;
+            } catch (...) {
+            }
         }
-        return 0;
+
+        MappedModuleRange range{};
+        return FindMappedModuleRange(processId, moduleName, range)
+            ? range.begin
+            : 0;
     }
 
-    bool ExecutePacga(std::uint64_t data,
+    bool OpenThreadContextDeviceUnlocked(std::string_view threadName) {
+        if (threadContextProvider != nullptr &&
+            contextThreadName == threadName) {
+            return true;
+        }
+
+        threadContextProvider.reset();
+        threadContextTransport.reset();
+        if (threadContextFd >= 0) {
+            ::close(threadContextFd);
+            threadContextFd = -1;
+        }
+
+        const char* configuredDevice =
+            std::getenv("LENGJING_THREAD_CONTEXT_DEVICE");
+        const char* device = configuredDevice != nullptr &&
+                configuredDevice[0] != '\0'
+            ? configuredDevice
+            : kDefaultThreadContextDevice;
+        threadContextFd = ::open(device, O_RDWR | O_CLOEXEC);
+        if (threadContextFd < 0) return false;
+
+        const thread_context_device_abi::Profile profile{
+            threadContextFd,
+            ThreadContextRequestCount(),
+            ThreadContextWriteSuccessPolicy(),
+        };
+        threadContextTransport =
+            std::make_unique<ThreadContextDeviceTransport>(profile);
+        threadContextProvider =
+            std::make_unique<ThreadExecutionContextProvider>(
+                processId,
+                *threadContextTransport,
+                MutableName(threadName));
+        contextThreadName = MutableName(threadName);
+        return true;
+    }
+
+    bool ExecutePacga(std::uintptr_t instructionAddress,
+                      std::uint32_t instruction,
+                      std::uint64_t data,
                       std::uint64_t modifier,
                       std::uint64_t& result,
                       int& status) noexcept {
         result = 0;
         status = -EINVAL;
         std::lock_guard<std::mutex> lock(ioMutex);
-        if (!open || processId < 1) return false;
-        return secureKernel.ExecuteComputation(
-            processId,
+        if (!open || processId < 1 ||
+            instructionAddress == 0 ||
+            (instructionAddress & 3U) != 0 ||
+            (instruction & UINT32_C(0xFFE0FC00)) !=
+                UINT32_C(0x9AC03000)) {
+            return false;
+        }
+
+        if (contextPacgaKeyAvailable) {
+            result = ComputeArm64Pacga(
+                data, modifier, contextPacgaKey);
+            status = 0;
+            return true;
+        }
+        if (contextThreadId < 1) {
+            status = -ENODATA;
+            return false;
+        }
+
+        std::uint64_t fingerprint =
+            static_cast<std::uint64_t>(instructionAddress) ^
+            (static_cast<std::uint64_t>(instruction) << 32U) ^
+            UINT64_C(0xCBF29CE484222325);
+        if (fingerprint == 0) fingerprint = 1;
+        const PacgaOracleInstruction oracle{
+            instructionAddress,
             data,
             modifier,
-            result,
-            status);
-    }
+            instruction,
+            {instructionAddress, fingerprint},
+        };
+        std::uint64_t threadPointer = 0;
+        status = ptraceOracleReader.Read(
+            contextThreadId, oracle, threadPointer, result);
+        if (status == 0) {
+            contextThreadPointer =
+                static_cast<std::uintptr_t>(threadPointer);
+            return true;
+        }
 
-    bool ReadSecure(std::uintptr_t address,
-                    void* destination,
-                    std::size_t size,
-                    int& status) noexcept {
-        status = -EINVAL;
-        std::lock_guard<std::mutex> lock(ioMutex);
-        if (!open || processId < 1) return false;
-        return secureKernel.Read(
-            processId,
-            address,
-            destination,
-            size,
-            status);
-    }
-
-    std::uintptr_t ModuleBaseSecure(
-        std::string_view moduleName,
-        std::size_t& moduleSize,
-        int& status) noexcept {
-        moduleSize = 0;
-        status = -EINVAL;
-        std::lock_guard<std::mutex> lock(ioMutex);
-        if (!open || processId < 1) return 0;
-        return secureKernel.ModuleBase(
-            processId,
-            moduleName,
-            moduleSize,
-            status);
+        std::vector<TaskThreadIdentity> identities;
+        if (contextThreadName.empty() ||
+            threadLocator.FindAllExact(
+                processId, contextThreadName, identities) != 0) {
+            return false;
+        }
+        for (const TaskThreadIdentity& identity : identities) {
+            if (identity.threadId == contextThreadId) continue;
+            threadPointer = 0;
+            const int candidateStatus = ptraceOracleReader.Read(
+                identity.threadId, oracle, threadPointer, result);
+            if (candidateStatus != 0) {
+                status = candidateStatus;
+                continue;
+            }
+            contextThreadId = identity.threadId;
+            contextThreadPointer =
+                static_cast<std::uintptr_t>(threadPointer);
+            status = 0;
+            return true;
+        }
+        return false;
     }
 
     bool QueryNamedThreadTls(std::string_view name,
@@ -653,12 +777,61 @@ struct MemoryTransport::Impl {
         status = -EINVAL;
         std::lock_guard<std::mutex> lock(ioMutex);
         if (!open || processId < 1) return false;
-        return secureKernel.QueryNamedThreadTls(
-            processId,
-            name,
-            threadId,
-            tls,
-            status);
+
+        if (OpenThreadContextDeviceUnlocked(name) &&
+            threadContextProvider != nullptr) {
+            const ThreadExecutionContextRefresh refresh =
+                threadContextProvider->Refresh();
+            if (refresh.HasThreadContext()) {
+                threadId = refresh.snapshot.threadId;
+                tls = static_cast<std::uintptr_t>(
+                    refresh.snapshot.tpidrEl0);
+                contextThreadId = threadId;
+                contextThreadPointer = tls;
+                contextThreadName = MutableName(name);
+                contextPacgaKey = {
+                    refresh.snapshot.apga.low,
+                    refresh.snapshot.apga.high,
+                };
+                contextPacgaKeyAvailable =
+                    refresh.snapshot.HasPacgaKey();
+                status = 0;
+                return true;
+            }
+            status = refresh.status != 0
+                ? refresh.status
+                : refresh.pacgaStatus;
+        } else {
+            status = errno != 0 ? -errno : -ENODEV;
+        }
+
+        std::vector<TaskThreadIdentity> identities;
+        const int locateStatus =
+            threadLocator.FindAllExact(processId, name, identities);
+        if (locateStatus != 0) {
+            status = locateStatus;
+            return false;
+        }
+        for (const TaskThreadIdentity& identity : identities) {
+            std::uint64_t threadPointer = 0;
+            const int candidateStatus =
+                ptraceOracleReader.ReadThreadPointer(
+                    identity.threadId, threadPointer);
+            if (candidateStatus != 0) {
+                status = candidateStatus;
+                continue;
+            }
+            threadId = identity.threadId;
+            tls = static_cast<std::uintptr_t>(threadPointer);
+            contextThreadId = threadId;
+            contextThreadPointer = tls;
+            contextThreadName = MutableName(name);
+            contextPacgaKey = {};
+            contextPacgaKeyAvailable = false;
+            status = 0;
+            return true;
+        }
+        return false;
     }
 
     bool QueryThreadStack(pid_t threadId,
@@ -671,25 +844,35 @@ struct MemoryTransport::Impl {
         status = -EINVAL;
         std::lock_guard<std::mutex> lock(ioMutex);
         if (!open || processId < 1 || threadId < 1) return false;
-        return secureKernel.QueryThreadStack(
-            threadId,
-            expectedTls,
-            low,
-            high,
-            status);
-    }
 
-    bool CaptureExecutionState(
-        pid_t threadId,
-        const SecureExecutionCapturePlan& plan,
-        SecureExecutionCaptureResult& result,
-        int& status) noexcept {
-        result = {};
-        status = -EINVAL;
-        std::lock_guard<std::mutex> lock(ioMutex);
-        if (!open || processId < 1 || threadId < 1) return false;
-        return secureKernel.CaptureExecutionState(
-            threadId, plan, result, status);
+        const std::string path =
+            "/proc/" + std::to_string(processId) + "/maps";
+        std::ifstream maps(path);
+        if (!maps) {
+            status = errno != 0 ? -errno : -EIO;
+            return false;
+        }
+        const std::string marker =
+            "[anon:stack_and_tls:" + std::to_string(threadId) + "]";
+        std::string line;
+        while (std::getline(maps, line)) {
+            if (line.find(marker) == std::string::npos) continue;
+            unsigned long long begin = 0;
+            unsigned long long end = 0;
+            if (std::sscanf(
+                    line.c_str(), "%llx-%llx", &begin, &end) != 2 ||
+                end <= begin ||
+                expectedTls < begin ||
+                expectedTls >= end) {
+                continue;
+            }
+            low = static_cast<std::uintptr_t>(begin);
+            high = static_cast<std::uintptr_t>(end);
+            status = 0;
+            return true;
+        }
+        status = -ENOENT;
+        return false;
     }
 
     bool IsOpen() const noexcept {
@@ -778,32 +961,9 @@ std::size_t MemoryTransport::ReadBatch(
         : 0;
 }
 
-bool MemoryTransport::ReadSecure(
-    std::uintptr_t address,
-    void* destination,
-    std::size_t size,
-    int& status) noexcept {
-    if (impl_ == nullptr) {
-        status = -EINVAL;
-        return false;
-    }
-    return impl_->ReadSecure(address, destination, size, status);
-}
-
-std::uintptr_t MemoryTransport::ModuleBaseSecure(
-    std::string_view moduleName,
-    std::size_t& moduleSize,
-    int& status) noexcept {
-    if (impl_ == nullptr) {
-        moduleSize = 0;
-        status = -EINVAL;
-        return 0;
-    }
-    return impl_->ModuleBaseSecure(
-        moduleName, moduleSize, status);
-}
-
-bool MemoryTransport::ExecutePacga(std::uint64_t data,
+bool MemoryTransport::ExecutePacga(std::uintptr_t instructionAddress,
+                                   std::uint32_t instruction,
+                                   std::uint64_t data,
                                    std::uint64_t modifier,
                                    std::uint64_t& result,
                                    int& status) noexcept {
@@ -813,6 +973,8 @@ bool MemoryTransport::ExecutePacga(std::uint64_t data,
         return false;
     }
     return impl_->ExecutePacga(
+        instructionAddress,
+        instruction,
         data,
         modifier,
         result,
@@ -852,20 +1014,6 @@ bool MemoryTransport::QueryNamedThreadTls(
     }
     return impl_->QueryNamedThreadTls(
         name, threadId, tls, status);
-}
-
-bool MemoryTransport::CaptureExecutionState(
-    pid_t threadId,
-    const SecureExecutionCapturePlan& plan,
-    SecureExecutionCaptureResult& result,
-    int& status) noexcept {
-    if (impl_ == nullptr) {
-        result = {};
-        status = -EINVAL;
-        return false;
-    }
-    return impl_->CaptureExecutionState(
-        threadId, plan, result, status);
 }
 
 #if LENGJING_ENABLE_PROJECTILE_TRACKING

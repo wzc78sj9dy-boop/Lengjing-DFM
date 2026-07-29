@@ -1,7 +1,6 @@
 #include "game/native/SceneTransformRuntime.h"
 
 #include "game/native/MemoryTransport.h"
-#include "game/native/SecureKernelClient.h"
 
 #include <unicorn/unicorn.h>
 
@@ -598,8 +597,7 @@ struct SceneTransformRuntime::Impl {
             std::lock_guard<std::mutex> lock(mutex);
             initialized = ready;
             probe.contextReady = ready;
-            probe.metadataReady =
-                metadata.valid && capture.metadataCaptured;
+            probe.metadataReady = metadata.valid;
             probe.error = initError;
             probe.systemError = initStatus;
             probe.stackLow = stackLow;
@@ -663,6 +661,12 @@ struct SceneTransformRuntime::Impl {
             return false;
         }
 
+        if (!ResolveInvocation(invocation)) {
+            error = SceneTransformError::InvocationUnavailable;
+            status = lastReadStatus;
+            return false;
+        }
+        static_cast<void>(ReadMetadata(metadata));
         if (!transport->QueryNamedThreadTls(
                 "GameThread", threadId, threadPointer, status)) {
             error = SceneTransformError::ThreadContextUnavailable;
@@ -675,30 +679,6 @@ struct SceneTransformRuntime::Impl {
         }
         if (!ResolveStackArena(*transport, status)) {
             error = SceneTransformError::ThreadContextUnavailable;
-            return false;
-        }
-        if (!ResolveInvocation(invocation)) {
-            error = SceneTransformError::InvocationUnavailable;
-            status = lastReadStatus;
-            return false;
-        }
-        static_cast<void>(ReadMetadata(metadata));
-        const SecureExecutionCapturePlan capturePlan{
-            invocation.entryPc,
-            metadata.callPc,
-            metadata.postLoadPc,
-            metadata.storedRegister,
-            metadata.loadedRegister,
-            profile.initialFpsr,
-            profile.initialFpcr,
-            metadata.valid,
-        };
-        if (!transport->CaptureExecutionState(
-                threadId,
-                capturePlan,
-                capture,
-                status)) {
-            error = SceneTransformError::MetadataUnavailable;
             return false;
         }
         if (!OpenEngine()) {
@@ -717,13 +697,12 @@ struct SceneTransformRuntime::Impl {
         std::uintptr_t address,
         void* destination,
         std::size_t size) noexcept {
-        int status = 0;
         if (memory != nullptr &&
-            memory->ReadSecure(address, destination, size, status)) {
+            memory->Read(address, destination, size)) {
             lastReadStatus = 0;
             return true;
         }
-        lastReadStatus = status;
+        lastReadStatus = -EIO;
         return false;
     }
 
@@ -829,7 +808,11 @@ struct SceneTransformRuntime::Impl {
                 status)) {
             return false;
         }
-        return SelectStackArena(low, high, kFallbackArenaMask);
+        if (SelectStackArena(low, high, kFallbackArenaMask)) {
+            return true;
+        }
+        status = -ERANGE;
+        return false;
     }
 
     bool ResolveInvocation(
@@ -1088,12 +1071,6 @@ struct SceneTransformRuntime::Impl {
         seekValues.clear();
         callTrace.clear();
         pendingMapLearn = {};
-        if (capture.metadataCaptured &&
-            capture.storedValue != 0 &&
-            capture.loadedValue != 0) {
-            capturedValues[capture.storedValue] =
-                capture.loadedValue;
-        }
     }
 
     void CloseEngine() noexcept {
@@ -1133,10 +1110,8 @@ struct SceneTransformRuntime::Impl {
         externalCalls.clear();
         void* libc = dlopen("libc.so", RTLD_NOW | RTLD_LOCAL);
         if (libc == nullptr) return;
-        std::size_t targetSize = 0;
-        int status = 0;
         const std::uintptr_t targetBase =
-            transport.ModuleBaseSecure("libc.so", targetSize, status);
+            transport.ModuleBase("libc.so");
         for (const auto& [name, kind] : kExternalCalls) {
             void* symbol = dlsym(libc, std::string(name).c_str());
             if (symbol == nullptr || targetBase == 0) continue;
@@ -1334,8 +1309,8 @@ struct SceneTransformRuntime::Impl {
         const std::uint64_t sp = context;
         const std::uint64_t pc = invocation.entryPc;
         const std::uint64_t pstate = UINT64_C(0x40000000);
-        const std::uint64_t fpsr = capture.fpsr;
-        const std::uint64_t fpcr = capture.fpcr;
+        const std::uint64_t fpsr = profile.initialFpsr;
+        const std::uint64_t fpcr = profile.initialFpcr;
         if (uc_reg_write(engine, UC_ARM64_REG_X0, &x0) != UC_ERR_OK ||
             uc_reg_write(engine, UC_ARM64_REG_X1, &x1) != UC_ERR_OK ||
             uc_reg_write(engine, UC_ARM64_REG_X29, &x29) != UC_ERR_OK ||
@@ -1391,6 +1366,8 @@ struct SceneTransformRuntime::Impl {
             activeMapHits = 0;
             activeMapLearns = 0;
             activeRetryDiagnostic = 0;
+            capturedValues.clear();
+            auxiliaryValues.clear();
             seekValues.clear();
             callTrace.clear();
             pendingMapLearn = {};
@@ -2389,7 +2366,12 @@ struct SceneTransformRuntime::Impl {
         ++activePacgaCalls;
         if (memory == nullptr ||
             !memory->ExecutePacga(
-                data, modifierValue, result, status)) {
+                address,
+                instruction,
+                data,
+                modifierValue,
+                result,
+                status)) {
             FailExecution(
                 SceneTransformError::PacgaUnavailable,
                 status);
@@ -2687,7 +2669,6 @@ struct SceneTransformRuntime::Impl {
 
     SceneTransformInvocation invocation{};
     Metadata metadata{};
-    SecureExecutionCaptureResult capture{};
     std::uintptr_t stackLow = kSyntheticStackLow;
     std::uintptr_t stackHigh = kSyntheticStackHigh;
     pid_t threadId = -1;
