@@ -97,6 +97,39 @@ ImU32 BlendColor(ImU32 start, ImU32 end, float amount) {
         Lerp(first.w, second.w, clamped)));
 }
 
+std::array<ImVec2, 8> ChamferedPanelPoints(
+    const ImVec2& minimum,
+    const ImVec2& maximum,
+    float cut) {
+    const float safeCut = std::clamp(
+        cut,
+        0.0f,
+        std::max(
+            0.0f,
+            std::min(maximum.x - minimum.x, maximum.y - minimum.y) * 0.5f));
+    return {
+        ImVec2(minimum.x + safeCut, minimum.y),
+        ImVec2(maximum.x - safeCut, minimum.y),
+        ImVec2(maximum.x, minimum.y + safeCut),
+        ImVec2(maximum.x, maximum.y - safeCut),
+        ImVec2(maximum.x - safeCut, maximum.y),
+        ImVec2(minimum.x + safeCut, maximum.y),
+        ImVec2(minimum.x, maximum.y - safeCut),
+        ImVec2(minimum.x, minimum.y + safeCut),
+    };
+}
+
+std::array<ImVec2, 8> OffsetPanelPoints(
+    const std::array<ImVec2, 8>& points,
+    const ImVec2& offset) {
+    std::array<ImVec2, 8> shifted = points;
+    for (ImVec2& point : shifted) {
+        point.x += offset.x;
+        point.y += offset.y;
+    }
+    return shifted;
+}
+
 }  // namespace
 
 AppController::AppController(AppOptions options)
@@ -443,58 +476,181 @@ void AppController::DrawToastNotifications(ImDrawList* drawList) {
 
     const RenderStyle& style = renderer_.Style();
     ImFont* font = ImGui::GetFont();
-    const float fontSize = std::max(12.0f, style.metrics.smallFontSize);
-    const float margin = std::clamp(screenWidth * 0.018f, 12.0f, 28.0f);
-    const float spacing = 8.0f;
-    const float paddingX = 13.0f;
-    const float paddingY = 10.0f;
-    const float accentWidth = 3.0f;
-    const float maximumWidth = std::clamp(screenWidth * 0.34f, 220.0f, 390.0f);
-    const float contentWidth = maximumWidth - paddingX * 2.0f - accentWidth;
+    if (font == nullptr) {
+        return;
+    }
+
+    constexpr ImU32 kIndigoShadow = IM_COL32(2, 3, 15, 230);
+    constexpr ImU32 kIndigoShell = IM_COL32(10, 12, 38, 246);
+    constexpr ImU32 kIndigoRaised = IM_COL32(22, 24, 64, 244);
+    constexpr ImU32 kIndigoBorder = IM_COL32(72, 82, 132, 230);
+    constexpr ImU32 kElectricCyan = IM_COL32(52, 230, 255, 255);
+    constexpr ImU32 kSignalMagenta = IM_COL32(242, 77, 214, 255);
+    constexpr ImU32 kSignalAmber = IM_COL32(255, 190, 70, 255);
+    constexpr ImU32 kColdText = IM_COL32(232, 241, 255, 255);
+
+    const float scale = std::clamp(
+        std::min(screenWidth, screenHeight) / 1080.0f, 0.78f, 1.28f);
+    const float fontSize = std::max(
+        13.0f, style.metrics.smallFontSize * std::clamp(scale, 0.9f, 1.16f));
+    const float margin = std::clamp(
+        screenWidth * 0.018f, 14.0f * scale, 30.0f * scale);
+    const float spacing = 10.0f * scale;
+    const float paddingX = 14.0f * scale;
+    const float paddingY = 12.0f * scale;
+    const float markerColumn = 31.0f * scale;
+    const float availableWidth = std::max(120.0f, screenWidth - margin * 2.0f);
+    const float maximumWidth = std::min(
+        availableWidth,
+        std::clamp(screenWidth * 0.36f, 280.0f * scale, 460.0f * scale));
+    const float minimumWidth = std::min(maximumWidth, 260.0f * scale);
+    const float contentWidth = std::max(
+        40.0f, maximumWidth - paddingX * 2.0f - markerColumn);
     float bottom = screenHeight - margin;
 
     for (auto notification = notifications.rbegin();
          notification != notifications.rend(); ++notification) {
         const float secondsLeft =
             std::chrono::duration<float>(notification->expiresAt - now).count();
-        const float opacity = std::clamp(secondsLeft / 0.4f, 0.0f, 1.0f);
+        const float age =
+            std::chrono::duration<float>(now - notification->refreshedAt).count();
+        const float enterProgress = SmoothStep01(age / 0.20f);
+        const float exitProgress = SmoothStep01(secondsLeft / 0.38f);
+        const float opacity = std::min(enterProgress, exitProgress);
+        if (opacity <= 0.001f) {
+            continue;
+        }
         const ImVec2 textSize = font->CalcTextSizeA(
             fontSize, std::numeric_limits<float>::max(), contentWidth,
             notification->message.c_str());
-        const float panelWidth = std::min(
-            maximumWidth, textSize.x + paddingX * 2.0f + accentWidth);
-        const float panelHeight = textSize.y + paddingY * 2.0f;
+        const float panelWidth = std::clamp(
+            textSize.x + paddingX * 2.0f + markerColumn,
+            minimumWidth,
+            maximumWidth);
+        const float panelHeight = std::max(
+            58.0f * scale, textSize.y + paddingY * 2.0f + 5.0f * scale);
+        const float slideOffset = (1.0f - enterProgress) * 28.0f * scale;
         const ImVec2 minimum{
-            screenWidth - margin - panelWidth,
+            screenWidth - margin - panelWidth + slideOffset,
             bottom - panelHeight,
         };
         const ImVec2 maximum{
-            screenWidth - margin,
+            screenWidth - margin + slideOffset,
             bottom,
         };
+        const float cut = 8.0f * scale;
+        const std::array<ImVec2, 8> panel =
+            ChamferedPanelPoints(minimum, maximum, cut);
+        const std::array<ImVec2, 8> shadow = OffsetPanelPoints(
+            panel, ImVec2(4.0f * scale, 5.0f * scale));
 
-        drawList->AddRectFilled(
-            ImVec2(minimum.x + 2.0f, minimum.y + 3.0f),
-            ImVec2(maximum.x + 2.0f, maximum.y + 3.0f),
-            WithOpacity(style.colors.shadow, opacity),
-            style.metrics.panelRounding);
-        drawList->AddRectFilled(
-            minimum, maximum,
-            WithOpacity(style.colors.surfaceRaised, opacity),
-            style.metrics.panelRounding);
-        drawList->AddRectFilled(
-            minimum,
-            ImVec2(minimum.x + accentWidth, maximum.y),
-            WithOpacity(style.colors.accent, opacity),
-            style.metrics.panelRounding);
-        drawList->AddRect(
-            minimum, maximum, WithOpacity(style.colors.border, opacity),
-            style.metrics.panelRounding, 0, 1.0f);
+        drawList->AddConvexPolyFilled(
+            shadow.data(),
+            static_cast<int>(shadow.size()),
+            WithOpacity(kIndigoShadow, opacity * 0.78f));
+        drawList->AddConvexPolyFilled(
+            panel.data(),
+            static_cast<int>(panel.size()),
+            WithOpacity(kIndigoShell, opacity));
+        const ImVec2 insetMinimum{
+            minimum.x + 2.0f * scale,
+            minimum.y + 2.0f * scale};
+        const ImVec2 insetMaximum{
+            maximum.x - 2.0f * scale,
+            maximum.y - 2.0f * scale};
+        const std::array<ImVec2, 8> inset = ChamferedPanelPoints(
+            insetMinimum, insetMaximum, std::max(0.0f, cut - 2.0f * scale));
+        drawList->AddConvexPolyFilled(
+            inset.data(),
+            static_cast<int>(inset.size()),
+            WithOpacity(kIndigoRaised, opacity * 0.56f));
+        drawList->AddPolyline(
+            panel.data(),
+            static_cast<int>(panel.size()),
+            WithOpacity(kIndigoBorder, opacity),
+            ImDrawFlags_Closed,
+            std::max(1.0f, 1.2f * scale));
+
+        const float railY = minimum.y + 2.0f * scale;
+        const float railMiddle = Lerp(
+            minimum.x + cut,
+            maximum.x - cut,
+            0.56f);
+        drawList->AddLine(
+            ImVec2(minimum.x + cut, railY),
+            ImVec2(railMiddle, railY),
+            WithOpacity(kElectricCyan, opacity),
+            std::max(1.0f, 2.0f * scale));
+        drawList->AddLine(
+            ImVec2(railMiddle, railY),
+            ImVec2(maximum.x - cut, railY),
+            WithOpacity(kSignalMagenta, opacity),
+            std::max(1.0f, 2.0f * scale));
+
+        const ImVec2 markerCenter{
+            minimum.x + paddingX + 8.0f * scale,
+            minimum.y + panelHeight * 0.5f - 1.0f * scale};
+        const float markerRadius = 7.0f * scale;
+        const std::array<ImVec2, 4> marker{
+            ImVec2(markerCenter.x, markerCenter.y - markerRadius),
+            ImVec2(markerCenter.x + markerRadius, markerCenter.y),
+            ImVec2(markerCenter.x, markerCenter.y + markerRadius),
+            ImVec2(markerCenter.x - markerRadius, markerCenter.y),
+        };
+        drawList->AddConvexPolyFilled(
+            marker.data(),
+            static_cast<int>(marker.size()),
+            WithOpacity(kElectricCyan, opacity * 0.16f));
+        drawList->AddPolyline(
+            marker.data(),
+            static_cast<int>(marker.size()),
+            WithOpacity(kElectricCyan, opacity),
+            ImDrawFlags_Closed,
+            std::max(1.0f, 1.4f * scale));
+        drawList->AddCircleFilled(
+            markerCenter,
+            std::max(1.5f, 2.2f * scale),
+            WithOpacity(kSignalMagenta, opacity));
+
+        const float dividerX = minimum.x + paddingX + markerColumn - 5.0f * scale;
+        drawList->AddLine(
+            ImVec2(dividerX, minimum.y + 12.0f * scale),
+            ImVec2(dividerX, maximum.y - 12.0f * scale),
+            WithOpacity(kSignalAmber, opacity * 0.62f),
+            std::max(1.0f, scale));
         drawList->AddText(
             font, fontSize,
-            ImVec2(minimum.x + paddingX + accentWidth, minimum.y + paddingY),
-            WithOpacity(style.colors.text, opacity),
+            ImVec2(
+                minimum.x + paddingX + markerColumn,
+                minimum.y + (panelHeight - textSize.y) * 0.5f - 1.0f * scale),
+            WithOpacity(kColdText, opacity),
             notification->message.c_str(), nullptr, contentWidth);
+
+        const float lifetime = std::max(
+            0.001f, std::chrono::duration<float>(kToastLifetime).count());
+        const float remaining = std::clamp(secondsLeft / lifetime, 0.0f, 1.0f);
+        const float trackLeft = minimum.x + paddingX + markerColumn;
+        const float trackRight = maximum.x - paddingX;
+        const float trackY = maximum.y - 7.0f * scale;
+        drawList->AddRectFilled(
+            ImVec2(trackLeft, trackY),
+            ImVec2(trackRight, trackY + 2.0f * scale),
+            WithOpacity(kIndigoBorder, opacity * 0.55f));
+        const float progressRight = Lerp(trackLeft, trackRight, remaining);
+        if (progressRight > trackLeft) {
+            drawList->AddRectFilledMultiColor(
+                ImVec2(trackLeft, trackY),
+                ImVec2(progressRight, trackY + 2.0f * scale),
+                WithOpacity(kElectricCyan, opacity),
+                WithOpacity(kSignalMagenta, opacity),
+                WithOpacity(kSignalMagenta, opacity),
+                WithOpacity(kElectricCyan, opacity));
+        }
+        drawList->AddTriangleFilled(
+            ImVec2(maximum.x - cut, maximum.y),
+            ImVec2(maximum.x, maximum.y - cut),
+            ImVec2(maximum.x - cut, maximum.y - cut),
+            WithOpacity(kSignalAmber, opacity * 0.82f));
 
         bottom = minimum.y - spacing;
         if (bottom <= margin) {
@@ -768,12 +924,22 @@ void AppController::DrawPopulation(const game::GameFrame& frame,
     }
 
     ImGuiIO& io = ImGui::GetIO();
-    const RenderStyle& style = renderer_.Style();
     ImFont* font = ImGui::GetFont();
     if (font == nullptr) {
         return;
     }
     populationDrawnThisFrame_ = true;
+
+    constexpr ImU32 kIndigoShadow = IM_COL32(2, 3, 16, 230);
+    constexpr ImU32 kIndigoShell = IM_COL32(9, 11, 36, 244);
+    constexpr ImU32 kIndigoRaised = IM_COL32(24, 25, 65, 246);
+    constexpr ImU32 kIndigoHover = IM_COL32(31, 32, 78, 248);
+    constexpr ImU32 kIndigoBorder = IM_COL32(70, 80, 132, 235);
+    constexpr ImU32 kElectricCyan = IM_COL32(49, 229, 255, 255);
+    constexpr ImU32 kSignalMagenta = IM_COL32(244, 72, 216, 255);
+    constexpr ImU32 kSignalAmber = IM_COL32(255, 188, 66, 255);
+    constexpr ImU32 kColdText = IM_COL32(229, 241, 255, 255);
+    constexpr ImU32 kMagentaText = IM_COL32(255, 193, 240, 255);
 
     const float screenWidth = static_cast<float>(model_.runtime.screenWidth);
     const float screenHeight = static_cast<float>(model_.runtime.screenHeight);
@@ -788,27 +954,36 @@ void AppController::DrawPopulation(const game::GameFrame& frame,
         safePadding.y,
         std::clamp(screenHeight * 0.014f, 10.0f * scale, 26.0f * scale));
 
-    char statusText[64]{};
+    char playerText[32]{};
+    char botText[32]{};
     std::snprintf(
-        statusText, sizeof(statusText),
-        "玩家 %d  ·  人机 %d", frame.playerCount, frame.botCount);
-    const float fontSize = std::clamp(20.0f * scale, 16.0f, 27.0f);
-    const ImVec2 textSize = font->CalcTextSizeA(
+        playerText, sizeof(playerText), "玩家 %d", frame.playerCount);
+    std::snprintf(botText, sizeof(botText), "人机 %d", frame.botCount);
+    const float fontSize = std::clamp(19.0f * scale, 16.0f, 26.0f);
+    const ImVec2 playerTextSize = font->CalcTextSizeA(
         fontSize,
         std::numeric_limits<float>::max(),
         0.0f,
-        statusText);
-    const float paddingX = 18.0f * scale;
-    const float paddingY = 8.0f * scale;
-    const float dotRadius = 4.0f * scale;
-    const float contentGap = 11.0f * scale;
-    const float panelHeight = std::ceil(textSize.y + paddingY * 2.0f);
+        playerText);
+    const ImVec2 botTextSize = font->CalcTextSizeA(
+        fontSize,
+        std::numeric_limits<float>::max(),
+        0.0f,
+        botText);
+    const float paddingX = 17.0f * scale;
+    const float paddingY = 10.0f * scale;
+    const float markerSpan = 13.0f * scale;
+    const float markerGap = 11.0f * scale;
+    const float segmentGap = 24.0f * scale;
+    const float panelHeight = std::ceil(
+        std::max(playerTextSize.y, botTextSize.y) + paddingY * 2.0f);
     const float maximumWidth = std::max(
         1.0f, screenWidth - safeMarginX * 2.0f);
     const float minimumWidth = std::min(
-        maximumWidth, panelHeight * 2.4f);
+        maximumWidth, panelHeight * 4.0f);
     const float targetWidth = std::clamp(
-        textSize.x + paddingX * 2.0f + dotRadius * 2.0f + contentGap,
+        playerTextSize.x + botTextSize.x +
+            paddingX * 2.0f + markerSpan + markerGap + segmentGap,
         minimumWidth,
         maximumWidth);
     if (populationWidth_ < 0.0f) {
@@ -953,111 +1128,196 @@ void AppController::DrawPopulation(const game::GameFrame& frame,
     populationHover_ = Approach(
         populationHover_, hovered ? 1.0f : 0.0f, 14.0f, io.DeltaTime);
 
-    const float rounding = panelHeight * 0.5f;
     const float opacity = std::clamp(populationAlpha_, 0.0f, 1.0f);
     const ImU32 panelColor = BlendColor(
-        style.colors.surfaceRaised,
-        style.colors.surfaceSoft,
-        populationHover_ * 0.34f + populationPress_ * 0.20f);
-    const ImU32 borderColor = BlendColor(
-        style.colors.border,
-        style.colors.accent,
+        kIndigoShell,
+        BlendColor(kIndigoRaised, kIndigoHover, populationHover_),
         std::clamp(
-            populationHover_ * 0.52f +
-                populationPulse_ * 0.78f +
-                populationPress_ * 0.24f,
+            populationHover_ * 0.58f + populationPress_ * 0.30f,
+            0.0f,
+            1.0f));
+    const ImU32 borderColor = BlendColor(
+        kIndigoBorder,
+        BlendColor(kElectricCyan, kSignalMagenta, populationHover_ * 0.68f),
+        std::clamp(
+            0.22f +
+                populationHover_ * 0.48f +
+                populationPulse_ * 0.70f +
+                populationPress_ * 0.18f,
             0.0f,
             1.0f));
 
-    drawList->AddRectFilled(
-        ImVec2(panelMinimum.x + 2.0f * scale,
-               panelMinimum.y + 4.0f * scale),
-        ImVec2(panelMaximum.x + 2.0f * scale,
-               panelMaximum.y + 4.0f * scale),
-        WithOpacity(style.colors.shadow, opacity * 0.62f),
-        rounding);
-    drawList->AddRectFilled(
-        panelMinimum,
-        panelMaximum,
-        WithOpacity(panelColor, opacity),
-        rounding);
+    const float cut = 7.0f * scale;
+    const std::array<ImVec2, 8> panel =
+        ChamferedPanelPoints(panelMinimum, panelMaximum, cut);
+    const std::array<ImVec2, 8> shadow = OffsetPanelPoints(
+        panel, ImVec2(3.0f * scale, 4.0f * scale));
+    drawList->AddConvexPolyFilled(
+        shadow.data(),
+        static_cast<int>(shadow.size()),
+        WithOpacity(kIndigoShadow, opacity * 0.75f));
+    drawList->AddConvexPolyFilled(
+        panel.data(),
+        static_cast<int>(panel.size()),
+        WithOpacity(panelColor, opacity));
+
+    const float upperRailY = panelMinimum.y + 2.0f * scale;
+    const float lowerRailY = panelMaximum.y - 2.0f * scale;
+    const float railCenter = centerX;
+    drawList->AddLine(
+        ImVec2(panelMinimum.x + cut, upperRailY),
+        ImVec2(railCenter, upperRailY),
+        WithOpacity(kElectricCyan, opacity * 0.90f),
+        std::max(1.0f, 1.8f * scale));
+    drawList->AddLine(
+        ImVec2(railCenter, upperRailY),
+        ImVec2(panelMaximum.x - cut, upperRailY),
+        WithOpacity(kSignalMagenta, opacity * 0.90f),
+        std::max(1.0f, 1.8f * scale));
+    drawList->AddLine(
+        ImVec2(panelMinimum.x + cut, lowerRailY),
+        ImVec2(railCenter, lowerRailY),
+        WithOpacity(kSignalMagenta, opacity * 0.32f),
+        std::max(1.0f, scale));
+    drawList->AddLine(
+        ImVec2(railCenter, lowerRailY),
+        ImVec2(panelMaximum.x - cut, lowerRailY),
+        WithOpacity(kElectricCyan, opacity * 0.32f),
+        std::max(1.0f, scale));
+
     if (populationPulse_ > 0.01f) {
-        drawList->AddRect(
-            panelMinimum,
-            panelMaximum,
+        drawList->AddPolyline(
+            panel.data(),
+            static_cast<int>(panel.size()),
             WithOpacity(
-                style.colors.accent,
-                opacity * populationPulse_ * 0.68f),
-            rounding,
-            0,
-            std::max(1.0f, (1.0f + populationPulse_ * 1.8f) * scale));
+                kSignalAmber,
+                opacity * populationPulse_ * 0.82f),
+            ImDrawFlags_Closed,
+            std::max(1.0f, (1.0f + populationPulse_ * 1.6f) * scale));
     }
-    drawList->AddRect(
-        panelMinimum,
-        panelMaximum,
+    drawList->AddPolyline(
+        panel.data(),
+        static_cast<int>(panel.size()),
         WithOpacity(borderColor, opacity),
-        rounding,
-        0,
+        ImDrawFlags_Closed,
         std::max(1.0f, 1.25f * scale));
 
     const float popFontSize =
-        fontSize * (1.0f + populationPulse_ * 0.065f);
-    const ImVec2 popTextSize = font->CalcTextSizeA(
+        fontSize * (1.0f + populationPulse_ * 0.055f);
+    const ImVec2 popPlayerSize = font->CalcTextSizeA(
         popFontSize,
         std::numeric_limits<float>::max(),
         0.0f,
-        statusText);
+        playerText);
+    const ImVec2 popBotSize = font->CalcTextSizeA(
+        popFontSize,
+        std::numeric_limits<float>::max(),
+        0.0f,
+        botText);
     const float groupWidth =
-        dotRadius * 2.0f + contentGap + popTextSize.x;
+        markerSpan + markerGap + popPlayerSize.x + segmentGap + popBotSize.x;
     const float contentStart = centerX - groupWidth * 0.5f;
     const float contentOffsetY =
         populationPress_ * scale - populationPulse_ * 1.5f * scale;
-    const ImVec2 dotCenter{
-        contentStart + dotRadius,
+    const ImVec2 markerCenter{
+        contentStart + markerSpan * 0.5f,
         panelMinimum.y + panelHeight * 0.5f + contentOffsetY};
+
     drawList->PushClipRect(panelMinimum, panelMaximum, true);
-    drawList->AddCircleFilled(
-        dotCenter,
-        dotRadius + 3.0f * scale,
+    const float markerRadius = 5.0f * scale;
+    const std::array<ImVec2, 4> marker{
+        ImVec2(markerCenter.x, markerCenter.y - markerRadius),
+        ImVec2(markerCenter.x + markerRadius, markerCenter.y),
+        ImVec2(markerCenter.x, markerCenter.y + markerRadius),
+        ImVec2(markerCenter.x - markerRadius, markerCenter.y),
+    };
+    drawList->AddConvexPolyFilled(
+        marker.data(),
+        static_cast<int>(marker.size()),
         WithOpacity(
-            style.colors.accent,
-            opacity * (0.08f + populationPulse_ * 0.16f)));
+            model_.visible ? kElectricCyan : kSignalAmber,
+            opacity * (0.20f + populationPulse_ * 0.20f)));
+    drawList->AddPolyline(
+        marker.data(),
+        static_cast<int>(marker.size()),
+        WithOpacity(
+            model_.visible ? kElectricCyan : kSignalAmber,
+            opacity),
+        ImDrawFlags_Closed,
+        std::max(1.0f, 1.2f * scale));
     drawList->AddCircleFilled(
-        dotCenter,
-        dotRadius,
-        WithOpacity(style.colors.accent, opacity));
-    const ImVec2 textPosition{
-        contentStart + dotRadius * 2.0f + contentGap,
+        markerCenter,
+        std::max(1.2f, 1.8f * scale),
+        WithOpacity(kSignalMagenta, opacity));
+
+    const ImVec2 playerPosition{
+        contentStart + markerSpan + markerGap,
         panelMinimum.y +
-            (panelHeight - popTextSize.y) * 0.5f +
+            (panelHeight - popPlayerSize.y) * 0.5f +
             contentOffsetY};
+    const float dividerX =
+        playerPosition.x + popPlayerSize.x + segmentGap * 0.5f;
+    const ImVec2 botPosition{
+        dividerX + segmentGap * 0.5f,
+        panelMinimum.y +
+            (panelHeight - popBotSize.y) * 0.5f +
+            contentOffsetY};
+    drawList->AddLine(
+        ImVec2(
+            dividerX,
+            panelMinimum.y + 11.0f * scale + contentOffsetY),
+        ImVec2(
+            dividerX,
+            panelMaximum.y - 11.0f * scale + contentOffsetY),
+        WithOpacity(kSignalAmber, opacity * 0.74f),
+        std::max(1.0f, 1.2f * scale));
+
     drawList->AddText(
         font,
         popFontSize,
-        ImVec2(textPosition.x + scale, textPosition.y + scale),
-        WithOpacity(style.colors.shadow, opacity * 0.52f),
-        statusText);
+        ImVec2(playerPosition.x + scale, playerPosition.y + scale),
+        WithOpacity(kIndigoShadow, opacity * 0.72f),
+        playerText);
     drawList->AddText(
         font,
         popFontSize,
-        textPosition,
-        WithOpacity(style.colors.text, opacity),
-        statusText);
+        playerPosition,
+        WithOpacity(kColdText, opacity),
+        playerText);
+    drawList->AddText(
+        font,
+        popFontSize,
+        ImVec2(botPosition.x + scale, botPosition.y + scale),
+        WithOpacity(kIndigoShadow, opacity * 0.72f),
+        botText);
+    drawList->AddText(
+        font,
+        popFontSize,
+        botPosition,
+        WithOpacity(kMagentaText, opacity),
+        botText);
     drawList->PopClipRect();
 
-    const float indicatorWidth = std::min(
-        34.0f * scale, populationWidth_ * 0.20f);
-    drawList->AddLine(
-        ImVec2(centerX - indicatorWidth * 0.5f,
-               panelMaximum.y - 3.0f * scale),
-        ImVec2(centerX + indicatorWidth * 0.5f,
-               panelMaximum.y - 3.0f * scale),
-        WithOpacity(
-            style.colors.accent,
-            opacity * (0.32f +
-                       populationHover_ * 0.36f +
-                       populationPress_ * 0.16f)),
-        std::max(1.0f, 1.4f * scale));
+    const float indicatorOpacity = opacity * (
+        0.28f + populationHover_ * 0.46f + populationPress_ * 0.18f);
+    const float indicatorY = panelMaximum.y - 5.0f * scale;
+    const float indicatorHalfWidth = std::min(
+        18.0f * scale, populationWidth_ * 0.09f);
+    drawList->AddTriangleFilled(
+        ImVec2(centerX - indicatorHalfWidth, indicatorY),
+        ImVec2(centerX - 3.0f * scale, indicatorY),
+        ImVec2(centerX - 7.0f * scale, indicatorY - 4.0f * scale),
+        WithOpacity(kElectricCyan, indicatorOpacity));
+    drawList->AddTriangleFilled(
+        ImVec2(centerX - 3.0f * scale, indicatorY),
+        ImVec2(centerX + 3.0f * scale, indicatorY),
+        ImVec2(centerX, indicatorY - 4.0f * scale),
+        WithOpacity(kSignalAmber, indicatorOpacity));
+    drawList->AddTriangleFilled(
+        ImVec2(centerX + 3.0f * scale, indicatorY),
+        ImVec2(centerX + indicatorHalfWidth, indicatorY),
+        ImVec2(centerX + 7.0f * scale, indicatorY - 4.0f * scale),
+        WithOpacity(kSignalMagenta, indicatorOpacity));
 }
 
 void AppController::ScheduleConfigSave() {

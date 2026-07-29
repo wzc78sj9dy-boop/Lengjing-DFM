@@ -447,6 +447,29 @@ void RunConfigTests() {
     }
     REQUIRE(menuText.find("visual.aimWarningRay && visual.playerViewRay") != std::string::npos);
     REQUIRE(menuText.find("visual.playerViewRay = value;") != std::string::npos);
+    for (const char* redesignedMenuToken : {
+             "控制台##main_menu",
+             "##command_bar",
+             "##command_drag",
+             "##compact_navigation",
+             "##navigation_rail",
+             "actions.StartRuntime();",
+             "actions.StopRuntime();",
+             "actions.HideMenu();",
+             "actions.ExitApplication();",
+             "actions.AimEnabledChanged(enabled);",
+             "runtime.active || runtime.busy || runtime.stopping"}) {
+        REQUIRE(menuText.find(redesignedMenuToken) != std::string::npos);
+    }
+    for (const char* retiredMenuToken : {
+             "棱镜##main_menu",
+             "##action_dock",
+             "RenderActionDock(",
+             "menu_transition",
+             "workspace_cards",
+             "AddImage("}) {
+        REQUIRE(menuText.find(retiredMenuToken) == std::string::npos);
+    }
 
     const std::filesystem::path mainSource =
         std::filesystem::path(__FILE__).parent_path().parent_path() /

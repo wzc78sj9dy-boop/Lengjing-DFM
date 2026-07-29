@@ -279,8 +279,8 @@ CloudLayoutFetchResult FetchAuthenticatedCloudLayout(
 
 std::vector<std::string> DriverOptions() {
     return {
-        "纯C（支持虚拟机）",
-        "棱镜内核驱动（推荐）",
+        "用户态读取",
+        "内核读取",
     };
 }
 
@@ -583,7 +583,7 @@ int main() {
     if (kRuntimeAuthEnabled && !authSession.StartHeartbeat()) return 3;
 
     ANativeWindow* window = android::ANativeWindowCreator::Create(
-        "lengjing-surface", surfaceWidth, surfaceHeight, false);
+        "workspace-overlay", surfaceWidth, surfaceHeight, false);
     if (window == nullptr) {
         std::fprintf(stderr, "无法创建绘制窗口\n");
         return 1;
@@ -693,7 +693,7 @@ int main() {
                     window = nullptr;
                 }
                 window = android::ANativeWindowCreator::Create(
-                    "lengjing-surface", width, height, false);
+                    "workspace-overlay", width, height, false);
                 if (window != nullptr) {
                     initialization = InitializeGraphics(
                         window, width, height, requestedBackend);

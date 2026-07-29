@@ -5,7 +5,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 set "SOURCE_DIR=%~dp0jni"
 set "BUILD_DIR=%SOURCE_DIR%\build"
 set "REMOTE_DIR=/data/local/tmp"
-set "STATE_DIR=E:\demo\fenxi\lengjing\_misc"
+set "STATE_DIR=%~dp0build\device_state"
 set "SERIAL_CACHE=%STATE_DIR%\adb_serial.txt"
 set "DEVLIST=%STATE_DIR%\adb_devices_%RANDOM%_%RANDOM%.txt"
 set "CHECK_FILE=%STATE_DIR%\adb_push_%RANDOM%_%RANDOM%.txt"

@@ -10,20 +10,21 @@
 namespace lengjing::ui {
 namespace {
 
-constexpr ImVec4 kCanvas{0.055f, 0.071f, 0.071f, 0.98f};
-constexpr ImVec4 kPanel{0.068f, 0.088f, 0.094f, 1.00f};
-constexpr ImVec4 kPanelRaised{0.094f, 0.120f, 0.122f, 1.00f};
-constexpr ImVec4 kCard{0.078f, 0.101f, 0.105f, 1.00f};
-constexpr ImVec4 kBorder{0.160f, 0.216f, 0.207f, 1.00f};
-constexpr ImVec4 kText{0.910f, 0.933f, 0.918f, 1.00f};
-constexpr ImVec4 kMuted{0.560f, 0.620f, 0.592f, 1.00f};
-constexpr ImVec4 kAccent{0.106f, 0.710f, 0.537f, 1.00f};
-constexpr ImVec4 kAccentHover{0.153f, 0.804f, 0.620f, 1.00f};
-constexpr ImVec4 kAmber{0.839f, 0.643f, 0.263f, 1.00f};
-constexpr ImVec4 kRed{0.867f, 0.325f, 0.325f, 1.00f};
-constexpr ImVec4 kGreen{0.235f, 0.745f, 0.420f, 1.00f};
-constexpr ImVec4 kButtonText{0.945f, 0.975f, 0.958f, 1.00f};
-constexpr ImVec4 kPrimaryButtonText{0.025f, 0.105f, 0.080f, 1.00f};
+constexpr ImVec4 kCanvas{0.028f, 0.034f, 0.102f, 0.985f};
+constexpr ImVec4 kPanel{0.043f, 0.050f, 0.145f, 1.000f};
+constexpr ImVec4 kPanelRaised{0.061f, 0.071f, 0.192f, 1.000f};
+constexpr ImVec4 kSection{0.035f, 0.041f, 0.124f, 1.000f};
+constexpr ImVec4 kBorder{0.184f, 0.223f, 0.431f, 1.000f};
+constexpr ImVec4 kBorderStrong{0.196f, 0.827f, 0.922f, 0.780f};
+constexpr ImVec4 kText{0.925f, 0.949f, 0.996f, 1.000f};
+constexpr ImVec4 kMuted{0.548f, 0.604f, 0.757f, 1.000f};
+constexpr ImVec4 kAccent{0.102f, 0.792f, 0.925f, 1.000f};
+constexpr ImVec4 kAccentHover{0.216f, 0.875f, 0.973f, 1.000f};
+constexpr ImVec4 kAmber{0.953f, 0.657f, 0.184f, 1.000f};
+constexpr ImVec4 kRed{0.929f, 0.176f, 0.596f, 1.000f};
+constexpr ImVec4 kActive{0.102f, 0.792f, 0.925f, 1.000f};
+constexpr ImVec4 kButtonText{0.937f, 0.961f, 1.000f, 1.000f};
+constexpr ImVec4 kPrimaryButtonText{0.016f, 0.058f, 0.110f, 1.000f};
 
 constexpr std::array<const char*, 6> kPageNames{
     "运行", "视觉", "物资", "雷达", "瞄准", "系统"};
@@ -84,14 +85,14 @@ struct MenuStyleScope {
     int variableCount = 0;
 
     MenuStyleScope() {
-        PushVar(ImGuiStyleVar_WindowRounding, 18.0f);
-        PushVar(ImGuiStyleVar_ChildRounding, 14.0f);
-        PushVar(ImGuiStyleVar_FrameRounding, 10.0f);
-        PushVar(ImGuiStyleVar_PopupRounding, 12.0f);
-        PushVar(ImGuiStyleVar_ScrollbarRounding, 10.0f);
-        PushVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 14.0f));
-        PushVar(ImGuiStyleVar_FramePadding, ImVec2(12.0f, 9.0f));
-        PushVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 9.0f));
+        PushVar(ImGuiStyleVar_WindowRounding, 4.0f);
+        PushVar(ImGuiStyleVar_ChildRounding, 3.0f);
+        PushVar(ImGuiStyleVar_FrameRounding, 2.0f);
+        PushVar(ImGuiStyleVar_PopupRounding, 3.0f);
+        PushVar(ImGuiStyleVar_ScrollbarRounding, 2.0f);
+        PushVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 12.0f));
+        PushVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 8.0f));
+        PushVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 7.0f));
         PushVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
 
         PushColor(ImGuiCol_Text, kText);
@@ -101,21 +102,21 @@ struct MenuStyleScope {
         PushColor(ImGuiCol_PopupBg, kPanelRaised);
         PushColor(ImGuiCol_Border, kBorder);
         PushColor(ImGuiCol_FrameBg, kPanelRaised);
-        PushColor(ImGuiCol_FrameBgHovered, ImVec4(0.137f, 0.176f, 0.165f, 1.0f));
-        PushColor(ImGuiCol_FrameBgActive, ImVec4(0.157f, 0.204f, 0.188f, 1.0f));
+        PushColor(ImGuiCol_FrameBgHovered, ImVec4(0.078f, 0.102f, 0.255f, 1.0f));
+        PushColor(ImGuiCol_FrameBgActive, ImVec4(0.090f, 0.133f, 0.310f, 1.0f));
         PushColor(ImGuiCol_Button, kPanelRaised);
-        PushColor(ImGuiCol_ButtonHovered, ImVec4(0.145f, 0.196f, 0.180f, 1.0f));
-        PushColor(ImGuiCol_ButtonActive, ImVec4(0.169f, 0.235f, 0.212f, 1.0f));
-        PushColor(ImGuiCol_Header, ImVec4(0.110f, 0.298f, 0.247f, 1.0f));
-        PushColor(ImGuiCol_HeaderHovered, ImVec4(0.125f, 0.373f, 0.298f, 1.0f));
-        PushColor(ImGuiCol_HeaderActive, ImVec4(0.137f, 0.424f, 0.333f, 1.0f));
+        PushColor(ImGuiCol_ButtonHovered, ImVec4(0.075f, 0.118f, 0.286f, 1.0f));
+        PushColor(ImGuiCol_ButtonActive, ImVec4(0.098f, 0.161f, 0.345f, 1.0f));
+        PushColor(ImGuiCol_Header, ImVec4(0.078f, 0.294f, 0.420f, 1.0f));
+        PushColor(ImGuiCol_HeaderHovered, ImVec4(0.090f, 0.373f, 0.510f, 1.0f));
+        PushColor(ImGuiCol_HeaderActive, ImVec4(0.102f, 0.447f, 0.584f, 1.0f));
         PushColor(ImGuiCol_CheckMark, kAccent);
         PushColor(ImGuiCol_SliderGrab, kAccent);
         PushColor(ImGuiCol_SliderGrabActive, kAccentHover);
         PushColor(ImGuiCol_Separator, kBorder);
-        PushColor(ImGuiCol_ScrollbarBg, ImVec4(0.055f, 0.071f, 0.071f, 0.60f));
-        PushColor(ImGuiCol_ScrollbarGrab, ImVec4(0.235f, 0.294f, 0.271f, 1.0f));
-        PushColor(ImGuiCol_ScrollbarGrabHovered, ImVec4(0.302f, 0.376f, 0.345f, 1.0f));
+        PushColor(ImGuiCol_ScrollbarBg, ImVec4(0.028f, 0.034f, 0.102f, 0.72f));
+        PushColor(ImGuiCol_ScrollbarGrab, ImVec4(0.184f, 0.223f, 0.431f, 1.0f));
+        PushColor(ImGuiCol_ScrollbarGrabHovered, ImVec4(0.216f, 0.357f, 0.573f, 1.0f));
     }
 
     ~MenuStyleScope() {
@@ -171,16 +172,11 @@ ImVec4 Mix(const ImVec4& from, const ImVec4& to, float amount) {
 struct SectionLayoutState {
     bool active = false;
     bool cardOpen = false;
-    int columnCount = 1;
-    int nextColumn = 0;
-    int activeColumn = 0;
     float originX = 0.0f;
     float originY = 0.0f;
     float width = 0.0f;
-    float columnWidth = 0.0f;
-    float horizontalGap = 0.0f;
     float verticalGap = 0.0f;
-    std::array<float, 2> nextY{};
+    float nextY = 0.0f;
 };
 
 SectionLayoutState gSectionLayout;
@@ -193,9 +189,7 @@ void CloseSectionCard() {
     const float cardBottom =
         ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
     ImGui::EndChild();
-    gSectionLayout.nextY[static_cast<std::size_t>(
-        gSectionLayout.activeColumn)] =
-        cardBottom + gSectionLayout.verticalGap;
+    gSectionLayout.nextY = cardBottom + gSectionLayout.verticalGap;
     gSectionLayout.cardOpen = false;
 }
 
@@ -207,28 +201,15 @@ void BeginSectionLayout(const char* id) {
     gSectionLayout.originX = origin.x;
     gSectionLayout.originY = origin.y;
     gSectionLayout.width = ImGui::GetContentRegionAvail().x;
-    gSectionLayout.columnCount =
-        gSectionLayout.width >= 760.0f ? 2 : 1;
-    gSectionLayout.horizontalGap =
-        gSectionLayout.columnCount > 1
-            ? ImGui::GetStyle().ItemSpacing.x
-            : 0.0f;
-    gSectionLayout.verticalGap = 4.0f;
-    gSectionLayout.columnWidth =
-        (gSectionLayout.width - gSectionLayout.horizontalGap) /
-        static_cast<float>(gSectionLayout.columnCount);
-    gSectionLayout.nextY.fill(origin.y);
+    gSectionLayout.verticalGap = 8.0f;
+    gSectionLayout.nextY = origin.y;
 }
 
 void EndSectionLayout() {
     CloseSectionCard();
-    float bottom = gSectionLayout.originY;
-    for (int column = 0; column < gSectionLayout.columnCount; ++column) {
-        bottom = std::max(
-            bottom,
-            gSectionLayout.nextY[static_cast<std::size_t>(column)] -
-                gSectionLayout.verticalGap);
-    }
+    const float bottom = std::max(
+        gSectionLayout.originY,
+        gSectionLayout.nextY - gSectionLayout.verticalGap);
     ImGui::SetCursorScreenPos(ImVec2(gSectionLayout.originX, bottom));
     ImGui::Dummy(ImVec2(gSectionLayout.width, 0.0f));
     ImGui::PopID();
@@ -238,16 +219,9 @@ void EndSectionLayout() {
 void SectionTitle(const char* title, float height = 0.0f) {
     if (gSectionLayout.active) {
         CloseSectionCard();
-        const int column = gSectionLayout.nextColumn;
-        gSectionLayout.nextColumn =
-            (gSectionLayout.nextColumn + 1) % gSectionLayout.columnCount;
-        gSectionLayout.activeColumn = column;
         const ImVec2 cardPosition{
-            gSectionLayout.originX +
-                static_cast<float>(column) *
-                    (gSectionLayout.columnWidth +
-                     gSectionLayout.horizontalGap),
-            gSectionLayout.nextY[static_cast<std::size_t>(column)]};
+            gSectionLayout.originX,
+            gSectionLayout.nextY};
         ImGui::SetCursorScreenPos(cardPosition);
         ImGui::SetNextWindowPos(cardPosition, ImGuiCond_Always);
         ImGuiChildFlags childFlags = ImGuiChildFlags_Border;
@@ -255,13 +229,13 @@ void SectionTitle(const char* title, float height = 0.0f) {
             childFlags |= ImGuiChildFlags_AutoResizeY |
                 ImGuiChildFlags_AlwaysAutoResize;
         }
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f, 12.0f));
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, kCard);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 11.0f));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, kSection);
         ImGui::PushStyleColor(ImGuiCol_Border, kBorder);
         ImGui::BeginChild(
             title,
             ImVec2(
-                gSectionLayout.columnWidth,
+                gSectionLayout.width,
                 std::max(0.0f, height)),
             childFlags,
             ImGuiWindowFlags_NoScrollbar |
@@ -273,22 +247,27 @@ void SectionTitle(const char* title, float height = 0.0f) {
     }
 
     const ImVec2 marker = ImGui::GetCursorScreenPos();
+    const float available = ImGui::GetContentRegionAvail().x;
     ImGui::GetWindowDrawList()->AddRectFilled(
-        marker,
-        ImVec2(marker.x + 4.0f, marker.y + ImGui::GetTextLineHeight()),
+        ImVec2(marker.x, marker.y + 3.0f),
+        ImVec2(marker.x + 7.0f, marker.y + 10.0f),
         ImGui::GetColorU32(kAccent),
-        2.0f);
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 12.0f);
+        1.0f);
+    ImGui::GetWindowDrawList()->AddLine(
+        ImVec2(marker.x, marker.y + ImGui::GetTextLineHeight() + 7.0f),
+        ImVec2(marker.x + available, marker.y + ImGui::GetTextLineHeight() + 7.0f),
+        ImGui::GetColorU32(kBorder),
+        1.0f);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 14.0f);
     ImGui::TextColored(kText, "%s", title);
-    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+    ImGui::Dummy(ImVec2(0.0f, 9.0f));
 }
 
 bool Toggle(const char* label, bool& value) {
     ImGui::PushID(label);
 
-    const float rowHeight = 38.0f;
-    const float switchWidth = 42.0f;
-    const float switchHeight = 22.0f;
+    const float rowHeight = 36.0f;
+    const float boxSize = 22.0f;
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const float width = std::max(100.0f, ImGui::GetContentRegionAvail().x);
 
@@ -302,13 +281,13 @@ bool Toggle(const char* label, bool& value) {
 
     const ImGuiID itemId = ImGui::GetItemID();
     ImGuiStorage* storage = ImGui::GetStateStorage();
-    float* switchMotion = storage->GetFloatRef(
+    float* stateMotion = storage->GetFloatRef(
         itemId ^ 0x53a91f27U, value ? 1.0f : 0.0f);
     float* hoverMotion = storage->GetFloatRef(
         itemId ^ 0x19d47b63U, 0.0f);
     float* pressMotion = storage->GetFloatRef(
         itemId ^ 0x7c31a4d9U, 0.0f);
-    *switchMotion = AnimateToward(*switchMotion, value ? 1.0f : 0.0f, 13.0f);
+    *stateMotion = AnimateToward(*stateMotion, value ? 1.0f : 0.0f, 16.0f);
     *hoverMotion = AnimateToward(*hoverMotion, hovered ? 1.0f : 0.0f, 15.0f);
     *pressMotion = AnimateToward(*pressMotion, held ? 1.0f : 0.0f, 20.0f);
 
@@ -321,43 +300,59 @@ bool Toggle(const char* label, bool& value) {
                 kAccent.x,
                 kAccent.y,
                 kAccent.z,
-                0.055f * *hoverMotion)),
-            8.0f);
+                0.040f * *hoverMotion)),
+            2.0f);
     }
     const ImVec2 labelSize = ImGui::CalcTextSize(label);
     draw->AddText(
         ImVec2(origin.x, origin.y + (rowHeight - labelSize.y) * 0.5f),
         ImGui::GetColorU32(Mix(
-            ImVec4(0.78f, 0.82f, 0.80f, 1.0f),
+            ImVec4(0.73f, 0.77f, 0.89f, 1.0f),
             kText,
             *hoverMotion)),
         label);
 
-    const float switchX = origin.x + width - switchWidth;
-    const float switchY = origin.y + (rowHeight - switchHeight) * 0.5f;
-    const ImVec4 offTrack = Mix(
-        ImVec4(0.20f, 0.25f, 0.25f, 1.0f),
-        ImVec4(0.29f, 0.36f, 0.34f, 1.0f),
-        *hoverMotion);
-    const ImVec4 onTrack = Mix(kAccent, kAccentHover, *hoverMotion);
-    const ImVec4 track = Mix(offTrack, onTrack, *switchMotion);
+    const float boxX = origin.x + width - boxSize;
+    const float boxY = origin.y + (rowHeight - boxSize) * 0.5f;
+    const float inset = *pressMotion * 1.0f;
+    const ImVec2 boxMinimum(boxX + inset, boxY + inset);
+    const ImVec2 boxMaximum(
+        boxX + boxSize - inset,
+        boxY + boxSize - inset);
+    const ImVec4 fill = Mix(
+        Mix(kPanelRaised, ImVec4(0.078f, 0.102f, 0.255f, 1.0f), *hoverMotion),
+        Mix(kAccent, kAccentHover, *hoverMotion),
+        *stateMotion);
     draw->AddRectFilled(
-        ImVec2(switchX, switchY),
-        ImVec2(switchX + switchWidth, switchY + switchHeight),
-        ImGui::GetColorU32(track), switchHeight * 0.5f);
+        boxMinimum,
+        boxMaximum,
+        ImGui::GetColorU32(fill),
+        2.0f);
     draw->AddRect(
-        ImVec2(switchX, switchY),
-        ImVec2(switchX + switchWidth, switchY + switchHeight),
-        ImGui::GetColorU32(Mix(kBorder, kAccentHover, *switchMotion)),
-        switchHeight * 0.5f);
-
-    const float knobRadius = 8.0f;
-    const float knobX =
-        switchX + 11.0f + (switchWidth - 22.0f) * *switchMotion;
-    draw->AddCircleFilled(
-        ImVec2(knobX, switchY + switchHeight * 0.5f),
-        knobRadius - *pressMotion * 0.8f,
-        ImGui::GetColorU32(ImVec4(0.95f, 0.97f, 0.96f, 1.0f)));
+        boxMinimum,
+        boxMaximum,
+        ImGui::GetColorU32(Mix(kBorder, kBorderStrong, *stateMotion)),
+        2.0f,
+        0,
+        1.0f);
+    if (*stateMotion > 0.02f) {
+        const ImU32 markColor = ImGui::GetColorU32(ImVec4(
+            kPrimaryButtonText.x,
+            kPrimaryButtonText.y,
+            kPrimaryButtonText.z,
+            *stateMotion));
+        const float centerY = boxY + boxSize * 0.5f;
+        draw->AddLine(
+            ImVec2(boxX + 5.0f, centerY),
+            ImVec2(boxX + 9.0f, centerY + 4.0f),
+            markColor,
+            2.0f);
+        draw->AddLine(
+            ImVec2(boxX + 9.0f, centerY + 4.0f),
+            ImVec2(boxX + 17.0f, centerY - 5.0f),
+            markColor,
+            2.0f);
+    }
 
     ImGui::PopID();
     return pressed;
@@ -533,7 +528,7 @@ bool AnimatedButton(
         held ? 1.0f : 0.0f,
         20.0f);
 
-    const float inset = *pressMotion * 2.0f;
+    const float inset = *pressMotion;
     const ImVec2 minimum(origin.x + inset, origin.y + inset);
     const ImVec2 maximum(
         origin.x + size.x - inset,
@@ -543,27 +538,21 @@ bool AnimatedButton(
         pressedColor,
         *pressMotion);
     ImDrawList* draw = ImGui::GetWindowDrawList();
-    if (*hoverMotion > 0.02f) {
-        draw->AddRectFilled(
-            ImVec2(minimum.x - 2.0f, minimum.y - 2.0f),
-            ImVec2(maximum.x + 2.0f, maximum.y + 2.0f),
-            ImGui::GetColorU32(ImVec4(
-                kAccent.x,
-                kAccent.y,
-                kAccent.z,
-                0.055f * *hoverMotion)),
-            11.0f);
-    }
-    draw->AddRectFilled(minimum, maximum, ImGui::GetColorU32(color), 9.0f);
+    draw->AddRectFilled(minimum, maximum, ImGui::GetColorU32(color), 3.0f);
     draw->AddRect(
         minimum,
         maximum,
-        ImGui::GetColorU32(Mix(kBorder, kAccent, selected ? 0.72f : 0.12f)),
-        9.0f);
+        ImGui::GetColorU32(Mix(
+            kBorder,
+            kBorderStrong,
+            selected ? 0.85f : *hoverMotion * 0.42f)),
+        3.0f,
+        0,
+        1.0f);
     if (selected) {
         draw->AddRectFilled(
-            ImVec2(minimum.x + 12.0f, maximum.y - 3.0f),
-            ImVec2(maximum.x - 12.0f, maximum.y - 1.0f),
+            ImVec2(minimum.x + 1.0f, minimum.y + 5.0f),
+            ImVec2(minimum.x + 4.0f, maximum.y - 5.0f),
             ImGui::GetColorU32(kAccent),
             1.0f);
     }
@@ -608,14 +597,14 @@ bool SegmentedChoice(
         ImGui::PushID(static_cast<int>(i));
         const bool active = selected == static_cast<int>(i);
         const ImVec4 base = active
-            ? ImVec4(0.10f, 0.42f, 0.33f, 1.0f)
-            : ImVec4(0.10f, 0.13f, 0.13f, 1.0f);
+            ? ImVec4(0.055f, 0.208f, 0.333f, 1.0f)
+            : ImVec4(0.047f, 0.055f, 0.157f, 1.0f);
         if (AnimatedButton(
                 options[i],
                 ImVec2(buttonWidth, 40.0f),
                 base,
-                ImVec4(0.12f, 0.50f, 0.39f, 1.0f),
-                ImVec4(0.14f, 0.56f, 0.43f, 1.0f),
+                ImVec4(0.063f, 0.267f, 0.408f, 1.0f),
+                ImVec4(0.075f, 0.318f, 0.463f, 1.0f),
                 active ? kText : kButtonText,
                 active) &&
             !active) {
@@ -635,17 +624,17 @@ bool SegmentedChoice(
 bool ActionButton(const char* label, ActionTone tone, const ImVec2& size) {
     ImVec4 base = kAccent;
     ImVec4 hovered = kAccentHover;
-    ImVec4 active{0.08f, 0.60f, 0.45f, 1.0f};
+    ImVec4 active{0.067f, 0.647f, 0.784f, 1.0f};
     ImVec4 textColor = kPrimaryButtonText;
     if (tone == ActionTone::Neutral) {
-        base = ImVec4(0.18f, 0.22f, 0.21f, 1.0f);
-        hovered = ImVec4(0.23f, 0.28f, 0.26f, 1.0f);
-        active = ImVec4(0.27f, 0.33f, 0.30f, 1.0f);
+        base = ImVec4(0.078f, 0.090f, 0.216f, 1.0f);
+        hovered = ImVec4(0.102f, 0.125f, 0.286f, 1.0f);
+        active = ImVec4(0.122f, 0.153f, 0.333f, 1.0f);
         textColor = kButtonText;
     } else if (tone == ActionTone::Danger) {
-        base = ImVec4(0.60f, 0.20f, 0.20f, 1.0f);
-        hovered = ImVec4(0.70f, 0.24f, 0.24f, 1.0f);
-        active = ImVec4(0.52f, 0.15f, 0.15f, 1.0f);
+        base = ImVec4(0.631f, 0.075f, 0.365f, 1.0f);
+        hovered = kRed;
+        active = ImVec4(0.506f, 0.055f, 0.294f, 1.0f);
         textColor = kButtonText;
     }
     return AnimatedButton(
@@ -656,11 +645,11 @@ bool NavButton(const char* label, bool active, const ImVec2& size) {
     return AnimatedButton(
         label,
         size,
-        active ? ImVec4(0.10f, 0.31f, 0.25f, 1.0f)
-               : ImVec4(0.06f, 0.08f, 0.08f, 0.0f),
-        active ? ImVec4(0.12f, 0.38f, 0.30f, 1.0f)
+        active ? ImVec4(0.055f, 0.208f, 0.333f, 1.0f)
+               : ImVec4(0.035f, 0.041f, 0.124f, 0.0f),
+        active ? ImVec4(0.063f, 0.267f, 0.408f, 1.0f)
                : kPanelRaised,
-        ImVec4(0.13f, 0.43f, 0.34f, 1.0f),
+        ImVec4(0.075f, 0.318f, 0.463f, 1.0f),
         active ? kText : kButtonText,
         active);
 }
@@ -763,7 +752,7 @@ void RenderRuntime(UiModel& model, UiActions& actions) {
             "##runtime_metrics", metricColumns,
             ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoSavedSettings)) {
         const char* state = runtime.stopping ? "停止中" : (runtime.active ? "运行中" : "未运行");
-        const ImVec4 stateColor = runtime.stopping ? kAmber : (runtime.active ? kGreen : kMuted);
+        const ImVec4 stateColor = runtime.stopping ? kAmber : (runtime.active ? kActive : kMuted);
         StatusMetric("状态", state, stateColor);
         char fps[32]{};
         std::snprintf(fps, sizeof(fps), "%.1f", runtime.framesPerSecond);
@@ -1174,125 +1163,199 @@ void RenderSystem(UiModel& model, UiActions& actions) {
     }
 }
 
-void RenderNavigation(UiModel& model, ImTextureID logoTexture) {
-    ImDrawList* draw = ImGui::GetWindowDrawList();
-    const ImVec2 headerOrigin = ImGui::GetCursorScreenPos();
-    const float headerWidth = ImGui::GetContentRegionAvail().x;
-    constexpr float identityHeight = 52.0f;
-    draw->AddRectFilledMultiColor(
-        headerOrigin,
-        ImVec2(headerOrigin.x + headerWidth, headerOrigin.y + identityHeight),
-        ImGui::GetColorU32(ImVec4(0.08f, 0.20f, 0.18f, 0.52f)),
-        ImGui::GetColorU32(ImVec4(0.06f, 0.10f, 0.11f, 0.06f)),
-        ImGui::GetColorU32(ImVec4(0.06f, 0.10f, 0.11f, 0.02f)),
-        ImGui::GetColorU32(ImVec4(0.08f, 0.20f, 0.18f, 0.24f)));
-
-    const ImVec2 titlePos(headerOrigin.x + 10.0f, headerOrigin.y + 6.0f);
-    if (logoTexture != nullptr) {
-        constexpr float logoSize = 40.0f;
-        draw->AddImage(
-            logoTexture, titlePos,
-            ImVec2(titlePos.x + logoSize, titlePos.y + logoSize));
-        draw->AddCircleFilled(
-            ImVec2(titlePos.x + 35.0f, titlePos.y + 35.0f), 4.0f,
-            ImGui::GetColorU32(model.runtime.active ? kGreen : kAccent));
+void RenderRuntimeAction(
+    UiModel& model,
+    UiActions& actions,
+    const ImVec2& size) {
+    RuntimeModel& runtime = model.runtime;
+    if (runtime.busy || runtime.stopping) {
+        ImGui::BeginDisabled();
+        ActionButton(
+            runtime.stopping ? "停止中" : "处理中",
+            ActionTone::Neutral,
+            size);
+        ImGui::EndDisabled();
+    } else if (runtime.active) {
+        if (ActionButton("停止", ActionTone::Danger, size)) {
+            actions.StopRuntime();
+        }
     } else {
-        draw->AddCircleFilled(
-            ImVec2(titlePos.x + 20.0f, titlePos.y + 20.0f), 10.0f,
-            ImGui::GetColorU32(ImVec4(0.08f, 0.22f, 0.19f, 1.0f)));
-        draw->AddCircleFilled(
-            ImVec2(titlePos.x + 20.0f, titlePos.y + 20.0f), 4.0f,
-            ImGui::GetColorU32(model.runtime.active ? kGreen : kAccent));
+        const bool clicked = ActionButton("启动", ActionTone::Primary, size);
+        if (clicked) {
+            actions.StartRuntime();
+        }
+    }
+}
+
+const char* RuntimeStateLabel(const RuntimeModel& runtime) {
+    if (runtime.stopping) {
+        return "停止中";
+    }
+    if (runtime.busy) {
+        return "处理中";
+    }
+    return runtime.active ? "运行中" : "待机";
+}
+
+ImVec4 RuntimeStateColor(const RuntimeModel& runtime) {
+    if (runtime.stopping || runtime.busy) {
+        return kAmber;
+    }
+    return runtime.active ? kAccent : kMuted;
+}
+
+float CommandBarHeight(float width) {
+    return width >= 620.0f ? 62.0f : 106.0f;
+}
+
+bool RenderCommandBar(UiModel& model, UiActions& actions, float height) {
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, kPanel);
+    ImGui::PushStyleColor(ImGuiCol_Border, kBorderStrong);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 9.0f));
+    ImGui::BeginChild(
+        "##command_bar",
+        ImVec2(0.0f, height),
+        ImGuiChildFlags_Border,
+        ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoScrollWithMouse |
+            ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(2);
+
+    const float width = ImGui::GetContentRegionAvail().x;
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const bool wide = width >= 620.0f;
+    constexpr float runtimeWidth = 104.0f;
+    constexpr float secondaryWidth = 92.0f;
+    const float actionsWidth =
+        runtimeWidth + secondaryWidth * 2.0f + spacing * 2.0f;
+    const ImVec2 titleOrigin = ImGui::GetCursorScreenPos();
+    const float titleWidth = wide
+        ? std::max(120.0f, width - actionsWidth - spacing)
+        : width;
+    ImGui::InvisibleButton(
+        "##command_drag",
+        ImVec2(titleWidth, 40.0f),
+        ImGuiButtonFlags_MouseButtonLeft);
+    const bool dragActivated = ImGui::IsItemActivated();
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(
+        titleOrigin,
+        ImVec2(titleOrigin.x + 4.0f, titleOrigin.y + 22.0f),
+        ImGui::GetColorU32(kAccent),
+        1.0f);
+    const char* title = "控制台";
+    const char* state = RuntimeStateLabel(model.runtime);
+    const ImVec2 titleSize = ImGui::CalcTextSize(title);
+    draw->AddText(
+        ImVec2(
+            titleOrigin.x + 12.0f,
+            titleOrigin.y + (40.0f - titleSize.y) * 0.5f),
+        ImGui::GetColorU32(kText),
+        title);
+    draw->AddText(
+        ImVec2(
+            titleOrigin.x + 22.0f + titleSize.x,
+            titleOrigin.y + (40.0f - ImGui::CalcTextSize(state).y) * 0.5f),
+        ImGui::GetColorU32(RuntimeStateColor(model.runtime)),
+        state);
+
+    if (wide) {
+        ImGui::SetCursorScreenPos(ImVec2(
+            titleOrigin.x + width - actionsWidth,
+            titleOrigin.y));
+        RenderRuntimeAction(
+            model,
+            actions,
+            ImVec2(runtimeWidth, 40.0f));
+        ImGui::SameLine();
+        if (ActionButton(
+                "隐藏菜单",
+                ActionTone::Neutral,
+                ImVec2(secondaryWidth, 40.0f))) {
+            actions.HideMenu();
+        }
+        ImGui::SameLine();
+        if (ActionButton(
+                "退出程序",
+                ActionTone::Danger,
+                ImVec2(secondaryWidth, 40.0f))) {
+            actions.ExitApplication();
+        }
+    } else {
+        const float runtimeWidth = width * 0.42f;
+        const float secondaryWidth =
+            (width - runtimeWidth - spacing * 2.0f) * 0.5f;
+        RenderRuntimeAction(
+            model,
+            actions,
+            ImVec2(runtimeWidth, 38.0f));
+        ImGui::SameLine();
+        if (ActionButton(
+                "隐藏菜单",
+                ActionTone::Neutral,
+                ImVec2(secondaryWidth, 38.0f))) {
+            actions.HideMenu();
+        }
+        ImGui::SameLine();
+        if (ActionButton(
+                "退出程序",
+                ActionTone::Danger,
+                ImVec2(secondaryWidth, 38.0f))) {
+            actions.ExitApplication();
+        }
+    }
+    ImGui::EndChild();
+    return dragActivated;
+}
+
+void RenderNavigation(UiModel& model, bool compact) {
+    if (compact) {
+        if (ImGui::BeginTable(
+                "##compact_navigation",
+                2,
+                ImGuiTableFlags_SizingStretchSame |
+                    ImGuiTableFlags_NoSavedSettings)) {
+            for (std::size_t i = 0; i < kPages.size(); ++i) {
+                ImGui::TableNextColumn();
+                if (NavButton(
+                        kPageNames[i],
+                        model.page == kPages[i],
+                        ImVec2(ImGui::GetContentRegionAvail().x, 38.0f))) {
+                    model.page = kPages[i];
+                }
+            }
+            ImGui::EndTable();
+        }
+        return;
     }
 
-    const ImVec2 brandSize = ImGui::CalcTextSize("棱镜");
-    draw->AddText(
-        ImVec2(
-            titlePos.x + 52.0f,
-            titlePos.y + (40.0f - brandSize.y) * 0.5f),
-        ImGui::GetColorU32(kText),
-        "棱镜");
-
-    const char* status = model.runtime.stopping
-        ? "停止中"
-        : (model.runtime.busy
-            ? "处理中"
-            : (model.runtime.active ? "运行中" : "待机"));
-    const ImVec4 statusColor =
-        model.runtime.stopping || model.runtime.busy
-        ? kAmber
-        : (model.runtime.active ? kGreen : kMuted);
-    const ImVec2 statusSize = ImGui::CalcTextSize(status);
-    const float chipWidth = statusSize.x + 28.0f;
-    const ImVec2 chipMinimum(
-        headerOrigin.x + headerWidth - chipWidth - 10.0f,
-        headerOrigin.y + 10.0f);
-    const ImVec2 chipMaximum(
-        chipMinimum.x + chipWidth,
-        chipMinimum.y + 32.0f);
-    draw->AddRectFilled(
-        chipMinimum,
-        chipMaximum,
-        ImGui::GetColorU32(ImVec4(
-            statusColor.x,
-            statusColor.y,
-            statusColor.z,
-            0.11f)),
-        16.0f);
-    draw->AddRect(
-        chipMinimum,
-        chipMaximum,
-        ImGui::GetColorU32(ImVec4(
-            statusColor.x,
-            statusColor.y,
-            statusColor.z,
-            0.48f)),
-        16.0f);
-    draw->AddCircleFilled(
-        ImVec2(chipMinimum.x + 12.0f, chipMinimum.y + 16.0f),
-        3.5f,
-        ImGui::GetColorU32(statusColor));
-    draw->AddText(
-        ImVec2(
-            chipMinimum.x + 20.0f,
-            chipMinimum.y + (32.0f - statusSize.y) * 0.5f),
-        ImGui::GetColorU32(statusColor),
-        status);
-
-    ImGui::Dummy(ImVec2(0.0f, identityHeight + 4.0f));
-    const float width = ImGui::GetContentRegionAvail().x;
-    const int columns = width >= 760.0f ? 6 : (width >= 480.0f ? 3 : 2);
-    if (ImGui::BeginTable(
-            "##workspace_navigation",
-            columns,
-            ImGuiTableFlags_SizingStretchSame |
-                ImGuiTableFlags_NoSavedSettings)) {
-        for (std::size_t i = 0; i < kPages.size(); ++i) {
-            ImGui::TableNextColumn();
-            const bool clicked = NavButton(
+    for (std::size_t i = 0; i < kPages.size(); ++i) {
+        if (NavButton(
                 kPageNames[i],
                 model.page == kPages[i],
-                ImVec2(ImGui::GetContentRegionAvail().x, 40.0f));
-            if (clicked) {
-                model.page = kPages[i];
-            }
+                ImVec2(ImGui::GetContentRegionAvail().x, 42.0f))) {
+            model.page = kPages[i];
         }
-        ImGui::EndTable();
     }
-    ImGui::Dummy(ImVec2(0.0f, 2.0f));
 }
 
 void RenderContent(UiModel& model, UiActions& actions) {
     const ImVec2 titleOrigin = ImGui::GetCursorScreenPos();
-    ImGui::GetWindowDrawList()->AddCircleFilled(
-        ImVec2(titleOrigin.x + 5.0f, titleOrigin.y + ImGui::GetTextLineHeight() * 0.5f),
-        4.0f,
-        ImGui::GetColorU32(kAccent));
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 16.0f);
     ImGui::TextColored(kText, "%s", PageName(model.page));
-    ImGui::Dummy(ImVec2(0.0f, 3.0f));
+    const float lineY =
+        titleOrigin.y + ImGui::GetTextLineHeight() + 6.0f;
+    ImGui::GetWindowDrawList()->AddLine(
+        ImVec2(titleOrigin.x, lineY),
+        ImVec2(
+            titleOrigin.x + ImGui::GetContentRegionAvail().x,
+            lineY),
+        ImGui::GetColorU32(kBorderStrong),
+        1.0f);
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
 
-    BeginSectionLayout("##workspace_cards");
+    BeginSectionLayout("##workspace_sections");
 
     switch (model.page) {
     case Page::Runtime:
@@ -1318,115 +1381,15 @@ void RenderContent(UiModel& model, UiActions& actions) {
     EndSectionLayout();
 }
 
-float ActionDockHeight(float width) {
-    return width >= 560.0f ? 100.0f : 150.0f;
-}
-
-void RenderRuntimeAction(
-    UiModel& model,
-    UiActions& actions,
-    const ImVec2& size) {
-    RuntimeModel& runtime = model.runtime;
-    if (runtime.busy || runtime.stopping) {
-        ImGui::BeginDisabled();
-        ActionButton(
-            runtime.stopping ? "停止中" : "处理中",
-            ActionTone::Neutral,
-            size);
-        ImGui::EndDisabled();
-    } else if (runtime.active) {
-        if (ActionButton("停止", ActionTone::Danger, size)) {
-            actions.StopRuntime();
-        }
-    } else {
-        const bool clicked = ActionButton("启动", ActionTone::Primary, size);
-        if (clicked) {
-            actions.StartRuntime();
-        }
-    }
-}
-
-void RenderActionDock(UiModel& model, UiActions& actions, float height) {
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.055f, 0.073f, 0.077f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.18f, 0.28f, 0.25f, 1.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 9.0f));
-    ImGui::BeginChild(
-        "##action_dock",
-        ImVec2(0.0f, height),
-        ImGuiChildFlags_Border,
-        ImGuiWindowFlags_NoScrollbar |
-            ImGuiWindowFlags_NoScrollWithMouse |
-            ImGuiWindowFlags_NoSavedSettings);
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor(2);
-
-    const ImVec2 labelOrigin = ImGui::GetCursorScreenPos();
-    ImGui::GetWindowDrawList()->AddRectFilled(
-        labelOrigin,
-        ImVec2(
-            labelOrigin.x + 4.0f,
-            labelOrigin.y + ImGui::GetTextLineHeight()),
-        ImGui::GetColorU32(kAccent),
-        2.0f);
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 12.0f);
-    ImGui::TextColored(kText, "运行控制");
-
-    const float width = ImGui::GetContentRegionAvail().x;
-    const float spacing = ImGui::GetStyle().ItemSpacing.x;
-    if (width >= 540.0f) {
-        const float primaryWidth = width * 0.48f;
-        const float secondaryWidth =
-            (width - primaryWidth - spacing * 2.0f) * 0.5f;
-        RenderRuntimeAction(
-            model,
-            actions,
-            ImVec2(primaryWidth, 44.0f));
-        ImGui::SameLine();
-        const bool hideClicked = ActionButton(
-            "隐藏菜单",
-            ActionTone::Neutral,
-            ImVec2(secondaryWidth, 44.0f));
-        if (hideClicked) {
-            actions.HideMenu();
-        }
-        ImGui::SameLine();
-        if (ActionButton(
-                "退出程序",
-                ActionTone::Danger,
-                ImVec2(secondaryWidth, 44.0f))) {
-            actions.ExitApplication();
-        }
-    } else {
-        RenderRuntimeAction(model, actions, ImVec2(width, 40.0f));
-        const float halfWidth = (width - spacing) * 0.5f;
-        const bool hideClicked = ActionButton(
-            "隐藏菜单",
-            ActionTone::Neutral,
-            ImVec2(halfWidth, 40.0f));
-        if (hideClicked) {
-            actions.HideMenu();
-        }
-        ImGui::SameLine();
-        if (ActionButton(
-                "退出程序",
-                ActionTone::Danger,
-                ImVec2(halfWidth, 40.0f))) {
-            actions.ExitApplication();
-        }
-    }
-    ImGui::EndChild();
-}
-
 }  // namespace
 
 void MenuView::SetLogoTexture(void* texture) noexcept {
-    logoTexture_ = texture;
+    (void)texture;
 }
 
 void MenuView::RequestRecenter() noexcept {
     positionInitialized_ = false;
     dragActive_ = false;
-    animationAnchorValid_ = false;
 }
 
 void MenuView::ClearTopOverlayBounds() noexcept {
@@ -1464,26 +1427,18 @@ void MenuView::Render(UiModel& model, UiActions& actions) {
     if (!wasVisible_) {
         windowAnimation_ = 0.0f;
         pageAnimation_ = 1.0f;
-        animationAnchorValid_ = topOverlayValid_;
-        if (animationAnchorValid_) {
-            animationAnchorMinimumX_ = topOverlayMinimumX_;
-            animationAnchorMinimumY_ = topOverlayMinimumY_;
-            animationAnchorMaximumX_ = topOverlayMaximumX_;
-            animationAnchorMaximumY_ = topOverlayMaximumY_;
-        }
         wasVisible_ = true;
     }
     if (!pageStateInitialized_) {
         animatedPage_ = model.page;
         pageStateInitialized_ = true;
     }
-    windowAnimation_ = AnimateToward(windowAnimation_, 1.0f, 9.0f);
+    windowAnimation_ = AnimateToward(windowAnimation_, 1.0f, 10.0f);
     const float windowEase =
         1.0f - (1.0f - windowAnimation_) * (1.0f - windowAnimation_);
 
     constexpr float viewportMargin = 12.0f;
-    constexpr float topOverlayGap = 12.0f;
-    constexpr float dragRegionHeight = 52.0f;
+    constexpr float topOverlayGap = 10.0f;
     const float displayWidth = std::max(1.0f, io.DisplaySize.x);
     const float displayHeight = std::max(1.0f, io.DisplaySize.y);
     const float topInset = topOverlayValid_
@@ -1494,8 +1449,8 @@ void MenuView::Render(UiModel& model, UiActions& actions) {
     const float availableWidth = std::max(1.0f, displayWidth - viewportMargin * 2.0f);
     const float availableHeight =
         std::max(1.0f, displayHeight - topInset - viewportMargin);
-    const float windowWidth = std::min(1120.0f, availableWidth);
-    const float windowHeight = std::min(820.0f, availableHeight);
+    const float windowWidth = std::min(1160.0f, availableWidth);
+    const float windowHeight = std::min(840.0f, availableHeight);
     const float minWidth = std::min(360.0f, availableWidth);
     const float minHeight = std::min(440.0f, availableHeight);
 
@@ -1537,71 +1492,16 @@ void MenuView::Render(UiModel& model, UiActions& actions) {
     lastDisplayWidth_ = displayWidth;
     lastDisplayHeight_ = displayHeight;
 
-    if (animationAnchorValid_ && windowEase < 0.999f) {
-        const float anchorWidth =
-            animationAnchorMaximumX_ - animationAnchorMinimumX_;
-        const float anchorHeight =
-            animationAnchorMaximumY_ - animationAnchorMinimumY_;
-        const float anchorCenterX =
-            (animationAnchorMinimumX_ + animationAnchorMaximumX_) * 0.5f;
-        const float anchorCenterY =
-            (animationAnchorMinimumY_ + animationAnchorMaximumY_) * 0.5f;
-        const float targetCenterX = windowX_ + windowWidth * 0.5f;
-        const float targetCenterY = windowY_ + windowHeight * 0.5f;
-        const float drawWidth =
-            anchorWidth + (windowWidth - anchorWidth) * windowEase;
-        const float drawHeight =
-            anchorHeight + (windowHeight - anchorHeight) * windowEase;
-        const float drawCenterX =
-            anchorCenterX + (targetCenterX - anchorCenterX) * windowEase;
-        const float drawCenterY =
-            anchorCenterY + (targetCenterY - anchorCenterY) * windowEase;
-        ImGui::SetNextWindowPos(
-            ImVec2(
-                drawCenterX - drawWidth * 0.5f,
-                drawCenterY - drawHeight * 0.5f),
-            ImGuiCond_Always);
-        ImGui::SetNextWindowSize(
-            ImVec2(
-                std::max(1.0f, drawWidth),
-                std::max(1.0f, drawHeight)),
-            ImGuiCond_Always);
-        ImGui::SetNextWindowBgAlpha(std::max(0.18f, windowEase));
-        ImGui::Begin(
-            "棱镜##menu_transition",
-            nullptr,
-            ImGuiWindowFlags_NoTitleBar |
-                ImGuiWindowFlags_NoResize |
-                ImGuiWindowFlags_NoMove |
-                ImGuiWindowFlags_NoSavedSettings |
-                ImGuiWindowFlags_NoInputs |
-                ImGuiWindowFlags_NoNav |
-                ImGuiWindowFlags_NoFocusOnAppearing);
-        ImGui::End();
-        if (windowEase < 0.48f) {
-            return;
-        }
-    }
-
-    const float contentEase = animationAnchorValid_
-        ? std::clamp(
-              (windowEase - 0.48f) / 0.52f,
-              0.0f,
-              1.0f)
-        : windowEase;
     style.PushVar(
         ImGuiStyleVar_Alpha,
-        std::max(0.03f, contentEase));
+        std::max(0.04f, windowEase));
     ImGui::SetNextWindowSize(ImVec2(windowWidth, windowHeight), ImGuiCond_Always);
     ImGui::SetNextWindowSizeConstraints(
         ImVec2(minWidth, minHeight), ImVec2(availableWidth, availableHeight));
     ImGui::SetNextWindowPos(
         ImVec2(
             windowX_,
-            windowY_ +
-                (animationAnchorValid_
-                    ? 0.0f
-                    : (1.0f - windowEase) * 16.0f)),
+            windowY_ + (1.0f - windowEase) * 20.0f),
         ImGuiCond_Always);
 
     constexpr ImGuiWindowFlags flags =
@@ -1612,20 +1512,16 @@ void MenuView::Render(UiModel& model, UiActions& actions) {
         ImGuiWindowFlags_NoScrollWithMouse |
         ImGuiWindowFlags_NoSavedSettings;
 
-    if (!ImGui::Begin("棱镜##main_menu", nullptr, flags)) {
+    if (!ImGui::Begin("控制台##main_menu", nullptr, flags)) {
         ImGui::End();
         return;
     }
 
     const ImVec2 windowPosition = ImGui::GetWindowPos();
-    const ImVec2 dragCursor = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton(
-        "##window_drag_region",
-        ImVec2(
-            std::max(1.0f, ImGui::GetContentRegionAvail().x),
-            dragRegionHeight),
-        ImGuiButtonFlags_MouseButtonLeft);
-    const bool dragRegionActivated = ImGui::IsItemActivated();
+    const float commandHeight =
+        CommandBarHeight(ImGui::GetContentRegionAvail().x);
+    const bool dragRegionActivated =
+        RenderCommandBar(model, actions, commandHeight);
     if (dragRegionActivated) {
         dragActive_ = true;
         dragOffsetX_ = io.MousePos.x - windowPosition.x;
@@ -1635,48 +1531,76 @@ void MenuView::Render(UiModel& model, UiActions& actions) {
         !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         dragActive_ = false;
     }
-    ImGui::SetCursorScreenPos(dragCursor);
 
-    RenderNavigation(model, static_cast<ImTextureID>(logoTexture_));
-    if (model.page != animatedPage_) {
-        animatedPage_ = model.page;
-        pageAnimation_ = 0.0f;
-    }
-    pageAnimation_ = AnimateToward(pageAnimation_, 1.0f, 10.0f);
-    const float pageEase =
-        1.0f - (1.0f - pageAnimation_) * (1.0f - pageAnimation_);
-
-    const float dockHeight = ActionDockHeight(ImGui::GetContentRegionAvail().x);
+    const float bodyWidth = std::max(1.0f, ImGui::GetContentRegionAvail().x);
     const float bodyHeight = std::max(1.0f, ImGui::GetContentRegionAvail().y);
-    const float dockSpacing = ImGui::GetStyle().ItemSpacing.y;
-    const bool dockInsideScroll =
-        bodyHeight < dockHeight + 80.0f + dockSpacing;
-    const float contentHeight = dockInsideScroll
-        ? bodyHeight
-        : std::max(1.0f, bodyHeight - dockHeight - dockSpacing);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.045f, 0.061f, 0.064f, 0.72f));
-    if (ImGui::BeginChild(
-            "##workspace_content",
-            ImVec2(0.0f, contentHeight),
-            ImGuiChildFlags_AlwaysUseWindowPadding,
-            ImGuiWindowFlags_NoSavedSettings)) {
-        const float initialX = ImGui::GetCursorPosX();
-        ImGui::SetCursorPosX(initialX + (1.0f - pageEase) * 28.0f);
-        ImGui::PushStyleVar(
-            ImGuiStyleVar_Alpha,
-            ImGui::GetStyle().Alpha * std::max(0.06f, pageEase));
-        RenderContent(model, actions);
-        ImGui::PopStyleVar();
-        if (dockInsideScroll) {
-            ImGui::Dummy(ImVec2(0.0f, dockSpacing));
-            RenderActionDock(model, actions, dockHeight);
-        }
-    }
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
+    const bool compactNavigation = bodyWidth < 760.0f;
+    const float itemSpacing = ImGui::GetStyle().ItemSpacing.x;
 
-    if (!dockInsideScroll) {
-        RenderActionDock(model, actions, dockHeight);
+    const auto renderWorkspaceContent = [&](const ImVec2& size) {
+        if (model.page != animatedPage_) {
+            animatedPage_ = model.page;
+            pageAnimation_ = 0.0f;
+        }
+        pageAnimation_ = AnimateToward(pageAnimation_, 1.0f, 11.0f);
+        const float pageEase =
+            1.0f - (1.0f - pageAnimation_) * (1.0f - pageAnimation_);
+
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, kCanvas);
+        ImGui::PushStyleColor(ImGuiCol_Border, kBorder);
+        if (ImGui::BeginChild(
+                "##workspace_content",
+                size,
+                ImGuiChildFlags_AlwaysUseWindowPadding |
+                    ImGuiChildFlags_Border,
+                ImGuiWindowFlags_NoSavedSettings)) {
+            const float initialY = ImGui::GetCursorPosY();
+            ImGui::SetCursorPosY(
+                initialY + (1.0f - pageEase) * 18.0f);
+            ImGui::PushStyleVar(
+                ImGuiStyleVar_Alpha,
+                ImGui::GetStyle().Alpha * std::max(0.08f, pageEase));
+            RenderContent(model, actions);
+            ImGui::PopStyleVar();
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor(2);
+    };
+
+    if (compactNavigation) {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, kPanel);
+        if (ImGui::BeginChild(
+                "##compact_workspace",
+                ImVec2(bodyWidth, bodyHeight),
+                ImGuiChildFlags_AlwaysUseWindowPadding,
+                ImGuiWindowFlags_NoSavedSettings)) {
+            RenderNavigation(model, true);
+            ImGui::Dummy(ImVec2(0.0f, 3.0f));
+            renderWorkspaceContent(ImVec2(
+                0.0f,
+                std::max(1.0f, ImGui::GetContentRegionAvail().y)));
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    } else {
+        constexpr float railWidth = 178.0f;
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, kSection);
+        ImGui::PushStyleColor(ImGuiCol_Border, kBorder);
+        if (ImGui::BeginChild(
+                "##navigation_rail",
+                ImVec2(railWidth, bodyHeight),
+                ImGuiChildFlags_AlwaysUseWindowPadding |
+                    ImGuiChildFlags_Border,
+                ImGuiWindowFlags_NoScrollbar |
+                    ImGuiWindowFlags_NoSavedSettings)) {
+            RenderNavigation(model, false);
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor(2);
+        ImGui::SameLine();
+        renderWorkspaceContent(ImVec2(
+            std::max(1.0f, bodyWidth - railWidth - itemSpacing),
+            bodyHeight));
     }
     ImGui::End();
 }

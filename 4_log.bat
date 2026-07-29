@@ -3,7 +3,7 @@ chcp 65001 >nul 2>&1
 setlocal EnableExtensions EnableDelayedExpansion
 
 set "SOURCE_DIR=%~dp0jni"
-set "STATE_DIR=E:\demo\fenxi\lengjing\_misc"
+set "STATE_DIR=%~dp0build\device_state"
 set "SERIAL_CACHE=%STATE_DIR%\adb_serial.txt"
 set "DEVLIST=%STATE_DIR%\adb_devices_%RANDOM%_%RANDOM%.txt"
 set "TARGET="

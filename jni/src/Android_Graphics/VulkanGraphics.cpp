@@ -115,7 +115,7 @@ bool VulkanGraphics::Create() {
         VkApplicationInfo appInfo = {
                 .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
                 .pNext = nullptr,
-                .pApplicationName = "lengjing",
+                .pApplicationName = "workspace",
                 .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
                 .pEngineName = "native-overlay",
                 .engineVersion = VK_MAKE_VERSION(1, 0, 0),

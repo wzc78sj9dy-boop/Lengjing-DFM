@@ -3,7 +3,7 @@ chcp 65001 >nul 2>&1
 setlocal EnableExtensions EnableDelayedExpansion
 
 set "SOURCE_DIR=%~dp0tests"
-set "BUILD_DIR=E:\demo\fenxi\lengjing\host_tests"
+set "BUILD_DIR=%~dp0build\host_tests"
 set "TARGET="
 set "NINJA="
 
@@ -22,6 +22,9 @@ if defined NINJA_PATH (
     if not defined NINJA if exist "%NINJA_PATH%" set "NINJA=%NINJA_PATH%"
 )
 if not defined NINJA for %%I in (ninja.exe) do set "NINJA=%%~$PATH:I"
+if not defined NINJA if exist "%~dp0tools\python\bin\ninja.exe" (
+    set "NINJA=%~dp0tools\python\bin\ninja.exe"
+)
 if not defined NINJA if exist "E:\demo\fenxi\lengjing\tools\python\bin\ninja.exe" (
     set "NINJA=E:\demo\fenxi\lengjing\tools\python\bin\ninja.exe"
 )
@@ -41,7 +44,7 @@ set "TARGET=!TARGET:"=!"
 
 if /i "%~1"=="clean" (
     for %%D in ("%BUILD_DIR%") do set "RESOLVED_BUILD=%%~fD"
-    for %%D in ("E:\demo\fenxi\lengjing\host_tests") do set "EXPECTED_BUILD=%%~fD"
+    for %%D in ("%~dp0build\host_tests") do set "EXPECTED_BUILD=%%~fD"
     if /i not "!RESOLVED_BUILD!"=="!EXPECTED_BUILD!" (
         echo [ERROR] Refusing to clean an unexpected directory: !RESOLVED_BUILD!
         exit /b 1

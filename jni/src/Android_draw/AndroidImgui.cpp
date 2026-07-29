@@ -71,7 +71,43 @@ bool AndroidImgui::Init_Render(ANativeWindow *window, float width, float height)
         ImGui::StyleColorsDark();
         ImGuiStyle *style = &ImGui::GetStyle();
         style->Alpha = 1.0f;
-        style->WindowTitleAlign = ImVec2(0.5f, 0.5f);
+        style->WindowTitleAlign = ImVec2(0.0f, 0.5f);
+        style->WindowRounding = 5.0f;
+        style->ChildRounding = 4.0f;
+        style->FrameRounding = 3.0f;
+        style->PopupRounding = 4.0f;
+        style->GrabRounding = 2.0f;
+        style->ScrollbarRounding = 2.0f;
+        style->WindowBorderSize = 1.0f;
+        style->ChildBorderSize = 1.0f;
+        style->FrameBorderSize = 1.0f;
+        style->WindowPadding = ImVec2(14.0f, 12.0f);
+        style->FramePadding = ImVec2(11.0f, 8.0f);
+        style->ItemSpacing = ImVec2(9.0f, 8.0f);
+        style->Colors[ImGuiCol_Text] =
+            ImVec4(0.949f, 0.961f, 1.000f, 1.000f);
+        style->Colors[ImGuiCol_TextDisabled] =
+            ImVec4(0.604f, 0.651f, 0.769f, 1.000f);
+        style->Colors[ImGuiCol_WindowBg] =
+            ImVec4(0.039f, 0.055f, 0.106f, 0.985f);
+        style->Colors[ImGuiCol_ChildBg] =
+            ImVec4(0.063f, 0.078f, 0.149f, 1.000f);
+        style->Colors[ImGuiCol_PopupBg] =
+            ImVec4(0.078f, 0.102f, 0.192f, 1.000f);
+        style->Colors[ImGuiCol_Border] =
+            ImVec4(0.184f, 0.263f, 0.420f, 1.000f);
+        style->Colors[ImGuiCol_FrameBg] =
+            ImVec4(0.086f, 0.110f, 0.204f, 1.000f);
+        style->Colors[ImGuiCol_FrameBgHovered] =
+            ImVec4(0.118f, 0.165f, 0.286f, 1.000f);
+        style->Colors[ImGuiCol_FrameBgActive] =
+            ImVec4(0.125f, 0.235f, 0.337f, 1.000f);
+        style->Colors[ImGuiCol_CheckMark] =
+            ImVec4(0.192f, 0.839f, 1.000f, 1.000f);
+        style->Colors[ImGuiCol_SliderGrab] =
+            ImVec4(1.000f, 0.541f, 0.141f, 1.000f);
+        style->Colors[ImGuiCol_SliderGrabActive] =
+            ImVec4(1.000f, 0.302f, 0.525f, 1.000f);
         if (!My_ImGui_ImplAndroid_Init(window)) {
             rollback();
             return false;

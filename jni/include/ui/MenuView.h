@@ -19,7 +19,6 @@ public:
     void Render(UiModel& model, UiActions& actions);
 
 private:
-    void* logoTexture_ = nullptr;
     bool positionInitialized_ = false;
     bool dragActive_ = false;
     float windowX_ = 0.0f;
@@ -39,11 +38,6 @@ private:
     float topOverlayMaximumX_ = 0.0f;
     float topOverlayMaximumY_ = 0.0f;
     float topOverlayLayoutMaximumY_ = 0.0f;
-    bool animationAnchorValid_ = false;
-    float animationAnchorMinimumX_ = 0.0f;
-    float animationAnchorMinimumY_ = 0.0f;
-    float animationAnchorMaximumX_ = 0.0f;
-    float animationAnchorMaximumY_ = 0.0f;
 };
 
 }  // namespace lengjing::ui

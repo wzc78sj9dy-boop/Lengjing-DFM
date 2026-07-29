@@ -33,28 +33,28 @@ enum class RadarBlipKind : std::uint8_t {
 };
 
 struct RenderPalette {
-    ImU32 surface = IM_COL32(14, 18, 18, 226);
-    ImU32 surfaceRaised = IM_COL32(21, 26, 26, 240);
-    ImU32 surfaceSoft = IM_COL32(27, 33, 32, 210);
-    ImU32 border = IM_COL32(46, 55, 52, 196);
-    ImU32 grid = IM_COL32(71, 85, 80, 74);
-    ImU32 text = IM_COL32(245, 248, 246, 255);
-    ImU32 textMuted = IM_COL32(190, 202, 196, 255);
-    ImU32 accent = IM_COL32(36, 224, 153, 255);
-    ImU32 caution = IM_COL32(244, 190, 72, 255);
-    ImU32 danger = IM_COL32(246, 72, 72, 255);
-    ImU32 ally = IM_COL32(76, 166, 240, 255);
-    ImU32 shadow = IM_COL32(0, 0, 0, 220);
+    ImU32 surface = IM_COL32(16, 20, 38, 230);
+    ImU32 surfaceRaised = IM_COL32(23, 29, 51, 242);
+    ImU32 surfaceSoft = IM_COL32(31, 39, 67, 214);
+    ImU32 border = IM_COL32(57, 70, 99, 210);
+    ImU32 grid = IM_COL32(49, 214, 255, 58);
+    ImU32 text = IM_COL32(242, 245, 255, 255);
+    ImU32 textMuted = IM_COL32(154, 166, 196, 255);
+    ImU32 accent = IM_COL32(49, 214, 255, 255);
+    ImU32 caution = IM_COL32(255, 200, 87, 255);
+    ImU32 danger = IM_COL32(255, 77, 125, 255);
+    ImU32 ally = IM_COL32(139, 124, 255, 255);
+    ImU32 shadow = IM_COL32(5, 7, 19, 225);
 };
 
 struct RenderMetrics {
     float scale = 1.0f;
-    float lineWidth = 2.0f;
-    float outlineWidth = 4.0f;
-    float cornerLength = 14.0f;
-    float panelRounding = 4.0f;
-    float fontSize = 24.0f;
-    float smallFontSize = 20.0f;
+    float lineWidth = 1.6f;
+    float outlineWidth = 3.4f;
+    float cornerLength = 12.0f;
+    float panelRounding = 8.0f;
+    float fontSize = 23.0f;
+    float smallFontSize = 19.0f;
     float radarRadius = 110.0f;
 };
 

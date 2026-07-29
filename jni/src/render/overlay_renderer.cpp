@@ -3,6 +3,7 @@
 #include "render/PlayerTracerPolicy.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -53,6 +54,13 @@ ImVec2 Perpendicular(const ImVec2& value) {
     return ImVec2(-value.y, value.x);
 }
 
+ImVec2 Lerp(const ImVec2& first, const ImVec2& second, float amount) {
+    const float t = Clamp01(amount);
+    return ImVec2(
+        first.x + (second.x - first.x) * t,
+        first.y + (second.y - first.y) * t);
+}
+
 ImU32 WithAlpha(ImU32 color, float factor) {
     const unsigned int alpha = (color >> IM_COL32_A_SHIFT) & 0xffU;
     const unsigned int scaled = static_cast<unsigned int>(
@@ -67,7 +75,7 @@ ImU32 PlayerColor(const RenderStyle& style,
         case SemanticTone::Accent:
             return style.colors.accent;
         case SemanticTone::Caution:
-            return style.colors.text;
+            return style.colors.caution;
         case SemanticTone::Danger:
             return style.colors.danger;
         case SemanticTone::Ally:
@@ -227,6 +235,153 @@ void DrawOutlinedLine(ImDrawList* drawList,
         width);
 }
 
+void DrawDashedLine(ImDrawList* drawList,
+                    const ImVec2& first,
+                    const ImVec2& second,
+                    ImU32 color,
+                    ImU32 shadow,
+                    float width,
+                    float scale,
+                    int maximumSegments = 9,
+                    float duty = 0.58f) {
+    if (drawList == nullptr || !Finite(first) || !Finite(second)) return;
+    const float length = Length(Subtract(second, first));
+    if (!std::isfinite(length) || length <= 1.0f) return;
+    const float safeScale = SafeScale(scale);
+    const int segmentCount = std::clamp(
+        static_cast<int>(std::ceil(length / (24.0f * safeScale))),
+        2,
+        std::max(2, maximumSegments));
+    const float visibleDuty = std::clamp(duty, 0.25f, 0.85f);
+    const float outline = std::max(width + safeScale, width * 1.55f);
+    for (int index = 0; index < segmentCount; ++index) {
+        const float start = static_cast<float>(index) /
+            static_cast<float>(segmentCount);
+        const float end = std::min(
+            1.0f,
+            (static_cast<float>(index) + visibleDuty) /
+                static_cast<float>(segmentCount));
+        DrawOutlinedLine(
+            drawList,
+            Lerp(first, second, start),
+            Lerp(first, second, end),
+            color,
+            shadow,
+            width,
+            outline);
+    }
+}
+
+void DrawDiamond(ImDrawList* drawList,
+                 const ImVec2& center,
+                 float radius,
+                 ImU32 color,
+                 float width,
+                 bool filled) {
+    if (drawList == nullptr || !Finite(center) || !std::isfinite(radius) ||
+        radius <= 0.0f) {
+        return;
+    }
+    const std::array<ImVec2, 4> points{{
+        ImVec2(center.x, center.y - radius),
+        ImVec2(center.x + radius, center.y),
+        ImVec2(center.x, center.y + radius),
+        ImVec2(center.x - radius, center.y),
+    }};
+    if (filled) {
+        drawList->AddConvexPolyFilled(
+            points.data(), static_cast<int>(points.size()), color);
+    } else {
+        drawList->AddPolyline(
+            points.data(),
+            static_cast<int>(points.size()),
+            color,
+            ImDrawFlags_Closed,
+            std::max(0.5f, width));
+    }
+}
+
+void DrawArc(ImDrawList* drawList,
+             const ImVec2& center,
+             float radius,
+             float startRadians,
+             float endRadians,
+             ImU32 color,
+             float width,
+             int segments) {
+    if (drawList == nullptr || !Finite(center) || !std::isfinite(radius) ||
+        radius <= 0.0f || !std::isfinite(startRadians) ||
+        !std::isfinite(endRadians)) {
+        return;
+    }
+    const int count = std::clamp(segments, 2, 32);
+    ImVec2 previous(
+        center.x + std::cos(startRadians) * radius,
+        center.y + std::sin(startRadians) * radius);
+    for (int index = 1; index <= count; ++index) {
+        const float amount =
+            static_cast<float>(index) / static_cast<float>(count);
+        const float angle =
+            startRadians + (endRadians - startRadians) * amount;
+        const ImVec2 current(
+            center.x + std::cos(angle) * radius,
+            center.y + std::sin(angle) * radius);
+        drawList->AddLine(previous, current, color, std::max(0.5f, width));
+        previous = current;
+    }
+}
+
+void DrawTickedRing(ImDrawList* drawList,
+                    const ImVec2& center,
+                    float radius,
+                    ImU32 color,
+                    float width,
+                    int arcSegments = 8) {
+    constexpr float kQuarter = kPi * 0.5f;
+    constexpr float kGap = 0.16f;
+    for (int quadrant = 0; quadrant < 4; ++quadrant) {
+        const float start = quadrant * kQuarter + kGap;
+        const float end = (quadrant + 1) * kQuarter - kGap;
+        DrawArc(
+            drawList,
+            center,
+            radius,
+            start,
+            end,
+            color,
+            width,
+            arcSegments);
+    }
+}
+
+void DrawPanel(ImDrawList* drawList,
+               const ImVec2& minimum,
+               const ImVec2& maximum,
+               ImU32 surface,
+               ImU32 border,
+               ImU32 shadow,
+               float rounding,
+               float scale) {
+    if (drawList == nullptr || !Finite(minimum) || !Finite(maximum) ||
+        maximum.x <= minimum.x || maximum.y <= minimum.y) {
+        return;
+    }
+    const float safeScale = SafeScale(scale);
+    drawList->AddRectFilled(
+        Add(minimum, ImVec2(1.5f * safeScale, 2.5f * safeScale)),
+        Add(maximum, ImVec2(1.5f * safeScale, 2.5f * safeScale)),
+        WithAlpha(shadow, 0.54f),
+        rounding);
+    drawList->AddRectFilled(minimum, maximum, surface, rounding);
+    drawList->AddRect(
+        minimum,
+        maximum,
+        border,
+        rounding,
+        0,
+        std::max(1.0f, 0.9f * safeScale));
+}
+
 }  // namespace
 
 RenderStyle RenderStyle::Default() {
@@ -311,7 +466,7 @@ void OverlayRenderer::DrawPlayer(ImDrawList* drawList,
 
 void OverlayRenderer::DrawPlayerPlate(ImDrawList* drawList,
                                       const PlayerVisual& player,
-    const ScreenRect& viewport) const {
+                                      const ScreenRect& viewport) const {
     if (drawList == nullptr || !player.bounds.IsValid() || !viewport.IsValid()) return;
     const bool hasTitle = !player.name.empty();
     const bool hasDetail = !player.detail.empty();
@@ -320,36 +475,76 @@ void OverlayRenderer::DrawPlayerPlate(ImDrawList* drawList,
     const float scale = style_.metrics.scale;
     const float titleSize = style_.metrics.fontSize * scale;
     const float detailSize = style_.metrics.smallFontSize * scale;
-    const float margin = 4.0f * scale;
-    const float textGap = hasTitle && hasDetail ? 1.0f * scale : 0.0f;
-    const float maximumTextWidth = std::max(
+    const float margin = 6.0f * scale;
+    const float paddingX = 8.0f * scale;
+    const float paddingY = 5.0f * scale;
+    const float accentWidth = std::max(2.0f, 2.0f * scale);
+    const float textGap = hasTitle && hasDetail ? 2.0f * scale : 0.0f;
+    const float maximumContentWidth = std::max(
         1.0f,
-        std::min(300.0f * scale, viewport.Width() - margin * 2.0f));
+        std::min(
+            250.0f * scale,
+            viewport.Width() - margin * 2.0f - paddingX * 2.0f -
+                accentWidth));
     const FittedText title = hasTitle
-        ? FitTextWithExtent(player.name, maximumTextWidth, titleSize)
+        ? FitTextWithExtent(player.name, maximumContentWidth, titleSize)
         : FittedText{};
     const FittedText detail = hasDetail
-        ? FitTextWithExtent(player.detail, maximumTextWidth, detailSize)
+        ? FitTextWithExtent(player.detail, maximumContentWidth, detailSize)
         : FittedText{};
-    const float textHeight =
+    const float contentWidth = std::max(title.extent.x, detail.extent.x);
+    const float contentHeight =
         (title.text.empty() ? 0.0f : titleSize) +
         (detail.text.empty() ? 0.0f : detailSize) + textGap;
-    const float textTop = std::clamp(
-        player.bounds.top - textHeight - 5.0f * scale,
-        viewport.top + margin,
-        std::max(viewport.top + margin,
-                 viewport.bottom - margin - textHeight));
-    const float centerX = player.bounds.Center().x;
-    const ImU32 textShadow = WithAlpha(style_.colors.shadow, 0.62f);
+    if (contentWidth <= 0.0f || contentHeight <= 0.0f) return;
 
-    float cursorY = textTop;
+    const float cardWidth = std::min(
+        viewport.Width() - margin * 2.0f,
+        contentWidth + paddingX * 2.0f + accentWidth);
+    const float cardHeight = contentHeight + paddingY * 2.0f;
+    const float rightCandidate = player.bounds.right + 7.0f * scale;
+    const float leftCandidate =
+        player.bounds.left - cardWidth - 7.0f * scale;
+    float cardLeft = rightCandidate + cardWidth <= viewport.right - margin
+        ? rightCandidate
+        : leftCandidate;
+    cardLeft = ClampFinite(
+        cardLeft,
+        viewport.left + margin,
+        viewport.right - margin - cardWidth);
+    const float cardTop = ClampFinite(
+        player.bounds.top + 2.0f * scale,
+        viewport.top + margin,
+        viewport.bottom - margin - cardHeight);
+    const ImVec2 cardMinimum(cardLeft, cardTop);
+    const ImVec2 cardMaximum(
+        cardLeft + cardWidth, cardTop + cardHeight);
+    const ImU32 accent = render::WithExactAlpha(
+        PlayerColor(style_, player.tone, player.visible),
+        render::kSolidAlpha);
+    const ImU32 textShadow = WithAlpha(style_.colors.shadow, 0.62f);
+    DrawPanel(
+        drawList,
+        cardMinimum,
+        cardMaximum,
+        WithAlpha(style_.colors.surfaceRaised, 0.78f),
+        WithAlpha(accent, 0.58f),
+        style_.colors.shadow,
+        style_.metrics.panelRounding * scale,
+        scale);
+    drawList->AddRectFilled(
+        ImVec2(cardMinimum.x, cardMinimum.y + 2.0f * scale),
+        ImVec2(cardMinimum.x + accentWidth,
+               cardMaximum.y - 2.0f * scale),
+        accent,
+        accentWidth * 0.5f);
+
+    const float textLeft =
+        cardMinimum.x + accentWidth + paddingX;
+    float cursorY = cardMinimum.y + paddingY;
     if (!title.text.empty()) {
-        const float titleX = std::clamp(
-            centerX - title.extent.x * 0.5f,
-            viewport.left + margin,
-            viewport.right - margin - title.extent.x);
         DrawText(drawList,
-                 ImVec2(titleX, cursorY),
+                 ImVec2(textLeft, cursorY),
                  player.visible ? style_.colors.text : style_.colors.textMuted,
                  textShadow,
                  titleSize,
@@ -357,18 +552,13 @@ void OverlayRenderer::DrawPlayerPlate(ImDrawList* drawList,
         cursorY += titleSize + textGap;
     }
     if (!detail.text.empty()) {
-        const float detailX = std::clamp(
-            centerX - detail.extent.x * 0.5f,
-            viewport.left + margin,
-            viewport.right - margin - detail.extent.x);
         DrawText(drawList,
-                 ImVec2(detailX, cursorY),
+                 ImVec2(textLeft, cursorY),
                  style_.colors.textMuted,
                  textShadow,
                  detailSize,
                  detail.text);
     }
-
 }
 
 void OverlayRenderer::DrawCornerBox(ImDrawList* drawList,
@@ -377,34 +567,80 @@ void OverlayRenderer::DrawCornerBox(ImDrawList* drawList,
                                     bool visible) const {
     if (drawList == nullptr || !bounds.IsValid()) return;
     const float scale = style_.metrics.scale;
-    const float horizontalLength = bounds.Width() * 0.25f;
-    const float verticalLength = bounds.Height() * 0.25f;
     const float width = render::PlayerStrokeWidth(
         style_.metrics.lineWidth, scale);
     const float outline = render::PlayerOutlineWidth(
         width, style_.metrics.outlineWidth, scale);
     const ImU32 color = render::WithExactAlpha(
         PlayerColor(style_, tone, visible), render::kSolidAlpha);
-    const ImU32 shadow = render::WithExactAlpha(style_.colors.shadow, 140);
+    const ImU32 shadow = render::WithExactAlpha(style_.colors.shadow, 170);
+    const float rounding = std::clamp(
+        std::min(bounds.Width(), bounds.Height()) * 0.08f,
+        3.0f * scale,
+        11.0f * scale);
+    const ImVec2 minimum(bounds.left, bounds.top);
+    const ImVec2 maximum(bounds.right, bounds.bottom);
 
-    const ImVec2 topLeft(bounds.left, bounds.top);
-    const ImVec2 topRight(bounds.right, bounds.top);
-    const ImVec2 bottomLeft(bounds.left, bounds.bottom);
-    const ImVec2 bottomRight(bounds.right, bounds.bottom);
+    drawList->AddRectFilled(
+        minimum,
+        maximum,
+        WithAlpha(style_.colors.surfaceSoft, visible ? 0.055f : 0.035f),
+        rounding);
+    drawList->AddRect(
+        minimum,
+        maximum,
+        shadow,
+        rounding,
+        0,
+        outline);
+    drawList->AddRect(
+        minimum,
+        maximum,
+        color,
+        rounding,
+        0,
+        width);
 
-    const auto drawSegment = [&](const ImVec2& first, const ImVec2& second) {
+    const float horizontalTick = std::min(
+        style_.metrics.cornerLength * scale,
+        bounds.Width() * 0.22f);
+    const float verticalTick = std::min(
+        style_.metrics.cornerLength * scale,
+        bounds.Height() * 0.16f);
+    const ImVec2 center = bounds.Center();
+    const auto drawTick = [&](const ImVec2& first, const ImVec2& second) {
         DrawOutlinedLine(
             drawList, first, second, color, shadow, width, outline);
     };
+    drawTick(
+        ImVec2(bounds.left, center.y),
+        ImVec2(bounds.left + horizontalTick, center.y));
+    drawTick(
+        ImVec2(bounds.right, center.y),
+        ImVec2(bounds.right - horizontalTick, center.y));
+    drawTick(
+        ImVec2(center.x, bounds.top),
+        ImVec2(center.x, bounds.top + verticalTick));
+    drawTick(
+        ImVec2(center.x, bounds.bottom),
+        ImVec2(center.x, bounds.bottom - verticalTick));
 
-    drawSegment(topLeft, ImVec2(topLeft.x + horizontalLength, topLeft.y));
-    drawSegment(topLeft, ImVec2(topLeft.x, topLeft.y + verticalLength));
-    drawSegment(topRight, ImVec2(topRight.x - horizontalLength, topRight.y));
-    drawSegment(topRight, ImVec2(topRight.x, topRight.y + verticalLength));
-    drawSegment(bottomLeft, ImVec2(bottomLeft.x + horizontalLength, bottomLeft.y));
-    drawSegment(bottomLeft, ImVec2(bottomLeft.x, bottomLeft.y - verticalLength));
-    drawSegment(bottomRight, ImVec2(bottomRight.x - horizontalLength, bottomRight.y));
-    drawSegment(bottomRight, ImVec2(bottomRight.x, bottomRight.y - verticalLength));
+    const float markerRadius = std::clamp(
+        bounds.Width() * 0.045f, 2.5f * scale, 5.0f * scale);
+    DrawDiamond(
+        drawList,
+        ImVec2(center.x, bounds.top),
+        markerRadius,
+        shadow,
+        outline,
+        true);
+    DrawDiamond(
+        drawList,
+        ImVec2(center.x, bounds.top),
+        markerRadius * 0.62f,
+        color,
+        width,
+        true);
 }
 
 void OverlayRenderer::DrawSkeleton(ImDrawList* drawList,
@@ -417,9 +653,8 @@ void OverlayRenderer::DrawSkeleton(ImDrawList* drawList,
         PlayerColor(style_, tone, visible), render::kSolidAlpha);
     const float width = render::PlayerStrokeWidth(
         style_.metrics.lineWidth, scale);
-    const float outline = render::PlayerOutlineWidth(
-        width, style_.metrics.outlineWidth, scale);
-    const ImU32 shadow = render::WithExactAlpha(style_.colors.shadow, 140);
+    const float shadowWidth = std::max(width + scale, width * 1.45f);
+    const ImU32 shadow = render::WithExactAlpha(style_.colors.shadow, 176);
     const auto endpointColor = [&](const BoneJoint& joint) {
         if (!skeleton.colorByVisibility) return color;
         switch (joint.visibility) {
@@ -440,38 +675,48 @@ void OverlayRenderer::DrawSkeleton(ImDrawList* drawList,
         const BoneJoint& first = skeleton.joints[link.first];
         const BoneJoint& second = skeleton.joints[link.second];
         if (!first.valid || !second.valid || !Finite(first.position) || !Finite(second.position)) continue;
+        const ImVec2 delta = Subtract(second.position, first.position);
+        const float length = Length(delta);
+        if (!std::isfinite(length) || length <= 1.0f) continue;
+        const ImVec2 direction = Multiply(delta, 1.0f / length);
+        const ImVec2 midpoint = Lerp(first.position, second.position, 0.5f);
+        const float centerGap = std::min(1.8f * scale, length * 0.12f);
+        const ImVec2 firstEnd =
+            Subtract(midpoint, Multiply(direction, centerGap));
+        const ImVec2 secondStart =
+            Add(midpoint, Multiply(direction, centerGap));
         const ImU32 firstColor = endpointColor(first);
         const ImU32 secondColor = endpointColor(second);
-        if (firstColor == secondColor) {
-            DrawOutlinedLine(
-                drawList,
-                first.position,
-                second.position,
-                firstColor,
-                shadow,
-                width,
-                outline);
-        } else {
-            const ImVec2 midpoint{
-                (first.position.x + second.position.x) * 0.5f,
-                (first.position.y + second.position.y) * 0.5f};
-            DrawOutlinedLine(
-                drawList,
-                first.position,
-                midpoint,
-                firstColor,
-                shadow,
-                width,
-                outline);
-            DrawOutlinedLine(
-                drawList,
-                midpoint,
-                second.position,
-                secondColor,
-                shadow,
-                width,
-                outline);
-        }
+        drawList->AddLine(
+            first.position, second.position, shadow, shadowWidth);
+        drawList->AddLine(
+            first.position,
+            firstEnd,
+            render::WithExactAlpha(firstColor, render::kSolidAlpha),
+            width);
+        drawList->AddLine(
+            secondStart,
+            second.position,
+            render::WithExactAlpha(secondColor, render::kSolidAlpha),
+            width);
+    }
+    const float nodeRadius = std::max(1.4f, 1.65f * scale);
+    for (const BoneJoint& joint : skeleton.joints) {
+        if (!joint.valid || !Finite(joint.position)) continue;
+        DrawDiamond(
+            drawList,
+            joint.position,
+            nodeRadius,
+            shadow,
+            shadowWidth,
+            true);
+        DrawDiamond(
+            drawList,
+            joint.position,
+            nodeRadius * 0.58f,
+            endpointColor(joint),
+            width,
+            true);
     }
     if (skeleton.selectedJoint >= 0 &&
         static_cast<std::size_t>(skeleton.selectedJoint) <
@@ -479,19 +724,21 @@ void OverlayRenderer::DrawSkeleton(ImDrawList* drawList,
         const BoneJoint& selected =
             skeleton.joints[static_cast<std::size_t>(skeleton.selectedJoint)];
         if (selected.valid && Finite(selected.position)) {
-            drawList->AddCircle(
+            DrawDiamond(
+                drawList,
                 selected.position,
-                3.5f * scale,
+                5.5f * scale,
                 shadow,
-                0,
-                outline);
-            drawList->AddCircle(
+                shadowWidth,
+                false);
+            DrawDiamond(
+                drawList,
                 selected.position,
-                3.5f * scale,
+                4.1f * scale,
                 render::WithExactAlpha(
                     style_.colors.caution, render::kSolidAlpha),
-                0,
-                width);
+                width,
+                false);
         }
     }
 }
@@ -509,38 +756,43 @@ void OverlayRenderer::DrawVitalBars(ImDrawList* drawList,
     const ImU32 healthColor = vitals.downed || healthRatio <= 0.33f
         ? style_.colors.danger
         : (healthRatio <= 0.66f ? style_.colors.caution : style_.colors.accent);
-    const float height = std::max(bounds.Height(), 8.0f * scale);
-    const float healthWidth = std::max(2.0f, 3.0f * scale);
-    const float armorWidth = std::max(2.0f, 3.0f * scale);
-    const float gap = std::max(1.0f, 1.0f * scale);
-    const float right = bounds.left - 3.0f * scale;
-    const float top = bounds.bottom - height;
-    const ImVec2 healthMin(right - healthWidth, top);
-    const ImVec2 healthMax(right, bounds.bottom);
+    const float trackWidth = std::max(bounds.Width(), 12.0f * scale);
+    const float trackHeight = std::max(2.0f, 2.4f * scale);
+    const float gap = std::max(1.0f, 1.2f * scale);
+    const float left = bounds.Center().x - trackWidth * 0.5f;
+    const float right = left + trackWidth;
+    const float top = bounds.bottom + 4.0f * scale;
+    const float rounding = trackHeight * 0.5f;
+    const ImVec2 healthMin(left, top);
+    const ImVec2 healthMax(right, top + trackHeight);
     drawList->AddRectFilled(
         healthMin,
         healthMax,
-        IM_COL32(0, 0, 0, 128));
+        WithAlpha(style_.colors.surface, 0.90f),
+        rounding);
     if (healthRatio > 0.0f) {
         drawList->AddRectFilled(
-            ImVec2(healthMin.x, bounds.bottom - height * healthRatio),
-            healthMax,
-            render::WithExactAlpha(healthColor, render::kSolidAlpha));
+            healthMin,
+            ImVec2(left + trackWidth * healthRatio, healthMax.y),
+            render::WithExactAlpha(healthColor, render::kSolidAlpha),
+            rounding);
     }
     if (!hasArmorTrack) return;
 
-    const ImVec2 armorMax(healthMin.x - gap, bounds.bottom);
-    const ImVec2 armorMin(armorMax.x - armorWidth, top);
+    const ImVec2 armorMin(left, healthMax.y + gap);
+    const ImVec2 armorMax(right, armorMin.y + trackHeight);
     drawList->AddRectFilled(
         armorMin,
         armorMax,
-        IM_COL32(0, 0, 0, 128));
+        WithAlpha(style_.colors.surface, 0.90f),
+        rounding);
     if (armorRatio > 0.0f) {
         drawList->AddRectFilled(
-            ImVec2(armorMin.x, bounds.bottom - height * armorRatio),
-            armorMax,
+            armorMin,
+            ImVec2(left + trackWidth * armorRatio, armorMax.y),
             render::WithExactAlpha(
-                style_.colors.ally, render::kSolidAlpha));
+                style_.colors.ally, render::kSolidAlpha),
+            rounding);
     }
 }
 
@@ -555,11 +807,23 @@ void OverlayRenderer::DrawTracer(ImDrawList* drawList,
     if (Length(Subtract(target, origin)) <= 1.0f) return;
     const float width = render::PlayerStrokeWidth(
         style_.metrics.lineWidth, scale);
-    drawList->AddLine(
+    DrawDashedLine(
+        drawList,
         origin,
         target,
         render::WithExactAlpha(color, render::kSolidAlpha),
-        width);
+        render::WithExactAlpha(style_.colors.shadow, 150),
+        width,
+        scale,
+        8,
+        0.56f);
+    DrawDiamond(
+        drawList,
+        target,
+        3.0f * scale,
+        render::WithExactAlpha(color, render::kSolidAlpha),
+        width,
+        false);
 }
 
 void OverlayRenderer::DrawPlayerSignal(ImDrawList* drawList,
@@ -582,11 +846,42 @@ void OverlayRenderer::DrawPlayerSignal(ImDrawList* drawList,
         : ToneColor(signal.tone);
     const float width = render::PlayerStrokeWidth(
         style_.metrics.lineWidth, scale);
-    drawList->AddLine(
+    DrawDashedLine(
+        drawList,
         start,
         end,
         render::WithExactAlpha(base, render::kSolidAlpha),
-        width);
+        render::WithExactAlpha(style_.colors.shadow, 154),
+        width,
+        scale,
+        signal.kind == PlayerSignalKind::AimWarning ? 10 : 7,
+        signal.kind == PlayerSignalKind::AimWarning ? 0.64f : 0.46f);
+
+    const ImVec2 direction = Normalize(delta);
+    const ImVec2 side = Perpendicular(direction);
+    const float markerSize =
+        (signal.kind == PlayerSignalKind::AimWarning ? 5.0f : 3.2f) *
+        scale;
+    DrawDiamond(
+        drawList,
+        end,
+        markerSize,
+        render::WithExactAlpha(base, render::kSolidAlpha),
+        width,
+        signal.kind == PlayerSignalKind::AimWarning);
+    if (signal.kind == PlayerSignalKind::AimWarning) {
+        const ImVec2 neck = Subtract(end, Multiply(direction, 11.0f * scale));
+        drawList->AddLine(
+            neck,
+            Add(neck, Multiply(side, 5.0f * scale)),
+            base,
+            width);
+        drawList->AddLine(
+            neck,
+            Subtract(neck, Multiply(side, 5.0f * scale)),
+            base,
+            width);
+    }
 }
 
 void OverlayRenderer::DrawModelGeometry(
@@ -599,11 +894,17 @@ void OverlayRenderer::DrawModelGeometry(
 
     const float scale = style_.metrics.scale;
     const float width = std::max(
-        1.0f, style_.metrics.lineWidth * 0.5f * scale);
-    const ImU32 color = WithAlpha(ToneColor(model.tone), 0.66f);
-    for (const GeometrySegmentVisual& segment : model.segments) {
+        1.0f, style_.metrics.lineWidth * 0.46f * scale);
+    const ImU32 primary = WithAlpha(ToneColor(model.tone), 0.62f);
+    const ImU32 secondary = WithAlpha(style_.colors.grid, 0.76f);
+    for (std::size_t index = 0; index < model.segments.size(); ++index) {
+        const GeometrySegmentVisual& segment = model.segments[index];
         if (!Finite(segment.start) || !Finite(segment.end)) continue;
-        drawList->AddLine(segment.start, segment.end, color, width);
+        drawList->AddLine(
+            segment.start,
+            segment.end,
+            index % 3 == 0 ? primary : secondary,
+            width);
     }
 }
 
@@ -639,15 +940,44 @@ void OverlayRenderer::DrawOffscreenWarning(ImDrawList* drawList,
         maximumRadius);
     const ImVec2 anchor = Add(center, Multiply(direction, radius));
     const ImVec2 side = Perpendicular(direction);
-    const ImU32 color = WithAlpha(style_.colors.text, 0.92f);
-    const float arrowLength = 10.0f * shapeScale;
-    const float arrowWidth = 6.0f * shapeScale;
-    const ImVec2 base = Subtract(anchor, Multiply(direction, arrowLength));
-    const ImVec2 left = Add(base, Multiply(side, arrowWidth));
-    const ImVec2 right = Subtract(base, Multiply(side, arrowWidth));
-    drawList->AddTriangleFilled(anchor, left, right, color);
+    const ImU32 color = WithAlpha(ToneColor(marker.tone), 0.96f);
+    const ImU32 shadow =
+        render::WithExactAlpha(style_.colors.shadow, 180);
+    const float width = render::PlayerStrokeWidth(
+        style_.metrics.lineWidth, scale);
+    const float outline = std::max(width + scale, width * 1.5f);
+    const float bracketLength = 12.0f * shapeScale;
+    const float bracketWidth = 7.0f * shapeScale;
+    const ImVec2 outerBase =
+        Subtract(anchor, Multiply(direction, bracketLength));
+    const ImVec2 outerLeft =
+        Add(outerBase, Multiply(side, bracketWidth));
+    const ImVec2 outerRight =
+        Subtract(outerBase, Multiply(side, bracketWidth));
+    DrawOutlinedLine(
+        drawList, outerLeft, anchor, color, shadow, width, outline);
+    DrawOutlinedLine(
+        drawList, anchor, outerRight, color, shadow, width, outline);
+
+    const ImVec2 innerTip =
+        Subtract(anchor, Multiply(direction, 5.5f * shapeScale));
+    const ImVec2 innerBase =
+        Subtract(innerTip, Multiply(direction, 6.5f * shapeScale));
+    const ImVec2 innerLeft =
+        Add(innerBase, Multiply(side, 3.8f * shapeScale));
+    const ImVec2 innerRight =
+        Subtract(innerBase, Multiply(side, 3.8f * shapeScale));
+    drawList->AddLine(innerLeft, innerTip, WithAlpha(color, 0.58f), width);
+    drawList->AddLine(innerTip, innerRight, WithAlpha(color, 0.58f), width);
 
     std::string caption = marker.label;
+    const std::string distance = marker.distanceMeters > 0.0f
+        ? FormatDistance(marker.distanceMeters)
+        : std::string{};
+    if (!distance.empty()) {
+        if (!caption.empty()) caption += "  ";
+        caption += distance;
+    }
     if (!caption.empty()) {
         const float fontSize = style_.metrics.smallFontSize * scale;
         const ImVec2 extent = TextExtent(caption, fontSize);
@@ -656,7 +986,7 @@ void OverlayRenderer::DrawOffscreenWarning(ImDrawList* drawList,
         const float textWidth = std::min(extent.x, availableWidth);
         if (textWidth <= 0.0f) return;
         const ImVec2 inward = Subtract(
-            anchor, Multiply(direction, 22.0f * shapeScale));
+            anchor, Multiply(direction, 29.0f * shapeScale));
         ImVec2 position(inward.x - textWidth * 0.5f,
                         inward.y - fontSize * 0.5f);
         position.x = ClampFinite(
@@ -670,7 +1000,7 @@ void OverlayRenderer::DrawOffscreenWarning(ImDrawList* drawList,
         DrawText(drawList,
                  position,
                  color,
-                 style_.colors.shadow,
+                 shadow,
                  fontSize,
                  FitText(caption, textWidth, fontSize));
     }
@@ -684,13 +1014,15 @@ void OverlayRenderer::DrawProjectile(ImDrawList* drawList,
     const ImU32 color = projectile.colorOverride != 0
         ? projectile.colorOverride
         : ToneColor(projectile.tone);
+    const float rangeWidth = std::max(
+        1.0f, style_.metrics.lineWidth * 0.48f * scale);
     for (const GeometrySegmentVisual& segment : projectile.rangeSegments) {
         if (!Finite(segment.start) || !Finite(segment.end)) continue;
         drawList->AddLine(
             segment.start,
-            segment.end,
-            WithAlpha(color, 0.38f),
-            std::max(1.0f, style_.metrics.lineWidth * 0.42f * scale));
+            Lerp(segment.start, segment.end, 0.64f),
+            WithAlpha(color, 0.64f),
+            rangeWidth);
     }
 
     if (projectile.trajectory.size() >= 2) {
@@ -698,12 +1030,38 @@ void OverlayRenderer::DrawProjectile(ImDrawList* drawList,
             const ImVec2& first = projectile.trajectory[index - 1];
             const ImVec2& second = projectile.trajectory[index];
             if (!Finite(first) || !Finite(second)) continue;
-            drawList->AddLine(first,
-                              second,
-                              WithAlpha(color, 0.70f),
-                              std::max(1.0f, style_.metrics.lineWidth * 0.42f * scale));
+            drawList->AddLine(
+                first,
+                Lerp(first, second, 0.68f),
+                WithAlpha(color, 0.78f),
+                std::max(
+                    1.0f,
+                    style_.metrics.lineWidth * 0.48f * scale));
+            if (index % 6 == 1) {
+                DrawDiamond(
+                    drawList,
+                    second,
+                    1.9f * scale,
+                    WithAlpha(color, 0.80f),
+                    1.0f,
+                    true);
+            }
         }
     }
+    DrawTickedRing(
+        drawList,
+        projectile.center,
+        7.0f * scale,
+        WithAlpha(color, 0.92f),
+        std::max(1.0f, style_.metrics.lineWidth * 0.55f * scale),
+        3);
+    DrawDiamond(
+        drawList,
+        projectile.center,
+        2.6f * scale,
+        color,
+        1.0f,
+        true);
 
     std::string caption = projectile.label;
     const std::string distance = FormatDistance(projectile.distanceMeters);
@@ -713,22 +1071,38 @@ void OverlayRenderer::DrawProjectile(ImDrawList* drawList,
     }
     if (!caption.empty()) {
         const float fontSize = style_.metrics.fontSize * scale;
-        const float margin = 4.0f * scale;
+        const float margin = 6.0f * scale;
+        const float paddingX = 7.0f * scale;
+        const float paddingY = 4.0f * scale;
         const float maximumWidth = std::max(
             1.0f,
-            std::min(300.0f * scale, viewport.Width() - margin * 2.0f));
+            std::min(
+                280.0f * scale,
+                viewport.Width() - margin * 2.0f - paddingX * 2.0f));
         const FittedText fitted =
             FitTextWithExtent(caption, maximumWidth, fontSize);
-        const float x = std::clamp(
-            projectile.center.x - fitted.extent.x * 0.5f,
+        if (fitted.text.empty()) return;
+        const float panelWidth = fitted.extent.x + paddingX * 2.0f;
+        const float panelHeight = fontSize + paddingY * 2.0f;
+        const float x = ClampFinite(
+            projectile.center.x - panelWidth * 0.5f,
             viewport.left + margin,
-            viewport.right - margin - fitted.extent.x);
-        const float y = std::clamp(
-            projectile.center.y - fontSize - 9.0f * scale,
+            viewport.right - margin - panelWidth);
+        const float y = ClampFinite(
+            projectile.center.y - panelHeight - 12.0f * scale,
             viewport.top + margin,
-            viewport.bottom - margin - fontSize);
+            viewport.bottom - margin - panelHeight);
+        DrawPanel(
+            drawList,
+            ImVec2(x, y),
+            ImVec2(x + panelWidth, y + panelHeight),
+            WithAlpha(style_.colors.surfaceRaised, 0.82f),
+            WithAlpha(color, 0.72f),
+            style_.colors.shadow,
+            style_.metrics.panelRounding * scale,
+            scale);
         DrawText(drawList,
-                 ImVec2(x, y),
+                 ImVec2(x + paddingX, y + paddingY),
                  color,
                  WithAlpha(style_.colors.shadow, 0.62f),
                  fontSize,
@@ -748,16 +1122,62 @@ void OverlayRenderer::DrawCrosshair(ImDrawList* drawList,
         crosshair.thickness,
         0.5f,
         20.0f) * scale;
-    const ImU32 color = IM_COL32(255, 255, 255, 255);
+    const float gap = std::min(
+        half * 0.82f,
+        ClampFinite(crosshair.gap, 0.0f, 500.0f) * scale);
+    const ImU32 color = render::WithExactAlpha(
+        ToneColor(crosshair.tone), render::kSolidAlpha);
+    const ImU32 shadow =
+        render::WithExactAlpha(style_.colors.shadow, 180);
+    const float outline = std::max(width + scale, width * 1.55f);
     const ImVec2 center = crosshair.center;
-    drawList->AddLine(ImVec2(center.x - half, center.y),
-                      ImVec2(center.x + half, center.y),
-                      color,
-                      width);
-    drawList->AddLine(ImVec2(center.x, center.y - half),
-                      ImVec2(center.x, center.y + half),
-                      color,
-                      width);
+    const auto drawArm = [&](const ImVec2& inner,
+                             const ImVec2& outer,
+                             const ImVec2& capDirection) {
+        DrawOutlinedLine(
+            drawList, inner, outer, color, shadow, width, outline);
+        const float cap = std::max(2.0f, 2.8f * scale);
+        DrawOutlinedLine(
+            drawList,
+            Subtract(outer, Multiply(capDirection, cap)),
+            Add(outer, Multiply(capDirection, cap)),
+            color,
+            shadow,
+            width,
+            outline);
+    };
+    drawArm(
+        ImVec2(center.x - gap, center.y),
+        ImVec2(center.x - half, center.y),
+        ImVec2(0.0f, 1.0f));
+    drawArm(
+        ImVec2(center.x + gap, center.y),
+        ImVec2(center.x + half, center.y),
+        ImVec2(0.0f, 1.0f));
+    drawArm(
+        ImVec2(center.x, center.y - gap),
+        ImVec2(center.x, center.y - half),
+        ImVec2(1.0f, 0.0f));
+    drawArm(
+        ImVec2(center.x, center.y + gap),
+        ImVec2(center.x, center.y + half),
+        ImVec2(1.0f, 0.0f));
+    if (crosshair.centerDot) {
+        DrawDiamond(
+            drawList,
+            center,
+            std::max(1.6f, 1.9f * scale),
+            shadow,
+            outline,
+            true);
+        DrawDiamond(
+            drawList,
+            center,
+            std::max(0.9f, 1.05f * scale),
+            color,
+            width,
+            true);
+    }
 }
 
 void OverlayRenderer::DrawAimGuide(ImDrawList* drawList,
@@ -769,22 +1189,44 @@ void OverlayRenderer::DrawAimGuide(ImDrawList* drawList,
         const float radius = std::min(
             guide.radius,
             std::max(viewport.Width(), viewport.Height()));
-        drawList->AddCircle(guide.center,
-                            radius,
-                            IM_COL32(255, 0, 0, 220),
-                            0,
-                            std::max(1.0f, 1.25f * scale));
+        DrawTickedRing(
+            drawList,
+            guide.center,
+            radius,
+            WithAlpha(style_.colors.accent, 0.66f),
+            std::max(1.0f, 1.15f * scale),
+            18);
     }
     if (guide.drawTargetRay && guide.targetValid && Finite(guide.target)) {
         const ImVec2 target = ClampPoint(guide.target, viewport, 5.0f * scale);
         const ImU32 color = guide.locked
-            ? IM_COL32(255, 0, 0, 235)
-            : IM_COL32(255, 165, 0, 235);
-        drawList->AddLine(guide.center,
-                          target,
-                          color,
-                          std::max(1.0f, 1.5f * scale));
-        drawList->AddCircleFilled(target, 3.0f * scale, color, 10);
+            ? WithAlpha(style_.colors.danger, 0.96f)
+            : WithAlpha(style_.colors.caution, 0.94f);
+        const float width = std::max(1.0f, 1.35f * scale);
+        DrawDashedLine(
+            drawList,
+            guide.center,
+            target,
+            color,
+            render::WithExactAlpha(style_.colors.shadow, 170),
+            width,
+            scale,
+            10,
+            guide.locked ? 0.68f : 0.48f);
+        DrawDiamond(
+            drawList,
+            target,
+            5.0f * scale,
+            render::WithExactAlpha(style_.colors.shadow, 180),
+            width + scale,
+            true);
+        DrawDiamond(
+            drawList,
+            target,
+            guide.locked ? 3.4f * scale : 2.8f * scale,
+            color,
+            width,
+            guide.locked);
     }
 }
 
@@ -811,23 +1253,40 @@ void OverlayRenderer::DrawTouchRegion(ImDrawList* drawList,
     };
     if (!bounds.IsValid()) return;
 
-    const ImU32 color = WithAlpha(style_.colors.ally, 0.38f);
-    const float width = std::max(1.0f, style_.metrics.lineWidth * 0.5f * scale);
-    drawList->AddRect(ImVec2(bounds.left, bounds.top),
-                      ImVec2(bounds.right, bounds.bottom),
-                      color,
-                      0.0f,
-                      0,
-                      width);
-    const float half = 5.0f * scale;
-    drawList->AddLine(ImVec2(region.center.x - half, region.center.y),
-                      ImVec2(region.center.x + half, region.center.y),
-                      WithAlpha(style_.colors.text, 0.58f),
-                      width);
-    drawList->AddLine(ImVec2(region.center.x, region.center.y - half),
-                      ImVec2(region.center.x, region.center.y + half),
-                      WithAlpha(style_.colors.text, 0.58f),
-                      width);
+    const ImU32 outerColor = WithAlpha(style_.colors.ally, 0.52f);
+    const ImU32 innerColor = WithAlpha(style_.colors.accent, 0.42f);
+    const float width = std::max(
+        1.0f, style_.metrics.lineWidth * 0.52f * scale);
+    drawList->PushClipRect(
+        ImVec2(viewport.left, viewport.top),
+        ImVec2(viewport.right, viewport.bottom),
+        true);
+    DrawTickedRing(
+        drawList,
+        region.center,
+        extent,
+        outerColor,
+        width,
+        16);
+    DrawTickedRing(
+        drawList,
+        region.center,
+        extent * 0.36f,
+        innerColor,
+        width,
+        8);
+    const float half = 6.0f * scale;
+    drawList->AddLine(
+        ImVec2(region.center.x - half, region.center.y),
+        ImVec2(region.center.x + half, region.center.y),
+        WithAlpha(style_.colors.text, 0.62f),
+        width);
+    drawList->AddLine(
+        ImVec2(region.center.x, region.center.y - half),
+        ImVec2(region.center.x, region.center.y + half),
+        WithAlpha(style_.colors.text, 0.62f),
+        width);
+    drawList->PopClipRect();
 }
 
 void OverlayRenderer::DrawRadar(ImDrawList* drawList,
@@ -847,29 +1306,54 @@ void OverlayRenderer::DrawRadar(ImDrawList* drawList,
         std::min(45.0f * scale, maximumRadius),
         maximumRadius);
     const ImVec2 center = ClampPoint(radar.center, viewport, radius + 4.0f * scale);
-    const ImVec2 minimum(center.x - radius, center.y - radius);
-    const ImVec2 maximum(center.x + radius, center.y + radius);
-    const float insetRadius = std::max(1.0f, radius - 4.0f * scale);
-    const float lineWidth = std::max(1.0f, style_.metrics.lineWidth * 0.5f * scale);
-    drawList->AddRect(minimum,
-                      maximum,
-                      WithAlpha(style_.colors.textMuted, 0.46f),
-                      0.0f,
-                      0,
-                      lineWidth);
-    drawList->AddLine(ImVec2(center.x, minimum.y),
-                      ImVec2(center.x, maximum.y),
-                      WithAlpha(style_.colors.textMuted, 0.20f),
-                      lineWidth);
-    drawList->AddLine(ImVec2(minimum.x, center.y),
-                      ImVec2(maximum.x, center.y),
-                      WithAlpha(style_.colors.textMuted, 0.20f),
-                      lineWidth);
-    drawList->AddCircle(center,
-                        insetRadius * 0.5f,
-                        WithAlpha(style_.colors.textMuted, 0.16f),
-                        48,
-                        lineWidth);
+    const float insetRadius = std::max(1.0f, radius - 8.0f * scale);
+    const float lineWidth = std::max(
+        1.0f, style_.metrics.lineWidth * 0.52f * scale);
+    drawList->AddCircleFilled(
+        Add(center, ImVec2(1.5f * scale, 2.5f * scale)),
+        radius + 1.5f * scale,
+        WithAlpha(style_.colors.shadow, 0.46f),
+        48);
+    drawList->AddCircleFilled(
+        center,
+        radius,
+        WithAlpha(style_.colors.surface, 0.72f),
+        48);
+    drawList->AddCircle(
+        center,
+        radius,
+        WithAlpha(style_.colors.border, 0.92f),
+        48,
+        lineWidth);
+    DrawTickedRing(
+        drawList,
+        center,
+        radius - 3.5f * scale,
+        WithAlpha(style_.colors.accent, 0.62f),
+        lineWidth,
+        7);
+    drawList->AddCircle(
+        center,
+        insetRadius * 0.66f,
+        WithAlpha(style_.colors.grid, 0.62f),
+        36,
+        lineWidth);
+    drawList->AddCircle(
+        center,
+        insetRadius * 0.33f,
+        WithAlpha(style_.colors.grid, 0.50f),
+        28,
+        lineWidth);
+    drawList->AddLine(
+        ImVec2(center.x - insetRadius, center.y),
+        ImVec2(center.x + insetRadius, center.y),
+        WithAlpha(style_.colors.grid, 0.48f),
+        lineWidth);
+    drawList->AddLine(
+        ImVec2(center.x, center.y - insetRadius),
+        ImVec2(center.x, center.y + insetRadius),
+        WithAlpha(style_.colors.grid, 0.48f),
+        lineWidth);
 
     for (const RadarBlip& blip : radar.blips) {
         if (!Finite(blip.normalizedPosition)) continue;
@@ -891,13 +1375,28 @@ void OverlayRenderer::DrawRadar(ImDrawList* drawList,
             headingUsable) {
             const float heading = blip.headingRadians - radar.viewHeadingRadians - kPi * 0.5f;
             const ImVec2 forward(std::cos(heading), std::sin(heading));
-            drawList->AddLine(position,
-                              Add(position, Multiply(forward, size * 2.0f)),
-                              color,
-                              lineWidth);
-            drawList->AddCircleFilled(position, size * 0.65f, color, 10);
+            const ImVec2 side = Perpendicular(forward);
+            const ImVec2 tip = Add(position, Multiply(forward, size * 2.4f));
+            const ImVec2 rear = Subtract(position, Multiply(forward, size));
+            const std::array<ImVec2, 3> points{{
+                tip,
+                Add(rear, Multiply(side, size)),
+                Subtract(rear, Multiply(side, size)),
+            }};
+            if (blip.kind == RadarBlipKind::Player) {
+                drawList->AddConvexPolyFilled(
+                    points.data(), static_cast<int>(points.size()), color);
+            } else {
+                drawList->AddPolyline(
+                    points.data(),
+                    static_cast<int>(points.size()),
+                    color,
+                    ImDrawFlags_Closed,
+                    lineWidth);
+            }
         } else if (blip.kind == RadarBlipKind::Bot) {
-            drawList->AddCircle(position, size, color, 12, lineWidth);
+            DrawDiamond(
+                drawList, position, size * 1.15f, color, lineWidth, false);
             if (headingUsable) {
                 const float heading =
                     blip.headingRadians - radar.viewHeadingRadians - kPi * 0.5f;
@@ -909,12 +1408,15 @@ void OverlayRenderer::DrawRadar(ImDrawList* drawList,
                     lineWidth);
             }
         } else {
-            drawList->AddCircleFilled(position,
-                                      blip.kind == RadarBlipKind::Item
-                                          ? size * 0.55f
-                                          : size * 0.75f,
-                                      color,
-                                      10);
+            DrawDiamond(
+                drawList,
+                position,
+                blip.kind == RadarBlipKind::Item
+                    ? size * 0.72f
+                    : size,
+                color,
+                lineWidth,
+                true);
         }
 
         if (!blip.label.empty()) {
@@ -928,17 +1430,24 @@ void OverlayRenderer::DrawRadar(ImDrawList* drawList,
     }
 
     if (radar.showSelf) {
-        const float selfSize = 4.0f * scale;
-        const ImVec2 points[3] = {
-            ImVec2(center.x, center.y - selfSize),
-            ImVec2(center.x + selfSize * 0.8f, center.y + selfSize),
-            ImVec2(center.x - selfSize * 0.8f, center.y + selfSize),
-        };
-        drawList->AddPolyline(points,
-                              3,
-                              style_.colors.accent,
-                              ImDrawFlags_Closed,
-                              lineWidth);
+        const float selfSize = 5.0f * scale;
+        const std::array<ImVec2, 4> points{{
+            ImVec2(center.x, center.y - selfSize * 1.45f),
+            ImVec2(center.x + selfSize, center.y + selfSize),
+            ImVec2(center.x, center.y + selfSize * 0.45f),
+            ImVec2(center.x - selfSize, center.y + selfSize),
+        }};
+        drawList->AddConvexPolyFilled(
+            points.data(),
+            static_cast<int>(points.size()),
+            style_.colors.accent);
+        DrawDiamond(
+            drawList,
+            center,
+            2.0f * scale,
+            style_.colors.surface,
+            lineWidth,
+            true);
     }
 }
 
@@ -968,23 +1477,56 @@ void OverlayRenderer::DrawHudMap(ImDrawList* drawList,
         const ImU32 color = ToneColor(marker.tone);
         const float width = std::max(1.0f, style_.metrics.lineWidth * 0.5f * scale);
         if (marker.drawDirection && Finite(marker.directionEnd)) {
-            drawList->AddLine(marker.position,
-                              marker.directionEnd,
-                              WithAlpha(color, 0.82f),
-                              width);
+            DrawDashedLine(
+                drawList,
+                marker.position,
+                marker.directionEnd,
+                WithAlpha(color, 0.86f),
+                WithAlpha(style_.colors.shadow, 0.62f),
+                width,
+                scale,
+                4,
+                0.62f);
+            DrawDiamond(
+                drawList,
+                marker.directionEnd,
+                std::max(1.5f, size * 0.30f),
+                WithAlpha(color, 0.90f),
+                width,
+                true);
         }
 
         if (marker.kind == RadarBlipKind::Self) {
-            const ImVec2 points[3] = {
+            const std::array<ImVec2, 4> points{{
                 ImVec2(marker.position.x, marker.position.y - size * 1.25f),
-                ImVec2(marker.position.x + size, marker.position.y + size * 0.85f),
-                ImVec2(marker.position.x - size, marker.position.y + size * 0.85f),
-            };
-            drawList->AddPolyline(points, 3, color, ImDrawFlags_Closed, width);
+                ImVec2(marker.position.x + size, marker.position.y + size),
+                ImVec2(marker.position.x, marker.position.y + size * 0.45f),
+                ImVec2(marker.position.x - size, marker.position.y + size),
+            }};
+            drawList->AddConvexPolyFilled(
+                points.data(), static_cast<int>(points.size()), color);
         } else if (marker.kind == RadarBlipKind::Bot) {
-            drawList->AddCircle(marker.position, size, color, 12, width);
+            DrawDiamond(
+                drawList, marker.position, size, color, width, false);
         } else {
-            drawList->AddCircleFilled(marker.position, size * 0.58f, color, 10);
+            DrawDiamond(
+                drawList,
+                marker.position,
+                marker.kind == RadarBlipKind::Item
+                    ? size * 0.62f
+                    : size * 0.82f,
+                color,
+                width,
+                true);
+            if (marker.kind == RadarBlipKind::Player) {
+                DrawDiamond(
+                    drawList,
+                    marker.position,
+                    size * 0.30f,
+                    style_.colors.surface,
+                    width,
+                    true);
+            }
         }
 
         if (!marker.label.empty() && labelSize > 0.0f) {
@@ -1018,41 +1560,109 @@ void OverlayRenderer::DrawWorldLabel(ImDrawList* drawList,
         ? label.colorOverride
         : ToneColor(label.tone);
     const float margin = 6.0f * scale;
-    const float maximumWidth = std::max(
+    const float paddingX = (screenAlert ? 13.0f : 8.0f) * scale;
+    const float paddingY = (screenAlert ? 7.0f : 5.0f) * scale;
+    const float markerColumn = screenAlert ? 4.0f * scale : 8.0f * scale;
+    const float maximumContentWidth = std::max(
         1.0f,
         std::min((screenAlert ? 420.0f : 260.0f) * scale,
-                 viewport.Width() - margin * 2.0f));
+                 viewport.Width() - margin * 2.0f - paddingX * 2.0f -
+                     markerColumn));
     const FittedText title =
-        FitTextWithExtent(label.title, maximumWidth, titleSize);
+        FitTextWithExtent(label.title, maximumContentWidth, titleSize);
     const FittedText detail = label.detail.empty()
         ? FittedText{}
-        : FitTextWithExtent(label.detail, maximumWidth, detailSize);
-    const float gap = detail.text.empty() ? 0.0f : 1.0f * scale;
-    const float textHeight = titleSize +
+        : FitTextWithExtent(label.detail, maximumContentWidth, detailSize);
+    if (title.text.empty()) return;
+    const float gap = detail.text.empty() ? 0.0f : 2.0f * scale;
+    const float contentHeight = titleSize +
         (detail.text.empty() ? 0.0f : detailSize + gap);
+    const float contentWidth = std::max(title.extent.x, detail.extent.x);
+    const float panelWidth = std::min(
+        viewport.Width() - margin * 2.0f,
+        contentWidth + paddingX * 2.0f + markerColumn);
+    const float panelHeight = contentHeight + paddingY * 2.0f;
     const ImVec2 anchor = ClampPoint(label.anchor, viewport, margin);
-    const float top = ClampFinite(
-        anchor.y - textHeight * 0.5f,
-        viewport.top + margin,
-        viewport.bottom - margin - textHeight);
-    const ImU32 textShadow = WithAlpha(style_.colors.shadow, 0.62f);
-    const float titleX = ClampFinite(
-        anchor.x - title.extent.x * 0.5f,
+    const float panelLeft = ClampFinite(
+        anchor.x - panelWidth * 0.5f,
         viewport.left + margin,
-        viewport.right - margin - title.extent.x);
+        viewport.right - margin - panelWidth);
+    const float requestedTop = screenAlert
+        ? anchor.y - panelHeight * 0.5f
+        : anchor.y - panelHeight - 8.0f * scale;
+    const float panelTop = ClampFinite(
+        requestedTop,
+        viewport.top + margin,
+        viewport.bottom - margin - panelHeight);
+    const ImVec2 panelMinimum(panelLeft, panelTop);
+    const ImVec2 panelMaximum(
+        panelLeft + panelWidth, panelTop + panelHeight);
+    const ImU32 textShadow = WithAlpha(style_.colors.shadow, 0.62f);
+    if (!screenAlert) {
+        const ImVec2 stemEnd(
+            ClampFinite(
+                anchor.x,
+                panelMinimum.x + 10.0f * scale,
+                panelMaximum.x - 10.0f * scale),
+            panelMaximum.y);
+        drawList->AddLine(
+            anchor,
+            stemEnd,
+            WithAlpha(color, 0.48f),
+            std::max(1.0f, style_.metrics.lineWidth * 0.45f * scale));
+    }
+    DrawPanel(
+        drawList,
+        panelMinimum,
+        panelMaximum,
+        WithAlpha(
+            screenAlert ? style_.colors.surfaceRaised : style_.colors.surface,
+            screenAlert ? 0.90f : 0.78f),
+        WithAlpha(color, label.emphasized ? 0.92f : 0.62f),
+        style_.colors.shadow,
+        style_.metrics.panelRounding * scale,
+        scale);
+    if (screenAlert) {
+        drawList->AddRectFilled(
+            ImVec2(panelMinimum.x, panelMinimum.y),
+            ImVec2(panelMinimum.x + markerColumn, panelMaximum.y),
+            color,
+            style_.metrics.panelRounding * scale);
+        drawList->AddRectFilled(
+            ImVec2(panelMaximum.x - markerColumn, panelMinimum.y),
+            ImVec2(panelMaximum.x, panelMaximum.y),
+            color,
+            style_.metrics.panelRounding * scale);
+    } else {
+        DrawDiamond(
+            drawList,
+            ImVec2(
+                panelMinimum.x + markerColumn * 0.5f + 2.0f * scale,
+                panelMinimum.y + panelHeight * 0.5f),
+            label.emphasized ? 3.6f * scale : 2.8f * scale,
+            color,
+            1.0f,
+            label.kind == WorldLabelKind::Item || label.emphasized);
+    }
+
+    const float textStartX = panelMinimum.x + markerColumn + paddingX;
+    const float titleX = screenAlert
+        ? panelMinimum.x + (panelWidth - title.extent.x) * 0.5f
+        : textStartX;
+    float textY = panelMinimum.y + paddingY;
     DrawText(drawList,
-             ImVec2(titleX, top),
+             ImVec2(titleX, textY),
              color,
              textShadow,
              titleSize,
              title.text);
     if (!detail.text.empty()) {
-        const float detailX = ClampFinite(
-            anchor.x - detail.extent.x * 0.5f,
-            viewport.left + margin,
-            viewport.right - margin - detail.extent.x);
+        textY += titleSize + gap;
+        const float detailX = screenAlert
+            ? panelMinimum.x + (panelWidth - detail.extent.x) * 0.5f
+            : textStartX;
         DrawText(drawList,
-                 ImVec2(detailX, top + titleSize + gap),
+                 ImVec2(detailX, textY),
                  screenAlert ? style_.colors.text : style_.colors.textMuted,
                  textShadow,
                  detailSize,
@@ -1067,37 +1677,78 @@ void OverlayRenderer::DrawHighValueList(ImDrawList* drawList,
     const float scale = style_.metrics.scale;
     const float titleSize = style_.metrics.fontSize * scale;
     const float rowFontSize = style_.metrics.smallFontSize * scale;
-    const float headerHeight = list.title.empty() ? 0.0f : titleSize + 5.0f * scale;
-    const float rowHeight = rowFontSize + 5.0f * scale;
+    const float padding = 9.0f * scale;
+    const float headerHeight =
+        list.title.empty() ? 0.0f : titleSize + 8.0f * scale;
+    const float rowHeight = rowFontSize + 7.0f * scale;
     const float availableWidth = viewport.Width() - 16.0f * scale;
     const float availableHeight = viewport.Height() - 16.0f * scale;
-    if (availableWidth < 80.0f * scale || availableHeight < rowHeight) return;
+    if (availableWidth < 80.0f * scale ||
+        availableHeight < rowHeight + padding * 2.0f) {
+        return;
+    }
     const float width = std::min(
         std::max(list.width * scale, 210.0f * scale),
         availableWidth);
     const int rowsByHeight = std::max(
         0,
-        static_cast<int>((availableHeight - headerHeight) / rowHeight));
+        static_cast<int>(
+            (availableHeight - headerHeight - padding * 2.0f) /
+            rowHeight));
     const int rowCount = std::min(
         {list.maxRows, static_cast<int>(list.entries.size()), rowsByHeight});
     if (rowCount <= 0) return;
-    const float height = headerHeight + rowHeight * rowCount;
+    const float height =
+        padding * 2.0f + headerHeight + rowHeight * rowCount;
     ImVec2 origin = ClampPoint(list.origin, viewport, 8.0f * scale);
-    origin.x = std::clamp(origin.x, viewport.left + 8.0f * scale,
-                          viewport.right - width - 8.0f * scale);
-    origin.y = std::clamp(origin.y, viewport.top + 8.0f * scale,
-                          viewport.bottom - height - 8.0f * scale);
-    const float right = origin.x + width;
+    origin.x = ClampFinite(
+        origin.x,
+        viewport.left + 8.0f * scale,
+        viewport.right - width - 8.0f * scale);
+    origin.y = ClampFinite(
+        origin.y,
+        viewport.top + 8.0f * scale,
+        viewport.bottom - height - 8.0f * scale);
+    const ImVec2 panelMaximum(origin.x + width, origin.y + height);
+    const float contentLeft = origin.x + padding;
+    const float contentRight = panelMaximum.x - padding;
     const ImU32 textShadow = WithAlpha(style_.colors.shadow, 0.62f);
+    DrawPanel(
+        drawList,
+        origin,
+        panelMaximum,
+        WithAlpha(style_.colors.surfaceRaised, 0.88f),
+        WithAlpha(style_.colors.border, 0.96f),
+        style_.colors.shadow,
+        style_.metrics.panelRounding * scale,
+        scale);
+    drawList->AddRectFilled(
+        origin,
+        ImVec2(panelMaximum.x, origin.y + 2.5f * scale),
+        style_.colors.accent,
+        style_.metrics.panelRounding * scale);
 
-    float rowY = origin.y;
+    float rowY = origin.y + padding;
     if (!list.title.empty()) {
+        DrawDiamond(
+            drawList,
+            ImVec2(contentLeft + 3.0f * scale,
+                   rowY + titleSize * 0.5f),
+            3.0f * scale,
+            style_.colors.accent,
+            1.0f,
+            true);
         DrawText(drawList,
-                 origin,
+                 ImVec2(contentLeft + 11.0f * scale, rowY),
                  style_.colors.accent,
                  textShadow,
                  titleSize,
-                 FitText(list.title, width, titleSize));
+                 FitText(
+                     list.title,
+                     std::max(
+                         0.0f,
+                         contentRight - contentLeft - 11.0f * scale),
+                     titleSize));
         rowY += headerHeight;
     }
 
@@ -1108,26 +1759,44 @@ void OverlayRenderer::DrawHighValueList(ImDrawList* drawList,
         const std::string distance = FormatDistance(entry.distanceMeters);
         const ImVec2 valueExtent = TextExtent(value, rowFontSize);
         const ImVec2 distanceExtent = TextExtent(distance, rowFontSize);
-        const float valueX = right - valueExtent.x;
+        const float valueX = contentRight - valueExtent.x;
         const float distanceX = valueX - 10.0f * scale - distanceExtent.x;
-        const float nameX = origin.x;
+        const float nameX = contentLeft + 10.0f * scale;
         const float nameWidth = std::max(0.0f, distanceX - nameX - 8.0f * scale);
+        if (index % 2 == 0) {
+            drawList->AddRectFilled(
+                ImVec2(contentLeft - 3.0f * scale, rowY),
+                ImVec2(contentRight + 3.0f * scale, rowY + rowHeight),
+                WithAlpha(style_.colors.surfaceSoft, 0.48f),
+                3.0f * scale);
+        }
+        DrawDiamond(
+            drawList,
+            ImVec2(
+                contentLeft + 2.5f * scale,
+                rowY + rowHeight * 0.5f),
+            2.4f * scale,
+            color,
+            1.0f,
+            true);
+        const float textY =
+            rowY + (rowHeight - rowFontSize) * 0.5f;
         DrawText(drawList,
-                 ImVec2(nameX, rowY),
+                 ImVec2(nameX, textY),
                  style_.colors.text,
                  textShadow,
                  rowFontSize,
                  FitText(entry.name, nameWidth, rowFontSize));
         if (!distance.empty()) {
             DrawText(drawList,
-                     ImVec2(distanceX, rowY),
+                     ImVec2(distanceX, textY),
                      style_.colors.textMuted,
                      textShadow,
                      rowFontSize,
                      distance);
         }
         DrawText(drawList,
-                 ImVec2(valueX, rowY),
+                 ImVec2(valueX, textY),
                  color,
                  textShadow,
                  rowFontSize,
