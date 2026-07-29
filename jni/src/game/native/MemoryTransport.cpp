@@ -462,10 +462,12 @@ struct MemoryTransport::Impl {
                    ExecutionBreakpointBackend::Perf) {
             removed = perfExecutionBreakpoint.Remove();
         }
-        executionBreakpointBackend =
-            ExecutionBreakpointBackend::None;
-        executionBreakpointConfigured = false;
-        executionBreakpointAddress = 0;
+        if (removed) {
+            executionBreakpointBackend =
+                ExecutionBreakpointBackend::None;
+            executionBreakpointConfigured = false;
+            executionBreakpointAddress = 0;
+        }
         return removed;
     }
 

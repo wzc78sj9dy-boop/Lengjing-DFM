@@ -408,6 +408,208 @@ void TestUnreadableDecoyLiteralIsSkipped() {
     REQUIRE(located == secondVeneer);
 }
 
+void TestOrderedFirstReturnsFirstOfTwoMatches() {
+    LocatorFixture fixture;
+    const std::uintptr_t firstMatch = kScanBase + 0x80;
+    fixture.WriteSecondVeneer(firstMatch, kScanBase + 0x200);
+    fixture.WriteSecondVeneer(
+        kScanBase + 0x480, kScanBase + 0x600);
+
+    std::uintptr_t located = 0;
+    REQUIRE(lengjing::game::native::LocateSecondExecutionVeneer(
+        kModuleBase,
+        kFirstVeneerRva,
+        fixture.Reader(),
+        located,
+        lengjing::game::native::ExecutionVeneerMatchPolicy::
+            OrderedFirst));
+    REQUIRE(located == firstMatch);
+}
+
+void TestOrderedFirstSkipsUnreadablePage() {
+    LocatorFixture fixture;
+    const std::uintptr_t secondVeneer =
+        kScanBase + kPageSize + 0x80;
+    fixture.WriteSecondVeneer(
+        secondVeneer, kScanBase + kPageSize + 0x200);
+
+    const auto backingReader = fixture.Reader();
+    bool failedPageRead = false;
+    const lengjing::game::native::ExecutionVeneerReadMemory reader =
+        [&](std::uintptr_t address,
+            void* destination,
+            std::size_t size) {
+            if (address == kScanBase && size == kPageSize) {
+                failedPageRead = true;
+                return false;
+            }
+            return backingReader(address, destination, size);
+        };
+
+    std::uintptr_t located = 0;
+    REQUIRE(lengjing::game::native::LocateSecondExecutionVeneer(
+        kModuleBase,
+        kFirstVeneerRva,
+        reader,
+        located,
+        lengjing::game::native::ExecutionVeneerMatchPolicy::
+            OrderedFirst));
+    REQUIRE(failedPageRead);
+    REQUIRE(located == secondVeneer);
+}
+
+void TestOrderedFirstReadsCrossPageBranch() {
+    LocatorFixture fixture;
+    const std::uintptr_t secondVeneer =
+        kScanBase + kPageSize - sizeof(std::uint32_t);
+    const std::uintptr_t secondLiteral = kScanBase + 0x200;
+    fixture.WriteSecondVeneer(
+        secondVeneer, secondLiteral);
+
+    std::uintptr_t located = 0;
+    REQUIRE(lengjing::game::native::LocateSecondExecutionVeneer(
+        kModuleBase,
+        kFirstVeneerRva,
+        fixture.Reader(),
+        located,
+        lengjing::game::native::ExecutionVeneerMatchPolicy::
+            OrderedFirst));
+    REQUIRE(located == secondVeneer);
+    const auto literalRead = std::find_if(
+        fixture.memory.reads.begin(),
+        fixture.memory.reads.end(),
+        [secondLiteral](const ReadRequest& request) {
+            return request.address == secondLiteral &&
+                request.size == sizeof(std::uint64_t);
+        });
+    const auto branchRead = std::find_if(
+        fixture.memory.reads.begin(),
+        fixture.memory.reads.end(),
+        [secondVeneer](const ReadRequest& request) {
+            return request.address ==
+                    secondVeneer + sizeof(std::uint32_t) &&
+                request.size == sizeof(std::uint32_t);
+        });
+    REQUIRE(literalRead != fixture.memory.reads.end());
+    REQUIRE(branchRead != fixture.memory.reads.end());
+    REQUIRE(literalRead < branchRead);
+}
+
+void TestOrderedFirstMasksExpectedTargetToLow56() {
+    constexpr std::uintptr_t kTaggedModuleBase =
+        UINT64_C(0xAB00007000000000);
+    constexpr std::uintptr_t kTaggedFirstVeneer =
+        kTaggedModuleBase + kFirstVeneerRva;
+    constexpr std::uintptr_t kFirstLiteral =
+        kTaggedFirstVeneer + 0x100;
+    constexpr std::uintptr_t kSecondVeneer = kScanBase + 0x80;
+    constexpr std::uintptr_t kSecondLiteral = kScanBase + 0x200;
+
+    FakeMemory memory;
+    memory.AddRegion(kTaggedModuleBase, 3 * kPageSize);
+    memory.AddRegion(kScanBase, 5 * kPageSize);
+    memory.Write32(
+        kTaggedFirstVeneer,
+        EncodeLdrX(16, kTaggedFirstVeneer, kFirstLiteral));
+    memory.Write32(kTaggedFirstVeneer + 4, EncodeBr(16));
+    memory.Write64(
+        kFirstLiteral,
+        UINT64_C(0xAB00007100000234));
+    memory.Write32(
+        kSecondVeneer,
+        EncodeLdrX(9, kSecondVeneer, kSecondLiteral));
+    memory.Write32(kSecondVeneer + 4, EncodeBr(9));
+    memory.Write64(
+        kSecondLiteral,
+        UINT64_C(0xCD00007000001010));
+
+    const lengjing::game::native::ExecutionVeneerReadMemory reader =
+        [&memory](std::uintptr_t address,
+                  void* destination,
+                  std::size_t size) {
+            return memory.Read(address, destination, size);
+        };
+    std::uintptr_t located = 0;
+    REQUIRE(lengjing::game::native::LocateSecondExecutionVeneer(
+        kTaggedModuleBase,
+        kFirstVeneerRva,
+        reader,
+        located,
+        lengjing::game::native::ExecutionVeneerMatchPolicy::
+            OrderedFirst));
+    REQUIRE(located == kSecondVeneer);
+}
+
+bool LocateOrderedAtFirstTarget(
+    std::uintptr_t firstTarget,
+    std::uintptr_t& located) {
+    const std::uintptr_t scanBase =
+        firstTarget & ~static_cast<std::uintptr_t>(kPageSize - 1);
+    const std::uintptr_t firstVeneer =
+        kModuleBase + kFirstVeneerRva;
+    const std::uintptr_t firstLiteral = firstVeneer + 0x100;
+    const std::uintptr_t secondVeneer = scanBase + 0x200;
+    const std::uintptr_t secondLiteral = scanBase + 0x300;
+
+    FakeMemory memory;
+    memory.AddRegion(kModuleBase, 3 * kPageSize);
+    memory.AddRegion(scanBase, 5 * kPageSize);
+    memory.Write32(
+        firstVeneer,
+        EncodeLdrX(16, firstVeneer, firstLiteral));
+    memory.Write32(firstVeneer + 4, EncodeBr(16));
+    memory.Write64(
+        firstLiteral,
+        UINT64_C(0xAB00000000000000) |
+            static_cast<std::uint64_t>(firstTarget));
+    memory.Write32(
+        secondVeneer,
+        EncodeLdrX(9, secondVeneer, secondLiteral));
+    memory.Write32(secondVeneer + 4, EncodeBr(9));
+    memory.Write64(
+        secondLiteral,
+        UINT64_C(0xCD00000000000000) |
+            static_cast<std::uint64_t>(firstVeneer + 0x10));
+
+    const lengjing::game::native::ExecutionVeneerReadMemory reader =
+        [&memory](std::uintptr_t address,
+                  void* destination,
+                  std::size_t size) {
+            return memory.Read(address, destination, size);
+        };
+    return lengjing::game::native::LocateSecondExecutionVeneer(
+        kModuleBase,
+        kFirstVeneerRva,
+        reader,
+        located,
+        lengjing::game::native::ExecutionVeneerMatchPolicy::
+            OrderedFirst);
+}
+
+void TestOrderedFirstStrictTargetBounds() {
+    constexpr std::uintptr_t kLower = UINT64_C(0x5FEEE000FF);
+    constexpr std::uintptr_t kUpper = UINT64_C(0x8000000330);
+
+    std::uintptr_t located = 1;
+    REQUIRE(!LocateOrderedAtFirstTarget(kLower, located));
+    REQUIRE(located == 0);
+
+    REQUIRE(LocateOrderedAtFirstTarget(kLower + 1, located));
+    REQUIRE(located ==
+            ((kLower + 1) &
+             ~static_cast<std::uintptr_t>(kPageSize - 1)) +
+                0x200);
+
+    REQUIRE(LocateOrderedAtFirstTarget(kUpper - 4, located));
+    REQUIRE(located ==
+            ((kUpper - 4) &
+             ~static_cast<std::uintptr_t>(kPageSize - 1)) +
+                0x200);
+
+    REQUIRE(!LocateOrderedAtFirstTarget(kUpper, located));
+    REQUIRE(located == 0);
+}
+
 }  // namespace
 
 void RunExecutionVeneerLocatorTests() {
@@ -419,4 +621,9 @@ void RunExecutionVeneerLocatorTests() {
     TestZeroAndMultipleMatchesFail();
     TestCrossPageLiteralUsesCallback();
     TestUnreadableDecoyLiteralIsSkipped();
+    TestOrderedFirstReturnsFirstOfTwoMatches();
+    TestOrderedFirstSkipsUnreadablePage();
+    TestOrderedFirstReadsCrossPageBranch();
+    TestOrderedFirstMasksExpectedTargetToLow56();
+    TestOrderedFirstStrictTargetBounds();
 }

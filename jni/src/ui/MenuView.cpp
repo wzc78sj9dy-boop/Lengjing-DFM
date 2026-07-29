@@ -778,10 +778,21 @@ void RenderRuntime(UiModel& model, UiActions& actions) {
         ImGui::EndTable();
     }
     ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    const bool primaryCoordinateChanged =
+        Toggle("解密1", visual.coordinateDecrypt);
+    if (primaryCoordinateChanged && visual.coordinateDecrypt) {
+        visual.coordinateDecrypt2 = false;
+    }
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+    const bool secondaryCoordinateChanged =
+        Toggle("解密2", visual.coordinateDecrypt2);
+    if (secondaryCoordinateChanged && visual.coordinateDecrypt2) {
+        visual.coordinateDecrypt = false;
+    }
     Mark(
         actions,
         SettingsDomain::Visual,
-        Toggle("解密", visual.coordinateDecrypt));
+        primaryCoordinateChanged || secondaryCoordinateChanged);
     ImGui::Dummy(ImVec2(0.0f, 4.0f));
     int renderBackend = std::clamp(
         static_cast<int>(system.renderBackend),

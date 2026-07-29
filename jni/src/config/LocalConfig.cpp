@@ -15,7 +15,8 @@ namespace {
 
 using Json = nlohmann::json;
 
-constexpr int kSchemaVersion = 1;
+constexpr int kSchemaVersion = 2;
+constexpr int kPreviousSchemaVersion = 1;
 
 template <typename T>
 T ReadNumber(const Json& object, const char* key, T fallback, T minimum, T maximum) {
@@ -153,6 +154,7 @@ Json Serialize(const ui::UiModel& model) {
             {"model_geometry", model.visual.modelGeometry},
             {"visibility_color", model.visual.visibilityColor},
             {"coordinate_decrypt", model.visual.coordinateDecrypt},
+            {"coordinate_decrypt2", model.visual.coordinateDecrypt2},
             {"box", model.visual.box},
             {"snapline", model.visual.snapline},
             {"skeleton", model.visual.skeleton},
@@ -234,7 +236,9 @@ Json Serialize(const ui::UiModel& model) {
 }
 
 void Apply(const Json& root, ui::UiModel& model) {
-    if (root.value("schema_version", 0) != kSchemaVersion) {
+    const int schemaVersion = root.value("schema_version", 0);
+    if (schemaVersion != kSchemaVersion &&
+        schemaVersion != kPreviousSchemaVersion) {
         return;
     }
 
@@ -251,6 +255,15 @@ void Apply(const Json& root, ui::UiModel& model) {
     LOAD_VISUAL_BOOL(modelGeometry, "model_geometry");
     LOAD_VISUAL_BOOL(visibilityColor, "visibility_color");
     LOAD_VISUAL_BOOL(coordinateDecrypt, "coordinate_decrypt");
+    if (schemaVersion == kSchemaVersion) {
+        LOAD_VISUAL_BOOL(coordinateDecrypt2, "coordinate_decrypt2");
+        if (ui::SelectCoordinateMode(model.visual) ==
+            ui::CoordinateMode::Secondary) {
+            model.visual.coordinateDecrypt = false;
+        }
+    } else {
+        model.visual.coordinateDecrypt2 = false;
+    }
     LOAD_VISUAL_BOOL(box, "box");
     LOAD_VISUAL_BOOL(snapline, "snapline");
     LOAD_VISUAL_BOOL(skeleton, "skeleton");

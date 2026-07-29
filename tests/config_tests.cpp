@@ -127,6 +127,21 @@ void RunConfigTests() {
     REQUIRE(
         lengjing::ui::UiModel{}.aim.inputMode ==
         lengjing::ui::AimInputMode::ReadOnly);
+    REQUIRE(
+        lengjing::ui::SelectCoordinateMode(false, false) ==
+        lengjing::ui::CoordinateMode::None);
+    REQUIRE(
+        lengjing::ui::SelectCoordinateMode(true, false) ==
+        lengjing::ui::CoordinateMode::Primary);
+    REQUIRE(
+        lengjing::ui::SelectCoordinateMode(false, true) ==
+        lengjing::ui::CoordinateMode::Secondary);
+    REQUIRE(
+        lengjing::ui::SelectCoordinateMode(true, true) ==
+        lengjing::ui::CoordinateMode::Secondary);
+    REQUIRE(!lengjing::ui::AnyCoordinateMode(false, false));
+    REQUIRE(lengjing::ui::AnyCoordinateMode(true, false));
+    REQUIRE(lengjing::ui::AnyCoordinateMode(false, true));
     REQUIRE(lengjing::game::native::kMemoryTransportModeCount == 2);
     REQUIRE(lengjing::game::native::IsValidMemoryTransportMode(0));
     REQUIRE(lengjing::game::native::IsValidMemoryTransportMode(1));
@@ -183,9 +198,11 @@ void RunConfigTests() {
     REQUIRE(config.Save(expected, &error));
     REQUIRE(error.empty());
     const std::string serialized = ReadText(path);
+    REQUIRE(serialized.find("\"schema_version\": 2") !=
+        std::string::npos);
     REQUIRE(serialized.find("\"coordinate_decrypt\": true") !=
         std::string::npos);
-    REQUIRE(serialized.find("\"coordinate_decrypt2\"") ==
+    REQUIRE(serialized.find("\"coordinate_decrypt2\": false") !=
         std::string::npos);
     REQUIRE(serialized.find("\"coordinate_decrypt2_index\"") ==
         std::string::npos);
@@ -219,6 +236,7 @@ void RunConfigTests() {
     REQUIRE(actual.runtime.driverIndex == expected.runtime.driverIndex);
     REQUIRE(actual.visual.modelGeometry == expected.visual.modelGeometry);
     REQUIRE(actual.visual.coordinateDecrypt);
+    REQUIRE(!actual.visual.coordinateDecrypt2);
     REQUIRE(actual.visual.crosshair == expected.visual.crosshair);
     REQUIRE(actual.visual.playerViewRay == expected.visual.playerViewRay);
     REQUIRE(actual.visual.drawDistanceMeters == expected.visual.drawDistanceMeters);
@@ -271,6 +289,7 @@ void RunConfigTests() {
     actual = {};
     REQUIRE(config.Load(actual, &error));
     REQUIRE(!actual.visual.coordinateDecrypt);
+    REQUIRE(!actual.visual.coordinateDecrypt2);
 
     {
         std::ofstream canonicalDecrypt(
@@ -281,6 +300,35 @@ void RunConfigTests() {
     actual = {};
     REQUIRE(config.Load(actual, &error));
     REQUIRE(actual.visual.coordinateDecrypt);
+    REQUIRE(!actual.visual.coordinateDecrypt2);
+
+    {
+        std::ofstream secondaryDecrypt(
+            path, std::ios::binary | std::ios::trunc);
+        secondaryDecrypt <<
+            R"({"schema_version":2,"visual":{"coordinate_decrypt":false,"coordinate_decrypt2":true}})";
+    }
+    actual = {};
+    REQUIRE(config.Load(actual, &error));
+    REQUIRE(!actual.visual.coordinateDecrypt);
+    REQUIRE(actual.visual.coordinateDecrypt2);
+    REQUIRE(config.Save(actual, &error));
+    const std::string secondarySerialized = ReadText(path);
+    REQUIRE(secondarySerialized.find("\"coordinate_decrypt\": false") !=
+        std::string::npos);
+    REQUIRE(secondarySerialized.find("\"coordinate_decrypt2\": true") !=
+        std::string::npos);
+
+    {
+        std::ofstream conflictingDecrypts(
+            path, std::ios::binary | std::ios::trunc);
+        conflictingDecrypts <<
+            R"({"schema_version":2,"visual":{"coordinate_decrypt":true,"coordinate_decrypt2":true}})";
+    }
+    actual = {};
+    REQUIRE(config.Load(actual, &error));
+    REQUIRE(!actual.visual.coordinateDecrypt);
+    REQUIRE(actual.visual.coordinateDecrypt2);
 
     {
         std::ofstream legacy(path, std::ios::binary | std::ios::trunc);
@@ -432,10 +480,12 @@ void RunConfigTests() {
         std::filesystem::path(__FILE__).parent_path().parent_path() /
         "jni" / "src" / "ui" / "MenuView.cpp";
     const std::string menuText = ReadText(menuSource);
-    REQUIRE(menuText.find("\"解密\", visual.coordinateDecrypt") !=
+    REQUIRE(menuText.find("\"解密1\", visual.coordinateDecrypt") !=
+        std::string::npos);
+    REQUIRE(menuText.find("\"解密2\", visual.coordinateDecrypt2") !=
         std::string::npos);
     for (const char* legacyDecrypt : {
-             "解密1", "解密2", "解密3", "解密4", "解密5", "解密6"}) {
+             "解密3", "解密4", "解密5", "解密6"}) {
         REQUIRE(menuText.find(legacyDecrypt) == std::string::npos);
     }
     REQUIRE(menuText.find("SelectCoordinateDecrypt") == std::string::npos);
@@ -453,9 +503,11 @@ void RunConfigTests() {
         "jni" / "src" / "main.cpp";
     const std::string mainText = ReadText(mainSource);
     REQUIRE(mainText.find("内核 RPC") == std::string::npos);
-    REQUIRE(mainText.find("LENGJING_COORDINATE_PROBE_MODE") ==
+    REQUIRE(mainText.find("LENGJING_COORDINATE_PROBE_MODE") !=
         std::string::npos);
     REQUIRE(mainText.find("LENGJING_COORDINATE_PROBE_DECRYPT2") ==
+        std::string::npos);
+    REQUIRE(mainText.find("performanceCoordinate[0] == '2'") !=
         std::string::npos);
     REQUIRE(mainText.find("LENGJING_ALGORITHM_VISUAL_AUTOSTART") ==
         std::string::npos);

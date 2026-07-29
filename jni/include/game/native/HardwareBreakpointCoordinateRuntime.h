@@ -33,6 +33,11 @@ struct HardwareBreakpointCoordinateCallbacks {
     }
 };
 
+enum class HardwareBreakpointCoordinateProfile : std::uint8_t {
+    Existing,
+    OrderedRecordTable,
+};
+
 class HardwareBreakpointCoordinateRuntime final {
 public:
     HardwareBreakpointCoordinateRuntime() = default;
@@ -44,6 +49,11 @@ public:
         const HardwareBreakpointCoordinateRuntime&) = delete;
 
     bool Start(
+        std::uintptr_t breakpointAddress,
+        HardwareBreakpointCoordinateCallbacks callbacks,
+        HardwareBreakpointCoordinateProfile profile =
+            HardwareBreakpointCoordinateProfile::Existing) noexcept;
+    bool Reconfigure(
         std::uintptr_t breakpointAddress,
         HardwareBreakpointCoordinateCallbacks callbacks) noexcept;
     bool Stop() noexcept;
@@ -65,6 +75,7 @@ public:
     std::size_t PublishedCoordinateCount() const noexcept;
     std::uint64_t PollCount() const noexcept;
     std::uint64_t AcceptedSampleCount() const noexcept;
+    bool NeedsReconfigure() const noexcept;
 
 private:
     struct SeenRecord {
@@ -78,6 +89,7 @@ private:
     bool RefreshCoordinateTable(
         std::uintptr_t world,
         std::uintptr_t manager) noexcept;
+    void ClearConfigurationState() noexcept;
     void ClearWorldState() noexcept;
     void ClearSamplingState() noexcept;
 
@@ -97,6 +109,9 @@ private:
     std::uintptr_t lastHitAddress_ = 0;
     std::uint64_t pollCount_ = 0;
     std::uint64_t acceptedSampleCount_ = 0;
+    HardwareBreakpointCoordinateProfile profile_ =
+        HardwareBreakpointCoordinateProfile::Existing;
+    bool needsReconfigure_ = false;
     bool active_ = false;
 };
 

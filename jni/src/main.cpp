@@ -111,6 +111,22 @@ int CoordinateProbeDriver() {
         : 0;
 }
 
+lengjing::ui::CoordinateMode CoordinateProbeMode() {
+    const char* value = std::getenv("LENGJING_COORDINATE_PROBE_MODE");
+    if (value == nullptr || value[0] == '\0') {
+        return lengjing::ui::CoordinateMode::Primary;
+    }
+    int mode = 0;
+    const char* end = value + std::char_traits<char>::length(value);
+    const auto parsed = std::from_chars(value, end, mode, 10);
+    if (parsed.ec != std::errc{} || parsed.ptr != end) {
+        return lengjing::ui::CoordinateMode::Primary;
+    }
+    return mode == 2
+        ? lengjing::ui::CoordinateMode::Secondary
+        : lengjing::ui::CoordinateMode::Primary;
+}
+
 int RunCoordinateProbe(
     int seconds,
     int width,
@@ -128,7 +144,12 @@ int RunCoordinateProbe(
     options.programDirectory = programDirectory;
     options.cloudLayout = std::move(cloudLayout);
     lengjing::game::FeatureSettings settings;
-    settings.visual.coordinateDecrypt = true;
+    const lengjing::ui::CoordinateMode coordinateMode =
+        CoordinateProbeMode();
+    settings.visual.coordinateDecrypt =
+        coordinateMode == lengjing::ui::CoordinateMode::Primary;
+    settings.visual.coordinateDecrypt2 =
+        coordinateMode == lengjing::ui::CoordinateMode::Secondary;
     lengjing::game::GameRuntime runtime(
         lengjing::game::CreateNativeGameBackend());
     runtime.UpdateSettings(settings);
@@ -641,10 +662,13 @@ int main() {
             std::getenv("LENGJING_PERFORMANCE_COORDINATE");
         if (performanceCoordinate != nullptr &&
             (performanceCoordinate[0] == '0' ||
-             performanceCoordinate[0] == '1') &&
+             performanceCoordinate[0] == '1' ||
+             performanceCoordinate[0] == '2') &&
             performanceCoordinate[1] == '\0') {
             controller.Model().visual.coordinateDecrypt =
                 performanceCoordinate[0] == '1';
+            controller.Model().visual.coordinateDecrypt2 =
+                performanceCoordinate[0] == '2';
         }
         controller.StartRuntime();
         controller.SetMenuVisible(false);

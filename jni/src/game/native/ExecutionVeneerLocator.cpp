@@ -15,6 +15,10 @@ constexpr std::uint32_t kLdrXLiteralValue = UINT32_C(0x58000000);
 constexpr std::uint32_t kBrRegisterMask = UINT32_C(0xfffffc1f);
 constexpr std::uint32_t kBrRegisterValue = UINT32_C(0xd61f0000);
 constexpr std::uint64_t kLow56Mask = UINT64_C(0x00ffffffffffffff);
+constexpr std::uintptr_t kObservedPointerLower =
+    UINT64_C(0x5feee000ff);
+constexpr std::uintptr_t kObservedPointerUpper =
+    UINT64_C(0x8000000330);
 
 std::uint32_t DecodeLittleEndian32(const std::uint8_t* bytes) noexcept {
     return static_cast<std::uint32_t>(bytes[0]) |
@@ -54,6 +58,11 @@ bool AddSignedDisplacement(std::uintptr_t base,
     if (magnitude > base) return false;
     result = base - static_cast<std::uintptr_t>(magnitude);
     return true;
+}
+
+bool IsObservedPointer(std::uintptr_t pointer) noexcept {
+    return pointer > kObservedPointerLower &&
+        pointer < kObservedPointerUpper;
 }
 
 bool DecodeLiteralAddress(std::uintptr_t instructionAddress,
@@ -179,7 +188,8 @@ bool LocateSecondExecutionVeneer(
     std::uintptr_t moduleBase,
     std::uintptr_t firstVeneerRva,
     const ExecutionVeneerReadMemory& readMemory,
-    std::uintptr_t& secondVeneerAddress) {
+    std::uintptr_t& secondVeneerAddress,
+    ExecutionVeneerMatchPolicy matchPolicy) {
     secondVeneerAddress = 0;
     if (!readMemory || (moduleBase & 3U) != 0 ||
         (firstVeneerRva & 3U) != 0) {
@@ -194,10 +204,17 @@ bool LocateSecondExecutionVeneer(
             firstVeneer, 4U * kInstructionSize, expectedSecondTarget)) {
         return false;
     }
+    if (matchPolicy == ExecutionVeneerMatchPolicy::OrderedFirst) {
+        expectedSecondTarget = static_cast<std::uintptr_t>(
+            static_cast<std::uint64_t>(expectedSecondTarget) &
+            kLow56Mask);
+    }
 
     std::uintptr_t firstTarget = 0;
     if (!ReadFirstTarget(readMemory, firstVeneer, firstTarget) ||
-        (firstTarget & 3U) != 0) {
+        (firstTarget & 3U) != 0 ||
+        (matchPolicy == ExecutionVeneerMatchPolicy::OrderedFirst &&
+         !IsObservedPointer(firstTarget))) {
         return false;
     }
 
@@ -221,8 +238,15 @@ bool LocateSecondExecutionVeneer(
         if (!AddAddress(
                 scanBase,
                 static_cast<std::uintptr_t>(pageIndex * kPageSize),
-                pageAddress) ||
-            !readMemory(pageAddress, page.data(), page.size())) {
+                pageAddress)) {
+            return false;
+        }
+        page.fill(0);
+        if (!readMemory(pageAddress, page.data(), page.size())) {
+            if (matchPolicy ==
+                ExecutionVeneerMatchPolicy::OrderedFirst) {
+                continue;
+            }
             return false;
         }
 
@@ -243,6 +267,46 @@ bool LocateSecondExecutionVeneer(
             if ((ldrInstruction & kLdrXLiteralMask) !=
                 kLdrXLiteralValue) {
                 continue;
+            }
+
+            if (matchPolicy ==
+                ExecutionVeneerMatchPolicy::OrderedFirst) {
+                std::uintptr_t literalAddress = 0;
+                if (!DecodeLiteralAddress(
+                        candidateAddress,
+                        ldrInstruction,
+                        literalAddress)) {
+                    continue;
+                }
+                std::uint64_t literal = 0;
+                if (!ReadLiteral(
+                        readMemory, literalAddress, literal) ||
+                    (literal & kLow56Mask) !=
+                        expectedSecondTarget) {
+                    continue;
+                }
+
+                std::uint32_t brInstruction = 0;
+                if (!ReadCandidateBranch(
+                        readMemory,
+                        page,
+                        candidateAddress,
+                        pageOffset,
+                        brInstruction)) {
+                    continue;
+                }
+                std::uintptr_t verifiedLiteralAddress = 0;
+                if (!DecodeVeneer(
+                        candidateAddress,
+                        ldrInstruction,
+                        brInstruction,
+                        verifiedLiteralAddress) ||
+                    verifiedLiteralAddress != literalAddress) {
+                    continue;
+                }
+
+                secondVeneerAddress = candidateAddress;
+                return true;
             }
 
             std::uint32_t brInstruction = 0;

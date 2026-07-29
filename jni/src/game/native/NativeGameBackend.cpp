@@ -1055,17 +1055,43 @@ public:
             UpdateGeometryRuntime(settings);
         }
 
-        const bool requestedHardwareBreakpoint =
-            settings.visual.coordinateDecrypt;
+        const ui::CoordinateDecryptSelection requestedCoordinateSelection =
+            ui::ResolveCoordinateDecryptSelection(settings.visual);
         const bool hardwareBreakpointRequestChanged =
-            hardwareBreakpointRequested_ != requestedHardwareBreakpoint;
+            requestedCoordinateSelection_ !=
+            requestedCoordinateSelection;
         if (hardwareBreakpointRequestChanged) {
+            requestedCoordinateSelection_ =
+                requestedCoordinateSelection;
             hardwareBreakpointRetryAfter_ = {};
             hardwareBreakpointFailure_ = {};
+            characterPositions_.Clear();
+            positionCache_.clear();
+            boneCache_.clear();
         }
+
+        bool teardownAttempted = false;
+        if (coordinateSelection_ !=
+            requestedCoordinateSelection_) {
+            teardownAttempted =
+                hardwareBreakpointRuntime_.IsActive();
+            if (!teardownAttempted ||
+                StopHardwareBreakpointRuntime()) {
+                coordinateSelection_ =
+                    requestedCoordinateSelection_;
+            } else {
+                hardwareBreakpointFailure_.error =
+                    CoordinateDecryptError::EngineSetupFailed;
+            }
+        }
+        const bool hardwareBreakpointModeReady =
+            coordinateSelection_ ==
+                requestedCoordinateSelection_ &&
+            coordinateSelection_ !=
+            ui::CoordinateDecryptSelection::None;
         const auto hardwareBreakpointNow =
             std::chrono::steady_clock::now();
-        if (requestedHardwareBreakpoint &&
+        if (hardwareBreakpointModeReady &&
             !hardwareBreakpointRuntime_.IsActive() &&
             (hardwareBreakpointRetryAfter_ ==
                  std::chrono::steady_clock::time_point{} ||
@@ -1075,18 +1101,12 @@ public:
             } else {
                 hardwareBreakpointRetryAfter_ =
                     hardwareBreakpointNow +
-                    std::chrono::seconds(1);
+                    HardwareBreakpointRetryDelay();
             }
-        } else if (!requestedHardwareBreakpoint &&
-                   hardwareBreakpointRuntime_.IsActive()) {
+        } else if (!hardwareBreakpointModeReady &&
+                   hardwareBreakpointRuntime_.IsActive() &&
+                   !teardownAttempted) {
             static_cast<void>(StopHardwareBreakpointRuntime());
-        }
-        hardwareBreakpointRequested_ = requestedHardwareBreakpoint;
-
-        if (hardwareBreakpointRequestChanged) {
-            characterPositions_.Clear();
-            positionCache_.clear();
-            boneCache_.clear();
         }
         UpdateCoordinateProbe(probe);
         const native::PositionReadMode positionMode =
@@ -1154,12 +1174,36 @@ public:
                     geometryRuntime_.RequestValidation();
             }
         }
-        if (hardwareBreakpointRequested_ &&
+        if (hardwareBreakpointModeReady &&
             hardwareBreakpointRuntime_.IsActive()) {
-            if (hardwareBreakpointRuntime_.Poll(context.world) &&
+            bool coordinatePollReady =
+                hardwareBreakpointRuntime_.Poll(context.world);
+            if (!coordinatePollReady &&
+                coordinateSelection_ ==
+                    ui::CoordinateDecryptSelection::Secondary &&
+                hardwareBreakpointRuntime_.NeedsReconfigure() &&
+                (hardwareBreakpointRetryAfter_ ==
+                     std::chrono::steady_clock::time_point{} ||
+                 hardwareBreakpointNow >=
+                     hardwareBreakpointRetryAfter_)) {
+                if (ReconfigureHardwareBreakpointRuntime()) {
+                    hardwareBreakpointRetryAfter_ = {};
+                } else {
+                    hardwareBreakpointRetryAfter_ =
+                        hardwareBreakpointNow +
+                        HardwareBreakpointRetryDelay();
+                }
+            }
+            if (!hardwareBreakpointRuntime_.NeedsReconfigure() &&
                 hardwareBreakpointRuntime_.PublishedCoordinateCount() !=
                     0) {
                 hardwareBreakpointFailure_ = {};
+            } else if (
+                hardwareBreakpointRuntime_.NeedsReconfigure() &&
+                hardwareBreakpointFailure_.error ==
+                    CoordinateDecryptError::None) {
+                hardwareBreakpointFailure_.error =
+                    CoordinateDecryptError::EngineSetupFailed;
             } else if (
                 hardwareBreakpointRuntime_.AcceptedSampleCount() == 0) {
                 hardwareBreakpointFailure_.error =
@@ -3872,8 +3916,55 @@ private:
         return true;
     }
 
-    bool StartHardwareBreakpointRuntime() {
-        hardwareBreakpointFailure_ = {};
+    native::HardwareBreakpointCoordinateProfile
+    HardwareBreakpointProfile() const noexcept {
+        return coordinateSelection_ ==
+                ui::CoordinateDecryptSelection::Secondary
+            ? native::HardwareBreakpointCoordinateProfile::
+                  OrderedRecordTable
+            : native::HardwareBreakpointCoordinateProfile::Existing;
+    }
+
+    native::ExecutionVeneerMatchPolicy
+    HardwareBreakpointMatchPolicy() const noexcept {
+        return coordinateSelection_ ==
+                ui::CoordinateDecryptSelection::Secondary
+            ? native::ExecutionVeneerMatchPolicy::OrderedFirst
+            : native::ExecutionVeneerMatchPolicy::Unique;
+    }
+
+    std::chrono::milliseconds
+    HardwareBreakpointRetryDelay() const noexcept {
+        return coordinateSelection_ ==
+                ui::CoordinateDecryptSelection::Secondary
+            ? std::chrono::milliseconds(20)
+            : std::chrono::seconds(1);
+    }
+
+    bool HardwareBreakpointOutputReady() const noexcept {
+        return coordinateSelection_ ==
+                requestedCoordinateSelection_ &&
+            coordinateSelection_ !=
+                ui::CoordinateDecryptSelection::None &&
+            hardwareBreakpointRuntime_.IsActive();
+    }
+
+    native::ExecutionVeneerReadMemory
+    HardwareBreakpointReadMemory() {
+        return [this](std::uintptr_t address,
+                      void* destination,
+                      std::size_t size) {
+            return memory_ != nullptr && destination != nullptr &&
+                size != 0 && IsValidReadAddress(address) &&
+                size <= kMaximumRemoteAddress - address &&
+                memory_->Read(address, destination, size);
+        };
+    }
+
+    bool ResolveHardwareBreakpointAddress(
+        const native::ExecutionVeneerReadMemory& readMemory,
+        std::uintptr_t& breakpointAddress) {
+        breakpointAddress = 0;
         if (memory_ == nullptr || !memory_->IsOpen() ||
             !memory_->SupportsExecutionBreakpoints()) {
             hardwareBreakpointFailure_.error =
@@ -3900,21 +3991,12 @@ private:
             return false;
         }
 
-        const native::ExecutionVeneerReadMemory readMemory =
-            [this](std::uintptr_t address,
-                   void* destination,
-                   std::size_t size) {
-                return memory_ != nullptr && destination != nullptr &&
-                    size != 0 && IsValidReadAddress(address) &&
-                    size <= kMaximumRemoteAddress - address &&
-                    memory_->Read(address, destination, size);
-            };
-        std::uintptr_t breakpointAddress = 0;
         if (!native::LocateSecondExecutionVeneer(
                 moduleBase_,
                 firstVeneerRva_,
                 readMemory,
-                breakpointAddress)) {
+                breakpointAddress,
+                HardwareBreakpointMatchPolicy())) {
             hardwareBreakpointFailure_.error =
                 CoordinateDecryptError::EntryResolveFailed;
             return false;
@@ -3925,7 +4007,12 @@ private:
                 CoordinateDecryptError::EntryMappingMissing;
             return false;
         }
+        return true;
+    }
 
+    native::HardwareBreakpointCoordinateCallbacks
+    HardwareBreakpointCallbacks(
+        native::ExecutionVeneerReadMemory readMemory) {
         native::HardwareBreakpointCoordinateCallbacks callbacks{
             [this](std::uintptr_t address) {
                 return memory_ != nullptr &&
@@ -3951,7 +4038,45 @@ private:
                     memory_->RemoveExecutionBreakpoints();
             },
         };
+        return callbacks;
+    }
+
+    bool StartHardwareBreakpointRuntime() {
+        hardwareBreakpointFailure_ = {};
+        const native::ExecutionVeneerReadMemory readMemory =
+            HardwareBreakpointReadMemory();
+        std::uintptr_t breakpointAddress = 0;
+        if (!ResolveHardwareBreakpointAddress(
+                readMemory, breakpointAddress)) {
+            return false;
+        }
+        native::HardwareBreakpointCoordinateCallbacks callbacks =
+            HardwareBreakpointCallbacks(readMemory);
         if (!hardwareBreakpointRuntime_.Start(
+                breakpointAddress,
+                std::move(callbacks),
+                HardwareBreakpointProfile())) {
+            hardwareBreakpointFailure_.error =
+                CoordinateDecryptError::EngineSetupFailed;
+            return false;
+        }
+        hardwareBreakpointFailure_.error =
+            CoordinateDecryptError::SampleUnavailable;
+        return true;
+    }
+
+    bool ReconfigureHardwareBreakpointRuntime() {
+        hardwareBreakpointFailure_ = {};
+        const native::ExecutionVeneerReadMemory readMemory =
+            HardwareBreakpointReadMemory();
+        std::uintptr_t breakpointAddress = 0;
+        if (!ResolveHardwareBreakpointAddress(
+                readMemory, breakpointAddress)) {
+            return false;
+        }
+        native::HardwareBreakpointCoordinateCallbacks callbacks =
+            HardwareBreakpointCallbacks(readMemory);
+        if (!hardwareBreakpointRuntime_.Reconfigure(
                 breakpointAddress, std::move(callbacks))) {
             hardwareBreakpointFailure_.error =
                 CoordinateDecryptError::EngineSetupFailed;
@@ -3981,7 +4106,7 @@ private:
         }
         native::HardwareBreakpointCoordinate coordinate{};
         const bool found =
-            hardwareBreakpointRequested_ &&
+            HardwareBreakpointOutputReady() &&
             hardwareBreakpointRuntime_.Lookup(
                 coordinateId, mesh, world_, coordinate);
         if (IsCoordinateTraceEnabled() &&
@@ -4061,7 +4186,7 @@ private:
             *positionSource = native::CharacterPositionSource::None;
         }
 
-        if (hardwareBreakpointRequested_) {
+        if (HardwareBreakpointOutputReady()) {
             const std::uintptr_t mesh =
                 ReadPointer(actor + layout_.actorSubjectLayout.meshOffset);
             if (ReadHardwareBreakpointPosition(mesh, position)) {
@@ -6445,20 +6570,24 @@ private:
     }
 
     void UpdateCoordinateProbe(RuntimeProbe& probe) const {
-        if (hardwareBreakpointRequested_) {
+        if (requestedCoordinateSelection_ !=
+            ui::CoordinateDecryptSelection::None) {
+            const bool outputReady =
+                HardwareBreakpointOutputReady();
             probe.coordinateRequested = true;
-            probe.coordinateEntryReady =
-                hardwareBreakpointRuntime_.IsActive();
-            probe.coordinateContextReady =
-                hardwareBreakpointRuntime_.IsActive();
+            probe.coordinateEntryReady = outputReady;
+            probe.coordinateContextReady = outputReady;
             probe.coordinateThreadId = 0;
-            probe.coordinateGuestPc =
-                hardwareBreakpointRuntime_.BreakpointAddress();
+            probe.coordinateGuestPc = outputReady
+                ? hardwareBreakpointRuntime_.BreakpointAddress()
+                : 0;
             probe.coordinateContextGeneration = 0;
-            probe.coordinateAttempts =
-                hardwareBreakpointRuntime_.PollCount();
-            probe.coordinateSuccesses =
-                hardwareBreakpointRuntime_.PublishedCoordinateCount();
+            probe.coordinateAttempts = outputReady
+                ? hardwareBreakpointRuntime_.PollCount()
+                : 0;
+            probe.coordinateSuccesses = outputReady
+                ? hardwareBreakpointRuntime_.PublishedCoordinateCount()
+                : 0;
             probe.coordinateError = hardwareBreakpointFailure_.error;
             probe.coordinateSystemError =
                 hardwareBreakpointFailure_.systemError;
@@ -6503,7 +6632,10 @@ private:
         }
         if (memory_ != nullptr) memory_->Close();
         memory_.reset();
-        hardwareBreakpointRequested_ = false;
+        coordinateSelection_ =
+            ui::CoordinateDecryptSelection::None;
+        requestedCoordinateSelection_ =
+            ui::CoordinateDecryptSelection::None;
         hardwareBreakpointRetryAfter_ = {};
         hardwareBreakpointFailure_ = {};
         processId_ = -1;
@@ -6530,7 +6662,10 @@ private:
     bool geometryTransportDedicated_ = false;
     native::HardwareBreakpointCoordinateRuntime
         hardwareBreakpointRuntime_{};
-    bool hardwareBreakpointRequested_ = false;
+    ui::CoordinateDecryptSelection coordinateSelection_ =
+        ui::CoordinateDecryptSelection::None;
+    ui::CoordinateDecryptSelection requestedCoordinateSelection_ =
+        ui::CoordinateDecryptSelection::None;
     std::chrono::steady_clock::time_point
         hardwareBreakpointRetryAfter_{};
     CoordinateFailure hardwareBreakpointFailure_{};

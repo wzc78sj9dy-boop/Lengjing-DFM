@@ -2,6 +2,7 @@
 
 #include "game/native/HardwareBreakpointCoordinateRuntime.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +18,7 @@ namespace {
 using lengjing::game::native::ExecutionBreakpointRecord;
 using lengjing::game::native::HardwareBreakpointCoordinate;
 using lengjing::game::native::HardwareBreakpointCoordinateCallbacks;
+using lengjing::game::native::HardwareBreakpointCoordinateProfile;
 using lengjing::game::native::HardwareBreakpointCoordinateRuntime;
 
 constexpr std::uintptr_t kManagerOffset = 0x1B8;
@@ -45,6 +47,7 @@ struct FakeRuntimeTransport {
     std::function<void(std::uintptr_t, std::size_t)> beforeMemoryRead;
     std::uintptr_t failingAddress = 0;
     std::size_t removeCount = 0;
+    bool removeResult = true;
 
     template <typename Value>
     void PutValue(std::uintptr_t address, const Value& value) {
@@ -128,7 +131,7 @@ struct FakeRuntimeTransport {
             },
             [this] {
                 ++removeCount;
-                return true;
+                return removeResult;
             },
         };
     }
@@ -178,6 +181,39 @@ void InstallTable(FakeRuntimeTransport& transport,
         records != nullptr ? *records : emptyRecords;
     const std::vector<std::uint32_t>& selectedIds =
         ids != nullptr ? *ids : emptyIds;
+    transport.PutBytes(
+        recordsBase, selectedRecords.data(), selectedRecords.size());
+    transport.PutBytes(
+        idArray,
+        selectedIds.data(),
+        selectedIds.size() * sizeof(std::uint32_t));
+}
+
+void InstallOrderedTable(
+    FakeRuntimeTransport& transport,
+    std::uintptr_t manager,
+    std::uintptr_t recordsBase,
+    std::uintptr_t idArray,
+    std::uint32_t rawCount,
+    const std::vector<std::uint8_t>* records = nullptr,
+    const std::vector<std::uint32_t>* ids = nullptr) {
+    transport.PutValue(manager + kIdArrayOffset, idArray);
+    transport.PutValue(manager + kCountOffset, rawCount);
+    if (rawCount == 0) return;
+
+    const std::size_t itemCount =
+        static_cast<std::size_t>(rawCount - 1);
+    if (itemCount < 15 || itemCount > 16384) return;
+
+    std::vector<std::uint8_t> emptyRecords(
+        itemCount * kRecordStride);
+    std::vector<std::uint32_t> emptyIds(itemCount);
+    const std::vector<std::uint8_t>& selectedRecords =
+        records != nullptr ? *records : emptyRecords;
+    const std::vector<std::uint32_t>& selectedIds =
+        ids != nullptr ? *ids : emptyIds;
+    REQUIRE(selectedRecords.size() == itemCount * kRecordStride);
+    REQUIRE(selectedIds.size() == itemCount);
     transport.PutBytes(
         recordsBase, selectedRecords.data(), selectedRecords.size());
     transport.PutBytes(
@@ -454,10 +490,506 @@ void TestCountAndCandidateBoundaries() {
     REQUIRE(runtime.Stop());
 }
 
+void RequireOrderedRawCount(std::uint32_t rawCount,
+                            bool expectedResult) {
+    constexpr std::uintptr_t kBreakpoint = 0x14000;
+    constexpr std::uintptr_t kWorld = 0x15000;
+    constexpr std::uintptr_t kManager =
+        UINT64_C(0x6000010000);
+    constexpr std::uintptr_t kRecordsBase =
+        UINT64_C(0x6000100000);
+    constexpr std::uintptr_t kIdArray =
+        UINT64_C(0x6000300000);
+
+    FakeRuntimeTransport transport{};
+    transport.PutValue(kWorld + kManagerOffset, kManager);
+    const std::uint64_t probe = UINT64_C(0x1122334455667788);
+    transport.PutValue(kRecordsBase, probe);
+    InstallOrderedTable(
+        transport,
+        kManager,
+        kRecordsBase,
+        kIdArray,
+        rawCount);
+    transport.AddBatch(
+        {Record(1, kBreakpoint, kRecordsBase)},
+        kBreakpoint);
+
+    HardwareBreakpointCoordinateRuntime runtime;
+    REQUIRE(runtime.Start(
+        kBreakpoint,
+        transport.Callbacks(),
+        HardwareBreakpointCoordinateProfile::OrderedRecordTable));
+    REQUIRE(runtime.Poll(kWorld, kManager) == expectedResult);
+    if (expectedResult) {
+        const std::size_t count =
+            static_cast<std::size_t>(rawCount - 1);
+        REQUIRE(transport.ReadCount(
+                    kRecordsBase,
+                    (count - 1) * kRecordStride) == 1);
+        REQUIRE(transport.ReadCount(
+                    kIdArray,
+                    count * sizeof(std::uint32_t)) == 1);
+    }
+    REQUIRE(runtime.Stop());
+}
+
+void TestOrderedRawCountBoundaries() {
+    RequireOrderedRawCount(15, false);
+    RequireOrderedRawCount(16, true);
+    RequireOrderedRawCount(16385, true);
+    RequireOrderedRawCount(16386, false);
+}
+
+void TestOrderedRecordReadAndCoordinateValidation() {
+    constexpr std::uintptr_t kBreakpoint = 0x16000;
+    constexpr std::uintptr_t kWorld = 0x17000;
+    constexpr std::uintptr_t kManager =
+        UINT64_C(0x6001010000);
+    constexpr std::uintptr_t kRecordsBase =
+        UINT64_C(0x6001100000);
+    constexpr std::uintptr_t kIdArray =
+        UINT64_C(0x6001300000);
+    constexpr std::uint32_t kRawCount = 17;
+    constexpr std::size_t kCount =
+        static_cast<std::size_t>(kRawCount - 1);
+
+    std::vector<std::uint8_t> records(kCount * kRecordStride);
+    std::vector<std::uint32_t> ids(kCount);
+    ids[0] = 101;
+    SetCoordinate(records, 0, 1.0f, 2.0f, 3.0f);
+    ids[1] = 102;
+    SetCoordinate(records, 1, 0.0f, 2.0f, 3.0f);
+    ids[2] = 103;
+    SetCoordinate(records, 2, 1.0f, 0.0f, 3.0f);
+    ids[3] = 104;
+    SetCoordinate(records, 3, 1.0f, 2.0f, 0.0f);
+    ids[4] = 105;
+    SetCoordinate(
+        records,
+        4,
+        1.0f,
+        2.0f,
+        std::numeric_limits<float>::infinity());
+    ids[5] = 106;
+    SetCoordinate(
+        records,
+        5,
+        1.0f,
+        2.0f,
+        std::numeric_limits<float>::quiet_NaN());
+    ids[kCount - 1] = 199;
+    SetCoordinate(records, kCount - 1, 7.0f, 8.0f, 9.0f);
+
+    FakeRuntimeTransport transport{};
+    transport.PutValue(kWorld + kManagerOffset, kManager);
+    InstallOrderedTable(
+        transport,
+        kManager,
+        kRecordsBase,
+        kIdArray,
+        kRawCount,
+        &records,
+        &ids);
+    transport.AddBatch(
+        {Record(1, kBreakpoint, kRecordsBase)},
+        kBreakpoint);
+
+    HardwareBreakpointCoordinateRuntime runtime;
+    REQUIRE(runtime.Start(
+        kBreakpoint,
+        transport.Callbacks(),
+        HardwareBreakpointCoordinateProfile::OrderedRecordTable));
+    REQUIRE(runtime.Poll(kWorld, kManager));
+    REQUIRE(transport.ReadCount(
+                kRecordsBase,
+                (kCount - 1) * kRecordStride) == 1);
+    REQUIRE(transport.ReadCount(
+                kRecordsBase,
+                kCount * kRecordStride) == 0);
+    REQUIRE(runtime.PublishedCoordinateCount() == 1);
+
+    HardwareBreakpointCoordinate coordinate{};
+    REQUIRE(runtime.Lookup(101, kWorld, coordinate));
+    REQUIRE(coordinate.x == 1.0f);
+    REQUIRE(coordinate.y == 2.0f);
+    REQUIRE(coordinate.z == 83.0f);
+    REQUIRE(!runtime.Lookup(102, kWorld, coordinate));
+    REQUIRE(!runtime.Lookup(103, kWorld, coordinate));
+    REQUIRE(!runtime.Lookup(104, kWorld, coordinate));
+    REQUIRE(!runtime.Lookup(105, kWorld, coordinate));
+    REQUIRE(!runtime.Lookup(106, kWorld, coordinate));
+    REQUIRE(!runtime.Lookup(199, kWorld, coordinate));
+
+    std::fill(records.begin(), records.end(), std::uint8_t{0});
+    InstallOrderedTable(
+        transport,
+        kManager,
+        kRecordsBase,
+        kIdArray,
+        kRawCount,
+        &records,
+        &ids);
+    transport.AddBatch(
+        {Record(2, kBreakpoint, kRecordsBase)},
+        kBreakpoint);
+    REQUIRE(runtime.Poll(kWorld, kManager));
+    REQUIRE(runtime.PublishedCoordinateCount() == 1);
+    REQUIRE(runtime.Lookup(101, kWorld, coordinate));
+    REQUIRE(coordinate.x == 1.0f);
+    REQUIRE(coordinate.y == 2.0f);
+    REQUIRE(coordinate.z == 83.0f);
+    REQUIRE(runtime.Stop());
+}
+
+void RequireOrderedCandidateAndRecordsBound(
+    std::uintptr_t recordsBase,
+    bool expectedResult) {
+    constexpr std::uintptr_t kBreakpoint = 0x18000;
+    constexpr std::uintptr_t kWorld = 0x19000;
+    constexpr std::uintptr_t kManager =
+        UINT64_C(0x6002010000);
+    constexpr std::uintptr_t kIdArray =
+        UINT64_C(0x6002300000);
+
+    FakeRuntimeTransport transport{};
+    transport.PutValue(kWorld + kManagerOffset, kManager);
+    InstallOrderedTable(
+        transport,
+        kManager,
+        recordsBase,
+        kIdArray,
+        16);
+    transport.AddBatch(
+        {Record(1, kBreakpoint, recordsBase)},
+        kBreakpoint);
+
+    HardwareBreakpointCoordinateRuntime runtime;
+    REQUIRE(runtime.Start(
+        kBreakpoint,
+        transport.Callbacks(),
+        HardwareBreakpointCoordinateProfile::OrderedRecordTable));
+    REQUIRE(runtime.Poll(kWorld, kManager) == expectedResult);
+    REQUIRE(runtime.AcceptedSampleCount() ==
+            (expectedResult ? 1U : 0U));
+    REQUIRE(runtime.RecordsBase() ==
+            (expectedResult ? recordsBase : 0U));
+    REQUIRE(transport.ReadCount(
+                recordsBase, sizeof(std::uint64_t)) ==
+            (expectedResult ? 1U : 0U));
+    REQUIRE(runtime.Stop());
+}
+
+void RequireOrderedManagerBound(std::uintptr_t manager,
+                                bool expectedResult) {
+    constexpr std::uintptr_t kBreakpoint = 0x1A000;
+    constexpr std::uintptr_t kWorld = 0x1B000;
+    constexpr std::uintptr_t kRecordsBase =
+        UINT64_C(0x6003100000);
+    constexpr std::uintptr_t kIdArray =
+        UINT64_C(0x6003300000);
+
+    FakeRuntimeTransport transport{};
+    transport.PutValue(kWorld + kManagerOffset, manager);
+    InstallOrderedTable(
+        transport,
+        manager,
+        kRecordsBase,
+        kIdArray,
+        16);
+    transport.AddBatch(
+        {Record(1, kBreakpoint, kRecordsBase)},
+        kBreakpoint);
+
+    HardwareBreakpointCoordinateRuntime runtime;
+    REQUIRE(runtime.Start(
+        kBreakpoint,
+        transport.Callbacks(),
+        HardwareBreakpointCoordinateProfile::OrderedRecordTable));
+    REQUIRE(runtime.Poll(kWorld) == expectedResult);
+    REQUIRE(runtime.AcceptedSampleCount() == 1);
+    REQUIRE(runtime.RecordsBase() == kRecordsBase);
+    REQUIRE(transport.ReadCount(
+                manager + kIdArrayOffset,
+                sizeof(std::uintptr_t)) ==
+            (expectedResult ? 2U : 0U));
+    REQUIRE(runtime.Stop());
+}
+
+void RequireOrderedIdArrayBound(std::uintptr_t idArray,
+                                bool expectedResult) {
+    constexpr std::uintptr_t kBreakpoint = 0x1C000;
+    constexpr std::uintptr_t kWorld = 0x1D000;
+    constexpr std::uintptr_t kManager =
+        UINT64_C(0x6004010000);
+    constexpr std::uintptr_t kRecordsBase =
+        UINT64_C(0x6004100000);
+    constexpr std::size_t kCount = 15;
+
+    FakeRuntimeTransport transport{};
+    transport.PutValue(kWorld + kManagerOffset, kManager);
+    InstallOrderedTable(
+        transport,
+        kManager,
+        kRecordsBase,
+        idArray,
+        16);
+    transport.AddBatch(
+        {Record(1, kBreakpoint, kRecordsBase)},
+        kBreakpoint);
+
+    HardwareBreakpointCoordinateRuntime runtime;
+    REQUIRE(runtime.Start(
+        kBreakpoint,
+        transport.Callbacks(),
+        HardwareBreakpointCoordinateProfile::OrderedRecordTable));
+    REQUIRE(runtime.Poll(kWorld, kManager) == expectedResult);
+    REQUIRE(transport.ReadCount(
+                idArray,
+                kCount * sizeof(std::uint32_t)) ==
+            (expectedResult ? 1U : 0U));
+    REQUIRE(runtime.Stop());
+}
+
+void TestOrderedStrictPointerBounds() {
+    constexpr std::uintptr_t kLower = UINT64_C(0x5FEEE000FF);
+    constexpr std::uintptr_t kUpper = UINT64_C(0x8000000330);
+
+    RequireOrderedCandidateAndRecordsBound(kLower, false);
+    RequireOrderedCandidateAndRecordsBound(kLower + 1, true);
+    RequireOrderedCandidateAndRecordsBound(kUpper - 1, true);
+    RequireOrderedCandidateAndRecordsBound(kUpper, false);
+
+    RequireOrderedManagerBound(kLower, false);
+    RequireOrderedManagerBound(kLower + 1, true);
+    RequireOrderedManagerBound(kUpper - 1, true);
+    RequireOrderedManagerBound(kUpper, false);
+
+    RequireOrderedIdArrayBound(kLower, false);
+    RequireOrderedIdArrayBound(kLower + 1, true);
+    RequireOrderedIdArrayBound(kUpper - 1, true);
+    RequireOrderedIdArrayBound(kUpper, false);
+}
+
+void TestOrderedReadFailureAndReconfigurePreserveState() {
+    constexpr std::uintptr_t kBreakpoint = 0x1E000;
+    constexpr std::uintptr_t kSecondBreakpoint = 0x1F000;
+    constexpr std::uintptr_t kWorld = 0x20000;
+    constexpr std::uintptr_t kManager =
+        UINT64_C(0x6005010000);
+    constexpr std::uintptr_t kRecordsA =
+        UINT64_C(0x6005100000);
+    constexpr std::uintptr_t kRecordsB =
+        UINT64_C(0x6005200000);
+    constexpr std::uintptr_t kIdArray =
+        UINT64_C(0x6005300000);
+    constexpr std::uint32_t kRawCount = 16;
+    constexpr std::size_t kCount =
+        static_cast<std::size_t>(kRawCount - 1);
+    constexpr std::uint32_t kId = 701;
+
+    std::vector<std::uint8_t> recordsA(kCount * kRecordStride);
+    std::vector<std::uint8_t> recordsB(kCount * kRecordStride);
+    std::vector<std::uint32_t> ids(kCount);
+    ids[0] = kId;
+    SetCoordinate(recordsA, 0, 1.0f, 2.0f, 3.0f);
+    SetCoordinate(recordsB, 0, 10.0f, 20.0f, 30.0f);
+
+    FakeRuntimeTransport transport{};
+    transport.PutValue(kWorld + kManagerOffset, kManager);
+    InstallOrderedTable(
+        transport,
+        kManager,
+        kRecordsA,
+        kIdArray,
+        kRawCount,
+        &recordsA,
+        &ids);
+    InstallOrderedTable(
+        transport,
+        kManager,
+        kRecordsB,
+        kIdArray,
+        kRawCount,
+        &recordsB,
+        &ids);
+    transport.AddBatch(
+        {Record(1, kBreakpoint, kRecordsA)},
+        kBreakpoint);
+    transport.AddBatch(
+        {Record(2, kBreakpoint, kRecordsA)},
+        kBreakpoint);
+    transport.AddBatch(
+        {Record(3, kBreakpoint, kRecordsB)},
+        kBreakpoint);
+
+    HardwareBreakpointCoordinateRuntime runtime;
+    REQUIRE(runtime.Start(
+        kBreakpoint,
+        transport.Callbacks(),
+        HardwareBreakpointCoordinateProfile::OrderedRecordTable));
+    REQUIRE(runtime.Poll(kWorld, kManager));
+    REQUIRE(runtime.Poll(kWorld, kManager));
+    REQUIRE(runtime.Poll(kWorld, kManager));
+    REQUIRE(runtime.RecordsBase() == kRecordsA);
+    REQUIRE(runtime.AcceptedSampleCount() == 3);
+    REQUIRE(runtime.PublishedCoordinateCount() == 1);
+
+    HardwareBreakpointCoordinate coordinate{};
+    REQUIRE(runtime.Lookup(kId, kWorld, coordinate));
+    REQUIRE(coordinate.x == 1.0f);
+    REQUIRE(coordinate.z == 83.0f);
+
+    REQUIRE(!runtime.Poll(kWorld, kManager));
+    REQUIRE(runtime.NeedsReconfigure());
+    REQUIRE(runtime.RecordsBase() == kRecordsA);
+    REQUIRE(runtime.AcceptedSampleCount() == 3);
+    REQUIRE(runtime.PublishedCoordinateCount() == 1);
+    REQUIRE(runtime.Lookup(kId, kWorld, coordinate));
+    REQUIRE(coordinate.x == 1.0f);
+
+    REQUIRE(runtime.Reconfigure(
+        kSecondBreakpoint, transport.Callbacks()));
+    REQUIRE(!runtime.NeedsReconfigure());
+    REQUIRE(runtime.BreakpointAddress() == kSecondBreakpoint);
+    REQUIRE(transport.configuredAddresses.size() == 2);
+    REQUIRE(transport.configuredAddresses.back() ==
+            kSecondBreakpoint);
+    REQUIRE(transport.removeCount == 1);
+    REQUIRE(runtime.RecordsBase() == kRecordsA);
+    REQUIRE(runtime.AcceptedSampleCount() == 3);
+    REQUIRE(runtime.PublishedCoordinateCount() == 1);
+    REQUIRE(runtime.Lookup(kId, kWorld, coordinate));
+    REQUIRE(coordinate.x == 1.0f);
+
+    transport.AddBatch(
+        {Record(3, kSecondBreakpoint, kRecordsB)},
+        kSecondBreakpoint);
+    REQUIRE(runtime.Poll(kWorld, kManager));
+    REQUIRE(runtime.RecordsBase() == kRecordsA);
+    REQUIRE(runtime.AcceptedSampleCount() == 3);
+
+    transport.AddBatch(
+        {Record(1, kSecondBreakpoint, kRecordsB)},
+        kSecondBreakpoint);
+    REQUIRE(runtime.Poll(kWorld, kManager));
+    REQUIRE(runtime.RecordsBase() == kRecordsA);
+    REQUIRE(runtime.AcceptedSampleCount() == 4);
+    REQUIRE(runtime.Lookup(kId, kWorld, coordinate));
+    REQUIRE(coordinate.x == 1.0f);
+
+    transport.AddBatch(
+        {Record(2, kSecondBreakpoint, kRecordsB)},
+        kSecondBreakpoint);
+    transport.failingAddress = kIdArray;
+    REQUIRE(!runtime.Poll(kWorld, kManager));
+    REQUIRE(runtime.RecordsBase() == kRecordsB);
+    REQUIRE(runtime.AcceptedSampleCount() == 5);
+    REQUIRE(runtime.Lookup(kId, kWorld, coordinate));
+    REQUIRE(coordinate.x == 1.0f);
+    REQUIRE(coordinate.z == 83.0f);
+
+    transport.failingAddress = 0;
+    transport.AddBatch(
+        {Record(3, kSecondBreakpoint, kRecordsB)},
+        kSecondBreakpoint);
+    REQUIRE(runtime.Poll(kWorld, kManager));
+    REQUIRE(runtime.RecordsBase() == kRecordsB);
+    REQUIRE(runtime.AcceptedSampleCount() == 6);
+    REQUIRE(runtime.Lookup(kId, kWorld, coordinate));
+    REQUIRE(coordinate.x == 10.0f);
+    REQUIRE(coordinate.y == 20.0f);
+    REQUIRE(coordinate.z == 110.0f);
+    REQUIRE(runtime.Stop());
+    REQUIRE(transport.removeCount == 2);
+}
+
+void TestOrderedRecordReorderAndCountRollback() {
+    constexpr std::uintptr_t kBreakpoint = 0x21000;
+    constexpr std::uintptr_t kWorld = 0x22000;
+    constexpr std::uintptr_t kManager =
+        UINT64_C(0x6006010000);
+    constexpr std::uintptr_t kRecordsBase =
+        UINT64_C(0x6006100000);
+    constexpr std::uintptr_t kIdArray =
+        UINT64_C(0x6006300000);
+
+    FakeRuntimeTransport transport{};
+    transport.PutValue(kWorld + kManagerOffset, kManager);
+    InstallOrderedTable(
+        transport,
+        kManager,
+        kRecordsBase,
+        kIdArray,
+        16);
+    const ExecutionBreakpointRecord first =
+        Record(1, kBreakpoint, kRecordsBase, 101);
+    const ExecutionBreakpointRecord second =
+        Record(1, kBreakpoint, kRecordsBase, 202);
+    transport.AddBatch({first, second}, kBreakpoint, 2);
+    transport.AddBatch({second, first}, kBreakpoint, 2);
+    transport.AddBatch(
+        {Record(2, kBreakpoint, kRecordsBase, 101)},
+        kBreakpoint,
+        1);
+
+    HardwareBreakpointCoordinateRuntime runtime;
+    REQUIRE(runtime.Start(
+        kBreakpoint,
+        transport.Callbacks(),
+        HardwareBreakpointCoordinateProfile::OrderedRecordTable));
+    REQUIRE(runtime.Poll(kWorld, kManager));
+    REQUIRE(runtime.AcceptedSampleCount() == 2);
+    REQUIRE(runtime.Poll(kWorld, kManager));
+    REQUIRE(runtime.AcceptedSampleCount() == 2);
+    REQUIRE(runtime.Poll(kWorld, kManager));
+    REQUIRE(runtime.AcceptedSampleCount() == 3);
+    REQUIRE(!runtime.NeedsReconfigure());
+    REQUIRE(runtime.RecordsBase() == kRecordsBase);
+    REQUIRE(transport.configuredAddresses.size() == 1);
+    REQUIRE(runtime.Stop());
+}
+
+void TestOrderedReconfigureRequiresRemoval() {
+    constexpr std::uintptr_t kBreakpoint = 0x23000;
+    constexpr std::uintptr_t kSecondBreakpoint = 0x24000;
+
+    FakeRuntimeTransport transport{};
+    HardwareBreakpointCoordinateRuntime runtime;
+    REQUIRE(runtime.Start(
+        kBreakpoint,
+        transport.Callbacks(),
+        HardwareBreakpointCoordinateProfile::OrderedRecordTable));
+
+    transport.removeResult = false;
+    REQUIRE(!runtime.Reconfigure(
+        kSecondBreakpoint, transport.Callbacks()));
+    REQUIRE(runtime.NeedsReconfigure());
+    REQUIRE(runtime.BreakpointAddress() == kBreakpoint);
+    REQUIRE(transport.configuredAddresses.size() == 1);
+    REQUIRE(transport.removeCount == 1);
+
+    transport.removeResult = true;
+    REQUIRE(runtime.Reconfigure(
+        kSecondBreakpoint, transport.Callbacks()));
+    REQUIRE(!runtime.NeedsReconfigure());
+    REQUIRE(runtime.BreakpointAddress() == kSecondBreakpoint);
+    REQUIRE(transport.configuredAddresses.size() == 2);
+    REQUIRE(transport.removeCount == 2);
+    REQUIRE(runtime.Stop());
+    REQUIRE(transport.removeCount == 3);
+}
+
 }  // namespace
 
 void RunHardwareBreakpointCoordinateRuntimeTests() {
     TestTablePublicationAndStability();
     TestTenSlotModeAndFirstTie();
     TestCountAndCandidateBoundaries();
+    TestOrderedRawCountBoundaries();
+    TestOrderedRecordReadAndCoordinateValidation();
+    TestOrderedStrictPointerBounds();
+    TestOrderedReadFailureAndReconfigurePreserveState();
+    TestOrderedRecordReorderAndCountRollback();
+    TestOrderedReconfigureRequiresRemoval();
 }

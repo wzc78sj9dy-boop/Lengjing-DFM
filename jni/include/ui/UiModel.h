@@ -40,6 +40,29 @@ enum class AimInputMode : std::uint8_t {
     KernelGyroscope,
 };
 
+enum class CoordinateMode : std::uint8_t {
+    None = 0,
+    Primary,
+    Secondary,
+};
+
+using CoordinateDecryptSelection = CoordinateMode;
+
+constexpr CoordinateMode SelectCoordinateMode(
+    bool primaryEnabled,
+    bool secondaryEnabled) noexcept {
+    return secondaryEnabled
+        ? CoordinateMode::Secondary
+        : (primaryEnabled ? CoordinateMode::Primary : CoordinateMode::None);
+}
+
+constexpr bool AnyCoordinateMode(
+    bool primaryEnabled,
+    bool secondaryEnabled) noexcept {
+    return SelectCoordinateMode(primaryEnabled, secondaryEnabled) !=
+        CoordinateMode::None;
+}
+
 struct RuntimeModel {
     bool active = false;
     bool busy = false;
@@ -76,6 +99,7 @@ struct VisualSettings {
     bool modelGeometry = false;
     bool visibilityColor = false;
     bool coordinateDecrypt = false;
+    bool coordinateDecrypt2 = false;
 
     bool box = true;
     bool snapline = true;
@@ -111,6 +135,22 @@ struct VisualSettings {
     float lineThickness = 1.0f;
     float fontScale = 1.0f;
 };
+
+constexpr CoordinateMode SelectCoordinateMode(
+    const VisualSettings& settings) noexcept {
+    return SelectCoordinateMode(
+        settings.coordinateDecrypt, settings.coordinateDecrypt2);
+}
+
+constexpr bool AnyCoordinateMode(const VisualSettings& settings) noexcept {
+    return AnyCoordinateMode(
+        settings.coordinateDecrypt, settings.coordinateDecrypt2);
+}
+
+constexpr CoordinateDecryptSelection ResolveCoordinateDecryptSelection(
+    const VisualSettings& settings) noexcept {
+    return SelectCoordinateMode(settings);
+}
 
 enum class ContainerKind : std::uint8_t {
     ComputerCase,

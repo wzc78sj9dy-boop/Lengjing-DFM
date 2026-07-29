@@ -28,7 +28,8 @@ struct BackendState {
     std::atomic_bool aimEnabled{false};
     std::atomic_bool selfAimSetting{false};
     std::atomic_bool projectileTrackingSetting{false};
-    std::atomic_bool coordinateDecryptSetting{false};
+    std::atomic_int coordinateMode{
+        static_cast<int>(lengjing::ui::CoordinateMode::None)};
     std::atomic_bool frameReady{true};
     std::atomic<std::uint16_t> coordinateError{0};
     std::atomic_int coordinateSystemError{0};
@@ -73,8 +74,8 @@ public:
         state_->selfAimSetting.store(settings.aim.enabled);
         state_->projectileTrackingSetting.store(
             settings.aim.trajectoryTracking);
-        state_->coordinateDecryptSetting.store(
-            settings.visual.coordinateDecrypt);
+        state_->coordinateMode.store(static_cast<int>(
+            lengjing::ui::SelectCoordinateMode(settings.visual)));
         error = frame.ready ? std::string{} : "waiting";
         probe.coordinateError =
             static_cast<lengjing::game::CoordinateDecryptError>(
@@ -185,18 +186,30 @@ void RunRuntimeTests() {
     REQUIRE(state->cloudLayoutPresent.load());
     REQUIRE(state->selfAimSetting.load());
     REQUIRE(!state->projectileTrackingSetting.load());
-    REQUIRE(!state->coordinateDecryptSetting.load());
+    REQUIRE(
+        state->coordinateMode.load() ==
+        static_cast<int>(lengjing::ui::CoordinateMode::None));
 
     settings.visual.coordinateDecrypt = true;
     runtime.UpdateSettings(settings);
     REQUIRE(WaitFor([&] {
-        return state->coordinateDecryptSetting.load();
+        return state->coordinateMode.load() ==
+            static_cast<int>(lengjing::ui::CoordinateMode::Primary);
     }));
 
     settings.visual.coordinateDecrypt = false;
+    settings.visual.coordinateDecrypt2 = true;
     runtime.UpdateSettings(settings);
     REQUIRE(WaitFor([&] {
-        return !state->coordinateDecryptSetting.load();
+        return state->coordinateMode.load() ==
+            static_cast<int>(lengjing::ui::CoordinateMode::Secondary);
+    }));
+
+    settings.visual.coordinateDecrypt2 = false;
+    runtime.UpdateSettings(settings);
+    REQUIRE(WaitFor([&] {
+        return state->coordinateMode.load() ==
+            static_cast<int>(lengjing::ui::CoordinateMode::None);
     }));
 
     state->coordinateError.store(
