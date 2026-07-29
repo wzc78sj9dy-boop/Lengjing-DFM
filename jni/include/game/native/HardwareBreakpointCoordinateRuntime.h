@@ -16,6 +16,12 @@ struct HardwareBreakpointCoordinate {
     float z = 0.0f;
 };
 
+enum class HardwareBreakpointCandidateSampleResult : std::uint8_t {
+    Retry,
+    Accepted,
+    Reset,
+};
+
 struct HardwareBreakpointCoordinateCallbacks {
     std::function<bool(std::uintptr_t)> configureBreakpoint;
     std::function<bool(ExecutionBreakpointRecord*,
@@ -26,10 +32,14 @@ struct HardwareBreakpointCoordinateCallbacks {
         readRecords;
     std::function<bool(std::uintptr_t, void*, std::size_t)> readMemory;
     std::function<bool()> removeBreakpoints;
+    std::function<HardwareBreakpointCandidateSampleResult(
+        std::uintptr_t&)>
+        readCandidate;
 
     explicit operator bool() const noexcept {
-        return configureBreakpoint && readRecords && readMemory &&
-            removeBreakpoints;
+        return configureBreakpoint &&
+            (readRecords || readCandidate) &&
+            readMemory && removeBreakpoints;
     }
 };
 
@@ -60,6 +70,9 @@ public:
     bool Poll(std::uintptr_t world) noexcept;
     bool Poll(std::uintptr_t world,
               std::uintptr_t manager) noexcept;
+    bool Poll(std::uintptr_t world,
+              std::uintptr_t targetRoot,
+              std::uintptr_t manager) noexcept;
     bool Lookup(std::uint32_t id,
                 std::uintptr_t world,
                 HardwareBreakpointCoordinate& coordinate) noexcept;
@@ -86,11 +99,13 @@ private:
     };
 
     bool SampleRecordsBase() noexcept;
+    bool SampleCandidate() noexcept;
     bool ReadObservedManager(
-        std::uintptr_t world,
+        std::uintptr_t targetRoot,
         std::uintptr_t& manager) noexcept;
     bool RefreshCoordinateTable(
         std::uintptr_t world,
+        std::uintptr_t targetRoot,
         std::uintptr_t manager) noexcept;
     void ClearConfigurationState() noexcept;
     void ClearWorldState() noexcept;
@@ -105,6 +120,7 @@ private:
         coordinates_;
     std::uintptr_t breakpointAddress_ = 0;
     std::uintptr_t recordsBase_ = 0;
+    std::uintptr_t publishedRecordsBase_ = 0;
     std::uintptr_t world_ = 0;
     std::size_t candidateWriteIndex_ = 0;
     std::size_t candidateCount_ = 0;

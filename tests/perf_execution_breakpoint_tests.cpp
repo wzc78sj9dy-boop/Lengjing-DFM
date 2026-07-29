@@ -1,6 +1,9 @@
 #include "game/native/PerfExecutionBreakpoint.h"
+#include "game/native/ExecutionBreakpointRecordHistory.h"
+#include "game/native/MemoryTransport.h"
 #include "test_support.h"
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -138,11 +141,58 @@ void TestUnsupportedHostIsExplicit() {
                 IsSupported());
 }
 
+void TestChronologicalRecordHistory() {
+    using lengjing::game::native::ExecutionBreakpointRecord;
+    using lengjing::game::native::ExecutionBreakpointRecordHistory;
+    using lengjing::game::native::kExecutionBreakpointRecordLimit;
+
+    ExecutionBreakpointRecordHistory history;
+    history.Push({1, 1, 0x1000, 0, 0, 0, 0x21, 0x100});
+    history.Push({1, 2, 0x1000, 0, 0, 0, 0x21, 0x200});
+
+    std::array<ExecutionBreakpointRecord, 2> duplicate{};
+    REQUIRE(history.CopyNewest(
+                duplicate.data(), duplicate.size()) == 2);
+    REQUIRE(duplicate[0].hitCount == 1);
+    REQUIRE(duplicate[1].hitCount == 2);
+    REQUIRE(duplicate[0].x21 == duplicate[1].x21);
+
+    for (std::size_t index = 0;
+         index < kExecutionBreakpointRecordLimit;
+         ++index) {
+        history.Push({
+            2,
+            static_cast<std::uint64_t>(index + 3),
+            0x2000,
+            0,
+            0,
+            0,
+            static_cast<std::uintptr_t>(index),
+            static_cast<std::uintptr_t>(index + 0x300),
+        });
+    }
+    REQUIRE(history.Size() == kExecutionBreakpointRecordLimit);
+
+    std::array<ExecutionBreakpointRecord, 3> newest{};
+    REQUIRE(history.CopyNewest(newest.data(), newest.size()) == 3);
+    REQUIRE(newest[0].hitCount ==
+            kExecutionBreakpointRecordLimit);
+    REQUIRE(newest[1].hitCount ==
+            kExecutionBreakpointRecordLimit + 1);
+    REQUIRE(newest[2].hitCount ==
+            kExecutionBreakpointRecordLimit + 2);
+
+    history.Clear();
+    REQUIRE(history.Size() == 0);
+    REQUIRE(history.CopyNewest(newest.data(), newest.size()) == 0);
+}
+
 }  // namespace
 
 void RunPerfExecutionBreakpointTests() {
     TestArm64RegisterMapping();
     TestPayloadValidation();
+    TestChronologicalRecordHistory();
     TestUnsupportedHostIsExplicit();
 }
 

@@ -26,6 +26,7 @@ void RunCardInputPolicyTests();
 void RunCloudLayoutStartupPolicyTests();
 void RunCloudLayoutTests();
 void RunCpuMailboxPolicyTests();
+void RunExecutionSnapshotTransportTests();
 void RunFrameProjectionTests();
 void RunGameVersionPolicyTests();
 void RunGeometrySceneBuildPolicyTests();

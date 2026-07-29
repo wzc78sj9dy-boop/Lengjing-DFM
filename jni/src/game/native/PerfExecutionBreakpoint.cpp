@@ -1,5 +1,6 @@
 #include "game/native/PerfExecutionBreakpoint.h"
 
+#include "game/native/ExecutionBreakpointRecordHistory.h"
 #include "game/native/MemoryTransport.h"
 
 #include <algorithm>
@@ -208,18 +209,12 @@ struct PerfExecutionBreakpoint::Impl {
         std::uint64_t lostCount = 0;
     };
 
-    struct SavedRecord {
-        ExecutionBreakpointRecord record{};
-        std::uint64_t updateSequence = 0;
-    };
-
     pid_t processId = -1;
     std::uintptr_t address = 0;
     std::size_t pageSize = 0;
     std::map<pid_t, std::unique_ptr<ThreadEvent>> events;
-    std::map<std::uintptr_t, SavedRecord> records;
+    ExecutionBreakpointRecordHistory records;
     std::map<pid_t, std::uint64_t> threadHitCounts;
-    std::uint64_t updateSequence = 0;
     std::chrono::steady_clock::time_point nextDiscovery{};
     bool configured = false;
 
@@ -409,23 +404,7 @@ struct PerfExecutionBreakpoint::Impl {
         noexcept {
         event.hitCount = SaturatingAdd(event.hitCount, 1);
         threadHitCounts[event.threadId] = event.hitCount;
-        const std::uintptr_t identity =
-            static_cast<std::uintptr_t>(sample.x21);
-        auto iterator = records.find(identity);
-        if (iterator == records.end() &&
-            records.size() >= kExecutionBreakpointRecordLimit) {
-            auto oldest = records.begin();
-            for (auto candidate = records.begin();
-                 candidate != records.end(); ++candidate) {
-                if (candidate->second.updateSequence <
-                    oldest->second.updateSequence) {
-                    oldest = candidate;
-                }
-            }
-            records.erase(oldest);
-        }
-        SavedRecord& saved = records[identity];
-        saved.record = {
+        records.Push({
             event.threadId,
             event.hitCount,
             static_cast<std::uintptr_t>(sample.pc),
@@ -434,9 +413,7 @@ struct PerfExecutionBreakpoint::Impl {
             static_cast<std::uintptr_t>(sample.x20),
             static_cast<std::uintptr_t>(sample.x21),
             static_cast<std::uintptr_t>(sample.x23),
-        };
-        saved.updateSequence = SaturatingAdd(updateSequence, 1);
-        updateSequence = saved.updateSequence;
+        });
     }
 
     bool DrainEvent(ThreadEvent& event) noexcept {
@@ -586,14 +563,8 @@ struct PerfExecutionBreakpoint::Impl {
         if (!DiscoverThreads(false)) valid = false;
         if (!valid) return false;
 
-        totalRecords = std::min(
-            records.size(), kExecutionBreakpointRecordLimit);
-        const std::size_t requested =
-            std::min(capacity, totalRecords);
-        for (const auto& entry : records) {
-            if (recordsRead == requested) break;
-            output[recordsRead++] = entry.second.record;
-        }
+        totalRecords = records.Size();
+        recordsRead = records.CopyNewest(output, capacity);
         hitAddress = address;
         return true;
     }
@@ -603,12 +574,11 @@ struct PerfExecutionBreakpoint::Impl {
             CloseEvent(*entry.second);
         }
         events.clear();
-        records.clear();
+        records.Clear();
         threadHitCounts.clear();
         processId = -1;
         address = 0;
         pageSize = 0;
-        updateSequence = 0;
         nextDiscovery = {};
         configured = false;
         return true;

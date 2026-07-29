@@ -14,6 +14,7 @@
 #include "game/native/ActorRecordSource.h"
 #include "game/native/BoneFrameSource.h"
 #include "game/native/CharacterPositionResolver.h"
+#include "game/native/ExecutionSnapshotTransport.h"
 #include "game/native/ExecutionVeneerLocator.h"
 #include "game/native/FrameProjection.h"
 #include "game/native/GeometryRuntime.h"
@@ -1176,22 +1177,38 @@ public:
         }
         if (hardwareBreakpointModeReady &&
             hardwareBreakpointRuntime_.IsActive()) {
-            bool coordinatePollReady =
-                hardwareBreakpointRuntime_.Poll(context.world);
-            if (!coordinatePollReady &&
+            const auto coordinatePollNow =
+                std::chrono::steady_clock::now();
+            const bool secondaryCoordinateMode =
                 coordinateSelection_ ==
-                    ui::CoordinateDecryptSelection::Secondary &&
-                hardwareBreakpointRuntime_.NeedsReconfigure() &&
-                (hardwareBreakpointRetryAfter_ ==
-                     std::chrono::steady_clock::time_point{} ||
-                 hardwareBreakpointNow >=
-                     hardwareBreakpointRetryAfter_)) {
-                if (ReconfigureHardwareBreakpointRuntime()) {
-                    hardwareBreakpointRetryAfter_ = {};
-                } else {
+                    ui::CoordinateDecryptSelection::Secondary;
+            const bool reconfigureRequested =
+                secondaryCoordinateMode &&
+                hardwareBreakpointRuntime_.NeedsReconfigure();
+            bool coordinatePollReady = false;
+            if (!reconfigureRequested) {
+                coordinatePollReady = secondaryCoordinateMode
+                    ? hardwareBreakpointRuntime_.Poll(
+                          context.world, context.localPawn, 0)
+                    : hardwareBreakpointRuntime_.Poll(context.world);
+            }
+            if (!coordinatePollReady &&
+                reconfigureRequested) {
+                if (hardwareBreakpointRetryAfter_ ==
+                    std::chrono::steady_clock::time_point{}) {
                     hardwareBreakpointRetryAfter_ =
-                        hardwareBreakpointNow +
+                        coordinatePollNow +
                         HardwareBreakpointRetryDelay();
+                } else if (
+                    coordinatePollNow >=
+                    hardwareBreakpointRetryAfter_) {
+                    if (ReconfigureHardwareBreakpointRuntime()) {
+                        hardwareBreakpointRetryAfter_ = {};
+                    } else {
+                        hardwareBreakpointRetryAfter_ =
+                            coordinatePollNow +
+                            HardwareBreakpointRetryDelay();
+                    }
                 }
             }
             if (!hardwareBreakpointRuntime_.NeedsReconfigure() &&
@@ -3966,7 +3983,9 @@ private:
         std::uintptr_t& breakpointAddress) {
         breakpointAddress = 0;
         if (memory_ == nullptr || !memory_->IsOpen() ||
-            !memory_->SupportsExecutionBreakpoints()) {
+            (coordinateSelection_ !=
+                 ui::CoordinateDecryptSelection::Secondary &&
+             !memory_->SupportsExecutionBreakpoints())) {
             hardwareBreakpointFailure_.error =
                 CoordinateDecryptError::MemoryTransportUnavailable;
             return false;
@@ -4037,8 +4056,79 @@ private:
                 return memory_ != nullptr &&
                     memory_->RemoveExecutionBreakpoints();
             },
+            {},
         };
         return callbacks;
+    }
+
+    native::HardwareBreakpointCoordinateCallbacks
+    ExecutionSnapshotCallbacks(
+        native::ExecutionVeneerReadMemory readMemory) {
+        return {
+            [this](std::uintptr_t address) {
+                return executionSnapshotTransport_.Start(
+                    processId_, address);
+            },
+            {},
+            [readMemory](std::uintptr_t address,
+                         void* destination,
+                         std::size_t size) {
+                return readMemory(address, destination, size);
+            },
+            [this] {
+                return executionSnapshotTransport_.Stop();
+            },
+            [this](std::uintptr_t& candidate) {
+                native::ExecutionSnapshot snapshot{};
+                const native::ExecutionSnapshotPollResult result =
+                    executionSnapshotTransport_.Poll(snapshot);
+#if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
+                const auto snapshotProbe =
+                    executionSnapshotTransport_.Probe();
+                if (result ==
+                        native::ExecutionSnapshotPollResult::Reconfigure ||
+                    (result ==
+                         native::ExecutionSnapshotPollResult::Accepted &&
+                     (snapshotProbe.acceptedCount <= 5 ||
+                      (snapshotProbe.acceptedCount % 30) == 0))) {
+                    std::fprintf(
+                        stderr,
+                        "[snapshot-sample] result=%u candidate=%llx "
+                        "primary=%llx fallback=%llx source=%s "
+                        "sequence=%llu state=%u error=%u sys=%d\n",
+                        static_cast<unsigned>(result),
+                        static_cast<unsigned long long>(
+                            snapshot.candidate),
+                        static_cast<unsigned long long>(
+                            snapshot.primaryCandidate),
+                        static_cast<unsigned long long>(
+                            snapshot.fallbackCandidate),
+                        snapshot.usedFallback ? "fallback" : "primary",
+                        static_cast<unsigned long long>(
+                            snapshot.sequence),
+                        static_cast<unsigned>(snapshot.state),
+                        static_cast<unsigned>(snapshotProbe.error),
+                        snapshotProbe.systemError);
+                    std::fflush(stderr);
+                }
+#endif
+                candidate = snapshot.candidate;
+                executionSnapshotFallback_.Observe(result);
+                switch (result) {
+                    case native::ExecutionSnapshotPollResult::Accepted:
+                        return native::
+                            HardwareBreakpointCandidateSampleResult::
+                                Accepted;
+                    case native::ExecutionSnapshotPollResult::Reconfigure:
+                        return native::
+                            HardwareBreakpointCandidateSampleResult::Reset;
+                    case native::ExecutionSnapshotPollResult::Retry:
+                    default:
+                        return native::
+                            HardwareBreakpointCandidateSampleResult::Retry;
+                }
+            },
+        };
     }
 
     bool StartHardwareBreakpointRuntime() {
@@ -4050,12 +4140,49 @@ private:
                 readMemory, breakpointAddress)) {
             return false;
         }
-        native::HardwareBreakpointCoordinateCallbacks callbacks =
-            HardwareBreakpointCallbacks(readMemory);
-        if (!hardwareBreakpointRuntime_.Start(
+        bool started = false;
+        if (coordinateSelection_ ==
+            ui::CoordinateDecryptSelection::Secondary) {
+            executionSnapshotFallback_.Reset();
+            auto callbacks = ExecutionSnapshotCallbacks(readMemory);
+            started = hardwareBreakpointRuntime_.Start(
                 breakpointAddress,
                 std::move(callbacks),
-                HardwareBreakpointProfile())) {
+                HardwareBreakpointProfile());
+            executionSnapshotSelected_ = started;
+            const auto snapshotStartProbe =
+                executionSnapshotTransport_.Probe();
+            if (!started) {
+                executionSnapshotTransport_.Reset();
+                auto fallback = HardwareBreakpointCallbacks(readMemory);
+                started = hardwareBreakpointRuntime_.Start(
+                    breakpointAddress,
+                    std::move(fallback),
+                    HardwareBreakpointProfile());
+            }
+#if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
+            std::fprintf(
+                stderr,
+                "[snapshot-backend] source=%s started=%d "
+                "error=%u sys=%d active=%d cleanup_pending=%d\n",
+                executionSnapshotSelected_
+                    ? "execution_snapshot"
+                    : "execution_breakpoint",
+                started ? 1 : 0,
+                static_cast<unsigned>(snapshotStartProbe.error),
+                snapshotStartProbe.systemError,
+                snapshotStartProbe.active ? 1 : 0,
+                snapshotStartProbe.cleanupPending ? 1 : 0);
+            std::fflush(stderr);
+#endif
+        } else {
+            auto callbacks = HardwareBreakpointCallbacks(readMemory);
+            started = hardwareBreakpointRuntime_.Start(
+                breakpointAddress,
+                std::move(callbacks),
+                HardwareBreakpointProfile());
+        }
+        if (!started) {
             hardwareBreakpointFailure_.error =
                 CoordinateDecryptError::EngineSetupFailed;
             return false;
@@ -4075,12 +4202,30 @@ private:
             return false;
         }
         native::HardwareBreakpointCoordinateCallbacks callbacks =
-            HardwareBreakpointCallbacks(readMemory);
+            executionSnapshotSelected_ &&
+                !executionSnapshotFallback_.ShouldFallback()
+            ? ExecutionSnapshotCallbacks(readMemory)
+            : HardwareBreakpointCallbacks(readMemory);
+        const bool switchToExecutionBreakpoint =
+            executionSnapshotSelected_ &&
+            executionSnapshotFallback_.ShouldFallback();
         if (!hardwareBreakpointRuntime_.Reconfigure(
                 breakpointAddress, std::move(callbacks))) {
             hardwareBreakpointFailure_.error =
                 CoordinateDecryptError::EngineSetupFailed;
             return false;
+        }
+        if (switchToExecutionBreakpoint) {
+            executionSnapshotTransport_.Reset();
+            executionSnapshotSelected_ = false;
+            executionSnapshotFallback_.Reset();
+#if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
+            std::fprintf(
+                stderr,
+                "[snapshot-backend] source=execution_breakpoint "
+                "started=1 reason=poll_reconfigure_limit\n");
+            std::fflush(stderr);
+#endif
         }
         hardwareBreakpointFailure_.error =
             CoordinateDecryptError::SampleUnavailable;
@@ -4089,7 +4234,12 @@ private:
 
     bool StopHardwareBreakpointRuntime() noexcept {
         for (int attempt = 0; attempt < 3; ++attempt) {
-            if (hardwareBreakpointRuntime_.Stop()) return true;
+            if (hardwareBreakpointRuntime_.Stop()) {
+                executionSnapshotTransport_.Reset();
+                executionSnapshotSelected_ = false;
+                executionSnapshotFallback_.Reset();
+                return true;
+            }
         }
         return false;
     }
@@ -4207,6 +4357,19 @@ private:
                 }
                 return true;
             }
+        }
+        if (requestedCoordinateSelection_ ==
+            ui::CoordinateDecryptSelection::Secondary) {
+            if (IsCoordinateTraceEnabled()) {
+                auto& traceRecord = coordinateTraceRecords_[actor];
+                traceRecord = CoordinateTraceRecord{};
+                traceRecord.root = root;
+                traceRecord.source = CoordinateTraceSource::Failure;
+                traceRecord.attempted = true;
+                traceRecord.error =
+                    CoordinateDecryptError::PositionReadFailed;
+            }
+            return false;
         }
 
         auto readBytes = [this](std::uintptr_t address,
@@ -6662,6 +6825,9 @@ private:
     bool geometryTransportDedicated_ = false;
     native::HardwareBreakpointCoordinateRuntime
         hardwareBreakpointRuntime_{};
+    native::ExecutionSnapshotTransport executionSnapshotTransport_{};
+    bool executionSnapshotSelected_ = false;
+    native::ExecutionSnapshotFallbackPolicy executionSnapshotFallback_{};
     ui::CoordinateDecryptSelection coordinateSelection_ =
         ui::CoordinateDecryptSelection::None;
     ui::CoordinateDecryptSelection requestedCoordinateSelection_ =
