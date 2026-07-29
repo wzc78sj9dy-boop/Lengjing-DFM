@@ -171,7 +171,8 @@ private:
         coordinates_;
     std::unordered_map<std::uint32_t, std::uint8_t>
         coordinateMissCounts_;
-    std::unordered_set<std::uint32_t> coordinateJumpBlocks_;
+    std::unordered_map<std::uint32_t, HardwareBreakpointCoordinate>
+        coordinateJumpReferences_;
     std::uintptr_t breakpointAddress_ = 0;
     std::uintptr_t recordsBase_ = 0;
     std::uintptr_t pendingRecordsBase_ = 0;

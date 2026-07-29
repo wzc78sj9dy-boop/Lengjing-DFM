@@ -1653,7 +1653,9 @@ bool HardwareBreakpointCoordinateRuntime::PublishCoordinateTable(
             publishedRecordsBase_ == recordsBase;
         std::unordered_map<std::uint32_t, HardwareBreakpointCoordinate> next;
         std::unordered_map<std::uint32_t, std::uint8_t> nextMissCounts;
-        std::unordered_set<std::uint32_t> nextJumpBlocks;
+        std::unordered_map<
+            std::uint32_t,
+            HardwareBreakpointCoordinate> nextJumpReferences;
 
         const bool orderedRecordTable =
             UsesOrderedRecordTable(profile_);
@@ -1676,10 +1678,11 @@ bool HardwareBreakpointCoordinateRuntime::PublishCoordinateTable(
             for (const std::uint32_t id : snapshot.ids) {
                 if (id != 0) activeIds.insert(id);
             }
-            nextJumpBlocks.reserve(coordinateJumpBlocks_.size());
-            for (const std::uint32_t id : coordinateJumpBlocks_) {
-                if (activeIds.find(id) != activeIds.end()) {
-                    nextJumpBlocks.insert(id);
+            nextJumpReferences.reserve(
+                coordinateJumpReferences_.size());
+            for (const auto& entry : coordinateJumpReferences_) {
+                if (activeIds.find(entry.first) != activeIds.end()) {
+                    nextJumpReferences.insert(entry);
                 }
             }
             next.reserve(
@@ -1726,13 +1729,27 @@ bool HardwareBreakpointCoordinateRuntime::PublishCoordinateTable(
                 } else if (
                     rejectedCoordinateIds.find(entry.first) !=
                     rejectedCoordinateIds.end()) {
-                    nextJumpBlocks.insert(entry.first);
+                    nextJumpReferences.insert_or_assign(
+                        entry.first, entry.second);
                 }
             }
             for (const auto& entry : snapshot.coordinates) {
-                if (nextJumpBlocks.find(entry.first) !=
-                    nextJumpBlocks.end()) {
-                    continue;
+                const auto blocked =
+                    nextJumpReferences.find(entry.first);
+                if (blocked != nextJumpReferences.end()) {
+                    const double dx =
+                        static_cast<double>(entry.second.x) -
+                        static_cast<double>(blocked->second.x);
+                    const double dy =
+                        static_cast<double>(entry.second.y) -
+                        static_cast<double>(blocked->second.y);
+                    const double dz =
+                        static_cast<double>(entry.second.z) -
+                        static_cast<double>(blocked->second.z);
+                    if (std::hypot(dx, dy, dz) > 500.0) {
+                        continue;
+                    }
+                    nextJumpReferences.erase(blocked);
                 }
                 if (rejectedCoordinateIds.find(entry.first) !=
                     rejectedCoordinateIds.end()) {
@@ -1754,7 +1771,7 @@ bool HardwareBreakpointCoordinateRuntime::PublishCoordinateTable(
         if (world != world_) return false;
         coordinates_.swap(next);
         coordinateMissCounts_.swap(nextMissCounts);
-        coordinateJumpBlocks_.swap(nextJumpBlocks);
+        coordinateJumpReferences_.swap(nextJumpReferences);
         recordsBase_ = recordsBase;
         pendingRecordsBase_ = recordsBase;
         publishedRecordsBase_ = recordsBase;
@@ -1783,7 +1800,7 @@ bool HardwareBreakpointCoordinateRuntime::PublishCoordinateTable(
 void HardwareBreakpointCoordinateRuntime::ClearPublishedState() noexcept {
     coordinates_.clear();
     coordinateMissCounts_.clear();
-    coordinateJumpBlocks_.clear();
+    coordinateJumpReferences_.clear();
     recordsBase_ = 0;
     publishedRecordsBase_ = 0;
     publishedTargetRoot_ = 0;

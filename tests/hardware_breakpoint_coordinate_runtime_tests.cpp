@@ -1697,7 +1697,7 @@ void TestOrderedFallbackCoordinateExpiry() {
         34,
         &records,
         &ids);
-    for (std::uint64_t hitCount = 1; hitCount <= 11; ++hitCount) {
+    for (std::uint64_t hitCount = 1; hitCount <= 12; ++hitCount) {
         transport.AddBatch(
             {Record(hitCount, kBreakpoint, kRecordsBase)},
             kBreakpoint);
@@ -1751,6 +1751,13 @@ void TestOrderedFallbackCoordinateExpiry() {
     REQUIRE(!runtime.Lookup(7002, kWorld, coordinate));
     REQUIRE(runtime.Poll(kWorld, kManager));
     REQUIRE(!runtime.Lookup(7002, kWorld, coordinate));
+
+    SetCoordinate(records, 2, 120.0f, 220.0f, 320.0f);
+    transport.PutBytes(
+        kRecordsBase, records.data(), records.size());
+    REQUIRE(runtime.Poll(kWorld, kManager));
+    REQUIRE(runtime.Lookup(7002, kWorld, coordinate));
+    REQUIRE(coordinate.x == 120.0f);
     REQUIRE(runtime.Stop());
 }
 
