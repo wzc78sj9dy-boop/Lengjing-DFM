@@ -32,8 +32,7 @@ struct SceneTransformProfile {
     constexpr bool IsValid() const noexcept {
         return bridgeRva != 0 && bridgePointerOffset != 0 &&
             contextBackOffset != 0 && entryOffset != 0 &&
-            returnOffset != 0 && secondaryRootRva != 0 &&
-            secondaryPointerOffset != 0 &&
+            returnOffset != 0 &&
             componentTransformOffset != 0 && actorBaseOffset != 0 &&
             instructionBudget != 0;
     }
@@ -45,8 +44,8 @@ inline constexpr SceneTransformProfile kSceneTransformDomesticProfile{
     UINT64_C(0x08),
     UINT64_C(0xA0),
     UINT64_C(0xA8),
-    UINT64_C(0x0E73895C),
-    UINT64_C(0xA0),
+    UINT64_C(0),
+    UINT64_C(0),
     UINT64_C(0),
     UINT64_C(0x180),
     UINT64_C(0x210),
@@ -101,8 +100,7 @@ struct SceneTransformInvocation {
             IsSceneTransformRemotePointer(initialX0) &&
             IsSceneTransformRemotePointer(entryPc) &&
             IsSceneTransformRemotePointer(linkPc) &&
-            IsSceneTransformRemotePointer(hookPc) &&
-            IsSceneTransformRemotePointer(secondaryEntry);
+            IsSceneTransformRemotePointer(hookPc);
     }
 };
 

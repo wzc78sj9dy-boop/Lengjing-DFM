@@ -690,6 +690,21 @@ struct SceneTransformRuntime::Impl {
             return false;
         }
         ResolveExternalCalls(*transport);
+        if (metadata.valid) {
+            const ExecutionMapSeedPlan plan{
+                metadata.callPc,
+                metadata.postLoadPc,
+                metadata.storedRegister,
+                metadata.loadedRegister,
+            };
+            ExecutionMapSeed mapSeed{};
+            int captureStatus = 0;
+            if (transport->CaptureExecutionMapSeed(
+                    threadId, plan, mapSeed, captureStatus) &&
+                mapSeed.IsValid()) {
+                capturedValues[mapSeed.key] = mapSeed.value;
+            }
+        }
         return true;
     }
 
@@ -861,34 +876,37 @@ struct SceneTransformRuntime::Impl {
         }
         hook = NormalizeSceneTransformPointer(hook);
 
-        std::uint64_t secondaryRootAddress = 0;
-        std::uint64_t secondaryRoot = 0;
         std::uint64_t secondaryPointer = 0;
-        if (!AddAddress(
-                moduleBase,
-                profile.secondaryRootRva,
-                secondaryRootAddress) ||
-            !ReadRemote(
-                secondaryRootAddress,
-                &secondaryRoot,
-                sizeof(secondaryRoot))) {
-            return false;
+        if (profile.secondaryRootRva != 0 &&
+            profile.secondaryPointerOffset != 0) {
+            std::uint64_t secondaryRootAddress = 0;
+            std::uint64_t secondaryRoot = 0;
+            if (!AddAddress(
+                    moduleBase,
+                    profile.secondaryRootRva,
+                    secondaryRootAddress) ||
+                !ReadRemote(
+                    secondaryRootAddress,
+                    &secondaryRoot,
+                    sizeof(secondaryRoot))) {
+                return false;
+            }
+            secondaryRoot =
+                NormalizeSceneTransformPointer(secondaryRoot);
+            if (secondaryRoot == 0 ||
+                !ReadRemote(
+                    secondaryRoot + profile.secondaryPointerOffset,
+                    &secondaryPointer,
+                    sizeof(secondaryPointer)) ||
+                !AddAddress(
+                    NormalizeSceneTransformPointer(secondaryPointer),
+                    profile.secondaryFinalOffset,
+                    secondaryPointer)) {
+                return false;
+            }
+            secondaryPointer =
+                NormalizeSceneTransformPointer(secondaryPointer);
         }
-        secondaryRoot =
-            NormalizeSceneTransformPointer(secondaryRoot);
-        if (secondaryRoot == 0 ||
-            !ReadRemote(
-                secondaryRoot + profile.secondaryPointerOffset,
-                &secondaryPointer,
-                sizeof(secondaryPointer)) ||
-            !AddAddress(
-                NormalizeSceneTransformPointer(secondaryPointer),
-                profile.secondaryFinalOffset,
-                secondaryPointer)) {
-            return false;
-        }
-        secondaryPointer =
-            NormalizeSceneTransformPointer(secondaryPointer);
 
         output = {
             static_cast<std::uintptr_t>(bridge),
@@ -1240,8 +1258,7 @@ struct SceneTransformRuntime::Impl {
         context = top - kContextDistance;
         if (context < stackLow ||
             context + kContextSize > stackHigh ||
-            !EnsureRange(context, kContextSize) ||
-            !EnsureRange(stackLow + UINT64_C(0x90), 12)) {
+            !EnsureRange(context, kContextSize)) {
             return false;
         }
 
@@ -1255,8 +1272,6 @@ struct SceneTransformRuntime::Impl {
         }
         const std::uint64_t savedFrame = frame | UINT64_C(1);
         const std::uint64_t hook = invocation.hookPc;
-        const std::uint64_t sentinel = UINT64_C(0xA5A5A5A5A5A5A5A5);
-        const std::uint32_t sentinelTail = UINT32_C(0xA5A5A5A5);
         if (uc_mem_write(
                 engine, context, zero.data(), zero.size()) != UC_ERR_OK ||
             uc_mem_write(
@@ -1273,17 +1288,7 @@ struct SceneTransformRuntime::Impl {
                 engine,
                 context + kContextReturnOffset,
                 &hook,
-                sizeof(hook)) != UC_ERR_OK ||
-            uc_mem_write(
-                engine,
-                stackLow + UINT64_C(0x90),
-                &sentinel,
-                sizeof(sentinel)) != UC_ERR_OK ||
-            uc_mem_write(
-                engine,
-                stackLow + UINT64_C(0x98),
-                &sentinelTail,
-                sizeof(sentinelTail)) != UC_ERR_OK) {
+                sizeof(hook)) != UC_ERR_OK) {
             return false;
         }
         selectedSlot = context + kContextSelectedOffset;
@@ -1366,8 +1371,6 @@ struct SceneTransformRuntime::Impl {
             activeMapHits = 0;
             activeMapLearns = 0;
             activeRetryDiagnostic = 0;
-            capturedValues.clear();
-            auxiliaryValues.clear();
             seekValues.clear();
             callTrace.clear();
             pendingMapLearn = {};

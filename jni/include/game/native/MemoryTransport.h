@@ -50,6 +50,29 @@ struct ExecutionBreakpointRecord {
     std::uintptr_t x23 = 0;
 };
 
+struct ExecutionMapSeedPlan {
+    std::uintptr_t callPc = 0;
+    std::uintptr_t postLoadPc = 0;
+    std::uint32_t storedRegister = 31;
+    std::uint32_t loadedRegister = 31;
+
+    constexpr bool IsValid() const noexcept {
+        return callPc != 0 && postLoadPc != 0 &&
+            callPc != postLoadPc &&
+            ((callPc | postLoadPc) & 3U) == 0 &&
+            storedRegister <= 30 && loadedRegister <= 30;
+    }
+};
+
+struct ExecutionMapSeed {
+    std::uint32_t key = 0;
+    std::uint64_t value = 0;
+
+    constexpr bool IsValid() const noexcept {
+        return key != 0 && value != 0;
+    }
+};
+
 class MemoryTransport final {
 public:
     MemoryTransport();
@@ -92,6 +115,11 @@ public:
                           std::uintptr_t& low,
                           std::uintptr_t& high,
                           int& status) noexcept;
+    bool CaptureExecutionMapSeed(
+        pid_t threadId,
+        const ExecutionMapSeedPlan& plan,
+        ExecutionMapSeed& seed,
+        int& status) noexcept;
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
     bool Write(std::uintptr_t address, const void* source, std::size_t size);
 #endif

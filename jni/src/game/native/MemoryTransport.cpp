@@ -14,6 +14,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
 #include <fstream>
@@ -41,6 +42,7 @@ static_assert(HWBP_MAX_RECORDS == kExecutionBreakpointRecordLimit,
 constexpr std::uintptr_t kMinimumRemoteAddress = 0x10000000ULL;
 constexpr std::uintptr_t kMaximumRemoteAddress = 0x10000000000ULL;
 constexpr char kDefaultThreadContextDevice[] = "/dev/fbe775";
+constexpr unsigned int kExecutionMapSeedPollCount = 25;
 
 bool IsNumericName(const char* name) {
     if (name == nullptr || *name == '\0') return false;
@@ -66,6 +68,44 @@ bool IsRemoteRangeValid(std::uintptr_t address, std::size_t size) {
         address < kMaximumRemoteAddress &&
         size > 0 &&
         size <= kMaximumRemoteAddress - address;
+}
+
+bool ReadBreakpointRegister(const hwbp_record& record,
+                            std::uint32_t index,
+                            std::uint64_t& value) noexcept {
+    value = 0;
+    if (index <= 29) {
+        static_assert(
+            offsetof(hwbp_record, x29) - offsetof(hwbp_record, x0) ==
+                29 * sizeof(std::uint64_t));
+        const auto* source =
+            reinterpret_cast<const std::uint8_t*>(&record) +
+            offsetof(hwbp_record, x0) +
+            index * sizeof(std::uint64_t);
+        std::memcpy(&value, source, sizeof(value));
+        return true;
+    }
+    if (index == 30) {
+        value = record.lr;
+        return true;
+    }
+    return false;
+}
+
+bool IsStableBreakpointRecord(const hwbp_record& previous,
+                              const hwbp_record& current,
+                              std::uint32_t registerIndex) noexcept {
+    std::uint64_t previousValue = 0;
+    std::uint64_t currentValue = 0;
+    return previous.tid == current.tid &&
+        previous.hit_count == current.hit_count &&
+        previous.pc == current.pc &&
+        previous.sp == current.sp &&
+        ReadBreakpointRegister(
+            previous, registerIndex, previousValue) &&
+        ReadBreakpointRegister(
+            current, registerIndex, currentValue) &&
+        previousValue == currentValue;
 }
 
 struct MemoryTransferResult {
@@ -360,6 +400,181 @@ struct MemoryTransport::Impl {
             }
         }
         return PerfExecutionBreakpoint::IsSupported();
+    }
+
+    bool CaptureExecutionMapSeed(
+        pid_t threadId,
+        const ExecutionMapSeedPlan& plan,
+        ExecutionMapSeed& seed,
+        int& status) noexcept {
+        seed = {};
+        status = -EINVAL;
+        std::lock_guard<std::mutex> lock(ioMutex);
+        if (!open || processId <= 0 || threadId <= 0 ||
+            !plan.IsValid() ||
+            !IsRemoteRangeValid(plan.callPc, sizeof(std::uint32_t)) ||
+            !IsRemoteRangeValid(
+                plan.postLoadPc, sizeof(std::uint32_t))) {
+            return false;
+        }
+        if (mode != MemoryTransportMode::KernelDriver ||
+            kernel == nullptr) {
+            status = -EOPNOTSUPP;
+            return false;
+        }
+        if (executionBreakpointConfigured) {
+            status = -EBUSY;
+            return false;
+        }
+
+        std::uint64_t breakpointCount = 0;
+        std::uint64_t watchpointCount = 0;
+        bool setAttempted = false;
+        const auto removeBreakpoints = [&]() noexcept {
+            if (!setAttempted) return true;
+            setAttempted = false;
+            try {
+                return kernel->hwbp_remove(processId);
+            } catch (...) {
+                return false;
+            }
+        };
+        try {
+            if (!kernel->hwbp_get_info(
+                    &breakpointCount, &watchpointCount) ||
+                breakpointCount < 2) {
+                status = -ENOSPC;
+                return false;
+            }
+
+            std::array<hwbp_point_config, 2> points{{
+                {
+                    HWBP_BREAKPOINT_X,
+                    HWBP_BREAKPOINT_LEN_4,
+                    SCOPE_ALL_THREADS,
+                    static_cast<std::uint64_t>(plan.callPc),
+                },
+                {
+                    HWBP_BREAKPOINT_X,
+                    HWBP_BREAKPOINT_LEN_4,
+                    SCOPE_ALL_THREADS,
+                    static_cast<std::uint64_t>(plan.postLoadPc),
+                },
+            }};
+            setAttempted = true;
+            if (!kernel->hwbp_set(
+                    processId,
+                    points.data(),
+                    static_cast<int>(points.size()))) {
+                status = -EIO;
+                static_cast<void>(removeBreakpoints());
+                return false;
+            }
+
+            std::array<hwbp_record, 2> previousRecords{};
+            std::array<hwbp_record, 2> stableRecords{};
+            std::array<bool, 2> previousSeen{};
+            for (unsigned int poll = 0;
+                 poll < kExecutionMapSeedPollCount;
+                 ++poll) {
+                std::array<bool, 2> stableSeen{};
+                for (std::size_t point = 0;
+                     point < points.size();
+                     ++point) {
+                    std::uint64_t hitAddress = 0;
+                    int totalRecords = 0;
+                    const int copied = kernel->hwbp_read_records(
+                        processId,
+                        static_cast<int>(point),
+                        executionBreakpointRecordBuffer.data(),
+                        static_cast<int>(
+                            executionBreakpointRecordBuffer.size()),
+                        &hitAddress,
+                        &totalRecords);
+                    if (copied < 0 ||
+                        static_cast<std::size_t>(copied) >
+                            executionBreakpointRecordBuffer.size() ||
+                        totalRecords < 0 ||
+                        totalRecords > HWBP_MAX_RECORDS) {
+                        status = -EIO;
+                        static_cast<void>(removeBreakpoints());
+                        return false;
+                    }
+                    if (hitAddress != 0 &&
+                        hitAddress != points[point].hit_addr) {
+                        continue;
+                    }
+                    const hwbp_record* latest = nullptr;
+                    for (int index = 0; index < copied; ++index) {
+                        const hwbp_record& candidate =
+                            executionBreakpointRecordBuffer[
+                                static_cast<std::size_t>(index)];
+                        if (candidate.tid != threadId ||
+                            candidate.hit_count == 0 ||
+                            candidate.pc != points[point].hit_addr ||
+                            (latest != nullptr &&
+                             candidate.hit_count <= latest->hit_count)) {
+                            continue;
+                        }
+                        latest = &candidate;
+                    }
+                    if (latest == nullptr) continue;
+                    const std::uint32_t registerIndex =
+                        point == 0
+                            ? plan.storedRegister
+                            : plan.loadedRegister;
+                    if (previousSeen[point] &&
+                        IsStableBreakpointRecord(
+                            previousRecords[point],
+                            *latest,
+                            registerIndex)) {
+                        stableRecords[point] = *latest;
+                        stableSeen[point] = true;
+                    }
+                    previousRecords[point] = *latest;
+                    previousSeen[point] = true;
+                }
+                if (stableSeen[0] && stableSeen[1]) {
+                    std::uint64_t stored = 0;
+                    std::uint64_t loaded = 0;
+                    if (!ReadBreakpointRegister(
+                            stableRecords[0],
+                            plan.storedRegister,
+                            stored) ||
+                        !ReadBreakpointRegister(
+                            stableRecords[1],
+                            plan.loadedRegister,
+                            loaded)) {
+                        status = -EIO;
+                        static_cast<void>(removeBreakpoints());
+                        return false;
+                    }
+                    seed = {
+                        static_cast<std::uint32_t>(stored),
+                        loaded,
+                    };
+                    if (seed.IsValid()) break;
+                }
+                if (poll + 1 < kExecutionMapSeedPollCount) {
+                    usleep(1000);
+                }
+            }
+
+            if (!removeBreakpoints()) {
+                status = -EIO;
+                return false;
+            }
+            if (!seed.IsValid()) {
+                status = -ETIMEDOUT;
+                return false;
+            }
+            status = 0;
+            return true;
+        } catch (...) {
+            static_cast<void>(removeBreakpoints());
+            status = -EIO;
+            return false;
+        }
     }
 
     bool ConfigureExecutionBreakpoint(std::uintptr_t address) noexcept {
@@ -1014,6 +1229,20 @@ bool MemoryTransport::QueryNamedThreadTls(
     }
     return impl_->QueryNamedThreadTls(
         name, threadId, tls, status);
+}
+
+bool MemoryTransport::CaptureExecutionMapSeed(
+    pid_t threadId,
+    const ExecutionMapSeedPlan& plan,
+    ExecutionMapSeed& seed,
+    int& status) noexcept {
+    if (impl_ == nullptr) {
+        seed = {};
+        status = -EINVAL;
+        return false;
+    }
+    return impl_->CaptureExecutionMapSeed(
+        threadId, plan, seed, status);
 }
 
 #if LENGJING_ENABLE_PROJECTILE_TRACKING
