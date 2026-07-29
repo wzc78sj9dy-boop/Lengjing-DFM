@@ -86,6 +86,9 @@ private:
     };
 
     bool SampleRecordsBase() noexcept;
+    bool ReadObservedManager(
+        std::uintptr_t world,
+        std::uintptr_t& manager) noexcept;
     bool RefreshCoordinateTable(
         std::uintptr_t world,
         std::uintptr_t manager) noexcept;

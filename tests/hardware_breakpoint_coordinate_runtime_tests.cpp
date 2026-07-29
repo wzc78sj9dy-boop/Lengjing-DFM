@@ -22,8 +22,11 @@ using lengjing::game::native::HardwareBreakpointCoordinateProfile;
 using lengjing::game::native::HardwareBreakpointCoordinateRuntime;
 
 constexpr std::uintptr_t kManagerOffset = 0x1B8;
+constexpr std::uintptr_t kTargetLinkOffset = 0x10;
 constexpr std::uintptr_t kIdArrayOffset = 0xF98;
 constexpr std::uintptr_t kCountOffset = 0xFA0;
+constexpr std::uintptr_t kFirstLinkDelta = 0x100000;
+constexpr std::uintptr_t kSecondLinkDelta = 0x200000;
 constexpr std::size_t kRecordStride = 0x40;
 constexpr std::size_t kCoordinateOffset = 0x30;
 
@@ -220,6 +223,17 @@ void InstallOrderedTable(
         idArray,
         selectedIds.data(),
         selectedIds.size() * sizeof(std::uint32_t));
+}
+
+void InstallOrderedManagerChain(
+    FakeRuntimeTransport& transport,
+    std::uintptr_t targetBase,
+    std::uintptr_t manager) {
+    const std::uintptr_t first = targetBase + kFirstLinkDelta;
+    const std::uintptr_t second = targetBase + kSecondLinkDelta;
+    transport.PutValue(targetBase + kTargetLinkOffset, first);
+    transport.PutValue(first + kTargetLinkOffset, second);
+    transport.PutValue(second + kManagerOffset, manager);
 }
 
 void TestTablePublicationAndStability() {
@@ -502,7 +516,7 @@ void RequireOrderedRawCount(std::uint32_t rawCount,
         UINT64_C(0x6000300000);
 
     FakeRuntimeTransport transport{};
-    transport.PutValue(kWorld + kManagerOffset, kManager);
+    InstallOrderedManagerChain(transport, kWorld, kManager);
     const std::uint64_t probe = UINT64_C(0x1122334455667788);
     transport.PutValue(kRecordsBase, probe);
     InstallOrderedTable(
@@ -582,7 +596,7 @@ void TestOrderedRecordReadAndCoordinateValidation() {
     SetCoordinate(records, kCount - 1, 7.0f, 8.0f, 9.0f);
 
     FakeRuntimeTransport transport{};
-    transport.PutValue(kWorld + kManagerOffset, kManager);
+    InstallOrderedManagerChain(transport, kWorld, kManager);
     InstallOrderedTable(
         transport,
         kManager,
@@ -607,6 +621,18 @@ void TestOrderedRecordReadAndCoordinateValidation() {
     REQUIRE(transport.ReadCount(
                 kRecordsBase,
                 kCount * kRecordStride) == 0);
+    REQUIRE(transport.ReadCount(
+                kWorld + kTargetLinkOffset,
+                sizeof(std::uintptr_t)) == 2);
+    REQUIRE(transport.ReadCount(
+                kWorld + kFirstLinkDelta + kTargetLinkOffset,
+                sizeof(std::uintptr_t)) == 2);
+    REQUIRE(transport.ReadCount(
+                kWorld + kSecondLinkDelta + kManagerOffset,
+                sizeof(std::uintptr_t)) == 2);
+    REQUIRE(transport.ReadCount(
+                kWorld + kManagerOffset,
+                sizeof(std::uintptr_t)) == 0);
     REQUIRE(runtime.PublishedCoordinateCount() == 1);
 
     HardwareBreakpointCoordinate coordinate{};
@@ -653,7 +679,7 @@ void RequireOrderedCandidateAndRecordsBound(
         UINT64_C(0x6002300000);
 
     FakeRuntimeTransport transport{};
-    transport.PutValue(kWorld + kManagerOffset, kManager);
+    InstallOrderedManagerChain(transport, kWorld, kManager);
     InstallOrderedTable(
         transport,
         kManager,
@@ -690,7 +716,7 @@ void RequireOrderedManagerBound(std::uintptr_t manager,
         UINT64_C(0x6003300000);
 
     FakeRuntimeTransport transport{};
-    transport.PutValue(kWorld + kManagerOffset, manager);
+    InstallOrderedManagerChain(transport, kWorld, manager);
     InstallOrderedTable(
         transport,
         manager,
@@ -727,7 +753,7 @@ void RequireOrderedIdArrayBound(std::uintptr_t idArray,
     constexpr std::size_t kCount = 15;
 
     FakeRuntimeTransport transport{};
-    transport.PutValue(kWorld + kManagerOffset, kManager);
+    InstallOrderedManagerChain(transport, kWorld, kManager);
     InstallOrderedTable(
         transport,
         kManager,
@@ -796,7 +822,7 @@ void TestOrderedReadFailureAndReconfigurePreserveState() {
     SetCoordinate(recordsB, 0, 10.0f, 20.0f, 30.0f);
 
     FakeRuntimeTransport transport{};
-    transport.PutValue(kWorld + kManagerOffset, kManager);
+    InstallOrderedManagerChain(transport, kWorld, kManager);
     InstallOrderedTable(
         transport,
         kManager,
@@ -915,7 +941,7 @@ void TestOrderedRecordReorderAndCountRollback() {
         UINT64_C(0x6006300000);
 
     FakeRuntimeTransport transport{};
-    transport.PutValue(kWorld + kManagerOffset, kManager);
+    InstallOrderedManagerChain(transport, kWorld, kManager);
     InstallOrderedTable(
         transport,
         kManager,

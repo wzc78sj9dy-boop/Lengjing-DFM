@@ -9,6 +9,7 @@
 namespace lengjing::game::native {
 namespace {
 
+constexpr std::uintptr_t kTargetLinkOffset = 0x10;
 constexpr std::uintptr_t kManagerOffset = 0x1B8;
 constexpr std::uintptr_t kIdArrayOffset = 0xF98;
 constexpr std::uintptr_t kCountOffset = 0xFA0;
@@ -244,24 +245,8 @@ bool HardwareBreakpointCoordinateRuntime::Poll(
 
     if (!SampleRecordsBase() || recordsBase_ == 0) return false;
 
-    std::uintptr_t managerAddress = 0;
-    std::uintptr_t rawManager = 0;
-    if (!AddOffset(world, kManagerOffset, managerAddress) ||
-        !ReadMemory(
-            callbacks_,
-            managerAddress,
-            &rawManager,
-            sizeof(rawManager))) {
-        return false;
-    }
-    std::uintptr_t observedManager = rawManager;
-    if (UsesOrderedRecordTable(profile_)) {
-        if (!NormalizeObservedPointer(rawManager, observedManager)) {
-            return false;
-        }
-    } else if (observedManager == 0) {
-        return false;
-    }
+    std::uintptr_t observedManager = 0;
+    if (!ReadObservedManager(world, observedManager)) return false;
     if (manager != 0 && manager != observedManager) {
         return false;
     }
@@ -431,6 +416,44 @@ bool HardwareBreakpointCoordinateRuntime::SampleRecordsBase() noexcept {
     return true;
 }
 
+bool HardwareBreakpointCoordinateRuntime::ReadObservedManager(
+    std::uintptr_t world,
+    std::uintptr_t& manager) noexcept {
+    manager = 0;
+    std::uintptr_t managerAddress = 0;
+    if (UsesOrderedRecordTable(profile_)) {
+        std::uintptr_t firstAddress = 0;
+        std::uintptr_t first = 0;
+        std::uintptr_t secondAddress = 0;
+        std::uintptr_t second = 0;
+        if (!AddOffset(world, kTargetLinkOffset, firstAddress) ||
+            !ReadMemory(
+                callbacks_, firstAddress, &first, sizeof(first)) ||
+            !AddOffset(first, kTargetLinkOffset, secondAddress) ||
+            !ReadMemory(
+                callbacks_, secondAddress, &second, sizeof(second)) ||
+            !AddOffset(second, kManagerOffset, managerAddress)) {
+            return false;
+        }
+    } else if (!AddOffset(world, kManagerOffset, managerAddress)) {
+        return false;
+    }
+
+    std::uintptr_t rawManager = 0;
+    if (!ReadMemory(
+            callbacks_,
+            managerAddress,
+            &rawManager,
+            sizeof(rawManager))) {
+        return false;
+    }
+    manager = rawManager;
+    if (UsesOrderedRecordTable(profile_)) {
+        return NormalizeObservedPointer(rawManager, manager);
+    }
+    return manager != 0;
+}
+
 bool HardwareBreakpointCoordinateRuntime::RefreshCoordinateTable(
     std::uintptr_t world,
     std::uintptr_t manager) noexcept {
@@ -498,14 +521,10 @@ bool HardwareBreakpointCoordinateRuntime::RefreshCoordinateTable(
             return false;
         }
 
-        std::uintptr_t managerAddress = 0;
-        std::uintptr_t rawVerifiedManager = 0;
+        std::uintptr_t verifiedManager = 0;
         std::uintptr_t rawVerifiedIdArray = 0;
         std::uint32_t verifiedRawCount = 0;
-        if (!AddOffset(world, kManagerOffset, managerAddress) ||
-            !ReadMemory(
-                callbacks_, managerAddress, &rawVerifiedManager,
-                sizeof(rawVerifiedManager)) ||
+        if (!ReadObservedManager(world, verifiedManager) ||
             !ReadMemory(
                 callbacks_, idArrayAddress, &rawVerifiedIdArray,
                 sizeof(rawVerifiedIdArray)) ||
@@ -514,13 +533,10 @@ bool HardwareBreakpointCoordinateRuntime::RefreshCoordinateTable(
                 sizeof(verifiedRawCount))) {
             return false;
         }
-        std::uintptr_t verifiedManager = rawVerifiedManager;
         std::uintptr_t verifiedIdArray = rawVerifiedIdArray;
         if (orderedRecordTable &&
-            (!NormalizeObservedPointer(
-                 rawVerifiedManager, verifiedManager) ||
-             !NormalizeObservedPointer(
-                 rawVerifiedIdArray, verifiedIdArray))) {
+            !NormalizeObservedPointer(
+                rawVerifiedIdArray, verifiedIdArray)) {
             return false;
         }
         if (verifiedManager != manager ||
