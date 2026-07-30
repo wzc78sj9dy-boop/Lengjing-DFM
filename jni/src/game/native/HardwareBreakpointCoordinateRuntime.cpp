@@ -595,14 +595,13 @@ bool HardwareBreakpointCoordinateRuntime::Poll(
     if (UsesStableRecordTable(profile_)) {
         static_cast<void>(targetRoot);
         static_cast<void>(manager);
-        if (!SampleRecordsBase() ||
-            (recordsBase_ == 0 && pendingRecordsBase_ == 0)) {
+        if (!SampleRecordsBase() || pendingRecordsBase_ == 0) {
             return false;
         }
 
         std::uintptr_t observedManager = 0;
         if (!ReadObservedManager(world, observedManager)) return false;
-        return RefreshOrderedFallbackCoordinateTable(
+        return RefreshCoordinateTable(
             world, world, observedManager);
     }
     if (targetRoot == 0) return false;
@@ -936,66 +935,74 @@ SampleStableRecordsBase() noexcept {
     std::array<SeenRecord, kExecutionBreakpointRecordLimit>
         nextSeenRecords{};
 
-    const auto isLatestThreadRecord =
-        [&](std::size_t recordIndex) noexcept {
-            const ExecutionBreakpointRecord& record =
-                records_[recordIndex];
-            for (std::size_t index = 0; index < recordsRead; ++index) {
-                if (records_[index].tid == record.tid &&
-                    records_[index].hitCount > record.hitCount) {
-                    return false;
-                }
-            }
-            return true;
-        };
-    for (int latestPass = 0; latestPass < 2; ++latestPass) {
-        for (std::size_t index = 0; index < recordsRead; ++index) {
-            const ExecutionBreakpointRecord& record = records_[index];
-            if (record.tid <= 0 || record.hitCount == 0 ||
-                record.pc != breakpointAddress_ ||
-                isLatestThreadRecord(index) != (latestPass != 0)) {
-                continue;
-            }
-
-            bool seen = false;
-            for (const SeenRecord& previous : previousSeenRecords) {
-                if (previous.valid && previous.tid == record.tid &&
-                    previous.hitCount == record.hitCount &&
-                    previous.pc == record.pc) {
-                    seen = true;
-                    break;
-                }
-            }
-            nextSeenRecords[index] = {
-                record.tid,
-                record.hitCount,
-                record.pc,
-                record.x20,
-                record.x21,
-                true,
-            };
-            if (seen) continue;
-
-            const std::uintptr_t candidate =
-                record.x23 & kPointerPayloadMask;
-            std::uint64_t probe = 0;
-            if (candidate == 0 ||
-                (candidate & kRejectedCandidateMask) ==
-                    kRejectedCandidateValue ||
-                !ReadMemory(
-                    callbacks_, candidate, &probe, sizeof(probe))) {
-                continue;
-            }
-
-            candidateRing_[candidateWriteIndex_] = candidate;
-            candidateWriteIndex_ =
-                (candidateWriteIndex_ + 1) % candidateRing_.size();
-            if (candidateCount_ < candidateRing_.size()) {
-                ++candidateCount_;
-            }
-            ObserveCandidate(candidate, record.x20, record.x21);
-            ++acceptedSampleCount_;
+    std::array<std::size_t, kExecutionBreakpointRecordLimit>
+        latestIndices{};
+    std::size_t latestCount = 0;
+    for (std::size_t index = 0; index < recordsRead; ++index) {
+        const ExecutionBreakpointRecord& record = records_[index];
+        if (record.tid <= 0 || record.hitCount == 0 ||
+            record.pc != breakpointAddress_) {
+            continue;
         }
+
+        std::size_t slot = 0;
+        while (slot < latestCount &&
+               records_[latestIndices[slot]].tid != record.tid) {
+            ++slot;
+        }
+        if (slot == latestCount) {
+            latestIndices[latestCount++] = index;
+            continue;
+        }
+
+        const ExecutionBreakpointRecord& current =
+            records_[latestIndices[slot]];
+        if (record.hitCount >= current.hitCount) {
+            latestIndices[slot] = index;
+        }
+    }
+
+    std::size_t nextSeenCount = 0;
+    for (std::size_t slot = 0; slot < latestCount; ++slot) {
+        const ExecutionBreakpointRecord& record =
+            records_[latestIndices[slot]];
+        bool seen = false;
+        for (const SeenRecord& previous : previousSeenRecords) {
+            if (previous.valid && previous.tid == record.tid &&
+                previous.hitCount == record.hitCount &&
+                previous.pc == record.pc) {
+                seen = true;
+                break;
+            }
+        }
+        nextSeenRecords[nextSeenCount++] = {
+            record.tid,
+            record.hitCount,
+            record.pc,
+            record.x20,
+            record.x21,
+            true,
+        };
+        if (seen) continue;
+
+        const std::uintptr_t candidate =
+            record.x23 & kPointerPayloadMask;
+        std::uint64_t probe = 0;
+        if (candidate == 0 ||
+            (candidate & kRejectedCandidateMask) ==
+                kRejectedCandidateValue ||
+            !ReadMemory(
+                callbacks_, candidate, &probe, sizeof(probe))) {
+            continue;
+        }
+
+        candidateRing_[candidateWriteIndex_] = candidate;
+        candidateWriteIndex_ =
+            (candidateWriteIndex_ + 1) % candidateRing_.size();
+        if (candidateCount_ < candidateRing_.size()) {
+            ++candidateCount_;
+        }
+        ++acceptedSampleCount_;
     }
     seenRecords_ = nextSeenRecords;
 
@@ -1452,7 +1459,9 @@ bool HardwareBreakpointCoordinateRuntime::RefreshCoordinateTable(
             world, targetRoot, manager);
     }
 
-    const std::uintptr_t selected = UsesOrderedRecordTable(profile_)
+    const std::uintptr_t selected =
+        (UsesOrderedRecordTable(profile_) ||
+         UsesStableRecordTable(profile_))
         ? pendingRecordsBase_
         : recordsBase_;
     if (selected == 0) return false;
