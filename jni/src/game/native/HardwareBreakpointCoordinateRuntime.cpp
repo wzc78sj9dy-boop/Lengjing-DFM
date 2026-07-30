@@ -1009,6 +1009,8 @@ SampleStableRecordsBase() noexcept {
     const std::uintptr_t selected =
         MostFrequentCandidate(candidateRing_, candidateCount_);
     pendingRecordsBase_ = selected;
+    TraceOrderedSelection(
+        pollCount_, selected, candidateCount_);
     return true;
 }
 
