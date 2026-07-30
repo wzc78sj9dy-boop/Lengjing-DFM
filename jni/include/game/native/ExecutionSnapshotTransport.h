@@ -10,6 +10,7 @@ namespace lengjing::game::native {
 
 namespace execution_snapshot_abi {
 
+inline constexpr std::uint32_t kSetProcessOperation = 0x80eU;
 inline constexpr std::uint32_t kArmOperation = 0xc7a1U;
 inline constexpr std::uint32_t kDisarmOperation = 0xc7a2U;
 inline constexpr std::uint32_t kPollOperation = 0xc7a3U;
@@ -101,6 +102,9 @@ enum class ExecutionSnapshotTransportError : std::uint8_t {
     PollFailed,
     SnapshotInvalid,
     DisarmFailed,
+    EndpointOpenFailed,
+    ProcessBindFailed,
+    EndpointUnsupported,
 };
 
 enum class ExecutionSnapshotPollResult : std::uint8_t {

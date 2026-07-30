@@ -1,7 +1,6 @@
 #include "game/native/ExecutionSnapshotTransport.h"
 
 #include <cerrno>
-#include <cstdlib>
 #include <fcntl.h>
 #include <new>
 #include <utility>
@@ -41,70 +40,51 @@ struct ExecutionSnapshotTransport::Impl {
         probe.systemError = systemError;
     }
 
+    bool OpenEndpoint() noexcept {
+        if (submit != nullptr || carrierDescriptor >= 0) return true;
+#if defined(__ANDROID__) || defined(__linux__)
+        const int descriptor =
+            open(kCarrierPath, O_WRONLY | O_CLOEXEC);
+        if (descriptor < 0) {
+            SetError(
+                ExecutionSnapshotTransportError::EndpointOpenFailed,
+                errno != 0 ? -errno : -ENOENT);
+            return false;
+        }
+        carrierDescriptor = descriptor;
+        return true;
+#else
+        SetError(
+            ExecutionSnapshotTransportError::EndpointOpenFailed,
+            -ENOSYS);
+        return false;
+#endif
+    }
+
     int Submit(std::uint32_t operation, void* payload) noexcept {
         if (operation == 0 || payload == nullptr) return -EINVAL;
         if (submit != nullptr) {
-            return submit(context, operation, payload);
+            const int result = submit(context, operation, payload);
+            return result <= 0 ? result : -EPROTO;
         }
 #if defined(__ANDROID__) || defined(__linux__)
+        if (carrierDescriptor < 0) return -ENOTCONN;
         execution_snapshot_abi::Envelope envelope{
             operation,
             0,
             payload,
         };
-        if (carrierDescriptor > 0) {
-            errno = 0;
-            const ssize_t result = static_cast<ssize_t>(syscall(
-                SYS_write,
-                carrierDescriptor,
-                &envelope,
-                execution_snapshot_abi::kRequestCount));
-            const int systemError = errno;
-            if (systemError == 0xffff ||
-                result == static_cast<ssize_t>(0xffff)) {
-                close(carrierDescriptor);
-                carrierDescriptor = -1;
-                return 0xffff;
-            }
-            if (result < 0) {
-                return systemError != 0 ? -systemError : -EIO;
-            }
-            return static_cast<int>(result);
-        }
-
-        if (access(kCarrierPath, F_OK) == 0) {
-            static_cast<void>(std::system(
-                "echo '' >  /sys/fs/cgroup/cgroup.controllers"));
-        }
-        const int descriptor = open(kCarrierPath, O_WRONLY);
-        if (descriptor >= 1) {
-            static_cast<void>(std::system(
-                "echo '' >  /sys/fs/cgroup/cgroup.controllers"));
-        }
-        if (descriptor < 0) {
-            return errno != 0 ? -errno : -ENOENT;
-        }
         errno = 0;
         const ssize_t result = static_cast<ssize_t>(syscall(
             SYS_write,
-            descriptor,
+            carrierDescriptor,
             &envelope,
             execution_snapshot_abi::kRequestCount));
         const int systemError = errno;
-        if (result == 0) {
-            carrierDescriptor = descriptor;
-            return 0;
-        }
-        if (systemError == 0xffff ||
-            result == static_cast<ssize_t>(0xffff)) {
-            close(descriptor);
-            return 0xffff;
-        }
-        close(descriptor);
         if (result < 0) {
             return systemError != 0 ? -systemError : -EIO;
         }
-        return static_cast<int>(result);
+        return result == 0 ? 0 : -EPROTO;
 #else
         static_cast<void>(operation);
         static_cast<void>(payload);
@@ -119,6 +99,33 @@ struct ExecutionSnapshotTransport::Impl {
         }
 #endif
         carrierDescriptor = -1;
+    }
+
+    bool BindProcess() noexcept {
+        if (!OpenEndpoint()) {
+            probe.active = false;
+            probe.needsReconfigure = false;
+            probe.cleanupPending = false;
+            return false;
+        }
+        std::int32_t target = probe.processId;
+        const int result = Submit(
+            execution_snapshot_abi::kSetProcessOperation,
+            &target);
+        if (result == 0) {
+            probe.sequence = 0;
+            return true;
+        }
+        CloseEndpoint();
+        SetError(
+            result == -E2BIG
+                ? ExecutionSnapshotTransportError::EndpointUnsupported
+                : ExecutionSnapshotTransportError::ProcessBindFailed,
+            result);
+        probe.active = false;
+        probe.needsReconfigure = false;
+        probe.cleanupPending = false;
+        return false;
     }
 
     bool Disarm(bool reportError) noexcept {
@@ -142,14 +149,19 @@ struct ExecutionSnapshotTransport::Impl {
         const int result = Submit(
             execution_snapshot_abi::kArmOperation,
             &arm);
-        if (result == 0) return true;
+        if (result == 0) {
+            probe.sequence = 0;
+            return true;
+        }
+        CloseEndpoint();
         SetError(
-            ExecutionSnapshotTransportError::ArmFailed,
+            result == -E2BIG
+                ? ExecutionSnapshotTransportError::EndpointUnsupported
+                : ExecutionSnapshotTransportError::ArmFailed,
             result);
         probe.active = false;
-        probe.needsReconfigure = true;
+        probe.needsReconfigure = result != -E2BIG;
         probe.cleanupPending = false;
-        probe.instructionAddress = 0;
         return false;
     }
 
@@ -175,6 +187,10 @@ struct ExecutionSnapshotTransport::Impl {
         probe.instructionAddress = instructionAddress;
         probe.needsReconfigure = false;
         probe.cleanupPending = false;
+        if (!BindProcess()) {
+            return false;
+        }
+        static_cast<void>(Disarm(false));
         if (!Arm()) {
             return false;
         }
@@ -224,7 +240,15 @@ struct ExecutionSnapshotTransport::Impl {
                 0);
             return ExecutionSnapshotPollResult::Reconfigure;
         }
+        if (payload.processId != probe.processId) {
+            HardReset(
+                ExecutionSnapshotTransportError::
+                    SnapshotInvalid,
+                -EPROTO);
+            return ExecutionSnapshotPollResult::Reconfigure;
+        }
         if (payload.hit == 0 ||
+            payload.sequence == 0 ||
             payload.sequence == probe.sequence ||
             payload.instructionAddress !=
                 probe.instructionAddress) {
@@ -299,6 +323,7 @@ struct ExecutionSnapshotTransport::Impl {
                 return false;
             }
         }
+        CloseEndpoint();
         probe.active = false;
         probe.needsReconfigure = false;
         probe.cleanupPending = false;

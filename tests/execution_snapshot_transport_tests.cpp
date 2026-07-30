@@ -1,6 +1,7 @@
 #include "game/native/ExecutionSnapshotTransport.h"
 #include "test_support.h"
 
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -10,15 +11,18 @@ namespace {
 using lengjing::game::native::ExecutionSnapshot;
 using lengjing::game::native::ExecutionSnapshotPollResult;
 using lengjing::game::native::ExecutionSnapshotTransport;
+using lengjing::game::native::ExecutionSnapshotTransportError;
 namespace snapshot_abi =
     lengjing::game::native::execution_snapshot_abi;
 
 struct SubmitFixture {
     std::vector<std::uint32_t> operations;
     snapshot_abi::PollPayload nextSnapshot{};
+    int bindResult = 0;
     int disarmResult = 0;
     int armResult = 0;
     int pollResult = 0;
+    std::int32_t boundProcessId = -1;
     snapshot_abi::ArmPayload arm{};
 };
 
@@ -28,6 +32,10 @@ int Submit(void* context,
     auto& fixture = *static_cast<SubmitFixture*>(context);
     fixture.operations.push_back(operation);
     switch (operation) {
+        case snapshot_abi::kSetProcessOperation:
+            fixture.boundProcessId =
+                *static_cast<std::int32_t*>(payload);
+            return fixture.bindResult;
         case snapshot_abi::kDisarmOperation:
             return fixture.disarmResult;
         case snapshot_abi::kArmOperation:
@@ -65,6 +73,17 @@ void TestAbiLayoutAndPointerNormalization() {
                 snapshot_abi::PollPayload,
                 state) == 0x148);
     REQUIRE(snapshot_abi::kRequestCount == 0x9400);
+    REQUIRE(snapshot_abi::kSetProcessOperation == 0x80e);
+    REQUIRE(static_cast<unsigned>(
+                ExecutionSnapshotTransportError::ArmFailed) == 2);
+    REQUIRE(static_cast<unsigned>(
+                ExecutionSnapshotTransportError::DisarmFailed) == 5);
+    REQUIRE(static_cast<unsigned>(
+                ExecutionSnapshotTransportError::EndpointOpenFailed) == 6);
+    REQUIRE(static_cast<unsigned>(
+                ExecutionSnapshotTransportError::ProcessBindFailed) == 7);
+    REQUIRE(static_cast<unsigned>(
+                ExecutionSnapshotTransportError::EndpointUnsupported) == 8);
     REQUIRE(snapshot_abi::NormalizePointer(
                 UINT64_C(0xab00123456789abc)) ==
             UINT64_C(0x00123456789abc));
@@ -78,9 +97,14 @@ void TestStartPollAndStopProtocol() {
 
     REQUIRE(transport.Start(kProcessId, kInstruction));
     REQUIRE(transport.IsActive());
-    REQUIRE(fixture.operations.size() == 1);
+    REQUIRE(fixture.operations.size() == 3);
     REQUIRE(fixture.operations[0] ==
+            snapshot_abi::kSetProcessOperation);
+    REQUIRE(fixture.operations[1] ==
+            snapshot_abi::kDisarmOperation);
+    REQUIRE(fixture.operations[2] ==
             snapshot_abi::kArmOperation);
+    REQUIRE(fixture.boundProcessId == kProcessId);
     REQUIRE(fixture.arm.processId == kProcessId);
     REQUIRE(fixture.arm.instructionAddress == kInstruction);
     REQUIRE(fixture.arm.literalAddress == 0);
@@ -170,14 +194,14 @@ void TestFallbackAndSnapshotValidation() {
             snapshot_abi::kDisarmOperation);
 
     REQUIRE(transport.Start(kProcessId, kInstruction));
-    REQUIRE(transport.Probe().sequence == 1);
+    REQUIRE(transport.Probe().sequence == 0);
     fixture.nextSnapshot.sequence = 4;
     fixture.nextSnapshot.state = 1;
     fixture.nextSnapshot.instructionAddress =
         kInstruction + 4;
     REQUIRE(transport.Poll(snapshot) ==
             ExecutionSnapshotPollResult::Retry);
-    REQUIRE(transport.Probe().sequence == 1);
+    REQUIRE(transport.Probe().sequence == 0);
 
     fixture.nextSnapshot.sequence = 5;
     fixture.nextSnapshot.instructionAddress = kInstruction;
@@ -200,6 +224,13 @@ void TestFailureAndRearmBehavior() {
 
     fixture = {};
     REQUIRE(transport.Start(77, 0x8000));
+    REQUIRE(fixture.operations.size() == 3);
+    REQUIRE(fixture.operations[0] ==
+            snapshot_abi::kSetProcessOperation);
+    REQUIRE(fixture.operations[1] ==
+            snapshot_abi::kDisarmOperation);
+    REQUIRE(fixture.operations[2] ==
+            snapshot_abi::kArmOperation);
     fixture.nextSnapshot.instructionAddress = 0x8000;
     fixture.nextSnapshot.primaryCandidate = 0x9000;
     fixture.nextSnapshot.sequence = 12;
@@ -215,7 +246,12 @@ void TestFailureAndRearmBehavior() {
             snapshot_abi::kDisarmOperation);
     REQUIRE(fixture.operations.back() ==
             snapshot_abi::kArmOperation);
-    REQUIRE(transport.Probe().sequence == 12);
+    REQUIRE(transport.Probe().sequence == 0);
+
+    fixture.nextSnapshot.sequence = 1;
+    REQUIRE(transport.Poll(snapshot) ==
+            ExecutionSnapshotPollResult::Accepted);
+    REQUIRE(transport.Probe().sequence == 1);
 
     fixture.pollResult = -9;
     REQUIRE(transport.Poll(snapshot) ==
@@ -232,6 +268,123 @@ void TestFailureAndRearmBehavior() {
     transport.Reset();
     REQUIRE(transport.Probe().sequence == 0);
     REQUIRE(transport.Probe().pollCount == 0);
+}
+
+void TestBindFailureAndBestEffortInitialReset() {
+    SubmitFixture fixture{};
+    fixture.bindResult = -5;
+    ExecutionSnapshotTransport transport(Submit, &fixture);
+    REQUIRE(!transport.Start(71, 0x7000));
+    REQUIRE(!transport.IsActive());
+    REQUIRE(fixture.operations.size() == 1);
+    REQUIRE(fixture.operations[0] ==
+            snapshot_abi::kSetProcessOperation);
+    REQUIRE(transport.Probe().error ==
+            lengjing::game::native::
+                ExecutionSnapshotTransportError::ProcessBindFailed);
+    REQUIRE(!transport.Probe().cleanupPending);
+    REQUIRE(!transport.Probe().needsReconfigure);
+
+    fixture = {};
+    fixture.disarmResult = -9;
+    REQUIRE(transport.Start(71, 0x7000));
+    REQUIRE(transport.IsActive());
+    REQUIRE(fixture.operations.size() == 3);
+    REQUIRE(fixture.operations[0] ==
+            snapshot_abi::kSetProcessOperation);
+    REQUIRE(fixture.operations[1] ==
+            snapshot_abi::kDisarmOperation);
+    REQUIRE(fixture.operations[2] ==
+            snapshot_abi::kArmOperation);
+    fixture.disarmResult = 0;
+    REQUIRE(transport.Stop());
+}
+
+void TestUnsupportedEndpointAndSessionRebind() {
+    SubmitFixture fixture{};
+    fixture.bindResult = -E2BIG;
+    ExecutionSnapshotTransport transport(Submit, &fixture);
+    REQUIRE(!transport.Start(72, 0x7200));
+    REQUIRE(transport.Probe().error ==
+            lengjing::game::native::
+                ExecutionSnapshotTransportError::EndpointUnsupported);
+    REQUIRE(transport.Probe().systemError == -E2BIG);
+
+    fixture = {};
+    REQUIRE(transport.Start(72, 0x7200));
+    const std::size_t activeOperationCount =
+        fixture.operations.size();
+    REQUIRE(transport.Start(72, 0x7200));
+    REQUIRE(fixture.operations.size() == activeOperationCount);
+
+    REQUIRE(transport.Start(73, 0x7300));
+    REQUIRE(fixture.operations.size() ==
+            activeOperationCount + 4);
+    REQUIRE(fixture.operations[activeOperationCount] ==
+            snapshot_abi::kDisarmOperation);
+    REQUIRE(fixture.operations[activeOperationCount + 1] ==
+            snapshot_abi::kSetProcessOperation);
+    REQUIRE(fixture.operations[activeOperationCount + 2] ==
+            snapshot_abi::kDisarmOperation);
+    REQUIRE(fixture.operations[activeOperationCount + 3] ==
+            snapshot_abi::kArmOperation);
+    REQUIRE(fixture.boundProcessId == 73);
+    REQUIRE(transport.Stop());
+}
+
+void TestSnapshotProcessAndSequenceIsolation() {
+    SubmitFixture fixture{};
+    ExecutionSnapshotTransport transport(Submit, &fixture);
+    REQUIRE(transport.Start(81, 0x8100));
+
+    fixture.nextSnapshot.instructionAddress = 0x8100;
+    fixture.nextSnapshot.primaryCandidate = 0x9100;
+    fixture.nextSnapshot.sequence = 0;
+    fixture.nextSnapshot.processId = 81;
+    fixture.nextSnapshot.hit = 1;
+    fixture.nextSnapshot.state = 1;
+    ExecutionSnapshot snapshot{};
+    REQUIRE(transport.Poll(snapshot) ==
+            ExecutionSnapshotPollResult::Retry);
+    REQUIRE(transport.Probe().sequence == 0);
+
+    fixture.nextSnapshot.sequence = 7;
+    fixture.nextSnapshot.processId = 82;
+    REQUIRE(transport.Poll(snapshot) ==
+            ExecutionSnapshotPollResult::Reconfigure);
+    REQUIRE(!transport.IsActive());
+    REQUIRE(transport.Probe().systemError == -EPROTO);
+
+    REQUIRE(transport.Start(81, 0x8100));
+    fixture.nextSnapshot.processId = 81;
+    REQUIRE(transport.Poll(snapshot) ==
+            ExecutionSnapshotPollResult::Accepted);
+    REQUIRE(transport.Probe().sequence == 7);
+
+    REQUIRE(transport.Start(82, 0x8200));
+    REQUIRE(transport.Probe().sequence == 0);
+    fixture.nextSnapshot.instructionAddress = 0x8200;
+    fixture.nextSnapshot.processId = 82;
+    REQUIRE(transport.Poll(snapshot) ==
+            ExecutionSnapshotPollResult::Accepted);
+    REQUIRE(transport.Probe().sequence == 7);
+    REQUIRE(transport.Stop());
+}
+
+void TestPositiveSubmitResultIsProtocolFailure() {
+    SubmitFixture fixture{};
+    fixture.bindResult = 0xffff;
+    ExecutionSnapshotTransport transport(Submit, &fixture);
+    REQUIRE(!transport.Start(91, 0x9100));
+    REQUIRE(transport.Probe().error ==
+            ExecutionSnapshotTransportError::ProcessBindFailed);
+    REQUIRE(transport.Probe().systemError == -EPROTO);
+    REQUIRE(!transport.Probe().cleanupPending);
+
+    fixture = {};
+    REQUIRE(transport.Start(91, 0x9100));
+    REQUIRE(fixture.operations.size() == 3);
+    REQUIRE(transport.Stop());
 }
 
 void TestDisarmFailureIsRetried() {
@@ -329,6 +482,10 @@ void RunExecutionSnapshotTransportTests() {
     TestStartPollAndStopProtocol();
     TestFallbackAndSnapshotValidation();
     TestFailureAndRearmBehavior();
+    TestBindFailureAndBestEffortInitialReset();
+    TestUnsupportedEndpointAndSessionRebind();
+    TestSnapshotProcessAndSequenceIsolation();
+    TestPositiveSubmitResultIsProtocolFailure();
     TestDisarmFailureIsRetried();
     TestResetRetainsPendingCleanup();
     TestInvalidStartInput();
