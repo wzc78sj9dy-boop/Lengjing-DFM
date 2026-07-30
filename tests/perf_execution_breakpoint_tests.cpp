@@ -1,5 +1,5 @@
 #include "game/native/PerfExecutionBreakpoint.h"
-#include "game/native/ExecutionBreakpointRecordHistory.h"
+#include "game/native/ExecutionBreakpointRecordStore.h"
 #include "game/native/MemoryTransport.h"
 #include "test_support.h"
 
@@ -139,52 +139,140 @@ void TestUnsupportedHostIsExplicit() {
 #if !defined(__linux__) || !defined(__aarch64__)
     REQUIRE(!lengjing::game::native::PerfExecutionBreakpoint::
                 IsSupported());
+#endif
 }
 
-void TestChronologicalRecordHistory() {
+lengjing::game::native::ExecutionBreakpointRecord MakeRecord(
+    pid_t tid,
+    std::uint64_t hitCount,
+    std::uintptr_t value) {
+    return {
+        tid,
+        hitCount,
+        0x1000,
+        value + 1,
+        value + 2,
+        value + 20,
+        value + 21,
+        value + 23,
+    };
+}
+
+void TestPersistentRecordTableRetainsOtherThreads() {
     using lengjing::game::native::ExecutionBreakpointRecord;
-    using lengjing::game::native::ExecutionBreakpointRecordHistory;
+    using lengjing::game::native::ExecutionBreakpointRecordStore;
     using lengjing::game::native::kExecutionBreakpointRecordLimit;
 
-    ExecutionBreakpointRecordHistory history;
-    history.Push({1, 1, 0x1000, 0, 0, 0, 0x21, 0x100});
-    history.Push({1, 2, 0x1000, 0, 0, 0, 0x21, 0x200});
+    ExecutionBreakpointRecordStore store;
+    REQUIRE(store.Store(MakeRecord(10, 1, 0x100)));
+    for (std::uint64_t hit = 1; hit <= 1024; ++hit) {
+        REQUIRE(store.Store(MakeRecord(20, hit, 0x200 + hit)));
+    }
 
-    std::array<ExecutionBreakpointRecord, 2> duplicate{};
-    REQUIRE(history.CopyNewest(
-                duplicate.data(), duplicate.size()) == 2);
-    REQUIRE(duplicate[0].hitCount == 1);
-    REQUIRE(duplicate[1].hitCount == 2);
-    REQUIRE(duplicate[0].x21 == duplicate[1].x21);
+    REQUIRE(store.LatestSize() == 2);
+    REQUIRE(store.HistorySize() == kExecutionBreakpointRecordLimit);
+    const ExecutionBreakpointRecord* retained = store.FindLatest(10);
+    REQUIRE(retained != nullptr);
+    REQUIRE(retained->hitCount == 1);
+    REQUIRE(retained->x20 == 0x114);
+    REQUIRE(retained->x21 == 0x115);
+    REQUIRE(retained->x23 == 0x117);
 
+    const ExecutionBreakpointRecord* noisy = store.FindLatest(20);
+    REQUIRE(noisy != nullptr);
+    REQUIRE(noisy->hitCount == 1024);
+
+    std::array<
+        ExecutionBreakpointRecord,
+        kExecutionBreakpointRecordLimit> merged{};
+    std::size_t totalRecords = 0;
+    REQUIRE(store.CopyMerged(
+                merged.data(),
+                merged.size(),
+                totalRecords) == kExecutionBreakpointRecordLimit);
+    REQUIRE(totalRecords == kExecutionBreakpointRecordLimit);
+    REQUIRE(merged[0].tid == 10);
+    REQUIRE(merged[0].hitCount == 1);
+    REQUIRE(merged[1].tid == 20);
+    REQUIRE(merged[1].hitCount == 1024);
+    REQUIRE(merged[2].tid == 20);
+    REQUIRE(merged[2].hitCount == 770);
+    REQUIRE(merged.back().tid == 20);
+    REQUIRE(merged.back().hitCount == 1023);
+
+    std::size_t latestCopies = 0;
+    for (const ExecutionBreakpointRecord& record : merged) {
+        if (record.tid == 20 && record.hitCount == 1024) {
+            ++latestCopies;
+        }
+    }
+    REQUIRE(latestCopies == 1);
+
+    std::array<ExecutionBreakpointRecord, 1> priority{};
+    REQUIRE(store.CopyMerged(
+                priority.data(),
+                priority.size(),
+                totalRecords) == 1);
+    REQUIRE(totalRecords == kExecutionBreakpointRecordLimit);
+    REQUIRE(priority[0].tid == 10);
+    REQUIRE(priority[0].hitCount == 1);
+}
+
+void TestPersistentRecordTableEvictsOldestThread() {
+    using lengjing::game::native::ExecutionBreakpointRecordStore;
+    using lengjing::game::native::kExecutionBreakpointRecordLimit;
+
+    ExecutionBreakpointRecordStore store;
     for (std::size_t index = 0;
          index < kExecutionBreakpointRecordLimit;
          ++index) {
-        history.Push({
-            2,
-            static_cast<std::uint64_t>(index + 3),
-            0x2000,
-            0,
-            0,
-            0,
-            static_cast<std::uintptr_t>(index),
-            static_cast<std::uintptr_t>(index + 0x300),
-        });
+        REQUIRE(store.Store(MakeRecord(
+            static_cast<pid_t>(index + 1),
+            1,
+            static_cast<std::uintptr_t>(index))));
     }
-    REQUIRE(history.Size() == kExecutionBreakpointRecordLimit);
+    REQUIRE(store.Store(MakeRecord(1, 2, 0x10000)));
+    REQUIRE(store.Store(MakeRecord(
+        static_cast<pid_t>(kExecutionBreakpointRecordLimit + 1),
+        1,
+        0x20000)));
 
-    std::array<ExecutionBreakpointRecord, 3> newest{};
-    REQUIRE(history.CopyNewest(newest.data(), newest.size()) == 3);
-    REQUIRE(newest[0].hitCount ==
-            kExecutionBreakpointRecordLimit);
-    REQUIRE(newest[1].hitCount ==
-            kExecutionBreakpointRecordLimit + 1);
-    REQUIRE(newest[2].hitCount ==
-            kExecutionBreakpointRecordLimit + 2);
+    REQUIRE(store.LatestSize() == kExecutionBreakpointRecordLimit);
+    REQUIRE(store.FindLatest(1) != nullptr);
+    REQUIRE(store.FindLatest(2) == nullptr);
+    REQUIRE(store.FindLatest(
+                static_cast<pid_t>(
+                    kExecutionBreakpointRecordLimit + 1)) != nullptr);
+}
 
-    history.Clear();
-    REQUIRE(history.Size() == 0);
-    REQUIRE(history.CopyNewest(newest.data(), newest.size()) == 0);
+void TestPersistentRecordTableCopiesInTidOrder() {
+    using lengjing::game::native::ExecutionBreakpointRecord;
+    using lengjing::game::native::ExecutionBreakpointRecordStore;
+
+    ExecutionBreakpointRecordStore store;
+    REQUIRE(store.Store(MakeRecord(30, 1, 0x300)));
+    REQUIRE(store.Store(MakeRecord(10, 1, 0x100)));
+    REQUIRE(store.Store(MakeRecord(20, 1, 0x200)));
+
+    std::array<ExecutionBreakpointRecord, 3> records{};
+    std::size_t totalRecords = 0;
+    REQUIRE(store.CopyMerged(
+                records.data(),
+                records.size(),
+                totalRecords) == 3);
+    REQUIRE(totalRecords == 3);
+    REQUIRE(records[0].tid == 10);
+    REQUIRE(records[1].tid == 20);
+    REQUIRE(records[2].tid == 30);
+
+    store.Clear();
+    REQUIRE(store.LatestSize() == 0);
+    REQUIRE(store.HistorySize() == 0);
+    REQUIRE(store.CopyMerged(
+                records.data(),
+                records.size(),
+                totalRecords) == 0);
+    REQUIRE(totalRecords == 0);
 }
 
 }  // namespace
@@ -192,8 +280,8 @@ void TestChronologicalRecordHistory() {
 void RunPerfExecutionBreakpointTests() {
     TestArm64RegisterMapping();
     TestPayloadValidation();
-    TestChronologicalRecordHistory();
+    TestPersistentRecordTableRetainsOtherThreads();
+    TestPersistentRecordTableEvictsOldestThread();
+    TestPersistentRecordTableCopiesInTidOrder();
     TestUnsupportedHostIsExplicit();
 }
-
-#endif

@@ -67,7 +67,18 @@ add_executable(lengjing_tests
     ../jni/src/render/PresentationRateTracker.cpp
 )
 
+add_executable(lengjing_perf_tests
+    perf_execution_breakpoint_test_main.cpp
+    perf_execution_breakpoint_tests.cpp
+    ../jni/src/game/native/PerfExecutionBreakpoint.cpp
+)
+
 target_include_directories(lengjing_tests PRIVATE
+    ../jni/include
+    ../jni/lib
+)
+
+target_include_directories(lengjing_perf_tests PRIVATE
     ../jni/include
     ../jni/lib
 )
@@ -78,8 +89,12 @@ endif()
 
 if(MSVC)
     target_compile_options(lengjing_tests PRIVATE /W4 /utf-8)
+    target_compile_options(lengjing_perf_tests PRIVATE /W4 /utf-8)
 else()
     target_compile_options(lengjing_tests PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(
+        lengjing_perf_tests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 add_test(NAME lengjing_tests COMMAND lengjing_tests)
+add_test(NAME lengjing_perf_tests COMMAND lengjing_perf_tests)

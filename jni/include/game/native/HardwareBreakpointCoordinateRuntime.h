@@ -109,12 +109,21 @@ private:
         std::uint64_t lastSeenPoll = 0;
     };
 
+    struct CandidateSource {
+        std::uintptr_t coordinateBase = 0;
+        std::uintptr_t mesh = 0;
+        std::uint64_t lastSeenPoll = 0;
+    };
+
     struct CandidateObservation {
         std::uintptr_t value = 0;
         std::uint64_t lastSeenPoll = 0;
         std::uint64_t lastEvaluatedPoll = 0;
         std::uint64_t occurrences = 0;
         std::uint64_t distantOccurrences = 0;
+        std::array<CandidateSource, 8> sources{};
+        std::size_t sourceWriteIndex = 0;
+        std::size_t sourceCount = 0;
         std::uint8_t qualifiedStreak = 0;
         std::uint8_t failureStreak = 0;
     };
@@ -142,7 +151,14 @@ private:
     bool SampleCandidate() noexcept;
     void ObserveCandidate(
         std::uintptr_t candidate,
-        std::uintptr_t x20) noexcept;
+        std::uintptr_t x20,
+        std::uintptr_t x21) noexcept;
+    bool ValidateCandidateSources(
+        const CandidateObservation& observation,
+        const CoordinateTableSnapshot& snapshot,
+        std::size_t& usableCount,
+        std::size_t& matchedCount,
+        std::size_t& distinctIdCount) noexcept;
     bool ReadObservedManager(
         std::uintptr_t targetRoot,
         std::uintptr_t& manager) noexcept;
@@ -177,7 +193,9 @@ private:
         records_{};
     std::array<SeenRecord, kExecutionBreakpointRecordLimit> seenRecords_{};
     std::array<std::uintptr_t, 10> candidateRing_{};
-    std::array<CandidateObservation, 64> candidateObservations_{};
+    std::array<
+        CandidateObservation,
+        kExecutionBreakpointRecordLimit> candidateObservations_{};
     std::unordered_map<std::uint32_t, HardwareBreakpointCoordinate>
         coordinates_;
     std::unordered_map<std::uint32_t, MeshStreamCoordinate>
@@ -195,6 +213,8 @@ private:
     std::uintptr_t samplingManager_ = 0;
     std::uintptr_t samplingIdArray_ = 0;
     std::uintptr_t world_ = 0;
+    std::size_t publishedEvidenceCount_ = 0;
+    std::size_t publishedDistinctCount_ = 0;
     std::size_t candidateWriteIndex_ = 0;
     std::size_t candidateCount_ = 0;
     std::uint8_t orderedRefreshFailureCount_ = 0;

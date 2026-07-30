@@ -297,7 +297,7 @@ std::vector<std::uint8_t> MakeCoordinateRecords(
     return records;
 }
 
-void TestStableRecordTableUsesNewestRecordPerThread() {
+void TestStableRecordTableValidatesHistoryCandidates() {
     constexpr std::uintptr_t kBreakpoint = 0x3C000;
     constexpr std::uintptr_t kWorld = 0x3D000;
     constexpr std::uintptr_t kTargetRoot =
@@ -310,6 +310,10 @@ void TestStableRecordTableUsesNewestRecordPerThread() {
         UINT64_C(0x6030200000);
     constexpr std::uintptr_t kOldNoiseBase =
         UINT64_C(0x6030300000);
+    constexpr std::uintptr_t kSourceBaseOne =
+        UINT64_C(0x6030310000);
+    constexpr std::uintptr_t kMeshOne =
+        UINT64_C(0x6030330000);
     constexpr std::uintptr_t kIdArray =
         UINT64_C(0x6030500000);
     constexpr std::uintptr_t kTaggedRecordsBase =
@@ -321,8 +325,16 @@ void TestStableRecordTableUsesNewestRecordPerThread() {
         static_cast<std::size_t>(kCount) * kRecordStride);
     std::vector<std::uint32_t> ids(
         static_cast<std::size_t>(kCount));
-    ids[0] = kId;
-    SetCoordinate(coordinateRecords, 0, 100.0f, 200.0f, 30.0f);
+    for (std::size_t index = 0; index < ids.size(); ++index) {
+        ids[index] = kId + static_cast<std::uint32_t>(index);
+        const float delta = static_cast<float>(index) * 10.0f;
+        SetCoordinate(
+            coordinateRecords,
+            index,
+            100.0f + delta,
+            200.0f + delta,
+            30.0f + delta);
+    }
 
     FakeRuntimeTransport transport{};
     transport.PutValue(kWorld + kManagerOffset, kManager);
@@ -338,32 +350,54 @@ void TestStableRecordTableUsesNewestRecordPerThread() {
         kCount,
         &coordinateRecords,
         &ids);
+    const std::vector<std::uint8_t> noiseRecords =
+        MakeCoordinateRecords(
+            static_cast<std::size_t>(kCount),
+            0,
+            static_cast<std::size_t>(kCount),
+            10000.0f);
+    transport.PutBytes(
+        kOldNoiseBase, noiseRecords.data(), noiseRecords.size());
     transport.PutValue(
-        kOldNoiseBase, UINT64_C(0x1111222233334444));
+        kSourceBaseOne + kMeshCoordinateOffset,
+        HardwareBreakpointCoordinate{100.0f, 200.0f, 30.0f});
+    transport.PutValue(kMeshOne + kMeshIdOffset, kId);
 
     std::vector<ExecutionBreakpointRecord> history;
     for (std::uint64_t hit = 1; hit <= 254; ++hit) {
         history.push_back(
             Record(hit, kBreakpoint, kOldNoiseBase, 500));
     }
-    history.push_back(
-        Record(255, kBreakpoint, kTaggedRecordsBase, 500));
+    history.push_back(MeshRecord(
+        255,
+        kBreakpoint,
+        kSourceBaseOne,
+        kMeshOne,
+        kTaggedRecordsBase,
+        500));
     history.push_back(
         Record(1, kBreakpoint, kTaggedRecordsBase, 501));
     REQUIRE(history.size() ==
             lengjing::game::native::kExecutionBreakpointRecordLimit);
-    transport.AddBatch(history, kBreakpoint);
-    transport.AddBatch(history, kBreakpoint);
+    for (std::size_t index = 0; index < 70; ++index) {
+        transport.AddBatch(history, kBreakpoint);
+    }
 
     HardwareBreakpointCoordinateRuntime runtime;
     REQUIRE(runtime.Start(
         kBreakpoint,
         transport.Callbacks(),
         HardwareBreakpointCoordinateProfile::StableRecordTable));
+    REQUIRE(!runtime.Poll(kWorld, kTargetRoot, kIgnoredManager));
+    REQUIRE(runtime.AcceptedSampleCount() == history.size());
+    REQUIRE(runtime.RecordsBase() == 0);
+    REQUIRE(runtime.PublishedCoordinateCount() == 0);
+
     REQUIRE(runtime.Poll(kWorld, kTargetRoot, kIgnoredManager));
-    REQUIRE(runtime.AcceptedSampleCount() == 2);
+    REQUIRE(runtime.AcceptedSampleCount() == history.size());
     REQUIRE(runtime.RecordsBase() == kRecordsBase);
-    REQUIRE(runtime.PublishedCoordinateCount() == 1);
+    REQUIRE(runtime.PublishedCoordinateCount() ==
+            static_cast<std::size_t>(kCount));
 
     HardwareBreakpointCoordinate coordinate{};
     REQUIRE(runtime.Lookup(kId, kWorld, coordinate));
@@ -371,12 +405,13 @@ void TestStableRecordTableUsesNewestRecordPerThread() {
     REQUIRE(coordinate.y == 200.0f);
     REQUIRE(coordinate.z == 110.0f);
     REQUIRE(transport.ReadCount(
-                kOldNoiseBase, sizeof(std::uint64_t)) == 0);
+                kOldNoiseBase, sizeof(std::uint64_t)) ==
+            static_cast<std::size_t>(254));
     REQUIRE(transport.ReadCount(
                 kRecordsBase, sizeof(std::uint64_t)) == 2);
     REQUIRE(transport.ReadCount(
                 kWorld + kManagerOffset,
-                sizeof(std::uintptr_t)) == 2);
+                sizeof(std::uintptr_t)) == 6);
     REQUIRE(transport.ReadCount(
                 kTargetRoot + kManagerOffset,
                 sizeof(std::uintptr_t)) == 0);
@@ -384,13 +419,12 @@ void TestStableRecordTableUsesNewestRecordPerThread() {
                 kTargetRoot + kTargetLinkOffset,
                 sizeof(std::uintptr_t)) == 0);
 
-    REQUIRE(runtime.Poll(kWorld, kTargetRoot, kIgnoredManager));
-    REQUIRE(runtime.AcceptedSampleCount() == 2);
-    REQUIRE(runtime.RecordsBase() == kRecordsBase);
-    REQUIRE(runtime.Lookup(kId, kWorld, coordinate));
-    REQUIRE(transport.ReadCount(
-                kWorld + kManagerOffset,
-                sizeof(std::uintptr_t)) == 4);
+    for (std::size_t index = 2; index < 70; ++index) {
+        REQUIRE(runtime.Poll(
+            kWorld, kTargetRoot, kIgnoredManager));
+        REQUIRE(runtime.RecordsBase() == kRecordsBase);
+        REQUIRE(runtime.Lookup(kId, kWorld, coordinate));
+    }
     REQUIRE(runtime.Stop());
 }
 
@@ -2347,7 +2381,7 @@ void TestOrderedExplicitCandidateLifecycle() {
 }  // namespace
 
 void RunHardwareBreakpointCoordinateRuntimeTests() {
-    TestStableRecordTableUsesNewestRecordPerThread();
+    TestStableRecordTableValidatesHistoryCandidates();
     TestMeshStreamUsesRegisterPairAndRejectsX23Table();
     TestMeshStreamMeshAndIdReuse();
     TestMeshStreamFreshnessAndProfileSwitch();

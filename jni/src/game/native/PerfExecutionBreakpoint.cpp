@@ -1,6 +1,6 @@
 #include "game/native/PerfExecutionBreakpoint.h"
 
-#include "game/native/ExecutionBreakpointRecordHistory.h"
+#include "game/native/ExecutionBreakpointRecordStore.h"
 #include "game/native/MemoryTransport.h"
 
 #include <algorithm>
@@ -213,7 +213,7 @@ struct PerfExecutionBreakpoint::Impl {
     std::uintptr_t address = 0;
     std::size_t pageSize = 0;
     std::map<pid_t, std::unique_ptr<ThreadEvent>> events;
-    ExecutionBreakpointRecordHistory records;
+    ExecutionBreakpointRecordStore records;
     std::map<pid_t, std::uint64_t> threadHitCounts;
     std::chrono::steady_clock::time_point nextDiscovery{};
     bool configured = false;
@@ -398,13 +398,13 @@ struct PerfExecutionBreakpoint::Impl {
         return true;
     }
 
-    void SaveSample(
+    bool SaveSample(
         ThreadEvent& event,
         const perf_execution_breakpoint_internal::ParsedSample& sample)
         noexcept {
         event.hitCount = SaturatingAdd(event.hitCount, 1);
         threadHitCounts[event.threadId] = event.hitCount;
-        records.Push({
+        return records.Store({
             event.threadId,
             event.hitCount,
             static_cast<std::uintptr_t>(sample.pc),
@@ -488,7 +488,11 @@ struct PerfExecutionBreakpoint::Impl {
                     cursor = head;
                     break;
                 }
-                SaveSample(event, sample);
+                if (!SaveSample(event, sample)) {
+                    valid = false;
+                    cursor = head;
+                    break;
+                }
             } else if (header.type == PERF_RECORD_LOST) {
                 struct LostPayload {
                     std::uint64_t id;
@@ -508,6 +512,7 @@ struct PerfExecutionBreakpoint::Impl {
                     SaturatingAdd(event.lostCount, lost.lost);
                 event.hitCount =
                     SaturatingAdd(event.hitCount, lost.lost);
+                threadHitCounts[event.threadId] = event.hitCount;
             }
             cursor += header.size;
         }
@@ -563,8 +568,8 @@ struct PerfExecutionBreakpoint::Impl {
         if (!DiscoverThreads(false)) valid = false;
         if (!valid) return false;
 
-        totalRecords = records.Size();
-        recordsRead = records.CopyNewest(output, capacity);
+        recordsRead =
+            records.CopyMerged(output, capacity, totalRecords);
         hitAddress = address;
         return true;
     }
