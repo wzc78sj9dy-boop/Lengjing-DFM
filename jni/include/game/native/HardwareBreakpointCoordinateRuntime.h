@@ -7,8 +7,6 @@
 #include <cstdint>
 #include <functional>
 #include <unordered_map>
-#include <unordered_set>
-#include <vector>
 
 namespace lengjing::game::native {
 
@@ -48,6 +46,7 @@ struct HardwareBreakpointCoordinateCallbacks {
 enum class HardwareBreakpointCoordinateProfile : std::uint8_t {
     Existing,
     OrderedRecordTable,
+    MeshStream,
 };
 
 class HardwareBreakpointCoordinateRuntime final {
@@ -67,7 +66,8 @@ public:
             HardwareBreakpointCoordinateProfile::Existing) noexcept;
     bool Reconfigure(
         std::uintptr_t breakpointAddress,
-        HardwareBreakpointCoordinateCallbacks callbacks) noexcept;
+        HardwareBreakpointCoordinateCallbacks callbacks,
+        HardwareBreakpointCoordinateProfile profile) noexcept;
     bool Stop() noexcept;
     bool Poll(std::uintptr_t world) noexcept;
     bool Poll(std::uintptr_t world,
@@ -97,7 +97,15 @@ private:
         pid_t tid = -1;
         std::uint64_t hitCount = 0;
         std::uintptr_t pc = 0;
+        std::uintptr_t x20 = 0;
+        std::uintptr_t x21 = 0;
         bool valid = false;
+    };
+
+    struct MeshStreamCoordinate {
+        std::uintptr_t mesh = 0;
+        HardwareBreakpointCoordinate value{};
+        std::uint64_t lastSeenPoll = 0;
     };
 
     struct CandidateObservation {
@@ -113,7 +121,6 @@ private:
     struct CoordinateTableSnapshot {
         std::unordered_map<std::uint32_t, HardwareBreakpointCoordinate>
             coordinates;
-        std::vector<std::uint32_t> ids;
         std::uintptr_t rawIdArray = 0;
         std::uintptr_t idArray = 0;
         std::uint32_t rawCount = 0;
@@ -128,6 +135,8 @@ private:
     };
 
     bool SampleRecordsBase() noexcept;
+    bool SampleMeshStream() noexcept;
+    void ExpireMeshStream() noexcept;
     bool SampleCandidate() noexcept;
     void ObserveCandidate(
         std::uintptr_t candidate,
@@ -169,10 +178,10 @@ private:
     std::array<CandidateObservation, 64> candidateObservations_{};
     std::unordered_map<std::uint32_t, HardwareBreakpointCoordinate>
         coordinates_;
-    std::unordered_map<std::uint32_t, std::uint8_t>
-        coordinateMissCounts_;
-    std::unordered_map<std::uint32_t, HardwareBreakpointCoordinate>
-        coordinateJumpReferences_;
+    std::unordered_map<std::uint32_t, MeshStreamCoordinate>
+        meshStreamCoordinates_;
+    std::unordered_map<std::uintptr_t, std::uint32_t>
+        meshStreamIds_;
     std::uintptr_t breakpointAddress_ = 0;
     std::uintptr_t recordsBase_ = 0;
     std::uintptr_t pendingRecordsBase_ = 0;

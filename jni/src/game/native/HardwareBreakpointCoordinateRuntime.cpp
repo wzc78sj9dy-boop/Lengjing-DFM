@@ -17,6 +17,9 @@ constexpr std::uintptr_t kTargetLinkOffset = 0x10;
 constexpr std::uintptr_t kManagerOffset = 0x1B8;
 constexpr std::uintptr_t kIdArrayOffset = 0xF98;
 constexpr std::uintptr_t kCountOffset = 0xFA0;
+constexpr std::uintptr_t kMeshStreamCoordinateOffset = 0x80;
+constexpr std::uintptr_t kMeshStreamIdOffset = 0x2D8;
+constexpr std::uint64_t kMeshStreamFreshPolls = 60;
 constexpr std::size_t kCoordinateRecordStride = 0x40;
 constexpr std::size_t kCoordinateXOffset = 0x30;
 constexpr std::size_t kCoordinateYOffset = 0x34;
@@ -34,7 +37,6 @@ constexpr std::uint64_t kFallbackPublishedCandidateStalePolls = 2;
 constexpr std::uint8_t kFallbackCandidateQualificationCount = 2;
 constexpr std::uint8_t kFallbackCandidateShortRetryLimit = 2;
 constexpr std::uint8_t kOrderedRefreshFailureLimit = 3;
-constexpr std::uint8_t kCoordinateMissLimit = 3;
 constexpr std::uintptr_t kPageOffsetMask = 0xFFF;
 constexpr std::uintptr_t kPointerPayloadMask =
     UINT64_C(0x00FFFFFFFFFFFFFF);
@@ -111,6 +113,11 @@ bool UsesOrderedRecordTable(
         HardwareBreakpointCoordinateProfile::OrderedRecordTable;
 }
 
+bool UsesMeshStream(
+    HardwareBreakpointCoordinateProfile profile) noexcept {
+    return profile == HardwareBreakpointCoordinateProfile::MeshStream;
+}
+
 bool IsObservedPointer(std::uintptr_t pointer) noexcept {
     return pointer > kObservedPointerLower &&
         pointer < kObservedPointerUpper;
@@ -125,17 +132,11 @@ bool NormalizeObservedPointer(std::uintptr_t raw,
 }
 
 bool IsValidCoordinate(
-    const HardwareBreakpointCoordinate& coordinate,
-    HardwareBreakpointCoordinateProfile profile) noexcept {
+    const HardwareBreakpointCoordinate& coordinate) noexcept {
     const bool finite = std::isfinite(coordinate.x) &&
         std::isfinite(coordinate.y) &&
         std::isfinite(coordinate.z);
     if (!finite) return false;
-    if (UsesOrderedRecordTable(profile)) {
-        return coordinate.x != 0.0f &&
-            coordinate.y != 0.0f &&
-            coordinate.z != 0.0f;
-    }
     return coordinate.x != 0.0f ||
         coordinate.y != 0.0f ||
         coordinate.z != 0.0f;
@@ -144,9 +145,9 @@ bool IsValidCoordinate(
 bool IsPlausibleFallbackCoordinate(
     const HardwareBreakpointCoordinate& input,
     const HardwareBreakpointCoordinate& output) noexcept {
-    if (!std::isnormal(input.x) || !std::isnormal(input.y) ||
-        !std::isnormal(input.z) || !std::isnormal(output.x) ||
-        !std::isnormal(output.y) || !std::isnormal(output.z)) {
+    if (!std::isfinite(input.x) || !std::isfinite(input.y) ||
+        !std::isfinite(input.z) || !std::isfinite(output.x) ||
+        !std::isfinite(output.y) || !std::isfinite(output.z)) {
         return false;
     }
     if (std::fabs(output.x) > kFallbackCoordinateMagnitudeLimit ||
@@ -155,15 +156,15 @@ bool IsPlausibleFallbackCoordinate(
         return false;
     }
     return std::fabs(input.x) >=
-            kFallbackCoordinateMagnitudeMinimum &&
-        std::fabs(input.y) >= kFallbackCoordinateMagnitudeMinimum &&
+            kFallbackCoordinateMagnitudeMinimum ||
+        std::fabs(input.y) >= kFallbackCoordinateMagnitudeMinimum ||
         std::fabs(input.z) >= kFallbackCoordinateMagnitudeMinimum;
 }
 
 bool IsStrongFallbackCoordinate(
     const HardwareBreakpointCoordinate& input) noexcept {
-    return std::fabs(input.x) >= kFallbackStrongMagnitudeMinimum &&
-        std::fabs(input.y) >= kFallbackStrongMagnitudeMinimum &&
+    return std::fabs(input.x) >= kFallbackStrongMagnitudeMinimum ||
+        std::fabs(input.y) >= kFallbackStrongMagnitudeMinimum ||
         std::fabs(input.z) >= kFallbackStrongMagnitudeMinimum;
 }
 
@@ -388,7 +389,7 @@ bool HardwareBreakpointCoordinateRuntime::Start(
     HardwareBreakpointCoordinateCallbacks callbacks,
     HardwareBreakpointCoordinateProfile profile) noexcept {
     if (breakpointAddress == 0 || (breakpointAddress & 3U) != 0 ||
-        !callbacks) {
+        !callbacks || (UsesMeshStream(profile) && !callbacks.readRecords)) {
         return false;
     }
     if (active_ && breakpointAddress_ == breakpointAddress &&
@@ -422,12 +423,15 @@ bool HardwareBreakpointCoordinateRuntime::Start(
 
 bool HardwareBreakpointCoordinateRuntime::Reconfigure(
     std::uintptr_t breakpointAddress,
-    HardwareBreakpointCoordinateCallbacks callbacks) noexcept {
+    HardwareBreakpointCoordinateCallbacks callbacks,
+    HardwareBreakpointCoordinateProfile profile) noexcept {
     if (!active_ || breakpointAddress == 0 ||
-        (breakpointAddress & 3U) != 0 || !callbacks) {
+        (breakpointAddress & 3U) != 0 || !callbacks ||
+        (UsesMeshStream(profile) && !callbacks.readRecords)) {
         return false;
     }
 
+    ClearSamplingState();
     bool removed = false;
     try {
         removed = callbacks_.removeBreakpoints();
@@ -452,8 +456,8 @@ bool HardwareBreakpointCoordinateRuntime::Reconfigure(
 
     callbacks_ = std::move(callbacks);
     breakpointAddress_ = breakpointAddress;
+    profile_ = profile;
     needsReconfigure_ = false;
-    ClearConfigurationState();
     return true;
 }
 
@@ -497,9 +501,17 @@ bool HardwareBreakpointCoordinateRuntime::Poll(
     std::uintptr_t world,
     std::uintptr_t targetRoot,
     std::uintptr_t manager) noexcept {
-    if (!active_ || world == 0 || targetRoot == 0) return false;
+    if (!active_ || world == 0) return false;
     ++pollCount_;
     ResetWorld(world);
+    if (UsesMeshStream(profile_)) {
+        static_cast<void>(targetRoot);
+        static_cast<void>(manager);
+        const bool sampled = SampleMeshStream();
+        ExpireMeshStream();
+        return sampled;
+    }
+    if (targetRoot == 0) return false;
 
     const bool orderedRecordTable = UsesOrderedRecordTable(profile_);
     const bool orderedFallback =
@@ -569,6 +581,7 @@ bool HardwareBreakpointCoordinateRuntime::Lookup(
     std::uintptr_t world,
     HardwareBreakpointCoordinate& coordinate) noexcept {
     coordinate = {};
+    if (UsesMeshStream(profile_)) return false;
     if (!active_ || id == 0 || world == 0 || world != world_) {
         return false;
     }
@@ -583,7 +596,26 @@ bool HardwareBreakpointCoordinateRuntime::Lookup(
     std::uintptr_t mesh,
     std::uintptr_t world,
     HardwareBreakpointCoordinate& coordinate) noexcept {
-    static_cast<void>(mesh);
+    if (UsesMeshStream(profile_)) {
+        coordinate = {};
+        if (!active_ || id == 0 || mesh == 0 || world == 0 ||
+            world != world_) {
+            return false;
+        }
+        const auto found = meshStreamCoordinates_.find(id);
+        if (found == meshStreamCoordinates_.end()) return false;
+        const std::uintptr_t normalizedMesh =
+            mesh & kPointerPayloadMask;
+        if (normalizedMesh == 0 ||
+            found->second.mesh != normalizedMesh ||
+            pollCount_ < found->second.lastSeenPoll ||
+            pollCount_ - found->second.lastSeenPoll >=
+                kMeshStreamFreshPolls) {
+            return false;
+        }
+        coordinate = found->second.value;
+        return true;
+    }
     return Lookup(id, world, coordinate);
 }
 
@@ -610,7 +642,9 @@ HardwareBreakpointCoordinateRuntime::RecordsBase() const noexcept {
 
 std::size_t
 HardwareBreakpointCoordinateRuntime::PublishedCoordinateCount() const noexcept {
-    return coordinates_.size();
+    return UsesMeshStream(profile_)
+        ? meshStreamCoordinates_.size()
+        : coordinates_.size();
 }
 
 std::uint64_t HardwareBreakpointCoordinateRuntime::PollCount() const noexcept {
@@ -624,6 +658,156 @@ HardwareBreakpointCoordinateRuntime::AcceptedSampleCount() const noexcept {
 
 bool HardwareBreakpointCoordinateRuntime::NeedsReconfigure() const noexcept {
     return active_ && needsReconfigure_;
+}
+
+bool HardwareBreakpointCoordinateRuntime::SampleMeshStream() noexcept {
+    if (!callbacks_.readRecords) return false;
+
+    std::size_t recordsRead = 0;
+    std::size_t totalRecords = 0;
+    std::uintptr_t hitAddress = 0;
+    bool read = false;
+    try {
+        read = callbacks_.readRecords(
+            records_.data(), records_.size(), recordsRead, hitAddress,
+            totalRecords);
+    } catch (...) {
+        read = false;
+    }
+    if (!read || recordsRead > records_.size() ||
+        totalRecords > records_.size()) {
+        return false;
+    }
+    if (hitAddress != breakpointAddress_ ||
+        (lastHitAddress_ != 0 && lastHitAddress_ != hitAddress)) {
+        needsReconfigure_ = true;
+        ClearConfigurationState();
+        ClearWorldState();
+        return false;
+    }
+    if (totalRecords < lastTotalRecords_) {
+        ClearWorldState();
+    }
+
+    needsReconfigure_ = false;
+    lastHitAddress_ = hitAddress;
+    lastTotalRecords_ = totalRecords;
+    const auto previousSeenRecords = seenRecords_;
+    std::array<SeenRecord, kExecutionBreakpointRecordLimit>
+        nextSeenRecords{};
+
+    for (std::size_t index = 0; index < recordsRead; ++index) {
+        const ExecutionBreakpointRecord& record = records_[index];
+        if (record.tid <= 0 || record.hitCount == 0 ||
+            record.pc != breakpointAddress_) {
+            continue;
+        }
+
+        bool seen = false;
+        for (const SeenRecord& previous : previousSeenRecords) {
+            if (previous.valid && previous.tid == record.tid &&
+                previous.hitCount == record.hitCount &&
+                previous.pc == record.pc &&
+                previous.x20 == record.x20 &&
+                previous.x21 == record.x21) {
+                seen = true;
+                break;
+            }
+        }
+        nextSeenRecords[index] = {
+            record.tid,
+            record.hitCount,
+            record.pc,
+            record.x20,
+            record.x21,
+            true,
+        };
+        if (seen) continue;
+
+        const std::uintptr_t coordinateBase =
+            record.x20 & kPointerPayloadMask;
+        const std::uintptr_t mesh =
+            record.x21 & kPointerPayloadMask;
+        std::uintptr_t coordinateAddress = 0;
+        std::uintptr_t idAddress = 0;
+        if (!AddOffset(
+                coordinateBase,
+                kMeshStreamCoordinateOffset,
+                coordinateAddress) ||
+            !AddOffset(mesh, kMeshStreamIdOffset, idAddress)) {
+            continue;
+        }
+
+        std::uint32_t firstId = 0;
+        std::uint32_t secondId = 0;
+        HardwareBreakpointCoordinate coordinate{};
+        if (!ReadMemory(
+                callbacks_, idAddress, &firstId, sizeof(firstId)) ||
+            firstId == 0 ||
+            !ReadMemory(
+                callbacks_,
+                coordinateAddress,
+                &coordinate,
+                sizeof(coordinate)) ||
+            !ReadMemory(
+                callbacks_, idAddress, &secondId, sizeof(secondId)) ||
+            firstId != secondId || !IsValidCoordinate(coordinate)) {
+            continue;
+        }
+
+        const auto previousId = meshStreamIds_.find(mesh);
+        if (previousId != meshStreamIds_.end() &&
+            previousId->second != firstId) {
+            const auto previousCoordinate =
+                meshStreamCoordinates_.find(previousId->second);
+            if (previousCoordinate != meshStreamCoordinates_.end() &&
+                previousCoordinate->second.mesh == mesh) {
+                meshStreamCoordinates_.erase(previousCoordinate);
+            }
+        }
+        const auto previousMesh =
+            meshStreamCoordinates_.find(firstId);
+        if (previousMesh != meshStreamCoordinates_.end() &&
+            previousMesh->second.mesh != mesh) {
+            const auto oldMesh =
+                meshStreamIds_.find(previousMesh->second.mesh);
+            if (oldMesh != meshStreamIds_.end() &&
+                oldMesh->second == firstId) {
+                meshStreamIds_.erase(oldMesh);
+            }
+        }
+        meshStreamIds_[mesh] = firstId;
+        meshStreamCoordinates_[firstId] = {
+            mesh,
+            coordinate,
+            pollCount_,
+        };
+        recordsBase_ = coordinateBase;
+        ++acceptedSampleCount_;
+    }
+    seenRecords_ = nextSeenRecords;
+    return true;
+}
+
+void HardwareBreakpointCoordinateRuntime::ExpireMeshStream() noexcept {
+    for (auto iterator = meshStreamCoordinates_.begin();
+         iterator != meshStreamCoordinates_.end();) {
+        const bool expired =
+            pollCount_ < iterator->second.lastSeenPoll ||
+            pollCount_ - iterator->second.lastSeenPoll >=
+                kMeshStreamFreshPolls;
+        if (!expired) {
+            ++iterator;
+            continue;
+        }
+        const auto mesh = meshStreamIds_.find(iterator->second.mesh);
+        if (mesh != meshStreamIds_.end() &&
+            mesh->second == iterator->first) {
+            meshStreamIds_.erase(mesh);
+        }
+        iterator = meshStreamCoordinates_.erase(iterator);
+    }
+    if (meshStreamCoordinates_.empty()) recordsBase_ = 0;
 }
 
 bool HardwareBreakpointCoordinateRuntime::SampleRecordsBase() noexcept {
@@ -694,6 +878,8 @@ bool HardwareBreakpointCoordinateRuntime::SampleRecordsBase() noexcept {
             record.tid,
             record.hitCount,
             record.pc,
+            record.x20,
+            record.x21,
             true,
         };
         if (seen) continue;
@@ -757,9 +943,8 @@ bool HardwareBreakpointCoordinateRuntime::SampleCandidate() noexcept {
 
     if (result == HardwareBreakpointCandidateSampleResult::Reset) {
         needsReconfigure_ = true;
-        recordsBase_ = 0;
-        pendingRecordsBase_ = 0;
         ClearConfigurationState();
+        ClearWorldState();
         return false;
     }
     needsReconfigure_ = false;
@@ -1321,10 +1506,9 @@ bool HardwareBreakpointCoordinateRuntime::ReadCoordinateTable(
     } else if (idArray == 0) {
         return false;
     }
-    const std::int64_t logicalCount = orderedRecordTable
-        ? static_cast<std::int64_t>(rawCount) - 1
-        : static_cast<std::int64_t>(
-              static_cast<std::int32_t>(rawCount));
+    const std::int64_t logicalCount =
+        static_cast<std::int64_t>(
+            static_cast<std::int32_t>(rawCount));
     if (logicalCount < kMinimumCoordinateCount ||
         logicalCount > kMaximumCoordinateCount) {
         if (orderedRecordTable) {
@@ -1340,9 +1524,7 @@ bool HardwareBreakpointCoordinateRuntime::ReadCoordinateTable(
     const std::size_t itemCount = static_cast<std::size_t>(count);
     const std::size_t recordsContainerSize =
         itemCount * kCoordinateRecordStride;
-    const std::size_t recordsReadSize = orderedRecordTable
-        ? (itemCount - 1U) * kCoordinateRecordStride
-        : recordsContainerSize;
+    const std::size_t recordsReadSize = recordsContainerSize;
     const std::size_t idsSize = itemCount * sizeof(std::uint32_t);
     if (!IsReadableRange(recordsBase, recordsReadSize) ||
         !IsReadableRange(idArray, idsSize)) {
@@ -1386,10 +1568,10 @@ bool HardwareBreakpointCoordinateRuntime::ReadCoordinateTable(
         std::vector<std::uint32_t> verifiedIds;
         std::vector<std::uint8_t> verifiedRecords;
         if (orderedRecordTable) verifiedIds.resize(itemCount);
-        if (requireFallbackConfidence) {
+        if (orderedRecordTable || requireFallbackConfidence) {
             verifiedRecords.resize(recordsContainerSize);
         }
-        if ((requireFallbackConfidence &&
+        if (((orderedRecordTable || requireFallbackConfidence) &&
              !ReadMemory(
                  callbacks_,
                  recordsBase,
@@ -1478,7 +1660,7 @@ bool HardwareBreakpointCoordinateRuntime::ReadCoordinateTable(
                         source.data() + recordOffset +
                             kCoordinateZOffset,
                         sizeof(input.z));
-                    if (!IsValidCoordinate(input, profile_)) continue;
+                    if (!IsValidCoordinate(input)) continue;
                     HardwareBreakpointCoordinate output = input;
                     output.z += kCoordinateZAdjustment;
                     if (!std::isfinite(output.z)) continue;
@@ -1618,6 +1800,54 @@ bool HardwareBreakpointCoordinateRuntime::ReadCoordinateTable(
                 snapshot.distinctCount,
                 snapshot.requiredCount,
                 snapshot.qualified);
+        } else if (orderedRecordTable) {
+            std::unordered_map<std::uint32_t, HardwareBreakpointCoordinate>
+                verifiedExact;
+            std::unordered_map<std::uint32_t, HardwareBreakpointCoordinate>
+                unusedPlausible;
+            std::unordered_set<std::uint32_t> unusedStrongIds;
+            decodeRecords(
+                verifiedRecords,
+                verifiedExact,
+                unusedPlausible,
+                unusedStrongIds);
+            bool stable = true;
+            for (const std::uint32_t id : ids) {
+                if (id == 0) continue;
+                const auto first = exactCandidates.find(id);
+                const auto second = verifiedExact.find(id);
+                if ((first == exactCandidates.end()) !=
+                    (second == verifiedExact.end())) {
+                    stable = false;
+                    break;
+                }
+                if (first == exactCandidates.end()) continue;
+                const double dx =
+                    static_cast<double>(second->second.x) -
+                    static_cast<double>(first->second.x);
+                const double dy =
+                    static_cast<double>(second->second.y) -
+                    static_cast<double>(first->second.y);
+                const double dz =
+                    static_cast<double>(second->second.z) -
+                    static_cast<double>(first->second.z);
+                if (std::hypot(dx, dy, dz) > 500.0) {
+                    stable = false;
+                    break;
+                }
+            }
+            if (!stable) {
+                TraceOrderedTable(
+                    pollCount_, "records_changed", world, targetRoot,
+                    recordsBase, manager, rawIdArray, idArray, rawCount,
+                    logicalCount, 0, coordinates_.size());
+                return false;
+            }
+            snapshot.coordinates = std::move(verifiedExact);
+            snapshot.plausibleCount = snapshot.coordinates.size();
+            snapshot.evidenceCount = snapshot.coordinates.size();
+            snapshot.distinctCount = snapshot.coordinates.size();
+            snapshot.qualified = true;
         } else {
             snapshot.coordinates = std::move(exactCandidates);
             snapshot.plausibleCount = snapshot.coordinates.size();
@@ -1626,7 +1856,6 @@ bool HardwareBreakpointCoordinateRuntime::ReadCoordinateTable(
             snapshot.qualified = true;
         }
 
-        snapshot.ids = std::move(ids);
         if (world != world_) return false;
         return true;
     } catch (...) {
@@ -1645,133 +1874,12 @@ bool HardwareBreakpointCoordinateRuntime::PublishCoordinateTable(
     }
 
     try {
-        const bool sameGeneration =
-            publishedTargetRoot_ == targetRoot &&
-            publishedManager_ == manager &&
-            publishedIdArray_ == snapshot.idArray;
-        const bool sameBase =
-            publishedRecordsBase_ == recordsBase;
-        std::unordered_map<std::uint32_t, HardwareBreakpointCoordinate> next;
-        std::unordered_map<std::uint32_t, std::uint8_t> nextMissCounts;
-        std::unordered_map<
-            std::uint32_t,
-            HardwareBreakpointCoordinate> nextJumpReferences;
-
         const bool orderedRecordTable =
             UsesOrderedRecordTable(profile_);
-        const bool orderedFallback =
-            orderedRecordTable && !callbacks_.readCandidate;
-        if (!orderedRecordTable) {
-            next = std::move(snapshot.coordinates);
-        } else if (!orderedFallback && sameGeneration && sameBase) {
-            next = coordinates_;
-            next.reserve(
-                coordinates_.size() + snapshot.coordinates.size());
-            for (const auto& entry : snapshot.coordinates) {
-                next.insert_or_assign(entry.first, entry.second);
-            }
-        } else if (orderedFallback && sameGeneration && sameBase) {
-            std::unordered_set<std::uint32_t> activeIds;
-            std::unordered_set<std::uint32_t> rejectedCoordinateIds;
-            activeIds.reserve(snapshot.ids.size());
-            rejectedCoordinateIds.reserve(snapshot.coordinates.size());
-            for (const std::uint32_t id : snapshot.ids) {
-                if (id != 0) activeIds.insert(id);
-            }
-            nextJumpReferences.reserve(
-                coordinateJumpReferences_.size());
-            for (const auto& entry : coordinateJumpReferences_) {
-                if (activeIds.find(entry.first) != activeIds.end()) {
-                    nextJumpReferences.insert(entry);
-                }
-            }
-            next.reserve(
-                coordinates_.size() + snapshot.coordinates.size());
-            nextMissCounts.reserve(
-                coordinateMissCounts_.size() +
-                snapshot.coordinates.size());
-            for (const auto& entry : coordinates_) {
-                if (activeIds.find(entry.first) == activeIds.end()) {
-                    continue;
-                }
-                const auto refreshed =
-                    snapshot.coordinates.find(entry.first);
-                if (refreshed != snapshot.coordinates.end()) {
-                    const double dx =
-                        static_cast<double>(refreshed->second.x) -
-                        static_cast<double>(entry.second.x);
-                    const double dy =
-                        static_cast<double>(refreshed->second.y) -
-                        static_cast<double>(entry.second.y);
-                    const double dz =
-                        static_cast<double>(refreshed->second.z) -
-                        static_cast<double>(entry.second.z);
-                    if (std::hypot(dx, dy, dz) <= 500.0) {
-                        next.insert_or_assign(
-                            entry.first, refreshed->second);
-                        nextMissCounts[entry.first] = 0;
-                        continue;
-                    }
-                    rejectedCoordinateIds.insert(entry.first);
-                }
-                std::uint8_t misses = 0;
-                const auto previousMiss =
-                    coordinateMissCounts_.find(entry.first);
-                if (previousMiss != coordinateMissCounts_.end()) {
-                    misses = previousMiss->second;
-                }
-                if (misses < std::numeric_limits<std::uint8_t>::max()) {
-                    ++misses;
-                }
-                if (misses < kCoordinateMissLimit) {
-                    next.insert_or_assign(entry.first, entry.second);
-                    nextMissCounts[entry.first] = misses;
-                } else if (
-                    rejectedCoordinateIds.find(entry.first) !=
-                    rejectedCoordinateIds.end()) {
-                    nextJumpReferences.insert_or_assign(
-                        entry.first, entry.second);
-                }
-            }
-            for (const auto& entry : snapshot.coordinates) {
-                const auto blocked =
-                    nextJumpReferences.find(entry.first);
-                if (blocked != nextJumpReferences.end()) {
-                    const double dx =
-                        static_cast<double>(entry.second.x) -
-                        static_cast<double>(blocked->second.x);
-                    const double dy =
-                        static_cast<double>(entry.second.y) -
-                        static_cast<double>(blocked->second.y);
-                    const double dz =
-                        static_cast<double>(entry.second.z) -
-                        static_cast<double>(blocked->second.z);
-                    if (std::hypot(dx, dy, dz) > 500.0) {
-                        continue;
-                    }
-                    nextJumpReferences.erase(blocked);
-                }
-                if (rejectedCoordinateIds.find(entry.first) !=
-                    rejectedCoordinateIds.end()) {
-                    continue;
-                }
-                next.insert_or_assign(entry.first, entry.second);
-                nextMissCounts[entry.first] = 0;
-            }
-        } else {
-            next = std::move(snapshot.coordinates);
-            if (orderedFallback) {
-                nextMissCounts.reserve(next.size());
-                for (const auto& entry : next) {
-                    nextMissCounts[entry.first] = 0;
-                }
-            }
-        }
+        auto next = std::move(snapshot.coordinates);
 
         if (world != world_) return false;
         coordinates_.swap(next);
-        coordinateMissCounts_.swap(nextMissCounts);
-        coordinateJumpReferences_.swap(nextJumpReferences);
         recordsBase_ = recordsBase;
         pendingRecordsBase_ = recordsBase;
         publishedRecordsBase_ = recordsBase;
@@ -1799,8 +1907,8 @@ bool HardwareBreakpointCoordinateRuntime::PublishCoordinateTable(
 
 void HardwareBreakpointCoordinateRuntime::ClearPublishedState() noexcept {
     coordinates_.clear();
-    coordinateMissCounts_.clear();
-    coordinateJumpReferences_.clear();
+    meshStreamCoordinates_.clear();
+    meshStreamIds_.clear();
     recordsBase_ = 0;
     publishedRecordsBase_ = 0;
     publishedTargetRoot_ = 0;

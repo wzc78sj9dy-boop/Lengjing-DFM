@@ -3942,12 +3942,31 @@ private:
             : native::HardwareBreakpointCoordinateProfile::Existing;
     }
 
-    native::ExecutionVeneerMatchPolicy
-    HardwareBreakpointMatchPolicy() const noexcept {
+    native::HardwareBreakpointCoordinateProfile
+    HardwareBreakpointFallbackProfile() const noexcept {
         return coordinateSelection_ ==
                 ui::CoordinateDecryptSelection::Secondary
-            ? native::ExecutionVeneerMatchPolicy::OrderedFirst
-            : native::ExecutionVeneerMatchPolicy::Unique;
+            ? native::HardwareBreakpointCoordinateProfile::MeshStream
+            : native::HardwareBreakpointCoordinateProfile::Existing;
+    }
+
+    static const char* HardwareBreakpointProfileName(
+        native::HardwareBreakpointCoordinateProfile profile) noexcept {
+        switch (profile) {
+            case native::HardwareBreakpointCoordinateProfile::
+                    OrderedRecordTable:
+                return "ordered_record_table";
+            case native::HardwareBreakpointCoordinateProfile::MeshStream:
+                return "mesh_stream";
+            case native::HardwareBreakpointCoordinateProfile::Existing:
+                break;
+        }
+        return "existing";
+    }
+
+    native::ExecutionVeneerMatchPolicy
+    HardwareBreakpointMatchPolicy() const noexcept {
+        return native::ExecutionVeneerMatchPolicy::Unique;
     }
 
     std::chrono::milliseconds
@@ -3963,7 +3982,9 @@ private:
                 requestedCoordinateSelection_ &&
             coordinateSelection_ !=
                 ui::CoordinateDecryptSelection::None &&
-            hardwareBreakpointRuntime_.IsActive();
+            hardwareBreakpointRuntime_.IsActive() &&
+            !hardwareBreakpointRuntime_.NeedsReconfigure() &&
+            hardwareBreakpointRuntime_.PublishedCoordinateCount() != 0;
     }
 
     native::ExecutionVeneerReadMemory
@@ -4141,6 +4162,8 @@ private:
             return false;
         }
         bool started = false;
+        native::HardwareBreakpointCoordinateProfile activeProfile =
+            HardwareBreakpointProfile();
         if (coordinateSelection_ ==
             ui::CoordinateDecryptSelection::Secondary) {
             executionSnapshotFallback_.Reset();
@@ -4148,23 +4171,27 @@ private:
             started = hardwareBreakpointRuntime_.Start(
                 breakpointAddress,
                 std::move(callbacks),
-                HardwareBreakpointProfile());
+                activeProfile);
             executionSnapshotSelected_ = started;
             const auto snapshotStartProbe =
                 executionSnapshotTransport_.Probe();
             if (!started) {
                 executionSnapshotTransport_.Reset();
+                activeProfile = HardwareBreakpointFallbackProfile();
                 auto fallback = HardwareBreakpointCallbacks(readMemory);
                 started = hardwareBreakpointRuntime_.Start(
                     breakpointAddress,
                     std::move(fallback),
-                    HardwareBreakpointProfile());
+                    activeProfile);
             }
 #if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
             std::fprintf(
                 stderr,
-                "[snapshot-backend] source=%s started=%d "
+                "[coordinate-backend] breakpoint=%llx profile=%s "
+                "backend=%s started=%d "
                 "error=%u sys=%d active=%d cleanup_pending=%d\n",
+                static_cast<unsigned long long>(breakpointAddress),
+                HardwareBreakpointProfileName(activeProfile),
                 executionSnapshotSelected_
                     ? "execution_snapshot"
                     : "execution_breakpoint",
@@ -4180,7 +4207,17 @@ private:
             started = hardwareBreakpointRuntime_.Start(
                 breakpointAddress,
                 std::move(callbacks),
-                HardwareBreakpointProfile());
+                activeProfile);
+#if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
+            std::fprintf(
+                stderr,
+                "[coordinate-backend] breakpoint=%llx profile=%s "
+                "backend=execution_breakpoint started=%d\n",
+                static_cast<unsigned long long>(breakpointAddress),
+                HardwareBreakpointProfileName(activeProfile),
+                started ? 1 : 0);
+            std::fflush(stderr);
+#endif
         }
         if (!started) {
             hardwareBreakpointFailure_.error =
@@ -4201,16 +4238,22 @@ private:
                 readMemory, breakpointAddress)) {
             return false;
         }
-        native::HardwareBreakpointCoordinateCallbacks callbacks =
-            executionSnapshotSelected_ &&
-                !executionSnapshotFallback_.ShouldFallback()
-            ? ExecutionSnapshotCallbacks(readMemory)
-            : HardwareBreakpointCallbacks(readMemory);
         const bool switchToExecutionBreakpoint =
             executionSnapshotSelected_ &&
             executionSnapshotFallback_.ShouldFallback();
+        const bool useExecutionSnapshot =
+            executionSnapshotSelected_ &&
+            !switchToExecutionBreakpoint;
+        const native::HardwareBreakpointCoordinateProfile profile =
+            useExecutionSnapshot
+            ? HardwareBreakpointProfile()
+            : HardwareBreakpointFallbackProfile();
+        native::HardwareBreakpointCoordinateCallbacks callbacks =
+            useExecutionSnapshot
+            ? ExecutionSnapshotCallbacks(readMemory)
+            : HardwareBreakpointCallbacks(readMemory);
         if (!hardwareBreakpointRuntime_.Reconfigure(
-                breakpointAddress, std::move(callbacks))) {
+                breakpointAddress, std::move(callbacks), profile)) {
             hardwareBreakpointFailure_.error =
                 CoordinateDecryptError::EngineSetupFailed;
             return false;
@@ -4219,14 +4262,22 @@ private:
             executionSnapshotTransport_.Reset();
             executionSnapshotSelected_ = false;
             executionSnapshotFallback_.Reset();
-#if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
-            std::fprintf(
-                stderr,
-                "[snapshot-backend] source=execution_breakpoint "
-                "started=1 reason=poll_reconfigure_limit\n");
-            std::fflush(stderr);
-#endif
         }
+#if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
+        std::fprintf(
+            stderr,
+            "[coordinate-backend] breakpoint=%llx profile=%s "
+            "backend=%s reconfigured=1 reason=%s\n",
+            static_cast<unsigned long long>(breakpointAddress),
+            HardwareBreakpointProfileName(profile),
+            useExecutionSnapshot
+                ? "execution_snapshot"
+                : "execution_breakpoint",
+            switchToExecutionBreakpoint
+                ? "poll_reconfigure_limit"
+                : "runtime_reconfigure");
+        std::fflush(stderr);
+#endif
         hardwareBreakpointFailure_.error =
             CoordinateDecryptError::SampleUnavailable;
         return true;
