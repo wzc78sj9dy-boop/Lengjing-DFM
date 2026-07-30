@@ -47,6 +47,7 @@ enum class HardwareBreakpointCoordinateProfile : std::uint8_t {
     Existing,
     OrderedRecordTable,
     MeshStream,
+    StableRecordTable,
 };
 
 class HardwareBreakpointCoordinateRuntime final {
@@ -135,6 +136,7 @@ private:
     };
 
     bool SampleRecordsBase() noexcept;
+    bool SampleStableRecordsBase() noexcept;
     bool SampleMeshStream() noexcept;
     void ExpireMeshStream() noexcept;
     bool SampleCandidate() noexcept;

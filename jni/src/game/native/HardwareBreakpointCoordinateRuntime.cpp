@@ -118,6 +118,12 @@ bool UsesMeshStream(
     return profile == HardwareBreakpointCoordinateProfile::MeshStream;
 }
 
+bool UsesStableRecordTable(
+    HardwareBreakpointCoordinateProfile profile) noexcept {
+    return profile ==
+        HardwareBreakpointCoordinateProfile::StableRecordTable;
+}
+
 bool IsObservedPointer(std::uintptr_t pointer) noexcept {
     return pointer > kObservedPointerLower &&
         pointer < kObservedPointerUpper;
@@ -389,7 +395,9 @@ bool HardwareBreakpointCoordinateRuntime::Start(
     HardwareBreakpointCoordinateCallbacks callbacks,
     HardwareBreakpointCoordinateProfile profile) noexcept {
     if (breakpointAddress == 0 || (breakpointAddress & 3U) != 0 ||
-        !callbacks || (UsesMeshStream(profile) && !callbacks.readRecords)) {
+        !callbacks ||
+        ((UsesMeshStream(profile) || UsesStableRecordTable(profile)) &&
+         !callbacks.readRecords)) {
         return false;
     }
     if (active_ && breakpointAddress_ == breakpointAddress &&
@@ -427,7 +435,8 @@ bool HardwareBreakpointCoordinateRuntime::Reconfigure(
     HardwareBreakpointCoordinateProfile profile) noexcept {
     if (!active_ || breakpointAddress == 0 ||
         (breakpointAddress & 3U) != 0 || !callbacks ||
-        (UsesMeshStream(profile) && !callbacks.readRecords)) {
+        ((UsesMeshStream(profile) || UsesStableRecordTable(profile)) &&
+         !callbacks.readRecords)) {
         return false;
     }
 
@@ -510,6 +519,16 @@ bool HardwareBreakpointCoordinateRuntime::Poll(
         const bool sampled = SampleMeshStream();
         ExpireMeshStream();
         return sampled;
+    }
+    if (UsesStableRecordTable(profile_)) {
+        static_cast<void>(targetRoot);
+        static_cast<void>(manager);
+        if (!SampleRecordsBase() || recordsBase_ == 0) return false;
+
+        std::uintptr_t observedManager = 0;
+        if (!ReadObservedManager(world, observedManager)) return false;
+        return RefreshCoordinateTable(
+            world, world, observedManager);
     }
     if (targetRoot == 0) return false;
 
@@ -810,7 +829,116 @@ void HardwareBreakpointCoordinateRuntime::ExpireMeshStream() noexcept {
     if (meshStreamCoordinates_.empty()) recordsBase_ = 0;
 }
 
+bool HardwareBreakpointCoordinateRuntime::
+SampleStableRecordsBase() noexcept {
+    std::size_t recordsRead = 0;
+    std::size_t totalRecords = 0;
+    std::uintptr_t hitAddress = 0;
+    bool read = false;
+    try {
+        read = callbacks_.readRecords(
+            records_.data(), records_.size(), recordsRead, hitAddress,
+            totalRecords);
+    } catch (...) {
+        read = false;
+    }
+    if (!read || recordsRead > records_.size() ||
+        totalRecords > records_.size() ||
+        hitAddress != breakpointAddress_) {
+        return false;
+    }
+
+    if ((lastHitAddress_ != 0 &&
+         lastHitAddress_ != hitAddress) ||
+        totalRecords < lastTotalRecords_) {
+        ClearWorldState();
+    }
+    needsReconfigure_ = false;
+    lastHitAddress_ = hitAddress;
+    lastTotalRecords_ = totalRecords;
+
+    const auto previousSeenRecords = seenRecords_;
+    std::array<SeenRecord, kExecutionBreakpointRecordLimit>
+        nextSeenRecords{};
+
+    for (std::size_t index = 0; index < recordsRead; ++index) {
+        const ExecutionBreakpointRecord& record = records_[index];
+        if (record.tid <= 0 || record.hitCount == 0 ||
+            record.pc != breakpointAddress_) {
+            continue;
+        }
+
+        bool newerRecordForThread = false;
+        for (std::size_t other = 0;
+             other < recordsRead;
+             ++other) {
+            const ExecutionBreakpointRecord& candidate =
+                records_[other];
+            if (candidate.tid == record.tid &&
+                candidate.hitCount != 0 &&
+                candidate.pc == breakpointAddress_ &&
+                (candidate.hitCount > record.hitCount ||
+                 (candidate.hitCount == record.hitCount &&
+                  other > index))) {
+                newerRecordForThread = true;
+                break;
+            }
+        }
+        if (newerRecordForThread) continue;
+
+        bool seen = false;
+        for (const SeenRecord& previous : previousSeenRecords) {
+            if (previous.valid && previous.tid == record.tid &&
+                previous.hitCount == record.hitCount &&
+                previous.pc == record.pc) {
+                seen = true;
+                break;
+            }
+        }
+        nextSeenRecords[index] = {
+            record.tid,
+            record.hitCount,
+            record.pc,
+            record.x20,
+            record.x21,
+            true,
+        };
+        if (seen) continue;
+
+        const std::uintptr_t candidate =
+            record.x23 & kPointerPayloadMask;
+        std::uint64_t probe = 0;
+        if (candidate == 0 ||
+            (candidate & kRejectedCandidateMask) ==
+                kRejectedCandidateValue ||
+            !ReadMemory(
+                callbacks_, candidate, &probe, sizeof(probe))) {
+            continue;
+        }
+
+        candidateRing_[candidateWriteIndex_] = candidate;
+        candidateWriteIndex_ =
+            (candidateWriteIndex_ + 1) % candidateRing_.size();
+        if (candidateCount_ < candidateRing_.size()) {
+            ++candidateCount_;
+        }
+        ++acceptedSampleCount_;
+    }
+    seenRecords_ = nextSeenRecords;
+
+    const std::uintptr_t selected =
+        MostFrequentCandidate(candidateRing_, candidateCount_);
+    if (selected != recordsBase_) {
+        recordsBase_ = selected;
+        coordinates_.clear();
+    }
+    return true;
+}
+
 bool HardwareBreakpointCoordinateRuntime::SampleRecordsBase() noexcept {
+    if (UsesStableRecordTable(profile_)) {
+        return SampleStableRecordsBase();
+    }
     if (callbacks_.readCandidate) {
         return SampleCandidate();
     }
