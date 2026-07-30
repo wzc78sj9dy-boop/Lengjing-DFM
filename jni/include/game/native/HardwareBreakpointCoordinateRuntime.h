@@ -144,6 +144,22 @@ private:
         bool qualified = false;
     };
 
+    struct CandidateSourceValidation {
+        std::size_t storedCount = 0;
+        std::size_t freshCount = 0;
+        std::size_t expiredCount = 0;
+        std::size_t addressFailureCount = 0;
+        std::size_t readFailureCount = 0;
+        std::size_t invalidCount = 0;
+        std::size_t usableCount = 0;
+        std::size_t idMissCount = 0;
+        std::size_t presentCount = 0;
+        std::size_t distanceFailureCount = 0;
+        std::size_t matchedCount = 0;
+        std::size_t distinctIdCount = 0;
+        double closestDistance = 0.0;
+    };
+
     bool SampleRecordsBase() noexcept;
     bool SampleStableRecordsBase() noexcept;
     bool SampleMeshStream() noexcept;
@@ -156,9 +172,7 @@ private:
     bool ValidateCandidateSources(
         const CandidateObservation& observation,
         const CoordinateTableSnapshot& snapshot,
-        std::size_t& usableCount,
-        std::size_t& matchedCount,
-        std::size_t& distinctIdCount) noexcept;
+        CandidateSourceValidation& validation) noexcept;
     bool ReadObservedManager(
         std::uintptr_t targetRoot,
         std::uintptr_t& manager) noexcept;

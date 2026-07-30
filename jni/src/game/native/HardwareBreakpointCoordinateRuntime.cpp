@@ -31,6 +31,7 @@ constexpr float kFallbackCoordinateMagnitudeLimit = 1.0e6f;
 constexpr float kFallbackCoordinateMagnitudeMinimum = 1.0e-3f;
 constexpr float kFallbackStrongMagnitudeMinimum = 1.0f;
 constexpr std::size_t kFallbackMinimumRequiredCoordinates = 16;
+constexpr std::size_t kFallbackMinimumPlausiblePercent = 45;
 constexpr std::size_t kFallbackCandidatesPerPoll = 3;
 constexpr std::size_t kStableCandidatesPerPoll = 6;
 constexpr std::uint64_t kFallbackCandidateRetestPolls = 300;
@@ -341,28 +342,61 @@ void TraceOrderedQuality(
 void TraceSourceQuality(
     std::uint64_t pollCount,
     std::uintptr_t candidate,
+    std::size_t stored,
+    std::size_t fresh,
+    std::size_t expired,
+    std::size_t addressFailures,
+    std::size_t readFailures,
+    std::size_t invalid,
     std::size_t usable,
+    std::size_t idMisses,
+    std::size_t present,
+    std::size_t distanceFailures,
     std::size_t matched,
     std::size_t distinctIds,
+    double closestDistance,
     bool qualified) noexcept {
 #if LENGJING_ENABLE_COORDINATE_DEBUG_LOG
     std::fprintf(
         stderr,
-        "[hwbp-source-quality] poll=%llu candidate=%llx usable=%zu "
-        "matched=%zu distinct_ids=%zu qualified=%d\n",
+        "[hwbp-source-quality] poll=%llu candidate=%llx stored=%zu "
+        "fresh=%zu expired=%zu address_fail=%zu read_fail=%zu "
+        "invalid=%zu usable=%zu id_miss=%zu present=%zu "
+        "distance_fail=%zu matched=%zu distinct_ids=%zu closest=%.1f "
+        "qualified=%d\n",
         static_cast<unsigned long long>(pollCount),
         static_cast<unsigned long long>(candidate),
+        stored,
+        fresh,
+        expired,
+        addressFailures,
+        readFailures,
+        invalid,
         usable,
+        idMisses,
+        present,
+        distanceFailures,
         matched,
         distinctIds,
+        closestDistance,
         qualified ? 1 : 0);
     std::fflush(stderr);
 #else
     static_cast<void>(pollCount);
     static_cast<void>(candidate);
+    static_cast<void>(stored);
+    static_cast<void>(fresh);
+    static_cast<void>(expired);
+    static_cast<void>(addressFailures);
+    static_cast<void>(readFailures);
+    static_cast<void>(invalid);
     static_cast<void>(usable);
+    static_cast<void>(idMisses);
+    static_cast<void>(present);
+    static_cast<void>(distanceFailures);
     static_cast<void>(matched);
     static_cast<void>(distinctIds);
+    static_cast<void>(closestDistance);
     static_cast<void>(qualified);
 #endif
 }
@@ -902,51 +936,66 @@ SampleStableRecordsBase() noexcept {
     std::array<SeenRecord, kExecutionBreakpointRecordLimit>
         nextSeenRecords{};
 
-    for (std::size_t index = 0; index < recordsRead; ++index) {
-        const ExecutionBreakpointRecord& record = records_[index];
-        if (record.tid <= 0 || record.hitCount == 0 ||
-            record.pc != breakpointAddress_) {
-            continue;
-        }
-
-        bool seen = false;
-        for (const SeenRecord& previous : previousSeenRecords) {
-            if (previous.valid && previous.tid == record.tid &&
-                previous.hitCount == record.hitCount &&
-                previous.pc == record.pc) {
-                seen = true;
-                break;
+    const auto isLatestThreadRecord =
+        [&](std::size_t recordIndex) noexcept {
+            const ExecutionBreakpointRecord& record =
+                records_[recordIndex];
+            for (std::size_t index = 0; index < recordsRead; ++index) {
+                if (records_[index].tid == record.tid &&
+                    records_[index].hitCount > record.hitCount) {
+                    return false;
+                }
             }
-        }
-        nextSeenRecords[index] = {
-            record.tid,
-            record.hitCount,
-            record.pc,
-            record.x20,
-            record.x21,
-            true,
+            return true;
         };
-        if (seen) continue;
+    for (int latestPass = 0; latestPass < 2; ++latestPass) {
+        for (std::size_t index = 0; index < recordsRead; ++index) {
+            const ExecutionBreakpointRecord& record = records_[index];
+            if (record.tid <= 0 || record.hitCount == 0 ||
+                record.pc != breakpointAddress_ ||
+                isLatestThreadRecord(index) != (latestPass != 0)) {
+                continue;
+            }
 
-        const std::uintptr_t candidate =
-            record.x23 & kPointerPayloadMask;
-        std::uint64_t probe = 0;
-        if (candidate == 0 ||
-            (candidate & kRejectedCandidateMask) ==
-                kRejectedCandidateValue ||
-            !ReadMemory(
-                callbacks_, candidate, &probe, sizeof(probe))) {
-            continue;
-        }
+            bool seen = false;
+            for (const SeenRecord& previous : previousSeenRecords) {
+                if (previous.valid && previous.tid == record.tid &&
+                    previous.hitCount == record.hitCount &&
+                    previous.pc == record.pc) {
+                    seen = true;
+                    break;
+                }
+            }
+            nextSeenRecords[index] = {
+                record.tid,
+                record.hitCount,
+                record.pc,
+                record.x20,
+                record.x21,
+                true,
+            };
+            if (seen) continue;
 
-        candidateRing_[candidateWriteIndex_] = candidate;
-        candidateWriteIndex_ =
-            (candidateWriteIndex_ + 1) % candidateRing_.size();
-        if (candidateCount_ < candidateRing_.size()) {
-            ++candidateCount_;
+            const std::uintptr_t candidate =
+                record.x23 & kPointerPayloadMask;
+            std::uint64_t probe = 0;
+            if (candidate == 0 ||
+                (candidate & kRejectedCandidateMask) ==
+                    kRejectedCandidateValue ||
+                !ReadMemory(
+                    callbacks_, candidate, &probe, sizeof(probe))) {
+                continue;
+            }
+
+            candidateRing_[candidateWriteIndex_] = candidate;
+            candidateWriteIndex_ =
+                (candidateWriteIndex_ + 1) % candidateRing_.size();
+            if (candidateCount_ < candidateRing_.size()) {
+                ++candidateCount_;
+            }
+            ObserveCandidate(candidate, record.x20, record.x21);
+            ++acceptedSampleCount_;
         }
-        ObserveCandidate(candidate, record.x20, record.x21);
-        ++acceptedSampleCount_;
     }
     seenRecords_ = nextSeenRecords;
 
@@ -1217,22 +1266,25 @@ void HardwareBreakpointCoordinateRuntime::ObserveCandidate(
 bool HardwareBreakpointCoordinateRuntime::ValidateCandidateSources(
     const CandidateObservation& observation,
     const CoordinateTableSnapshot& snapshot,
-    std::size_t& usableCount,
-    std::size_t& matchedCount,
-    std::size_t& distinctIdCount) noexcept {
-    usableCount = 0;
-    matchedCount = 0;
-    distinctIdCount = 0;
+    CandidateSourceValidation& validation) noexcept {
+    validation = {};
+    validation.storedCount = observation.sourceCount;
+    validation.closestDistance =
+        std::numeric_limits<double>::infinity();
     std::array<std::uint32_t, 8> matchedIds{};
 
     for (const CandidateSource& source : observation.sources) {
         if (source.coordinateBase == 0 || source.mesh == 0 ||
-            source.lastSeenPoll == 0 ||
-            pollCount_ < source.lastSeenPoll ||
-            pollCount_ - source.lastSeenPoll >
-                kCandidateSourceFreshPolls) {
+            source.lastSeenPoll == 0) {
             continue;
         }
+        if (pollCount_ < source.lastSeenPoll ||
+            pollCount_ - source.lastSeenPoll >
+                kCandidateSourceFreshPolls) {
+            ++validation.expiredCount;
+            continue;
+        }
+        ++validation.freshCount;
 
         std::uintptr_t coordinateAddress = 0;
         std::uintptr_t idAddress = 0;
@@ -1244,6 +1296,7 @@ bool HardwareBreakpointCoordinateRuntime::ValidateCandidateSources(
                 source.mesh,
                 kMeshStreamIdOffset,
                 idAddress)) {
+            ++validation.addressFailureCount;
             continue;
         }
 
@@ -1252,22 +1305,29 @@ bool HardwareBreakpointCoordinateRuntime::ValidateCandidateSources(
         HardwareBreakpointCoordinate observed{};
         if (!ReadMemory(
                 callbacks_, idAddress, &firstId, sizeof(firstId)) ||
-            firstId == 0 ||
             !ReadMemory(
                 callbacks_,
                 coordinateAddress,
                 &observed,
                 sizeof(observed)) ||
             !ReadMemory(
-                callbacks_, idAddress, &secondId, sizeof(secondId)) ||
-            firstId != secondId ||
-            !IsValidCoordinate(observed)) {
+                callbacks_, idAddress, &secondId, sizeof(secondId))) {
+            ++validation.readFailureCount;
             continue;
         }
-        ++usableCount;
+        if (firstId == 0 || firstId != secondId ||
+            !IsValidCoordinate(observed)) {
+            ++validation.invalidCount;
+            continue;
+        }
+        ++validation.usableCount;
 
         const auto candidate = snapshot.coordinates.find(firstId);
-        if (candidate == snapshot.coordinates.end()) continue;
+        if (candidate == snapshot.coordinates.end()) {
+            ++validation.idMissCount;
+            continue;
+        }
+        ++validation.presentCount;
         HardwareBreakpointCoordinate adjusted = observed;
         adjusted.z += kCoordinateZAdjustment;
         if (!std::isfinite(adjusted.z)) continue;
@@ -1280,30 +1340,36 @@ bool HardwareBreakpointCoordinateRuntime::ValidateCandidateSources(
         const double dz =
             static_cast<double>(candidate->second.z) -
             static_cast<double>(adjusted.z);
-        if (std::hypot(dx, dy, dz) >
-            kCandidateSourceDistanceLimit) {
+        const double distance = std::hypot(dx, dy, dz);
+        validation.closestDistance = std::min(
+            validation.closestDistance, distance);
+        if (distance > kCandidateSourceDistanceLimit) {
+            ++validation.distanceFailureCount;
             continue;
         }
-        ++matchedCount;
+        ++validation.matchedCount;
         bool knownId = false;
         for (std::size_t index = 0;
-             index < distinctIdCount;
+             index < validation.distinctIdCount;
              ++index) {
             if (matchedIds[index] == firstId) {
                 knownId = true;
                 break;
             }
         }
-        if (!knownId && distinctIdCount < matchedIds.size()) {
-            matchedIds[distinctIdCount++] = firstId;
+        if (!knownId &&
+            validation.distinctIdCount < matchedIds.size()) {
+            matchedIds[validation.distinctIdCount++] = firstId;
         }
     }
 
-    return distinctIdCount >=
+    return validation.distinctIdCount >=
             kCandidateSourceMinimumDistinctIds &&
-        matchedCount >= kCandidateSourceMinimumDistinctIds &&
-        usableCount != 0 &&
-        matchedCount * 2U >= usableCount;
+        validation.matchedCount >=
+            kCandidateSourceMinimumDistinctIds &&
+        validation.usableCount != 0 &&
+        validation.matchedCount * 2U >=
+            validation.usableCount;
 }
 
 bool HardwareBreakpointCoordinateRuntime::ReadObservedManager(
@@ -1583,23 +1649,29 @@ RefreshOrderedFallbackCoordinateTable(
                 candidate);
         if (coherent && candidate.qualified &&
             UsesStableRecordTable(profile_)) {
-            std::size_t usable = 0;
-            std::size_t matched = 0;
-            std::size_t distinctIds = 0;
+            CandidateSourceValidation source{};
             const bool sourceQualified =
                 ValidateCandidateSources(
                     observation,
                     candidate,
-                    usable,
-                    matched,
-                    distinctIds);
+                    source);
             candidate.qualified = sourceQualified;
             TraceSourceQuality(
                 pollCount_,
                 observation.value,
-                usable,
-                matched,
-                distinctIds,
+                source.storedCount,
+                source.freshCount,
+                source.expiredCount,
+                source.addressFailureCount,
+                source.readFailureCount,
+                source.invalidCount,
+                source.usableCount,
+                source.idMissCount,
+                source.presentCount,
+                source.distanceFailureCount,
+                source.matchedCount,
+                source.distinctIdCount,
+                source.closestDistance,
                 sourceQualified);
         }
         if (coherent && candidate.idArray != 0) {
@@ -2114,8 +2186,9 @@ bool HardwareBreakpointCoordinateRuntime::ReadCoordinateTable(
                 snapshot.plausibleCount >= snapshot.requiredCount &&
                 snapshot.evidenceCount >= snapshot.requiredCount &&
                 snapshot.distinctCount >= requiredDistinct &&
-                snapshot.plausibleCount >=
-                    (snapshot.exactValidCount + 1U) / 2U;
+                snapshot.plausibleCount * 100U >=
+                    snapshot.exactValidCount *
+                        kFallbackMinimumPlausiblePercent;
             snapshot.coordinates = std::move(plausibleCandidates);
             TraceOrderedQuality(
                 pollCount_,
