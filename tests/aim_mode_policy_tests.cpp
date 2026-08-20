@@ -5,7 +5,6 @@
 #include "game/aim/TouchMotionPolicy.h"
 
 #include <cmath>
-#include <limits>
 
 void RunAimModePolicyTests() {
     using lengjing::game::IsProjectileTrackingRequested;
@@ -81,33 +80,21 @@ void RunAimModePolicyTests() {
     const auto landscapeLeft = ResolveGyroscopeDirection(3, 1.0f, 2.0f);
     REQUIRE(landscapeLeft.pitch == -1.0f);
     REQUIRE(landscapeLeft.yaw == -2.0f);
-    const int invalidOrientations[] = {
-        4,
-        -1,
-        std::numeric_limits<int>::min(),
-        std::numeric_limits<int>::max(),
-    };
-    for (const int orientation : invalidOrientations) {
-        const auto fallback =
-            ResolveGyroscopeDirection(orientation, 1.0f, 2.0f);
-        REQUIRE(fallback.pitch == -1.0f);
-        REQUIRE(fallback.yaw == -2.0f);
-    }
+    const auto normalized = ResolveGyroscopeDirection(-1, 1.0f, 2.0f);
+    REQUIRE(normalized.pitch == -1.0f);
+    REQUIRE(normalized.yaw == -2.0f);
 
     for (int orientation = 0; orientation < 4; ++orientation) {
         const auto screenMotion = ResolveGyroscopeScreenMotion(
-            100.0f, -50.0f, 30.0f, 20.0f);
+            100.0f, -50.0f, 30.0f, 20.0f, orientation);
         const auto resolved = ResolveGyroscopeDirection(
             orientation, screenMotion.pitch, screenMotion.yaw);
-        const float expectedPitch =
-            orientation == 0 || orientation == 3 ? -0.3f : 0.3f;
-        const float expectedYaw =
-            orientation == 2 || orientation == 3 ? -0.6f : 0.6f;
-        REQUIRE(std::fabs(resolved.pitch - expectedPitch) < 0.0001f);
-        REQUIRE(std::fabs(resolved.yaw - expectedYaw) < 0.0001f);
+        const float sign = orientation == 3 ? -1.0f : 1.0f;
+        REQUIRE(std::fabs(resolved.pitch - sign * 0.3f) < 0.0001f);
+        REQUIRE(std::fabs(resolved.yaw - sign * 0.6f) < 0.0001f);
         const auto kernel = ResolveKernelGyroscopeCommand(resolved);
-        REQUIRE(std::fabs(kernel.x + expectedYaw) < 0.0001f);
-        REQUIRE(std::fabs(kernel.y + expectedPitch) < 0.0001f);
+        REQUIRE(std::fabs(kernel.x + sign * 0.6f) < 0.0001f);
+        REQUIRE(std::fabs(kernel.y + sign * 0.3f) < 0.0001f);
     }
 
     const auto rightTouch = ResolveTouchScreenStep(

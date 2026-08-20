@@ -15,11 +15,15 @@ struct KernelGyroscopeCommand {
     float y = 0.0f;
 };
 
+constexpr int NormalizeGyroscopeOrientation(int orientation) noexcept {
+    return ((orientation % 4) + 4) % 4;
+}
+
 constexpr GyroscopeDirection ResolveGyroscopeDirection(
     int orientation,
     float pitch,
     float yaw) noexcept {
-    switch (orientation) {
+    switch (NormalizeGyroscopeOrientation(orientation)) {
         case 0:
             pitch = -pitch;
             break;
@@ -40,7 +44,8 @@ inline GyroscopeDirection ResolveGyroscopeScreenMotion(
     float offsetX,
     float offsetY,
     float speed,
-    float smoothing) noexcept {
+    float smoothing,
+    int orientation) noexcept {
     if (!std::isfinite(offsetX) || !std::isfinite(offsetY) ||
         !std::isfinite(speed) || !std::isfinite(smoothing)) {
         return {};
@@ -53,7 +58,12 @@ inline GyroscopeDirection ResolveGyroscopeScreenMotion(
     const float scale = speed * 0.004f * damp;
     const float sendX = std::clamp(offsetX * scale, -8.0f, 8.0f);
     const float sendY = std::clamp(offsetY * scale, -8.0f, 8.0f);
-    return GyroscopeDirection{-sendY, sendX};
+    float pitch = -sendY;
+    float yaw = sendX;
+    const int normalized = NormalizeGyroscopeOrientation(orientation);
+    if (normalized == 0) pitch = -pitch;
+    if (normalized == 2) yaw = -yaw;
+    return GyroscopeDirection{pitch, yaw};
 }
 
 constexpr KernelGyroscopeCommand ResolveKernelGyroscopeCommand(
