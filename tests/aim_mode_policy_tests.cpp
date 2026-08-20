@@ -5,6 +5,7 @@
 #include "game/aim/TouchMotionPolicy.h"
 
 #include <cmath>
+#include <limits>
 
 void RunAimModePolicyTests() {
     using lengjing::game::IsProjectileTrackingRequested;
@@ -80,9 +81,18 @@ void RunAimModePolicyTests() {
     const auto landscapeLeft = ResolveGyroscopeDirection(3, 1.0f, 2.0f);
     REQUIRE(landscapeLeft.pitch == -1.0f);
     REQUIRE(landscapeLeft.yaw == -2.0f);
-    const auto normalized = ResolveGyroscopeDirection(-1, 1.0f, 2.0f);
-    REQUIRE(normalized.pitch == -1.0f);
-    REQUIRE(normalized.yaw == -2.0f);
+    const int invalidOrientations[] = {
+        4,
+        -1,
+        std::numeric_limits<int>::min(),
+        std::numeric_limits<int>::max(),
+    };
+    for (const int orientation : invalidOrientations) {
+        const auto fallback =
+            ResolveGyroscopeDirection(orientation, 1.0f, 2.0f);
+        REQUIRE(fallback.pitch == -1.0f);
+        REQUIRE(fallback.yaw == -2.0f);
+    }
 
     for (int orientation = 0; orientation < 4; ++orientation) {
         const auto screenMotion = ResolveGyroscopeScreenMotion(

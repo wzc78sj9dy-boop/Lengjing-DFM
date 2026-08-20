@@ -15,15 +15,11 @@ struct KernelGyroscopeCommand {
     float y = 0.0f;
 };
 
-constexpr int NormalizeGyroscopeOrientation(int orientation) noexcept {
-    return ((orientation % 4) + 4) % 4;
-}
-
 constexpr GyroscopeDirection ResolveGyroscopeDirection(
     int orientation,
     float pitch,
     float yaw) noexcept {
-    switch (NormalizeGyroscopeOrientation(orientation)) {
+    switch (orientation) {
         case 0:
             pitch = -pitch;
             break;
