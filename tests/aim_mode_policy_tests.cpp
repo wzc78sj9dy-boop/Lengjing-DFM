@@ -86,15 +86,18 @@ void RunAimModePolicyTests() {
 
     for (int orientation = 0; orientation < 4; ++orientation) {
         const auto screenMotion = ResolveGyroscopeScreenMotion(
-            100.0f, -50.0f, 30.0f, 20.0f, orientation);
+            100.0f, -50.0f, 30.0f, 20.0f);
         const auto resolved = ResolveGyroscopeDirection(
             orientation, screenMotion.pitch, screenMotion.yaw);
-        const float sign = orientation == 3 ? -1.0f : 1.0f;
-        REQUIRE(std::fabs(resolved.pitch - sign * 0.3f) < 0.0001f);
-        REQUIRE(std::fabs(resolved.yaw - sign * 0.6f) < 0.0001f);
+        const float expectedPitch =
+            orientation == 0 || orientation == 3 ? -0.3f : 0.3f;
+        const float expectedYaw =
+            orientation == 2 || orientation == 3 ? -0.6f : 0.6f;
+        REQUIRE(std::fabs(resolved.pitch - expectedPitch) < 0.0001f);
+        REQUIRE(std::fabs(resolved.yaw - expectedYaw) < 0.0001f);
         const auto kernel = ResolveKernelGyroscopeCommand(resolved);
-        REQUIRE(std::fabs(kernel.x + sign * 0.6f) < 0.0001f);
-        REQUIRE(std::fabs(kernel.y + sign * 0.3f) < 0.0001f);
+        REQUIRE(std::fabs(kernel.x + expectedYaw) < 0.0001f);
+        REQUIRE(std::fabs(kernel.y + expectedPitch) < 0.0001f);
     }
 
     const auto rightTouch = ResolveTouchScreenStep(

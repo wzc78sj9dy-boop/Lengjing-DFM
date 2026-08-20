@@ -330,8 +330,7 @@ void AimController::WorkerMain() {
             offsetX,
             offsetY,
             activeSpeed,
-            target.tuning.smoothing,
-            target.orientation);
+            target.tuning.smoothing);
         if (!input_->SendGyroscope(
                 motion.pitch, motion.yaw, target.orientation)) {
             release();
