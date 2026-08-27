@@ -343,9 +343,12 @@ namespace android {
                 } else if (12 <= systemVersion && 13 >= systemVersion) {
                     // Android 12-13
                     ResolveMethod(SurfaceComposerClient, CreateSurface, libgui, "_ZN7android21SurfaceComposerClient13createSurfaceERKNS_7String8EjjijRKNS_2spINS_7IBinderEEENS_13LayerMetadataEPj");
-                } else if (14 <= systemVersion) {
-                    // Android 14+
+                } else if (14 <= systemVersion && 16 >= systemVersion) {
+                    // Android 14-16
                     ResolveMethod(SurfaceComposerClient, CreateSurface, libgui, "_ZN7android21SurfaceComposerClient13createSurfaceERKNS_7String8EjjiiRKNS_2spINS_7IBinderEEENS_3gui13LayerMetadataEPj");
+                } else if (17 == systemVersion) {
+                    // Android 17
+                    ResolveMethod(SurfaceComposerClient, CreateSurface, libgui, "_ZN7android21SurfaceComposerClient13createSurfaceERKNS_7String8EjjiiRKNS_2spINS_7IBinderEEERKNS_3gui13LayerMetadataEPj");
                 }
 
                 // MirrorSurface method - Android 11+
